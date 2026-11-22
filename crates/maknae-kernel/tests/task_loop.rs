@@ -5389,7 +5389,7 @@ mod board {
         let held = board.held_for(HOBI_UID, maknae_proto::HELD_PAGE_MAX);
         assert_eq!(held.len(), 2);
         for (key, id, _, lifted) in held {
-            assert_eq!(board.release(key, id, lifted), Ok(true));
+            assert_eq!(board.release(key, id, lifted, &everyone), Ok(true));
         }
         assert_eq!(jin_reads().await, all);
         assert_eq!(w.cursor("jin"), 0);

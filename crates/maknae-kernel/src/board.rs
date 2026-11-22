@@ -34,6 +34,7 @@ pub enum BoardRefusal {
     Store(String),
     Unavailable(String),
     Random,
+    StillContained,
 }
 
 impl std::fmt::Display for BoardRefusal {
@@ -45,6 +46,7 @@ impl std::fmt::Display for BoardRefusal {
             BoardRefusal::Store(why) => write!(f, "store: {why}"),
             BoardRefusal::Unavailable(why) => f.write_str(why),
             BoardRefusal::Random => f.write_str("no random id"),
+            BoardRefusal::StillContained => f.write_str("still contained"),
         }
     }
 }
@@ -601,12 +603,14 @@ impl BoardStore {
         self.held().holds_of(uid).count()
     }
 
-    /// Lifts one written hold; the post is live again when nothing withholds it.
+    /// Lifts one written hold unless `view` holds its subject contained; the post is live
+    /// again when nothing withholds it.
     pub fn release(
         &self,
         key: BoardKey,
         id: PostId,
         lifted: HeldFor,
+        view: &dyn EnrollmentView,
     ) -> Result<bool, BoardRefusal> {
         let _w = self.writing();
         let prior = {
@@ -620,6 +624,13 @@ impl BoardStore {
         let Some(prior) = prior else {
             return Err(BoardRefusal::Store("the post is not held for that".into()));
         };
+        let subject = match lifted {
+            HeldFor::Author => prior.author_uid,
+            HeldFor::Person => Some(key.0),
+        };
+        if subject.is_some_and(|uid| view.contained(uid)) {
+            return Err(BoardRefusal::StillContained);
+        }
         let mut next = Stored::clone(&prior);
         next.held.remove(&lifted);
         let plain = encode(&PostRecord {
@@ -638,6 +649,13 @@ impl BoardStore {
         let mut held = self.held();
         if let Some(board) = held.boards.get_mut(&key) {
             board.posts.insert(next.seq, Arc::clone(&next));
+        }
+        // A containment installed since the check is marked here, so `mark` cannot miss it.
+        if subject.is_some_and(|uid| view.contained(uid)) {
+            held.marked
+                .entry((key, next.seq))
+                .or_default()
+                .insert(lifted);
         }
         Ok(!held.withheld(key, &next))
     }
@@ -2222,6 +2240,10 @@ mod tests {
         assert_eq!(store.take_notices(), settled);
     }
 
+    fn free() -> crate::enrollment::Containing<crate::enrollment::FixedEnrollment> {
+        containing(&[], &[])
+    }
+
     fn holding(store: &BoardStore, uids: &[u32]) {
         store.mark(&containing(&[], uids));
         let due = store.due(100);
@@ -2238,7 +2260,7 @@ mod tests {
         let both: BTreeSet<HeldFor> = [HeldFor::Author, HeldFor::Person].into_iter().collect();
         assert_eq!(stored_on_disk(&b, BOB, id).held, both);
         store.mark(&containing(&[], &[]));
-        assert_eq!(store.release(BOB, id, HeldFor::Author), Ok(false));
+        assert_eq!(store.release(BOB, id, HeldFor::Author, &free()), Ok(false));
         assert_eq!(
             stored_on_disk(&b, BOB, id).held,
             [HeldFor::Person].into_iter().collect()
@@ -2246,16 +2268,16 @@ mod tests {
         assert!(store.get(BOB, id).is_none(), "the person's hold remains");
         assert!(store.candidates(BOB, 0, 10).is_empty());
         let before = b.attempts();
-        assert!(store.release(BOB, id, HeldFor::Author).is_err());
+        assert!(store.release(BOB, id, HeldFor::Author, &free()).is_err());
         assert_eq!(b.attempts(), before, "a hold already lifted writes nothing");
         b.fail(Some(Fail::Every));
-        assert!(store.release(BOB, id, HeldFor::Person).is_err());
+        assert!(store.release(BOB, id, HeldFor::Person, &free()).is_err());
         b.fail(None);
         assert!(
             store.get(BOB, id).is_none(),
             "a refused write lifts nothing"
         );
-        assert_eq!(store.release(BOB, id, HeldFor::Person), Ok(true));
+        assert_eq!(store.release(BOB, id, HeldFor::Person, &free()), Ok(true));
         assert!(stored_on_disk(&b, BOB, id).held.is_empty());
         assert!(store.get(BOB, id).is_some());
         assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![id]);
@@ -2278,7 +2300,7 @@ mod tests {
         holding(&store, &[2001]);
         store.mark(&containing(&[], &[]));
         b.fail(Some(Fail::Unsynced));
-        let got = store.release(BOB, post.post.id, HeldFor::Author);
+        let got = store.release(BOB, post.post.id, HeldFor::Author, &free());
         b.fail(None);
         assert!(
             matches!(&got, Err(BoardRefusal::Unavailable(why)) if why.starts_with(OUTCOME_UNKNOWN)),
@@ -2332,7 +2354,10 @@ mod tests {
         store.mark(&containing(&[], &[]));
         clock.set(T0 + 2 * RETAIN);
         assert!(store.due(10).is_empty(), "a held post does not expire");
-        assert_eq!(store.release(BOB, post.post.id, HeldFor::Author), Ok(true));
+        assert_eq!(
+            store.release(BOB, post.post.id, HeldFor::Author, &free()),
+            Ok(true)
+        );
         let due = store.due(10);
         assert_eq!(
             whys(&due),
@@ -2363,9 +2388,83 @@ mod tests {
             store.held_for(2001, 10),
             vec![(BOB, held.post.id, held.seq, HeldFor::Author)]
         );
-        assert_eq!(store.release(BOB, held.post.id, HeldFor::Author), Ok(true));
+        assert_eq!(
+            store.release(BOB, held.post.id, HeldFor::Author, &free()),
+            Ok(true)
+        );
         assert!(store.get(BOB, held.post.id).is_some());
         assert_eq!(store.held_count(2001), 0);
+    }
+
+    #[test]
+    fn a_release_is_refused_while_the_holds_subject_is_contained() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-still");
+        let id = post.post.id;
+        holding(&store, &[1000, 2001]);
+        let both: BTreeSet<HeldFor> = [HeldFor::Author, HeldFor::Person].into_iter().collect();
+        let before = b.attempts();
+        for (lifted, contained) in [(HeldFor::Author, 2001), (HeldFor::Person, 1000)] {
+            assert_eq!(
+                store.release(BOB, id, lifted, &containing(&[], &[contained])),
+                Err(BoardRefusal::StillContained),
+                "{lifted:?}"
+            );
+        }
+        assert_eq!(b.attempts(), before, "a refused lift writes nothing");
+        assert_eq!(stored_on_disk(&b, BOB, id).held, both);
+        assert_eq!(store.held_count(2001), 1);
+        assert_eq!(store.held_count(1000), 1);
+        assert_eq!(
+            store.release(BOB, id, HeldFor::Author, &containing(&[], &[1000])),
+            Ok(false),
+            "the board's person contained does not keep the author's hold"
+        );
+        assert_eq!(
+            stored_on_disk(&b, BOB, id).held,
+            [HeldFor::Person].into_iter().collect()
+        );
+        assert!(store.get(BOB, id).is_none());
+    }
+
+    /// Answers "not contained" to the first question and "contained" after it.
+    struct ContainedAfterOne(std::sync::atomic::AtomicBool);
+
+    impl EnrollmentView for ContainedAfterOne {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+        fn contained(&self, _: u32) -> bool {
+            self.0.swap(true, std::sync::atomic::Ordering::SeqCst)
+        }
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_containment_seen_after_the_lift_is_written_marks_the_post_again() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-late-contain");
+        holding(&store, &[2001]);
+        let late = ContainedAfterOne(std::sync::atomic::AtomicBool::new(false));
+        assert_eq!(
+            store.release(BOB, post.post.id, HeldFor::Author, &late),
+            Ok(false)
+        );
+        assert!(store.get(BOB, post.post.id).is_none(), "marked again");
+        assert_eq!(
+            whys(&store.due(10)),
+            vec![(Some(post.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+        );
     }
 
     #[test]

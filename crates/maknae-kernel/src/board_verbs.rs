@@ -321,7 +321,9 @@ pub(crate) fn defect_of(r: &BoardRefusal) -> BoardDefect {
         BoardRefusal::Full => BoardDefect::Full,
         BoardRefusal::AuthorAtCap => BoardDefect::AuthorAtCap,
         BoardRefusal::NoSuchPost => BoardDefect::NoSuchPost,
-        BoardRefusal::Store(_) | BoardRefusal::Random => BoardDefect::TryAgain,
+        BoardRefusal::Store(_) | BoardRefusal::Random | BoardRefusal::StillContained => {
+            BoardDefect::TryAgain
+        }
         BoardRefusal::Unavailable(_) => BoardDefect::OutcomeUnknown,
     }
 }
@@ -333,7 +335,8 @@ pub(crate) fn posture(r: &BoardRefusal) -> &'static str {
         | BoardRefusal::AuthorAtCap
         | BoardRefusal::NoSuchPost
         | BoardRefusal::Store(_)
-        | BoardRefusal::Random => "unauthorized",
+        | BoardRefusal::Random
+        | BoardRefusal::StillContained => "unauthorized",
     }
 }
 
@@ -898,6 +901,11 @@ mod tests {
                 "unauthorized",
             ),
             (BoardRefusal::Random, BoardDefect::TryAgain, "unauthorized"),
+            (
+                BoardRefusal::StillContained,
+                BoardDefect::TryAgain,
+                "unauthorized",
+            ),
             (
                 BoardRefusal::Unavailable("outcome unknown: x".into()),
                 BoardDefect::OutcomeUnknown,

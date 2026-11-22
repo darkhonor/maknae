@@ -1048,10 +1048,10 @@ where
                         return Ok(false);
                     }
                     if page.posts_released > 0 {
-                        emit(format!("{} held post(s) released", page.posts_released));
+                        emit(format!("{} post hold(s) lifted", page.posts_released));
                     }
                     if page.next.is_none() && page.posts_held > 0 {
-                        emit(format!("{} post(s) still held", page.posts_held));
+                        emit(format!("{} post hold(s) remain", page.posts_held));
                         all_released = false;
                     }
                     page.next
@@ -3776,17 +3776,17 @@ mod tests {
         assert_eq!(sent.len(), 3);
         assert_eq!(
             lines[1..],
-            ["32 held post(s) released", "8 held post(s) released"]
+            ["32 post hold(s) lifted", "8 post hold(s) lifted"]
         );
         let (result, lines, sent) = run_pages(&release_all(), vec![post_page(0, 2, None)]);
         assert_eq!(result, Ok(false));
         assert_eq!(
             (lines, sent.len()),
-            (vec!["2 post(s) still held".to_string()], 1)
+            (vec!["2 post hold(s) remain".to_string()], 1)
         );
         let (result, lines, _) = run_pages(&release_all(), vec![post_page(3, 1, None)]);
         assert_eq!(result, Ok(false));
-        assert_eq!(lines, ["3 held post(s) released", "1 post(s) still held"]);
+        assert_eq!(lines, ["3 post hold(s) lifted", "1 post hold(s) remain"]);
     }
 
     #[test]
