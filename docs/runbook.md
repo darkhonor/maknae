@@ -1686,9 +1686,9 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 
 ## Mint GitHub App tokens
 
-The Egress Daemon can mint short-lived GitHub App installation tokens for an agent's task and seal each one to that agent's public seal key, so `maknaed` relays a token it cannot read ([ADR-0038](../design/adr/ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md)). The App's private key lives only in Vault Transit, which signs for the Egress Daemon and never returns the key. Minting is off until `/etc/maknae/egress/minting.yaml` exists, and it is Linux-only: on macOS enroll refuses a host with `minting.yaml`. The steps below use the App name `acme`, the Transit mount `maknae-transit` and the Transit key `gh-acme`. They are not yet measured on a live host.
+The Egress Daemon can mint short-lived GitHub App installation tokens for an agent's task and seal each one to that agent's public seal key, so `maknaed` relays a token it cannot read ([ADR-0038](../design/adr/ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md)). The App's private key lives only in Vault Transit, which signs for the Egress Daemon and never returns the key. Minting is off until `/etc/maknae/egress/minting.yaml` configures it, and it is Linux-only: on macOS enroll refuses a host whose `minting.yaml` configures minting. The same file's `apis:` map is what a GitHub forge's reach check needs, App or not ([configuration §6.1.4](configuration.md#614-mintingyaml)). The steps below use the App name `acme`, the Transit mount `maknae-transit` and the Transit key `gh-acme`. They are not yet measured on a live host.
 
-1. **Create the GitHub App.** Give it the least it needs: repository permissions **Contents: Read-only**, **Pull requests: Read-only** and **Metadata: Read-only**, and nothing else. Turn the webhook off (clear **Active**). An agent's token can never hold more than the App holds.
+1. **Create the GitHub App.** Give it the least it needs: repository permissions **Contents: Read-only**, **Pull requests: Read-only**, **Issues: Read-only** and **Metadata: Read-only**, and nothing else. A task's reach check counts the App as able to read a repository only when it holds all four at read or above; an App without Issues gets no read reach on any repository. Write on Pull requests adds review, write on Issues adds issue writes, write on Contents and Pull requests together adds merge, and write on Contents on a pull request's head repository adds pushing to it. Turn the webhook off (clear **Active**). An agent's token can never hold more than the App holds.
 
 2. **Generate a private key** for the App. GitHub downloads it once, as a PEM file.
 
@@ -1727,13 +1727,20 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
 
 12. **Write `minting.yaml`** as `root:_maknae-egress 0640`. `vault.approle_mount` is the Egress Daemon's own AppRole mount (step 6), never `maknaed`'s or an agent's; enroll refuses either:
 
+    `host` is the forge's `host` from `maknae.yaml` `forges:`, and it must have an `apis` entry with the same `api`:
+
     ```yaml
+    apis:
+      github.com:
+        provider: github
+        api: https://api.github.com
     vault:
       approle_mount: maknae-egress-approle
     github_apps:
       acme:
         app_id: <app id>
         installation_id: <installation id>
+        host: github.com
         api: https://api.github.com
         transit_mount: maknae-transit
         transit_key: gh-acme
@@ -1750,6 +1757,34 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
 **Turning minting off.** Remove `/etc/maknae/egress/minting.yaml` and run `maknae enroll` before you remove the App from `github_apps` in Terraform, so the egress AppRole still exists when enroll destroys its SecretIDs. Enroll removes the drop-in and restarts the Egress Daemon, removes the sealed SecretID and the role id, and destroys the recorded SecretIDs. When Vault no longer has the egress mount or role, those SecretIDs went with it, and enroll finishes the withdrawal without them. A host enrolled without `minting.yaml` never gets the drop-in, so its Egress Daemon runs with no Vault identity. Removing the last App from `github_apps` destroys the Transit mount and every App key imported into it, whatever `deletion_allowed` says; turning minting on again means generating a new private key in GitHub and importing it again.
 
 **One minting host per egress AppRole.** Each `maknae enroll` retires every SecretID on the `maknae-egress` role it logs in to, so two hosts that share one `egress_approle_path` destroy each other's SecretIDs. Give each minting host its own `egress_approle_path` (and so its own role and mount), as each agent id is enrolled on one host only.
+
+## Store your forge login
+
+A task bound to a GitHub forge is checked against GitHub as you, at submission: what you may do on each bound repository, intersected with what the agent may do, is sealed into the task as its reach ([Task an agent](#task-an-agent)). Your client needs a token for that check, and it reads it from your own Vault subtree, never from `gh`. Store it once per forge, after `maknae login`:
+
+```bash
+maknae forge login github.com
+```
+
+`<SERVER>` is the forge's host as `maknae tools` lists it, port included (`maknae forge login ghe.example:8443`). The command asks `Token for <server> (will be hidden): ` on stderr and reads the token only from that hidden prompt, never from an argument, the environment or a pipe. It writes it, response-wrapped, with your own Vault login to `<user_prefix>/<you>/forges/<host>` (a `:` in the host is written `_`), and prints `maknae: your forge login for <server> is stored in Vault`. Run it again to replace the token. `maknae forge logout <server>` erases it: `maknae: your forge login for <server> is erased from Vault`.
+
+**Which token.** A fine-grained personal access token whose repository access covers every repository you will task an agent on, with read-only **Metadata**, **Contents**, **Pull requests** and **Issues**. The check calls `GET /repos/{owner}/{repo}` and, for a pull request, `GET /repos/{owner}/{repo}/pulls/{n}` and the head repository's `GET /repos`. What it reads is your role on the repository (measured 2026-10-22: the `permissions` GitHub returns are your role, not the token's own permissions), so the token's write permissions add nothing; keep it read-only. A token that does not cover a private repository gets a 404, and the task is refused: scope the token to the repository, or store an OAuth token such as `gh auth token` prints. The token is a secret-class value: it holds only `A-Z`, `a-z`, `0-9`, `.`, `_` and `-`, at most 1024 bytes.
+
+**Refusals**, on stderr, prefixed `maknae forge login: ` (or `logout: `), exit `1`:
+
+| Line | Meaning |
+|---|---|
+| `<server> is not a forge this host configures; its forges are: a, b` (or `…: it configures no forges`) | spell the host as `maknae tools` lists it |
+| `<server> is a gitlab forge, which maknae does not check reach on, so it takes no forge login` | only GitHub forges are checked |
+| `<server> has no forge login path: maknae stores none for an IPv6 literal or an over-long host` | the host cannot be a Vault path segment |
+| `Vault refused to store your forge login for <server> (HTTP 403): it is outside your Vault policy, or your login was revoked: run `maknae login`` (or `erase`) | your Vault token cannot write there |
+| `Vault could not store your forge login for <server>: <why>` (or `erase`) | any other Vault failure |
+| `no terminal on standard input: run it interactively; the token is read only from a hidden prompt, never from arguments, the environment or a pipe` | run it in a terminal |
+| `no token was entered` | an empty entry |
+| `the token is longer than 1024 bytes` | the entry is refused, never grown |
+| `a forge token holds only A-Z, a-z, 0-9, '.', '_' and '-'` | a stray byte, such as an arrow key or a pasted escape sequence |
+
+An expired Vault login prints `your Vault login expired: run `maknae login``. Ctrl-C at the prompt exits `1`. Logout resolves the server against the forges the host configures now, so a token stored for a forge since removed from `forges:` cannot be erased with it; delete `forges/<host>` under your subtree with your own `vault kv metadata delete` instead.
 
 ## Task an agent
 
@@ -1782,11 +1817,15 @@ When unread reports would not fit the conversation, the session stops collecting
 - **Links in your request.** A link to a forge binds: `https://github.com/o/r/pull/12` binds `o/r` change 12, a link to a GitLab merge request binds that merge request, and any other link into a repository binds the repository. With one forge, `o/r#12` binds too (on GitLab `o/r!12` is the merge request and `o/r#12`, an issue, binds the repository), and so does `` `o/r` `` in backticks. A bare `o/r` without backticks, or a bare `#12`, binds nothing. A link with a user name or token before the host (`https://token@github.com/o/r`) is neither bound nor listed.
 - **The checkout you started in.** When you run `maknae agent <name>` inside a git checkout, the remotes in its `.git/config` that point at a forge are bound to every task the session submits, and a bare `o/r` in a request that names one of them binds as well. The checkout is read once, when the session opens. The checkout directory, its `.git`, its `config` and any `gitdir:` or `commondir` it points to must be yours and not world-writable; group-writable is fine. A checkout that cannot be read is said once, on stderr, and binds nothing: `maknae: this directory's git checkout could not be read (not owned by you, unreadable or malformed): its repository is not bound`. Outside a checkout nothing is said.
 
-After `#n submitted` the session lists what the kernel sealed, one line each, `bound: github.com/o/r change 12`, then each candidate it left out and why, `not bound: <what>: <why>`. The reasons are `unknown server` (not a forge), `not https`, `ambiguous shorthand: more than one forge is known`, `ambiguous forge: the host matches more than one forge`, `ambiguous GitLab path`, `over the bound of 8 bindings or 976 bytes` and `no forge list` (the session could not get its tool catalog, so nothing is bound). A candidate left out does not stop the task: it is submitted without it. A binding the kernel refuses refuses the task, and the trail names why (`task not bound: …`). `/status <n>` lists a task's bindings.
+After `#n submitted` the session lists what the kernel sealed, one line each, with the binding's reach (below), `bound: github.com/o/r change 12; reach: read, review, write issues; head: push`, then each candidate it left out and why, `not bound: <what>: <why>`. The reasons are `unknown server` (not a forge), `not https`, `ambiguous shorthand: more than one forge is known`, `ambiguous forge: the host matches more than one forge`, `ambiguous GitLab path`, `over the bound of 8 bindings or 976 bytes` and `no forge list` (the session could not get its tool catalog, so nothing is bound). A candidate left out does not stop the task: it is submitted without it. A binding the kernel refuses refuses the task, and the trail names why (`task not bound: …`). `/status <n>` lists a task's bindings.
+
+**Reach.** For each binding on a GitHub forge the kernel asks GitHub, at submission, what you may do on the repository with your stored token ([Store your forge login](#store-your-forge-login)) and what the agent's GitHub App may do, and seals the lower of the two into the task. The `reach:` part of a `bound:` line is that result: the operations on the base repository, from `read`, `review`, `write issues` and `merge`, or `none`, then `; head: push` when the task may push to the pull request's head repository. When the reach is empty for a reason, the line ends with it: `(the change's head repository is gone)`, `(the agent's credential does not cover it)`, `(no forge credential observed it)` (the agent has no App on that forge, or one Maknae does not check) or `(this forge has no reach check)` (a GitLab forge). **Nothing enforces reach yet:** it is shown, listed and recorded, and the agent's tool calls and tokens are not yet bounded by it (#479).
+
+Your session sends one sealed token per GitHub server the task binds. Without a stored login it refuses before sending: `no forge login is stored for <server>: run `maknae forge login <server>`, then retry; your request was not sent` (for `/add`, `; nothing was sent`). **The kernel refuses the task when GitHub does not answer with success** for any binding, as you or as the agent: a repository that does not exist or that your token does not cover (404, including a pull request number that names an issue), an expired or revoked token (401), a rate limit (403 or 429), or no answer within the host's reach deadline. A working-directory remote counts too, so **a stale remote refuses every task from that checkout** until you fix or remove it. The session shows such a refusal as `your request was refused or its outcome is unknown`; the trail records `task not reached: …` with the class.
 
 | Command | Effect |
 |---|---|
-| `/add [n] <text>` | add to task n, or the newest open task |
+| `/add [n] <text>` | add to task n, or the newest open task; links in the text bind to the task while it is working (8 bindings at most in all), and when anything bound the session echoes `added to #n` and the task's bindings |
 | `/stop [n]` | stop task n, or the newest open task |
 | `/drop [n]` | drop task n, or the newest open task |
 | `/status [n]` | one task in full (`#n <state> · m:ss elapsed · <k> action(s)`, then ` · bound: <binding>, …` when it has bindings), or every open task |
