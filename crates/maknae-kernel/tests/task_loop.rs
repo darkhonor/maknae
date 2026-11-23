@@ -6200,4 +6200,55 @@ mod board {
             "never the later post without the one released below it"
         );
     }
+
+    fn counted<P>(inner: Arc<P>) -> Arc<common::CountsPostBatches<P>> {
+        Arc::new(common::CountsPostBatches {
+            inner,
+            batches: 0.into(),
+            posts: 0.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_read_decides_only_the_chunks_its_page_needs() {
+        let w = board_world("board-read-bound");
+        let j = w.at_work("jin");
+        let page = maknae_proto::BOARD_READ_PAGE_POSTS;
+        for n in 0..3 * page + 4 {
+            w.stored("hobi", &format!("sentinel-695-n{n}"), PostLabels::default());
+        }
+        let pdp = counted(Arc::clone(&w.pdp));
+        let got = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(got.posts.len(), page);
+        assert!(got.more);
+        let ord = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(
+            (pdp.batches.load(ord), pdp.posts.load(ord)),
+            (2, 2 * page),
+            "the first chunk fills the page and the second finds the lookahead; no more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_stopped_at_an_undecided_post_decides_no_later_chunk() {
+        let w = board_world("board-read-bound-stopped");
+        let j = w.at_work("jin");
+        let page = maknae_proto::BOARD_READ_PAGE_POSTS;
+        w.stored("hobi", "sentinel-695-undecided", labelled());
+        for n in 0..2 * page {
+            w.stored("hobi", &format!("sentinel-695-n{n}"), PostLabels::default());
+        }
+        let pdp = counted(Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        }));
+        let answer = w.board_as(&pdp, "jin", read(None), j).await.0;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        let ord = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(
+            (pdp.batches.load(ord), pdp.posts.load(ord)),
+            (1, page),
+            "only the chunk holding the undecided post is decided"
+        );
+    }
 }

@@ -2082,6 +2082,31 @@ impl<P> ReleasesDuringBatch<P> {
 
 board_double!(ReleasesDuringBatch);
 
+/// Counts the post-decision batches (a base request and at least one post) and the posts in
+/// them; decides through `inner`.
+pub struct CountsPostBatches<P> {
+    pub inner: Arc<P>,
+    pub batches: std::sync::atomic::AtomicUsize,
+    pub posts: std::sync::atomic::AtomicUsize,
+}
+
+impl<P> CountsPostBatches<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() > 1 {
+            self.batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.posts
+                .fetch_add(reqs.len() - 1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+board_double!(CountsPostBatches);
+
 /// Stamps another person's board on a board request before the composition decides it.
 pub struct OtherBoard<P> {
     pub inner: Arc<P>,
