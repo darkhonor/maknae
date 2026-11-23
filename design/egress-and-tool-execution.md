@@ -106,7 +106,7 @@ The same flow applies to an agent, with one consequence that is intended: the ag
 
 ### 5.4 An agent is tasked: reviewing a pull request with `gh`
 
-1. A tasker tasks the agent (`session.task`) with a link to the pull request, which the tasker's client binds (ADR-0037 decisions 2 and 3). Intake re-validates the binding and runs the repository intersection (#168 slice 4), which asks GitHub, not a list Maknae keeps, and reads the head repository from the pull request. The binding and the intersection result are sealed into the task.
+1. A tasker tasks the agent (`session.task`) with a link to the pull request. The tasker's client binds it to a `git` forge its tool catalog names (server, base repository and change), and after submission echoes what the kernel sealed; a link to any other host is not bound, and the echo says why (ADR-0037 decisions 2 and 3). Intake re-validates the binding, refuses one whose server is not the host of a `git` forge in `forges:`, and seals it into the task. The repository intersection (#168 slice 4 PR B) will ask GitHub, not a list Maknae keeps, read the head repository from the pull request, and seal its result as `reach`.
 2. The Agent Daemon asks `maknaed` to run `gh pr view …`. `maknaed` decides it on the **agent's** role and records intent.
 3. The Agent Daemon starts `gh` in its fetch entry's container (ADR-0036 decision 8), as the agent's uid, with only the task's own directory within its tasker's partition mounted (§3, decision 14), and with the task's installation token, minted at hand-out for the bound repositories at the intersected permissions (§3, decision 11), through the `GH_TOKEN` adapter.
 4. `gh` reaches `api.github.com` only through the relay and the proxy, which permits it only if the site is on the agent's allowlist. The container has no other route, and on Linux the agent's account can reach nothing but the proxy, at every tier, except through local services that connect on its behalf (§7).
@@ -344,7 +344,7 @@ Each statement this concept makes about something not yet built, and the breakdo
 | Tool output reaches the model with delivered credentials redacted | §5.2 | 4 |
 | Proxy decisions carry site and subject attributes; the trail records the site's `handling` | §9 | 2, 3 |
 | The agent's `gh` review flow | §5.4 | 8, with #475 and #480 |
-| Tasks and conversations carry typed bindings; tool entries declare `binds:`; link recognizers bind a tasker's link | §5.4 | 8 |
+| Conversations carry typed bindings; the client runs the resolvers `binds:` names; a tool call is decided on its task's bound values (#479) | §5.4 | 8 |
 | The repository intersection at submission, with the head read from the pull request | §5.4 | 8, with #168 |
 | Namespaced labels, each claimed by a loaded operand | §9 | 2 |
 | The agent as an app, with a narrowed token minted per task | §3 decision 11, §5.4 | 8 |

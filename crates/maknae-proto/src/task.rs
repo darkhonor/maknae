@@ -94,6 +94,189 @@ impl std::fmt::Debug for Ask {
 #[serde(deny_unknown_fields)]
 pub struct Labels {}
 
+pub const TASK_BINDINGS_MAX: usize = 8;
+/// The most a task's sealed `Vec<Binding>` may encode to.
+pub const TASK_BINDINGS_MAX_BYTES: usize = 1024;
+/// Sealing adds `head` (6 bytes as `null`) to each request, so a request set within this
+/// bound seals within [`TASK_BINDINGS_MAX_BYTES`].
+pub const TASK_BINDING_REQUESTS_MAX_BYTES: usize = TASK_BINDINGS_MAX_BYTES - 6 * TASK_BINDINGS_MAX;
+/// Reserved in [`TASK_ENVELOPE_MARGIN`] for the task's reach; no field carries it yet.
+pub const TASK_REACH_MAX_BYTES: usize = 1024;
+pub const REPOSITORY_PATH_MAX_BYTES: usize = 255;
+
+pub fn repository_path_is_acceptable(path: &str) -> bool {
+    path.len() <= REPOSITORY_PATH_MAX_BYTES
+        && !path.ends_with(".git")
+        && path.split('/').nth(1).is_some()
+        && path.split('/').all(|seg| {
+            !matches!(seg, "" | "." | "..")
+                && !seg.starts_with('-')
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+}
+
+fn binding_refusal(
+    server: &str,
+    base: &str,
+    head: Option<&str>,
+    change: Option<u64>,
+) -> Result<(), String> {
+    if !crate::server_is_acceptable(server) {
+        return Err(format!(
+            "binding `server` is not a lowercase host[:port] of at most {} bytes",
+            crate::SERVER_MAX_BYTES
+        ));
+    }
+    if !repository_path_is_acceptable(base) {
+        return Err("binding `base` is not a repository path".into());
+    }
+    if head.is_some_and(|h| !repository_path_is_acceptable(h)) {
+        return Err("binding `head` is not a repository path".into());
+    }
+    if change == Some(0) {
+        return Err("binding `change` is not a positive number".into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "GitRefWire")]
+pub struct GitRef {
+    pub server: String,
+    pub base: String,
+    pub change: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitRefWire {
+    server: String,
+    base: String,
+    change: Option<u64>,
+}
+
+impl TryFrom<GitRefWire> for GitRef {
+    type Error = String;
+    fn try_from(w: GitRefWire) -> Result<Self, String> {
+        binding_refusal(&w.server, &w.base, None, w.change)?;
+        Ok(GitRef {
+            server: w.server,
+            base: w.base,
+            change: w.change,
+        })
+    }
+}
+
+/// A sealed binding. `head` is the repository a change's head lives in, when known.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "GitBindingWire")]
+pub struct GitBinding {
+    pub server: String,
+    pub base: String,
+    pub head: Option<String>,
+    pub change: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitBindingWire {
+    server: String,
+    base: String,
+    head: Option<String>,
+    change: Option<u64>,
+}
+
+impl TryFrom<GitBindingWire> for GitBinding {
+    type Error = String;
+    fn try_from(w: GitBindingWire) -> Result<Self, String> {
+        binding_refusal(&w.server, &w.base, w.head.as_deref(), w.change)?;
+        Ok(GitBinding {
+            server: w.server,
+            base: w.base,
+            head: w.head,
+            change: w.change,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum BindingRequest {
+    Git(GitRef),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Binding {
+    Git(GitBinding),
+}
+
+struct EncodedLen(usize);
+
+impl std::io::Write for EncodedLen {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The CBOR length of `bindings` as a list, counted without buffering it.
+pub fn bindings_encoded_len<T: Serialize>(bindings: &[T]) -> usize {
+    let mut len = EncodedLen(0);
+    match ciborium::into_writer(bindings, &mut len) {
+        Ok(()) => len.0,
+        Err(_) => usize::MAX,
+    }
+}
+
+fn bounded<'de, D, T>(d: D, max_bytes: usize) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Serialize + PartialEq,
+{
+    struct AtMost<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for AtMost<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a list of at most {TASK_BINDINGS_MAX} bindings")
+        }
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut list = Vec::new();
+            while let Some(binding) = seq.next_element()? {
+                if list.len() == TASK_BINDINGS_MAX {
+                    return Err(de::Error::custom(format!(
+                        "more than {TASK_BINDINGS_MAX} bindings"
+                    )));
+                }
+                list.push(binding);
+            }
+            Ok(list)
+        }
+    }
+    let list = d.deserialize_seq(AtMost(std::marker::PhantomData))?;
+    if list.iter().enumerate().any(|(i, b)| list[..i].contains(b)) {
+        return Err(de::Error::custom("a duplicate binding"));
+    }
+    let len = bindings_encoded_len(&list);
+    if len > max_bytes {
+        return Err(de::Error::custom(format!(
+            "bindings of {len} bytes encode to more than {max_bytes}"
+        )));
+    }
+    Ok(list)
+}
+
+fn bounded_requests<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<BindingRequest>, D::Error> {
+    bounded(d, TASK_BINDING_REQUESTS_MAX_BYTES)
+}
+
+fn bounded_bindings<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Binding>, D::Error> {
+    bounded(d, TASK_BINDINGS_MAX_BYTES)
+}
+
 /// What a tasker sends. The id, the tasker and the parent are the kernel's.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +286,12 @@ pub struct TaskSubmission {
     pub agent: String,
     pub ask: Ask,
     pub labels: Labels,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "bounded_requests"
+    )]
+    pub bindings: Vec<BindingRequest>,
 }
 
 impl std::fmt::Debug for TaskSubmission {
@@ -113,6 +302,7 @@ impl std::fmt::Debug for TaskSubmission {
             .field("agent", &self.agent)
             .field("ask", &self.ask)
             .field("labels", &self.labels)
+            .field("bindings", &self.bindings)
             .finish()
     }
 }
@@ -130,6 +320,12 @@ pub struct TaskObject {
     pub agent: String,
     pub ask: Ask,
     pub labels: Labels,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "bounded_bindings"
+    )]
+    pub bindings: Vec<Binding>,
 }
 
 impl std::fmt::Debug for TaskObject {
@@ -143,6 +339,7 @@ impl std::fmt::Debug for TaskObject {
             .field("agent", &self.agent)
             .field("ask", &self.ask)
             .field("labels", &self.labels)
+            .field("bindings", &self.bindings)
             .finish()
     }
 }
@@ -362,6 +559,12 @@ pub struct TaskView {
     pub actions: u32,
     pub last_action_secs: Option<i64>,
     pub cursor: TaskCursor,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "bounded_bindings"
+    )]
+    pub bindings: Vec<Binding>,
 }
 
 /// `next` is the submission sequence to resume after.
@@ -371,6 +574,7 @@ pub struct TaskPage {
     pub next: Option<TaskCursor>,
 }
 
+pub const TASK_PAGE_MAX: usize = 32;
 pub const HELD_PAGE_MAX: usize = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -697,6 +901,7 @@ mod tests {
             agent: "hobi".into(),
             ask: prompt(SENTINEL),
             labels: Labels {},
+            bindings: vec![],
         }
     }
 
@@ -718,6 +923,7 @@ mod tests {
             agent: "hobi".into(),
             ask: prompt("hi"),
             labels: Labels {},
+            bindings: vec![],
         }
     }
 
@@ -1069,6 +1275,7 @@ mod tests {
             actions: 3,
             last_action_secs: Some(1_700_000_040),
             cursor: TaskCursor::from_seq(4),
+            bindings: vec![],
         }
     }
 
@@ -1173,8 +1380,7 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn a_max_size_task_delivery_fits_with_a_stamp() {
+    fn delivery_envelope(bindings: Vec<Binding>) -> usize {
         const CATALOG_DIGEST_ENCODED_MAX: usize = 49;
         let prompt_max = 1 << 20;
         let agent = "a".repeat(32);
@@ -1196,6 +1402,7 @@ mod tests {
                 agent: agent.clone(),
                 ask: prompt(&"p".repeat(prompt_max)),
                 labels: Labels {},
+                bindings,
             },
             signature: signature(alg, &part, &chain, &vec![0x5a; rest]),
         };
@@ -1214,9 +1421,47 @@ mod tests {
             .unwrap()
             .len();
         assert_eq!(stamped - bare, CATALOG_DIGEST_ENCODED_MAX);
-        let envelope = stamped - prompt_max - TASK_SIGNATURE_MAX_BYTES;
-        assert!(envelope <= TASK_ENVELOPE_MARGIN, "{envelope}");
         assert!(stamped <= prompt_response_cap(prompt_max), "{stamped}");
+        stamped - prompt_max - TASK_SIGNATURE_MAX_BYTES
+    }
+
+    #[test]
+    fn a_max_size_task_delivery_fits_with_a_stamp() {
+        let envelope = delivery_envelope(vec![]);
+        assert!(envelope <= TASK_ENVELOPE_MARGIN, "{envelope}");
+    }
+
+    #[test]
+    fn the_worst_case_bindings_and_the_reach_reserve_fit_the_envelope() {
+        let bindings = sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES);
+        let bare = delivery_envelope(vec![]);
+        let bound = delivery_envelope(bindings);
+        assert_eq!(bound - bare, 1 + "bindings".len() + TASK_BINDINGS_MAX_BYTES);
+        assert!(
+            bound + TASK_REACH_MAX_BYTES <= TASK_ENVELOPE_MARGIN,
+            "{bound} + {TASK_REACH_MAX_BYTES}"
+        );
+    }
+
+    #[test]
+    fn a_max_size_submission_with_max_bindings_fits_the_request_cap() {
+        let prompt_max = 1 << 20;
+        let mut task = submission();
+        task.agent = "a".repeat(32);
+        task.ask = prompt(&"p".repeat(prompt_max));
+        task.bindings = requests_at(TASK_BINDINGS_MAX, TASK_BINDING_REQUESTS_MAX_BYTES);
+        let req = crate::Request {
+            protocol_version: crate::PROTOCOL_VERSION,
+            verb: crate::Verb::TaskSubmit { task },
+            task: Some(id(0xf0)),
+        };
+        let bytes = crate::encode_request(&req).unwrap();
+        assert_eq!(crate::decode_request(&bytes).unwrap(), req);
+        assert!(
+            bytes.len() <= prompt_request_cap(prompt_max),
+            "{}",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -1458,6 +1703,7 @@ mod tests {
                 actions: 3,
                 last_action_secs: optional.then_some(14),
                 cursor: TaskCursor::from_seq(9),
+                bindings: vec![],
             },
             tasker: "uid 1234".into(),
             held_from: TaskState::Working,
@@ -1632,26 +1878,32 @@ mod tests {
             "{}",
             bytes.len()
         );
+        assert_eq!(crate::decode_response(&bytes).unwrap(), resp);
     }
 
     fn maximal_ref() -> TaskRef {
         TaskRef::from_id(&TaskId([0xff; 16]))
     }
 
+    fn maximal_view(state: TaskState) -> TaskView {
+        TaskView {
+            task: maximal_ref(),
+            agent: "a".repeat(32),
+            state,
+            close: Some(TaskClose::AgentGone),
+            submitted_secs: i64::MAX,
+            elapsed_secs: u64::MAX,
+            actions: u32::MAX,
+            last_action_secs: Some(i64::MAX),
+            cursor: TaskCursor::from_seq(u64::MAX),
+            bindings: sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES),
+        }
+    }
+
     #[test]
-    fn a_maximal_held_page_fits_a_control_frame() {
+    fn a_maximal_held_page_with_bindings_fits_a_control_frame() {
         let entry = HeldView {
-            view: TaskView {
-                task: maximal_ref(),
-                agent: "a".repeat(32),
-                state: TaskState::Held,
-                close: Some(TaskClose::AgentGone),
-                submitted_secs: i64::MAX,
-                elapsed_secs: u64::MAX,
-                actions: u32::MAX,
-                last_action_secs: Some(i64::MAX),
-                cursor: TaskCursor::from_seq(u64::MAX),
-            },
+            view: maximal_view(TaskState::Held),
             tasker: "é".repeat(128),
             held_from: TaskState::Reported,
             held_for: Some(HeldCause::Tasker),
@@ -1660,6 +1912,14 @@ mod tests {
         assert_eq!(entry.tasker.len(), 256);
         assert_fits_a_control_frame(crate::Payload::HeldTasks(HeldPage {
             entries: vec![entry; HELD_PAGE_MAX],
+            next: Some(TaskCursor::from_seq(u64::MAX)),
+        }));
+    }
+
+    #[test]
+    fn a_maximal_task_page_with_bindings_fits_a_control_frame() {
+        assert_fits_a_control_frame(crate::Payload::TaskList(TaskPage {
+            entries: vec![maximal_view(TaskState::Working); TASK_PAGE_MAX],
             next: Some(TaskCursor::from_seq(u64::MAX)),
         }));
     }
@@ -1815,5 +2075,422 @@ mod tests {
         ] {
             assert_eq!(epoch_to_rfc3339(secs, millis), want, "{secs}");
         }
+    }
+
+    const V1_OBJECT: &str = "a8
+         66 736368656d61 6b 6d616b6e61652e7461736b
+         67 76657273696f6e 01
+         67 7461736b5f6964 50 000102030405060708090a0b0c0d0e0f
+         66 7461736b6572 a1 63 556964 19 03e8
+         66 706172656e74 f6
+         65 6167656e74 64 686f6269
+         63 61736b a1 66 50726f6d7074 a1 66 70726f6d7074 62 6869
+         66 6c6162656c73 a0";
+
+    const V1_SUBMISSION: &str = "a5
+         66 736368656d61 6b 6d616b6e61652e7461736b
+         67 76657273696f6e 01
+         65 6167656e74 64 686f6269
+         63 61736b a1 66 50726f6d7074 a1 66 70726f6d7074 62 6869
+         66 6c6162656c73 a0";
+
+    const FORGE: &str = "forge.example";
+
+    fn git_ref(server: &str, base: &str, change: Option<u64>) -> BindingRequest {
+        BindingRequest::Git(GitRef {
+            server: server.into(),
+            base: base.into(),
+            change,
+        })
+    }
+
+    fn git_binding(server: &str, base: &str, head: Option<&str>, change: Option<u64>) -> Binding {
+        Binding::Git(GitBinding {
+            server: server.into(),
+            base: base.into(),
+            head: head.map(Into::into),
+            change,
+        })
+    }
+
+    fn path(i: usize, len: usize) -> String {
+        let owner = format!("o{i}/");
+        format!("{owner}{}", "r".repeat(len - owner.len()))
+    }
+
+    /// `count` distinct bindings whose list encodes to exactly `target` bytes.
+    fn sized<T: Serialize>(
+        count: usize,
+        target: usize,
+        make: impl Fn(usize, usize) -> T,
+    ) -> Vec<T> {
+        let mut lens = vec![24; count];
+        let build = |lens: &[usize]| -> Vec<T> {
+            lens.iter().enumerate().map(|(i, &l)| make(i, l)).collect()
+        };
+        let mut short = target - bindings_encoded_len(&build(&lens));
+        for len in &mut lens {
+            let add = short.min(REPOSITORY_PATH_MAX_BYTES - *len);
+            *len += add;
+            short -= add;
+        }
+        let list = build(&lens);
+        assert_eq!(bindings_encoded_len(&list), target);
+        list
+    }
+
+    fn requests_at(count: usize, target: usize) -> Vec<BindingRequest> {
+        sized(count, target, |i, len| {
+            git_ref(FORGE, &path(i, len), Some(u64::MAX))
+        })
+    }
+
+    fn sealed_at(count: usize, target: usize) -> Vec<Binding> {
+        sized(count, target, |i, len| {
+            git_binding(FORGE, &path(i, len), None, Some(u64::MAX))
+        })
+    }
+
+    fn submit_with(bindings: Vec<BindingRequest>) -> Result<TaskSubmission, String> {
+        let mut sub = submission();
+        sub.bindings = bindings;
+        dec(&enc(&sub))
+    }
+
+    fn object_with(bindings: Vec<Binding>) -> Result<TaskObject, String> {
+        let mut obj = object(Tasker::Uid(1000), None);
+        obj.bindings = bindings;
+        dec(&enc(&obj))
+    }
+
+    fn view_with(bindings: Vec<Binding>) -> Result<TaskView, String> {
+        let mut view = task_view();
+        view.bindings = bindings;
+        dec(&enc(&view))
+    }
+
+    fn keys(bytes: &[u8]) -> Vec<String> {
+        let value: ciborium::Value = dec(bytes).unwrap();
+        value
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_text().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_task_signed_before_bindings_reencodes_to_its_signed_bytes() {
+        let signed = hex(V1_OBJECT);
+        let object: TaskObject = dec(&signed).unwrap();
+        assert!(object.bindings.is_empty());
+        assert_eq!(enc(&object), signed);
+        let bytes = task_signing_bytes(&object, TASK_ENVELOPE_MARGIN).unwrap();
+        let (context, body) = bytes.split_at(TASK_SIGNING_CONTEXT.len());
+        assert_eq!(context, TASK_SIGNING_CONTEXT);
+        assert_eq!(body, signed.as_slice());
+        let sent = hex(V1_SUBMISSION);
+        let sub: TaskSubmission = dec(&sent).unwrap();
+        assert!(sub.bindings.is_empty());
+        assert_eq!(enc(&sub), sent);
+        let view = task_view();
+        assert!(!keys(&enc(&view)).contains(&"bindings".to_string()));
+    }
+
+    #[test]
+    fn bindings_round_trip_after_labels_and_are_omitted_when_empty() {
+        let golden = hex("a1 63 476974
+             a4 66 736572766572 64 682e696f
+                64 62617365 63 6f2f72
+                64 68656164 f6
+                66 6368616e6765 f6");
+        let sealed = git_binding("h.io", "o/r", None, None);
+        assert_eq!(enc(&sealed), golden);
+        assert_eq!(dec::<Binding>(&golden).unwrap(), sealed);
+        let request = hex("a1 63 476974
+             a3 66 736572766572 64 682e696f
+                64 62617365 63 6f2f72
+                66 6368616e6765 f6");
+        assert_eq!(enc(&git_ref("h.io", "o/r", None)), request);
+        assert_eq!(
+            dec::<BindingRequest>(&request).unwrap(),
+            git_ref("h.io", "o/r", None)
+        );
+
+        let mut sub = submission();
+        sub.bindings = vec![
+            git_ref(FORGE, "o/r", Some(7)),
+            git_ref("forge.example:8443", "group/sub/repo", None),
+        ];
+        let bytes = enc(&sub);
+        assert_eq!(
+            keys(&bytes),
+            ["schema", "version", "agent", "ask", "labels", "bindings"]
+        );
+        assert_eq!(dec::<TaskSubmission>(&bytes).unwrap(), sub);
+
+        let mut obj = object(Tasker::Uid(1000), None);
+        obj.bindings = vec![
+            git_binding(FORGE, "o/r", Some("fork/r"), Some(7)),
+            git_binding(FORGE, "o/r", None, None),
+        ];
+        let bytes = enc(&obj);
+        assert_eq!(keys(&bytes).last().map(String::as_str), Some("bindings"));
+        assert_eq!(keys(&bytes)[keys(&bytes).len() - 2], "labels");
+        assert_eq!(dec::<TaskObject>(&bytes).unwrap(), obj);
+
+        let mut view = task_view();
+        view.bindings = obj.bindings.clone();
+        let bytes = enc(&view);
+        assert_eq!(keys(&bytes).last().map(String::as_str), Some("bindings"));
+        assert_eq!(dec::<TaskView>(&bytes).unwrap(), view);
+
+        let bare = object(Tasker::Uid(1000), None);
+        assert!(!keys(&enc(&bare)).contains(&"bindings".to_string()));
+        assert!(!keys(&enc(&submission())).contains(&"bindings".to_string()));
+    }
+
+    #[test]
+    fn a_malformed_binding_never_decodes() {
+        use ciborium::Value;
+        let good = "owner/repo";
+        let long_server = format!("{}.com", "a".repeat(252));
+        let long_path = path(0, 256);
+        let server = |s: &str| GitBinding {
+            server: s.into(),
+            base: good.into(),
+            head: None,
+            change: None,
+        };
+        let base = |b: &str| GitBinding {
+            base: b.into(),
+            ..server(FORGE)
+        };
+        let head = |h: &str| GitBinding {
+            head: Some(h.into()),
+            ..server(FORGE)
+        };
+        let cases = [
+            ("server", server("Forge.example")),
+            ("server", server("forge.example/x")),
+            ("server", server("https://forge.example")),
+            ("server", server("")),
+            ("server", server(&long_server)),
+            ("base", base("owner")),
+            ("base", base("owner//repo")),
+            ("base", base("owner/")),
+            ("base", base("./repo")),
+            ("base", base("owner/.")),
+            ("base", base("../repo")),
+            ("base", base("owner/..")),
+            ("base", base("-owner/repo")),
+            ("base", base("owner/-repo")),
+            ("base", base("owner/repo.git")),
+            ("base", base("owner/re#po")),
+            ("base", base("owner/re%po")),
+            ("base", base("owner/re po")),
+            ("base", base("owner/ré")),
+            ("base", base("a/")),
+            ("base", base(&long_path)),
+            (
+                "change",
+                GitBinding {
+                    change: Some(0),
+                    ..server(FORGE)
+                },
+            ),
+            ("head", head("fork")),
+            ("head", head("fork/repo.git")),
+            ("head", head(&path(1, 256))),
+        ];
+        let fields = ["server", "base", "head", "change"];
+        let names_only = |err: &str, field: &str| {
+            assert!(err.contains(&format!("`{field}`")), "{field}: {err}");
+            for other in fields.iter().filter(|f| **f != field) {
+                assert!(!err.contains(&format!("`{other}`")), "{field}: {err}");
+            }
+        };
+        for (field, bad) in cases {
+            if bad.head.is_none() {
+                let req = git_ref(&bad.server, &bad.base, bad.change);
+                let err = dec::<BindingRequest>(&enc(&req)).unwrap_err();
+                names_only(&err, field);
+                assert!(submit_with(vec![req]).is_err(), "{field}");
+            }
+            let sealed = Binding::Git(bad);
+            let err = dec::<Binding>(&enc(&sealed)).unwrap_err();
+            names_only(&err, field);
+            assert!(object_with(vec![sealed.clone()]).is_err(), "{field}");
+            assert!(view_with(vec![sealed]).is_err(), "{field}");
+        }
+        let at_cap = path(0, REPOSITORY_PATH_MAX_BYTES);
+        for base in [
+            "a/b",
+            "o.x/r_y-z",
+            "Owner/Repo.git2",
+            "o/.r",
+            at_cap.as_str(),
+        ] {
+            assert!(repository_path_is_acceptable(base), "{base}");
+            assert!(
+                dec::<BindingRequest>(&enc(&git_ref(FORGE, base, Some(1)))).is_ok(),
+                "{base}"
+            );
+            let sealed = git_binding(FORGE, base, Some(base), Some(1));
+            assert!(dec::<Binding>(&enc(&sealed)).is_ok(), "{base}");
+        }
+
+        let text = |s: &str| Value::Text(s.into());
+        let git = |name: &str, extra: Option<(&str, Value)>| {
+            let mut m = vec![
+                (text("server"), text(FORGE)),
+                (text("base"), text(good)),
+                (text("change"), Value::Null),
+            ];
+            m.extend(extra.map(|(k, v)| (text(k), v)));
+            enc(&Value::Map(vec![(text(name), Value::Map(m))]))
+        };
+        assert!(dec::<BindingRequest>(&git("Git", None)).is_ok());
+        for (named, bytes) in [
+            ("Svn", git("Svn", None)),
+            ("token", git("Git", Some(("token", text("x"))))),
+        ] {
+            let err = dec::<BindingRequest>(&bytes).unwrap_err();
+            assert!(err.contains(named), "{named}: {err}");
+            let err = dec::<Binding>(&bytes).unwrap_err();
+            assert!(err.contains(named), "{named}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_submission_cannot_carry_a_head() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let with_head = enc(&Value::Map(vec![(
+            text("Git"),
+            Value::Map(vec![
+                (text("server"), text(FORGE)),
+                (text("base"), text("owner/repo")),
+                (text("head"), text("fork/repo")),
+                (text("change"), Value::Integer(3.into())),
+            ]),
+        )]));
+        let err = dec::<BindingRequest>(&with_head).unwrap_err();
+        assert!(err.contains("head"), "{err}");
+        assert_eq!(
+            dec::<Binding>(&with_head).unwrap(),
+            git_binding(FORGE, "owner/repo", Some("fork/repo"), Some(3))
+        );
+        let mut sub = submission_value(None);
+        if let Value::Map(m) = &mut sub {
+            m.push((
+                text("bindings"),
+                Value::Array(vec![dec::<Value>(&with_head).unwrap()]),
+            ));
+        }
+        let err = dec::<TaskSubmission>(&enc(&sub)).unwrap_err();
+        assert!(err.contains("head"), "{err}");
+    }
+
+    #[test]
+    fn a_duplicate_binding_is_refused() {
+        let a = git_ref(FORGE, "o/r", Some(1));
+        let b = git_ref(FORGE, "o/r", Some(2));
+        assert!(submit_with(vec![a.clone(), b.clone()]).is_ok());
+        for twice in [vec![a.clone(), a.clone()], vec![a.clone(), b, a]] {
+            let err = submit_with(twice).unwrap_err();
+            assert!(err.contains("duplicate binding"), "{err}");
+        }
+        let s = git_binding(FORGE, "o/r", None, Some(1));
+        let t = git_binding(FORGE, "o/r", Some("f/r"), Some(1));
+        assert!(object_with(vec![s.clone(), t.clone()]).is_ok());
+        assert!(view_with(vec![s.clone(), t]).is_ok());
+        let err = object_with(vec![s.clone(), s.clone()]).unwrap_err();
+        assert!(err.contains("duplicate binding"), "{err}");
+        let err = view_with(vec![s.clone(), s]).unwrap_err();
+        assert!(err.contains("duplicate binding"), "{err}");
+    }
+
+    #[test]
+    fn a_ninth_binding_is_refused() {
+        let change = |i: usize| Some(i as u64 + 1);
+        let reqs: Vec<_> = (0..=TASK_BINDINGS_MAX)
+            .map(|i| git_ref(FORGE, "o/r", change(i)))
+            .collect();
+        assert_eq!(
+            submit_with(reqs[..TASK_BINDINGS_MAX].to_vec())
+                .unwrap()
+                .bindings
+                .len(),
+            TASK_BINDINGS_MAX
+        );
+        let err = submit_with(reqs).unwrap_err();
+        assert!(err.contains("more than 8 bindings"), "{err}");
+        let sealed: Vec<_> = (0..=TASK_BINDINGS_MAX)
+            .map(|i| git_binding(FORGE, "o/r", None, change(i)))
+            .collect();
+        assert!(object_with(sealed[..TASK_BINDINGS_MAX].to_vec()).is_ok());
+        assert!(view_with(sealed[..TASK_BINDINGS_MAX].to_vec()).is_ok());
+        let err = object_with(sealed.clone()).unwrap_err();
+        assert!(err.contains("more than 8 bindings"), "{err}");
+        let err = view_with(sealed).unwrap_err();
+        assert!(err.contains("more than 8 bindings"), "{err}");
+        type Primitive = serde::de::value::U32Deserializer<serde::de::value::Error>;
+        let err = bounded_requests(Primitive::new(8)).unwrap_err().to_string();
+        assert!(err.contains("a list of at most 8 bindings"), "{err}");
+        let err = bounded_bindings(Primitive::new(8)).unwrap_err().to_string();
+        assert!(err.contains("a list of at most 8 bindings"), "{err}");
+    }
+
+    #[test]
+    fn bindings_one_byte_over_the_bound_are_refused_and_at_it_accepted() {
+        let refused = |err: String| assert!(err.contains("encode to more than"), "{err}");
+        for count in [4, TASK_BINDINGS_MAX] {
+            let at = requests_at(count, TASK_BINDING_REQUESTS_MAX_BYTES);
+            assert_eq!(submit_with(at.clone()).unwrap().bindings, at);
+            refused(
+                submit_with(requests_at(count, TASK_BINDING_REQUESTS_MAX_BYTES + 1)).unwrap_err(),
+            );
+            let at = sealed_at(count, TASK_BINDINGS_MAX_BYTES);
+            assert_eq!(object_with(at.clone()).unwrap().bindings, at);
+            assert_eq!(view_with(at.clone()).unwrap().bindings, at);
+            let over = sealed_at(count, TASK_BINDINGS_MAX_BYTES + 1);
+            refused(object_with(over.clone()).unwrap_err());
+            refused(view_with(over).unwrap_err());
+        }
+    }
+
+    #[test]
+    fn a_request_set_at_its_bound_seals_within_the_sealed_bound() {
+        assert_eq!(enc(&()).len(), 1, "a null is one byte");
+        assert_eq!(enc(&"head").len() + 1, 6);
+        for count in 4..=TASK_BINDINGS_MAX {
+            let requests = requests_at(count, TASK_BINDING_REQUESTS_MAX_BYTES);
+            let sealed: Vec<Binding> = requests
+                .iter()
+                .map(|BindingRequest::Git(r)| {
+                    Binding::Git(GitBinding {
+                        server: r.server.clone(),
+                        base: r.base.clone(),
+                        head: None,
+                        change: r.change,
+                    })
+                })
+                .collect();
+            let len = bindings_encoded_len(&sealed);
+            assert_eq!(len, TASK_BINDING_REQUESTS_MAX_BYTES + 6 * count);
+            assert!(len <= TASK_BINDINGS_MAX_BYTES, "{count}: {len}");
+            assert_eq!(object_with(sealed.clone()).unwrap().bindings, sealed);
+        }
+    }
+
+    #[test]
+    fn the_encoded_length_is_the_lists_cbor_length() {
+        let list = vec![
+            git_binding(FORGE, "o/r", Some("f/r"), Some(1)),
+            git_binding("h.io", "a/b/c", None, None),
+        ];
+        assert_eq!(bindings_encoded_len(&list), enc(&list).len());
+        assert_eq!(bindings_encoded_len::<Binding>(&[]), 1);
     }
 }

@@ -1,5 +1,6 @@
 //! The subject's tool catalog as the loop holds it: a hint fetched when the kernel's
 //! stamp changes, never an input to a decision.
+use maknae_agent::hints::{Forge, Provider};
 use maknae_graph::catalog;
 use maknae_graph::graph::Graph;
 use maknae_proto::{CatalogDigest, ToolCatalogReply};
@@ -57,6 +58,19 @@ impl CatalogHolder {
         self.held = None;
         self.last_attempted = None;
     }
+}
+
+/// The `git` forges `g` names, each with a provider this client reads.
+pub fn forges(g: &Graph) -> Vec<Forge> {
+    catalog::forges(g, "git")
+        .into_iter()
+        .filter_map(|(host, provider)| {
+            Some(Forge {
+                host: host.to_owned(),
+                provider: Provider::parse(provider)?,
+            })
+        })
+        .collect()
 }
 
 /// The reply's graph, once its bytes match their digest and decode.

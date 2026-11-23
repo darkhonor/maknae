@@ -630,6 +630,25 @@ mod tests {
     }
 
     #[test]
+    fn forges_without_entries_round_trip() {
+        let input = CatalogInput {
+            entries: vec![],
+            forges: vec![forge(
+                "sentinel-168a-forge",
+                "sentinel-168a.example",
+                "github",
+            )],
+        };
+        let bytes = encode(&input).unwrap();
+        let g = decode(&bytes).unwrap();
+        assert_eq!(g, build(&input).unwrap());
+        assert!(entries(&g).is_empty());
+        assert!(entries_for_binding(&g, "git").is_empty());
+        assert_eq!(forges(&g, "git"), [("sentinel-168a.example", "github")]);
+        assert_eq!(input_of(&g), Some(input));
+    }
+
+    #[test]
     fn shared_pattern_text_under_two_entries_is_two_nodes() {
         let input = CatalogInput {
             entries: vec![

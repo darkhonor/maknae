@@ -4,13 +4,14 @@
 //! Pure: every effect goes through [`TaskPlane`] and [`Clock`].
 use crate::budget::ContextBudget;
 use crate::drive::{Budget, LoopEvent, StepControl, StepHook, StopReason};
+use crate::hints::Forge;
 use crate::plane::{Plane, PlaneError, WriteOutcome};
 use crate::session::Session;
 use crate::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use crate::transcript::Transcript;
 use maknae_proto::{
-    Ask, Bytes, SecretText, SignedTask, TaskCursor, TaskId, TaskRef, TaskReportPage, TaskState,
-    TaskView,
+    Ask, Binding, BindingRequest, Bytes, SecretText, SignedTask, TaskCursor, TaskId, TaskRef,
+    TaskReportPage, TaskState, TaskView,
 };
 use std::future::Future;
 use std::path::Path;
@@ -148,11 +149,14 @@ pub trait TaskPlane: Plane {
         at: PersonaAt<'_>,
     ) -> impl Future<Output = Result<Option<SecretText>, String>> + Send;
     fn note(&mut self, _event: DriverEvent) {}
+    /// The `git` forges of the held catalog; `None` while no catalog is held.
+    fn forges(&self) -> Option<Vec<Forge>>;
     /// Cited: a task for `agent` under the cited task.
     fn submit(
         &mut self,
         agent: &str,
         prompt: SecretText,
+        bindings: Vec<BindingRequest>,
     ) -> impl Future<Output = Result<TaskView, TaskerFail>> + Send;
     fn sub_status(
         &mut self,
@@ -192,6 +196,7 @@ struct Held {
     session: Session,
     /// The partition, where `task_agent` stores a report.
     cwd: String,
+    bindings: Vec<Binding>,
     seen: u32,
     last_beat: Duration,
     answer: Option<Zeroizing<String>>,
@@ -267,6 +272,7 @@ struct Tool<'a, P, C> {
     clock: &'a mut C,
     shutdown: &'a AtomicBool,
     cwd: &'a str,
+    bindings: &'a [Binding],
 }
 
 impl<P: TaskPlane + Send, C: Clock + Send + Sync> Plane for Tool<'_, P, C> {
@@ -346,6 +352,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> Plane for Tool<'_, P, C> {
             &mut *self.plane,
             wait,
             self.cwd,
+            self.bindings,
             conversation,
             agent,
             prompt,
@@ -793,6 +800,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             id,
             session,
             cwd,
+            bindings: task.task.bindings.clone(),
             seen: 0,
             last_beat: self.clock.now(),
             answer: None,
@@ -872,6 +880,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 clock: &mut self.clock,
                 shutdown: &self.shutdown,
                 cwd: &held.cwd,
+                bindings: &held.bindings,
             };
             let outcome = match then {
                 Then::Run => {
@@ -1061,6 +1070,7 @@ mod tests {
         first_lost: Option<Duration>,
         quiet_at: Option<Duration>,
         stop_on_quiet: bool,
+        submitted: Vec<Vec<BindingRequest>>,
     }
     type Shared = Arc<Mutex<World>>;
 
@@ -1106,6 +1116,7 @@ mod tests {
         calls: usize,
         accept_subs: bool,
         diagnostics: Vec<String>,
+        forges: Option<Vec<Forge>>,
     }
 
     impl Fake {
@@ -1260,7 +1271,16 @@ mod tests {
                 None => "uncite".into(),
             });
         }
-        async fn submit(&mut self, agent: &str, _: SecretText) -> Result<TaskView, TaskerFail> {
+        fn forges(&self) -> Option<Vec<Forge>> {
+            self.forges.clone()
+        }
+        async fn submit(
+            &mut self,
+            agent: &str,
+            _: SecretText,
+            bindings: Vec<BindingRequest>,
+        ) -> Result<TaskView, TaskerFail> {
+            self.w.lock().unwrap().submitted.push(bindings);
             self.log(format!("submit {agent}"));
             match self.accept_subs {
                 true => Ok(view(TaskState::Queued)),
@@ -1323,6 +1343,7 @@ mod tests {
                 agent: "hobi".into(),
                 ask: Ask::Prompt { prompt: st(prompt) },
                 labels: Labels {},
+                bindings: vec![],
             },
             signature: TaskSignature {
                 alg: "alg".into(),
@@ -1356,6 +1377,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: maknae_proto::TaskCursor::from_seq(1),
+            bindings: vec![],
         }
     }
     fn refused() -> Refused {
@@ -1975,6 +1997,7 @@ mod tests {
             clock: &mut clock,
             shutdown: &shutdown,
             cwd: HOME,
+            bindings: &[],
         };
         let id = tool.open(Path::new(HOME), &[]).await.unwrap();
         assert!(tool.close(&id).await.is_ok());
@@ -2004,6 +2027,49 @@ mod tests {
                 other => panic!("{other:?}"),
             },
             other => panic!("not a tool turn: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sub_task_is_submitted_with_only_the_bindings_its_parent_holds() {
+        use crate::hints::Provider;
+        use maknae_proto::{GitBinding, GitRef};
+        let held = |base: &str, change| {
+            Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base: base.into(),
+                head: None,
+                change,
+            })
+        };
+        let github = Some(vec![Forge {
+            host: "github.com".into(),
+            provider: Provider::Github,
+        }]);
+        let asked = r#"{"agent":"jin","prompt":"see https://github.com/o/held/pull/3 and https://github.com/o/other/pull/4 and https://github.com/o/repo"}"#;
+        let want = vec![BindingRequest::Git(GitRef {
+            server: "github.com".into(),
+            base: "o/held".into(),
+            change: Some(3),
+        })];
+        for (parent, forges, sent) in [
+            (
+                vec![held("o/held", Some(3)), held("o/unasked", None)],
+                github.clone(),
+                want,
+            ),
+            (vec![], github.clone(), vec![]),
+            (vec![held("o/held", Some(3))], None, vec![]),
+        ] {
+            let mut f = fake();
+            let mut task = signed(1, "prompt-1");
+            task.task.bindings = parent;
+            f.tasks.insert(1, Ok(task));
+            f.forges = forges;
+            f.claims = VecDeque::from([delivered(1, PART)]);
+            f.replies = VecDeque::from([call("task_agent", "t1", asked), answer("a1")]);
+            let (_, _, w) = run_with(f, PersonaMode::Own).await;
+            assert_eq!(w.lock().unwrap().submitted, [sent]);
         }
     }
 
@@ -3183,6 +3249,7 @@ mod tests {
             id: id(1),
             session,
             cwd: format!("{HOME}/{PART}"),
+            bindings: vec![],
             seen: 0,
             last_beat: Duration::ZERO,
             answer: first.answer.map(|a| a.0),

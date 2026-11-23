@@ -490,6 +490,39 @@ impl TaskStamp {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub fn stamp_task_bindings(
+    resource: &mut maknae_security::Attributes,
+    cited: &crate::task::CitedTask,
+) {
+    use maknae_security::{AttrValue, GitBoundValues};
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut git = Vec::new();
+    for binding in &cited.signed.task.bindings {
+        match binding {
+            maknae_proto::Binding::Git(b) => {
+                kinds.insert(maknae_config::ForgeKind::Git.as_str().to_owned());
+                git.push(GitBoundValues {
+                    server: b.server.clone(),
+                    base: b.base.clone(),
+                    head: b.head.clone(),
+                    change: b.change,
+                });
+            }
+        }
+    }
+    resource.insert(
+        maknae_security::RESOURCE_BINDING_KINDS,
+        AttrValue::Set(kinds),
+    );
+    for (key, list) in maknae_security::encode_git_bound(&git) {
+        resource.insert(key, list);
+    }
+}
+
 /// Build the seam Request from the verb + kernel-verified peer uid. Subject
 /// carries the kernel-verified `uid` (i64 carriage of the u32 — lossless) and,
 /// when the kernel resolves one, the requester's home `~` binds to; both are
@@ -826,14 +859,14 @@ mod tests {
 
     #[test]
     fn build_tool_request_stamps_argv_as_ordered_list_and_kernel_subject() {
-        use maknae_config::{Bound, ToolCall};
+        use maknae_config::ToolCall;
         use maknae_security::{AttrValue, Attributes};
         let s = |v: &str| AttrValue::Str(v.into());
         let call = ToolCall {
             entry: "sentinel-674-entry".into(),
             program: "sentinel-674-prog".into(),
             argv: vec!["test".into(), "a b".into(), String::new()],
-            bound: Bound::empty(),
+            bound: Vec::new(),
         };
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
         let task = TaskStamp {
@@ -878,6 +911,7 @@ mod tests {
                 maknae_security::Lane::Local,
                 Some(&facts),
                 &call,
+                None,
             );
             let mut subject = Attributes::new();
             subject.insert("uid", AttrValue::Int(2001));
@@ -901,6 +935,94 @@ mod tests {
             );
             resource.insert("binding.kinds", AttrValue::Set(Default::default()));
             assert_eq!(got.resource.0, resource);
+        }
+    }
+
+    fn git(
+        server: &str,
+        base: &str,
+        head: Option<&str>,
+        change: Option<u64>,
+    ) -> maknae_proto::Binding {
+        maknae_proto::Binding::Git(maknae_proto::GitBinding {
+            server: server.into(),
+            base: base.into(),
+            head: head.map(Into::into),
+            change,
+        })
+    }
+
+    #[test]
+    fn a_cited_tasks_bindings_become_kinds_and_bound_lists() {
+        use maknae_security::{AttrValue, Attributes};
+        let list = |v: &[&str]| AttrValue::List(v.iter().map(|s| (*s).to_owned()).collect());
+        let cited = crate::test_fixtures::cited_task(vec![
+            git(
+                "sentinel-168a-one.example",
+                "sentinel-168a/alpha",
+                Some("sentinel-168a-head"),
+                Some(7),
+            ),
+            git(
+                "sentinel-168a-two.example:8443",
+                "sentinel-168a/beta",
+                None,
+                None,
+            ),
+        ]);
+        let mut got = Attributes::new();
+        stamp_task_bindings(&mut got, &cited);
+        let mut want = Attributes::new();
+        want.insert("binding.kinds", AttrValue::Set(["git".to_owned()].into()));
+        want.insert(
+            "bound.git.server",
+            list(&[
+                "sentinel-168a-one.example",
+                "sentinel-168a-two.example:8443",
+            ]),
+        );
+        want.insert(
+            "bound.git.base",
+            list(&["sentinel-168a/alpha", "sentinel-168a/beta"]),
+        );
+        want.insert("bound.git.head", list(&["sentinel-168a-head", ""]));
+        want.insert("bound.git.change", list(&["7", ""]));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn no_task_or_no_binding_stamps_the_empty_set_and_no_lists() {
+        use maknae_security::{AttrValue, Attributes};
+        let mut empty = Attributes::new();
+        empty.insert("binding.kinds", AttrValue::Set(Default::default()));
+        let unbound = crate::test_fixtures::cited_task(Vec::new());
+        let mut got = Attributes::new();
+        got.insert("binding.kinds", AttrValue::Set(["git".to_owned()].into()));
+        stamp_task_bindings(&mut got, &unbound);
+        assert_eq!(got, empty);
+
+        let call = maknae_config::ToolCall {
+            entry: "sentinel-168a-entry".into(),
+            program: "gh".into(),
+            argv: vec!["pr".into()],
+            bound: Vec::new(),
+        };
+        let mut want = Attributes::new();
+        want.insert("tool.entry", AttrValue::Str("sentinel-168a-entry".into()));
+        want.insert("tool.program", AttrValue::Str("gh".into()));
+        want.insert("tool.argv", AttrValue::List(vec!["pr".into()]));
+        want.insert("binding.kinds", AttrValue::Set(Default::default()));
+        for cited in [None, Some(&unbound)] {
+            let got = build_tool_request(
+                &Stamp::Client,
+                2001,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                &call,
+                cited,
+            );
+            assert_eq!(got.resource.0, want, "{cited:?}");
         }
     }
 
@@ -2127,6 +2249,7 @@ mod tests {
                         prompt: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
                     },
                     labels: maknae_proto::Labels {},
+                    bindings: vec![],
                 },
             },
             Verb::TaskAdd {

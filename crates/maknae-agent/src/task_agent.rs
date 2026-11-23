@@ -1,10 +1,11 @@
 //! `task_agent` (#609): gives a task to another agent under the task this agent is
 //! working, and waits for its report or its end. Agent Daemon only; every request
 //! carries the working task's cite, so each poll renews that task's lease.
+use crate::hints::{choose, Links};
 use crate::plane::{ReadBasis, TaskAgentOutcome, WriteOutcome};
 use crate::task::TaskerFail;
 use crate::task_driver::{Clock, TaskPlane};
-use maknae_proto::{SecretText, TaskRef, TaskReportView, TaskState};
+use maknae_proto::{Binding, SecretText, TaskRef, TaskReportView, TaskState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -20,16 +21,20 @@ pub struct Wait<'a, C> {
     pub shutdown: &'a AtomicBool,
 }
 
-/// `cwd` is the working task's partition, where the report is stored.
+/// `cwd` is the working task's partition, where the report is stored; `parent` is
+/// the working task's bindings, the only ones the sub-task may carry.
 pub async fn run<P: TaskPlane + Send, C: Clock + Send>(
     plane: &mut P,
     mut wait: Wait<'_, C>,
     cwd: &str,
+    parent: &[Binding],
     conversation: &str,
     agent: &str,
     prompt: SecretText,
 ) -> TaskAgentOutcome {
-    let given = match plane.submit(agent, prompt).await {
+    let forges = plane.forges();
+    let bindings = choose(&[&Links], &prompt.0, forges.as_deref(), Some(parent)).bindings;
+    let given = match plane.submit(agent, prompt, bindings).await {
         Ok(view) => view,
         Err(TaskerFail::Refused | TaskerFail::Unreachable { after_write: false }) => {
             return TaskAgentOutcome::NotAccepted
@@ -191,6 +196,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: TaskCursor::from_seq(1),
+            bindings: vec![],
         }
     }
 
@@ -312,10 +318,14 @@ mod tests {
         async fn persona(&mut self, _: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
             unreachable!()
         }
+        fn forges(&self) -> Option<Vec<crate::hints::Forge>> {
+            None
+        }
         async fn submit(
             &mut self,
             agent: &str,
             prompt: SecretText,
+            _: Vec<maknae_proto::BindingRequest>,
         ) -> Result<TaskView, TaskerFail> {
             self.cite(format!("submit {agent} {}", *prompt.0));
             self.submits.pop_front().expect("a scripted submit")
@@ -382,6 +392,7 @@ mod tests {
                 shutdown: &shutdown,
             },
             CWD,
+            &[],
             CONV,
             "jin",
             secret("sentinel-609-prompt"),

@@ -5,7 +5,7 @@
 //! revisable, so action is modelled as a newtype name here — any action
 //! attributes ride in `context`.
 
-use crate::value::Attributes;
+use crate::value::{AttrValue, Attributes};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subject(pub Attributes);
@@ -193,6 +193,100 @@ pub struct Request {
     pub context: Context,
 }
 
+pub const RESOURCE_BOUND_PREFIX: &str = "bound.";
+pub const GIT_BOUND_FIELDS: [&str; 4] = ["server", "base", "head", "change"];
+
+pub fn bound_key(kind: &str, field: &str) -> String {
+    format!("{RESOURCE_BOUND_PREFIX}{kind}.{field}")
+}
+
+/// One git binding's values, as the trust plane stamps them under `bound.git.*`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitBoundValues {
+    pub server: String,
+    pub base: String,
+    pub head: Option<String>,
+    pub change: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundEncodingError {
+    NotAList,
+    Misaligned,
+    Empty,
+    MissingField,
+}
+
+/// One `List` per field of [`GIT_BOUND_FIELDS`], index-aligned with `bindings`;
+/// `""` is an absent field. No bindings stamps no key.
+pub fn encode_git_bound(bindings: &[GitBoundValues]) -> Vec<(String, AttrValue)> {
+    if bindings.is_empty() {
+        return Vec::new();
+    }
+    let column = |field: fn(&GitBoundValues) -> String| {
+        AttrValue::List(bindings.iter().map(field).collect())
+    };
+    let columns = [
+        column(|b| b.server.clone()),
+        column(|b| b.base.clone()),
+        column(|b| b.head.clone().unwrap_or_default()),
+        column(|b| b.change.map(|c| c.to_string()).unwrap_or_default()),
+    ];
+    GIT_BOUND_FIELDS
+        .iter()
+        .zip(columns)
+        .map(|(field, list)| (bound_key("git", field), list))
+        .collect()
+}
+
+/// The inverse of [`encode_git_bound`]: per binding, the present fields as
+/// `("git.<field>", value)`; `server` and `base` are never absent. No `bound.git.*` key
+/// at all is no bindings.
+pub fn decode_git_bound(
+    resource: &Attributes,
+) -> Result<Vec<Vec<(String, String)>>, BoundEncodingError> {
+    let mut columns = Vec::with_capacity(GIT_BOUND_FIELDS.len());
+    for field in GIT_BOUND_FIELDS {
+        match resource.get(&bound_key("git", field)) {
+            None => columns.push(None),
+            Some(AttrValue::List(values)) => columns.push(Some(values.as_slice())),
+            Some(_) => return Err(BoundEncodingError::NotAList),
+        }
+    }
+    if columns.iter().all(Option::is_none) {
+        return Ok(Vec::new());
+    }
+    let columns = columns
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(BoundEncodingError::Misaligned)?;
+    let len = columns[0].len();
+    if columns.iter().any(|c| c.len() != len) {
+        return Err(BoundEncodingError::Misaligned);
+    }
+    if len == 0 {
+        return Err(BoundEncodingError::Empty);
+    }
+    if GIT_BOUND_FIELDS
+        .iter()
+        .zip(&columns)
+        .any(|(field, c)| matches!(*field, "server" | "base") && c.iter().any(String::is_empty))
+    {
+        return Err(BoundEncodingError::MissingField);
+    }
+    Ok((0..len)
+        .map(|i| {
+            GIT_BOUND_FIELDS
+                .iter()
+                .zip(&columns)
+                .filter(|(_, column)| !column[i].is_empty())
+                .map(|(field, column)| (format!("git.{field}"), column[i].clone()))
+                .collect()
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +357,146 @@ mod operation_tests {
         for unknown in ["", "write", "WriteExisting", "Read", "mkdir "] {
             assert_eq!(FsOperation::parse(unknown), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    use crate::value::{AttrValue, Attributes};
+
+    fn values() -> Vec<GitBoundValues> {
+        vec![
+            GitBoundValues {
+                server: "sentinel.example:8443".into(),
+                base: "o/a".into(),
+                head: None,
+                change: Some(1),
+            },
+            GitBoundValues {
+                server: "sentinel.example:8443".into(),
+                base: "o/b".into(),
+                head: Some("feature".into()),
+                change: None,
+            },
+        ]
+    }
+
+    fn stamped(v: &[GitBoundValues]) -> Attributes {
+        let mut a = Attributes::new();
+        for (k, list) in encode_git_bound(v) {
+            a.insert(k, list);
+        }
+        a
+    }
+
+    fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+        p.iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_bound_vocabulary_is_pinned() {
+        assert_eq!(RESOURCE_BOUND_PREFIX, "bound.");
+        assert_eq!(GIT_BOUND_FIELDS, ["server", "base", "head", "change"]);
+        assert_eq!(bound_key("git", "change"), "bound.git.change");
+    }
+
+    #[test]
+    fn git_bound_values_encode_as_index_aligned_lists() {
+        let a = stamped(&values());
+        assert_eq!(
+            a.list("bound.git.server"),
+            Some(
+                &[
+                    "sentinel.example:8443".to_string(),
+                    "sentinel.example:8443".into()
+                ][..]
+            )
+        );
+        assert_eq!(
+            a.list("bound.git.base"),
+            Some(&["o/a".to_string(), "o/b".into()][..])
+        );
+        assert_eq!(
+            a.list("bound.git.head"),
+            Some(&[String::new(), "feature".into()][..])
+        );
+        assert_eq!(
+            a.list("bound.git.change"),
+            Some(&["1".to_string(), String::new()][..])
+        );
+        assert!(encode_git_bound(&[]).is_empty());
+    }
+
+    #[test]
+    fn git_bound_values_round_trip_with_absent_fields_omitted() {
+        assert_eq!(
+            decode_git_bound(&stamped(&values())),
+            Ok(vec![
+                pairs(&[
+                    ("git.server", "sentinel.example:8443"),
+                    ("git.base", "o/a"),
+                    ("git.change", "1"),
+                ]),
+                pairs(&[
+                    ("git.server", "sentinel.example:8443"),
+                    ("git.base", "o/b"),
+                    ("git.head", "feature"),
+                ]),
+            ])
+        );
+        assert_eq!(decode_git_bound(&Attributes::new()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn unequal_or_partial_lists_are_refused() {
+        let mut a = stamped(&values());
+        a.insert("bound.git.head", AttrValue::List(vec![String::new()]));
+        assert_eq!(decode_git_bound(&a), Err(BoundEncodingError::Misaligned));
+        let mut partial = Attributes::new();
+        partial.insert("bound.git.base", AttrValue::List(vec!["o/a".into()]));
+        assert_eq!(
+            decode_git_bound(&partial),
+            Err(BoundEncodingError::Misaligned)
+        );
+    }
+
+    #[test]
+    fn a_bound_value_that_is_not_a_list_is_refused() {
+        for wrong in [
+            AttrValue::Str("o/a".into()),
+            AttrValue::Set(["o/a".to_string()].into()),
+            AttrValue::Int(1),
+        ] {
+            let mut a = stamped(&values()[..1]);
+            a.insert("bound.git.base", wrong);
+            assert_eq!(decode_git_bound(&a), Err(BoundEncodingError::NotAList));
+        }
+    }
+
+    #[test]
+    fn a_binding_without_its_server_or_base_is_refused() {
+        for blank in [
+            |v: &mut GitBoundValues| v.server.clear(),
+            |v: &mut GitBoundValues| v.base.clear(),
+        ] {
+            let mut v = values();
+            blank(&mut v[1]);
+            assert_eq!(
+                decode_git_bound(&stamped(&v)),
+                Err(BoundEncodingError::MissingField)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_lists_for_a_present_kind_are_refused() {
+        let mut a = Attributes::new();
+        for field in GIT_BOUND_FIELDS {
+            a.insert(bound_key("git", field), AttrValue::List(Vec::new()));
+        }
+        assert_eq!(decode_git_bound(&a), Err(BoundEncodingError::Empty));
     }
 }

@@ -1096,7 +1096,7 @@ mod tests {
                     entry: (*entry).into(),
                     program: (*program).into(),
                     argv: argv.iter().map(|a| (*a).to_owned()).collect(),
-                    bound: maknae_config::Bound::empty(),
+                    bound: Vec::new(),
                 };
                 let r = build_tool_request(
                     stamp,
@@ -1105,6 +1105,7 @@ mod tests {
                     maknae_security::Lane::Local,
                     None,
                     &call,
+                    None,
                 );
                 let d = c.decide_cited(&r);
                 let rule = d.rule.map(|c| {
@@ -1376,7 +1377,7 @@ mod tests {
             entry: "sentinel-674-entry".into(),
             program: "cargo".into(),
             argv: vec!["build".into()],
-            bound: maknae_config::Bound::empty(),
+            bound: Vec::new(),
         };
         let host = maknae_config::SensitiveList::empty();
         let ceiling = ceiling(Ceiling::baseline_for(US));
@@ -1406,6 +1407,7 @@ mod tests {
                 maknae_security::Lane::Local,
                 None,
                 &call,
+                None,
             );
             for (name, operand) in operands {
                 assert_eq!(
@@ -1415,6 +1417,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_bound_pattern_matches_within_one_binding_on_the_real_path() {
+        use crate::handler::{Stamp, TaskStamp};
+        use crate::test_fixtures::build_tool_request;
+        use maknae_authz_basic::Baseline;
+        let (g, basic) = crate::test_fixtures::fixture("bound-pattern", TOOL_SITE_POLICY, None);
+        crate::test_fixtures::write_empty_sensitive(&g.0);
+        crate::test_fixtures::write_tools(
+            &g.0,
+            concat!(
+                "schema_version: 1\n",
+                "tools:\n",
+                "  sentinel-168a-entry:\n",
+                "    executes_workspace: false\n",
+                "    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n",
+                "    output_to_model: redacted\n",
+                "    binds: { git: { resolver: git } }\n",
+                "    commands:\n",
+                "      gh:\n",
+                "        subcommands: [\"pr review {git.change} -R {git.base}\"]\n",
+            ),
+        );
+        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        basic.install(basic.compile_from_file().unwrap());
+        let c = Composition::with_us_baseline_ceiling(basic);
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let git = |base: &str, change| {
+            maknae_proto::Binding::Git(maknae_proto::GitBinding {
+                server: "sentinel-168a.example".into(),
+                base: base.into(),
+                head: None,
+                change: Some(change),
+            })
+        };
+        let decide = |cited: &crate::task::CitedTask, change: &str, base: &str| {
+            let task = TaskStamp::of(cited);
+            let call = maknae_config::ToolCall {
+                entry: "sentinel-168a-entry".into(),
+                program: "gh".into(),
+                argv: ["pr", "review", change, "-R", base]
+                    .map(str::to_owned)
+                    .to_vec(),
+                bound: Vec::new(),
+            };
+            let r = build_tool_request(
+                &Stamp::Agent {
+                    agent: &hobi,
+                    task: Some(&task),
+                },
+                2001,
+                Some(std::path::Path::new("/home/hobi-svc")),
+                maknae_security::Lane::Local,
+                None,
+                &call,
+                Some(cited),
+            );
+            c.decide_cited(&r).verdict
+        };
+        let at_the_ceiling = Verdict::Deny {
+            reason: "tool: arguments outside entry sentinel-168a-entry's subcommands".into(),
+        };
+        let at_the_role = Verdict::NotApplicable {
+            note: Some("role user: no rule for tool.invoke".into()),
+        };
+        let bound = crate::test_fixtures::cited_task(vec![
+            git("sentinel-168a/alpha", 1),
+            git("sentinel-168a/beta", 2),
+        ]);
+        for (change, base, passes) in [
+            ("2", "sentinel-168a/alpha", false),
+            ("2", "sentinel-168a/beta", true),
+            ("1", "sentinel-168a/alpha", true),
+            ("1", "sentinel-168a/beta", false),
+        ] {
+            let want = if passes {
+                &at_the_role
+            } else {
+                &at_the_ceiling
+            };
+            assert_eq!(
+                &decide(&bound, change, base),
+                want,
+                "pr review {change} -R {base}"
+            );
+        }
+        let unbound = crate::test_fixtures::cited_task(Vec::new());
+        assert_eq!(
+            decide(&unbound, "2", "sentinel-168a/beta"),
+            at_the_ceiling,
+            "a task with no binding"
+        );
     }
 
     const TASKS_TARGETS: &[&str] = &[

@@ -1184,6 +1184,18 @@ pub struct TaskView {
     pub actions: u32,
     pub last_action_secs: Option<i64>,
     pub cursor: TaskCursor,
+    pub bindings: Vec<Binding>,
+}
+
+pub struct GitBinding {
+    pub server: String,
+    pub base: String,
+    pub head: Option<String>,
+    pub change: Option<u64>,
+}
+
+pub enum Binding {
+    Git(GitBinding),
 }
 
 pub struct TaskPage {
@@ -1578,7 +1590,15 @@ always	task.agent	ships by construction
 always	task.state	ships by construction
 always	task.close	ships by construction
 always	task.cursor	ships by construction
+always	task.bindings.server	ships by construction
+always	task.bindings.base	ships by construction
+always	task.bindings.head	ships by construction
+always	task.bindings.change	ships by construction
 always	task_list.entries.cursor	ships by construction
+always	task_list.entries.bindings.server	ships by construction
+always	task_list.entries.bindings.base	ships by construction
+always	task_list.entries.bindings.head	ships by construction
+always	task_list.entries.bindings.change	ships by construction
 always	agent_list.entries.agent	ships by construction
 always	agent_list.entries.standing	ships by construction
 always	agent_list.entries.waiting	ships by construction
@@ -1595,6 +1615,10 @@ always	held_list.entries.view.elapsed_secs	ships by construction
 always	held_list.entries.view.actions	ships by construction
 always	held_list.entries.view.last_action_secs	ships by construction
 always	held_list.entries.view.cursor	ships by construction
+always	held_list.entries.view.bindings.server	ships by construction
+always	held_list.entries.view.bindings.base	ships by construction
+always	held_list.entries.view.bindings.head	ships by construction
+always	held_list.entries.view.bindings.change	ships by construction
 always	held_list.entries.tasker	ships by construction
 always	held_list.entries.held_from	ships by construction
 always	held_list.entries.held_for	ships by construction
@@ -1716,7 +1740,7 @@ cat > "$fx/crates/maknae-config/src/document.rs" <<'FIX'
 const DISCLOSABLE: &[&str] = &["transport", "providers[].name", "providers[].endpoint", "providers[].models", "providers[].models[]", "providers[].reasoning_effort", "providers[].output_tokens_field", "forges[].name", "forges[].kind", "forges[].host", "forges[].provider", "vault.addr", "vault.approle_mount", "vault.pki_int_mount", "vault.deployment_id", "vault.user_auth", "vault.user_auth.type", "vault.user_auth.mount", "vault.kv_mount", "vault.user_prefix", "vault.plane_key", "audit.jsonl_path", "principal", "egress.socket_path", "egress.deadline_ms", "deployment.mode", "deployment.account_source"];
 const SUPPRESSED: &[&str] = &["vault.insecure_plaintext_secret_path", "core.handling", "audit.au3_1"];
 FIX
-expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 147 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/rustfmt-collapsed-array-still-read" ": 159 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # REJECT: a section registered in boot.rs with no SURFACE entry. THE THIRD
 # fail-open, and the one that closes the PROPERTY rather than an instance: the
@@ -2308,7 +2332,7 @@ fi
 # go check a sed flag. This probe pins the corrected order.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'std::sync::Arc<String>')"
 expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
-  ": 147 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 159 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the config-surface `Vec` exemption holds for the QUALIFIED spelling
 # too. Under the old post-loop `s/.*:://`, `Vec<crate::Principal>` reduced to
@@ -2317,7 +2341,7 @@ expect_accept "config-disclosure-drift/qualified-wrapper-is-a-leaf" \
 # the unqualified `config-vec-of-struct-is-a-leaf` probe below cannot see.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<crate::Principal>')"
 expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
-  ": 147 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 159 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the mirror image. `Vec<WorkspaceStruct>` on a CONFIG surface is a
 # LEAF -- only a sequence whose element paths are declared is walked;
@@ -2326,12 +2350,12 @@ expect_accept "config-disclosure-drift/qualified-config-vec-is-still-a-leaf" \
 # did not, and every config row was silently held to the wire rule.
 fx="$(cfg_fixture "$CFG_OK" '' '' '' 'Vec<Principal>')"
 expect_accept "config-disclosure-drift/config-vec-of-struct-is-a-leaf" \
-  ": 147 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
+  ": 159 paths decided" "$fx/ci/gates/config-disclosure-drift.sh"
 
 # ACCEPT: the clean fixture passes and reports both counts. Without this every
 # rejection above would stay green against a gate that refuses everything.
 fx="$(cfg_fixture "$CFG_OK")"
-expect_accept "config-disclosure-drift/clean-fixture-passes" ": 147 paths decided, 166 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
+expect_accept "config-disclosure-drift/clean-fixture-passes" ": 159 paths decided, 181 struct fields covered" "$fx/ci/gates/config-disclosure-drift.sh"
 
 fx="$(cfg_fixture "$CFG_OK")"
 python3 - "$fx" <<'PYFIX'
@@ -2447,7 +2471,7 @@ expect_reported_count "p1-manifest/packages-match-the-workspace" "ok (" "$exp_p1
 # control; asserting it here means any future silent shrink is a red build.
 
 expect_accept "config-disclosure-drift/real-repo-counts-pinned" \
-  ": 159 paths decided, 166 struct fields covered" "$here/config-disclosure-drift.sh"
+  ": 171 paths decided, 181 struct fields covered" "$here/config-disclosure-drift.sh"
 
 
 # #158: a grant's own disclosure inventory must reject new data and type changes.

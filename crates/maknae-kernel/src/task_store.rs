@@ -756,6 +756,7 @@ mod tests {
                     prompt: secret(prompt),
                 },
                 labels: Labels {},
+                bindings: vec![],
             },
             signature: TaskSignature {
                 alg: "test".into(),
@@ -826,12 +827,21 @@ mod tests {
                 prompt: secret(SENTINEL),
             },
             labels: Labels {},
+            bindings: vec![],
         };
         let enrolled = Enrolled {
             generation: store.generation(&hobi()),
             agent_uid: HOBI,
         };
-        let t = store.mint(&Unverified, &v, enrolled, Tasker::Uid(1000), None, sub)?;
+        let t = store.mint(
+            &Unverified,
+            &v,
+            enrolled,
+            Tasker::Uid(1000),
+            None,
+            sub,
+            Vec::new(),
+        )?;
         store.confirm(&t.task.task_id, None, crate::task::Confirm::Queued)?;
         Ok(t)
     }

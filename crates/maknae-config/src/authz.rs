@@ -246,7 +246,7 @@ pub struct ToolCall {
     pub entry: String,
     pub program: String,
     pub argv: Vec<String>,
-    pub bound: Bound,
+    pub bound: Vec<Bound>,
 }
 
 /// A `~` pattern was evaluated with no home, or with one that is not an
@@ -829,8 +829,8 @@ impl ToolPattern {
         self.entry == call.entry
             && self.program == call.program
             && match side {
-                Side::Allow => self.args.matches(&call.argv, &call.bound),
-                Side::Deny => self.args.matches_for_deny(&call.argv, &call.bound),
+                Side::Allow => self.args.matches_any(&call.argv, &call.bound),
+                Side::Deny => self.args.matches_any_for_deny(&call.argv, &call.bound),
             }
     }
 }
@@ -3986,7 +3986,7 @@ mod tests {
             entry: entry.into(),
             program: program.into(),
             argv: argv.iter().map(|a| (*a).into()).collect(),
-            bound: Bound::empty(),
+            bound: Vec::new(),
         }
     }
 
@@ -4183,19 +4183,83 @@ mod tests {
             Ok(Match3::NoMatch)
         );
         let mut bound = call.clone();
-        bound.bound.insert("git.base", "sentinel-674-main");
+        let mut b = Bound::empty();
+        b.insert("git.base", "sentinel-674-main");
+        bound.bound = vec![b];
         assert_eq!(
             p.evaluate3_floored(None, &Request::Tool(&bound), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Tool(e git checkout {git.base})".into(),
             })
         );
-        bound.bound = Bound::empty();
-        bound.bound.insert("git.base", "other");
+        let mut b = Bound::empty();
+        b.insert("git.base", "other");
+        bound.bound = vec![b];
         assert_eq!(
             p.evaluate3_floored(None, &Request::Tool(&bound), None, Fold::None),
             Ok(Match3::NoMatch)
         );
+    }
+
+    fn review_call(change: &str, base: &str) -> ToolCall {
+        let mut call = tool_call("e", "gh", &["pr", "review", change, "-R", base]);
+        call.bound = [("o/a", "1"), ("o/b", "2")]
+            .iter()
+            .map(|(base, change)| {
+                let mut b = Bound::empty();
+                b.insert("git.base", base);
+                b.insert("git.change", change);
+                b
+            })
+            .collect();
+        call
+    }
+
+    #[test]
+    fn a_tool_deny_with_placeholders_overrides_per_binding() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(e gh pr review *)\"]\n  deny: [\"Tool(e gh pr review {git.change} -R {git.base})\"]\n",
+        )
+        .unwrap();
+        let eval = |change: &str, base: &str| {
+            p.evaluate3(&Request::Tool(&review_call(change, base)), None, Fold::None)
+                .unwrap()
+        };
+        let allowed = Match3::AllowMatch {
+            source: "Tool(e gh pr review *)".into(),
+        };
+        let denied = Match3::DenyMatch {
+            source: "Tool(e gh pr review {git.change} -R {git.base})".into(),
+        };
+        assert_eq!(eval("2", "o/a"), allowed);
+        assert_eq!(eval("2", "o/b"), denied);
+        assert_eq!(eval("1", "o/a"), denied);
+        assert_eq!(eval("1", "o/b"), allowed);
+        let mut unbound = review_call("2", "o/a");
+        unbound.bound = Vec::new();
+        assert_eq!(
+            p.evaluate3(&Request::Tool(&unbound), None, Fold::None),
+            Ok(denied)
+        );
+    }
+
+    #[test]
+    fn a_tool_allow_with_placeholders_matches_per_binding() {
+        let p = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(e gh pr review {git.change} -R {git.base})\"]\n",
+        )
+        .unwrap();
+        let eval = |change: &str, base: &str| {
+            p.evaluate3(&Request::Tool(&review_call(change, base)), None, Fold::None)
+                .unwrap()
+        };
+        let allowed = Match3::AllowMatch {
+            source: "Tool(e gh pr review {git.change} -R {git.base})".into(),
+        };
+        assert_eq!(eval("2", "o/a"), Match3::NoMatch);
+        assert_eq!(eval("2", "o/b"), allowed);
+        assert_eq!(eval("1", "o/a"), allowed);
+        assert_eq!(eval("1", "o/b"), Match3::NoMatch);
     }
 
     #[test]

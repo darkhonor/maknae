@@ -1,10 +1,12 @@
 //! The tasker's verbs and the agent list, one connection each.
 use crate::outcome::SentOutcome;
 use crate::plane::{Dial, Link, PlaneDial};
+use maknae_agent::hints::Forge;
 use maknae_config::AgentId;
 use maknae_proto::{
-    AgentEntry, AgentPage, Ask, BannerSpec, Labels, Payload, SecretText, TaskCursor, TaskPage,
-    TaskRef, TaskReportPage, TaskSubmission, TaskView, Verb, TASK_SCHEMA, TASK_VERSION,
+    AgentEntry, AgentPage, Ask, BannerSpec, BindingRequest, Labels, Payload, SecretText,
+    TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskSubmission, TaskView, Verb, TASK_SCHEMA,
+    TASK_VERSION,
 };
 use maknae_vault::{PlaneClient, TrustBundle};
 use std::sync::Arc;
@@ -88,6 +90,7 @@ impl<D: Dial> TaskerClient<D> {
         &self,
         agent: &AgentId,
         prompt: SecretText,
+        bindings: Vec<BindingRequest>,
     ) -> Result<TaskView, TaskerError> {
         let task = TaskSubmission {
             schema: TASK_SCHEMA.into(),
@@ -95,10 +98,21 @@ impl<D: Dial> TaskerClient<D> {
             agent: agent.as_str().into(),
             ask: Ask::Prompt { prompt },
             labels: Labels {},
+            bindings,
         };
         match self.call(Verb::TaskSubmit { task }, true).await? {
             Payload::TaskAccepted(view) => Ok(view),
             other => Err(unexpected("task.submit", &other)),
+        }
+    }
+
+    /// The `git` forges of the caller's catalog, once its bytes match their digest.
+    pub async fn forges(&self) -> Result<Vec<Forge>, TaskerError> {
+        match self.call(Verb::ToolCatalog {}, false).await? {
+            Payload::ToolCatalog(reply) => crate::catalog::verify(&reply)
+                .map(|g| crate::catalog::forges(&g))
+                .map_err(|e| TaskerError::Protocol(format!("tool.catalog: {e:?}"))),
+            other => Err(unexpected("tool.catalog", &other)),
         }
     }
 
@@ -258,6 +272,7 @@ mod tests {
             actions: 0,
             last_action_secs: None,
             cursor: TaskCursor::from_seq(seq),
+            bindings: vec![],
         }
     }
 
@@ -269,6 +284,111 @@ mod tests {
                 "sentinel-630-unreachable",
             ))
         }
+    }
+
+    fn git(server: &str, base: &str, change: Option<u64>) -> BindingRequest {
+        BindingRequest::Git(maknae_proto::GitRef {
+            server: server.into(),
+            base: base.into(),
+            change,
+        })
+    }
+
+    #[tokio::test]
+    async fn submit_sends_the_bindings_it_is_given() {
+        let given = vec![
+            git("github.com", "o/r", Some(7)),
+            git("gitlab.example", "g/p", None),
+        ];
+        let c = client(
+            Default::default(),
+            vec![RespResult::Ok(Payload::TaskAccepted(view(1)))],
+        );
+        c.submit(&agent(), text("p"), given.clone()).await.unwrap();
+        let seen = c.link.dial_for_test().finish().await;
+        match &seen.requests[0].verb {
+            Verb::TaskSubmit { task } => assert_eq!(task.bindings, given),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn catalog(forges: &[(&str, &str, &str)]) -> maknae_proto::ToolCatalogReply {
+        use maknae_graph::catalog::{encode, CatalogForge, CatalogInput};
+        let bytes = encode(&CatalogInput {
+            entries: vec![],
+            forges: forges
+                .iter()
+                .map(|(name, host, provider)| CatalogForge {
+                    name: (*name).into(),
+                    kind: "git".into(),
+                    host: (*host).into(),
+                    provider: (*provider).into(),
+                })
+                .collect(),
+        })
+        .unwrap();
+        maknae_proto::ToolCatalogReply {
+            digest: maknae_proto::CatalogDigest(maknae_crypto::sha256(&bytes)),
+            graph: maknae_proto::Bytes::new(zeroize::Zeroizing::new(bytes)),
+        }
+    }
+
+    #[tokio::test]
+    async fn forges_come_from_the_verified_catalog() {
+        use maknae_agent::hints::Provider;
+        let reply = catalog(&[
+            ("hub", "github.com", "github"),
+            ("lab", "gitlab.example:8443", "gitlab"),
+        ]);
+        let c = client(
+            Default::default(),
+            vec![RespResult::Ok(Payload::ToolCatalog(reply))],
+        );
+        let mut got = c.forges().await.unwrap();
+        got.sort_by(|a, b| a.host.cmp(&b.host));
+        assert_eq!(
+            got,
+            [
+                Forge {
+                    host: "github.com".into(),
+                    provider: Provider::Github,
+                },
+                Forge {
+                    host: "gitlab.example:8443".into(),
+                    provider: Provider::Gitlab,
+                },
+            ]
+        );
+        let seen = c.link.dial_for_test().finish().await;
+        assert!(matches!(seen.requests[0].verb, Verb::ToolCatalog {}));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_that_fails_its_digest_yields_no_forges() {
+        let mut reply = catalog(&[("hub", "github.com", "github")]);
+        reply.digest.0[0] ^= 1;
+        let c = client(
+            Default::default(),
+            vec![RespResult::Ok(Payload::ToolCatalog(reply))],
+        );
+        assert!(matches!(c.forges().await, Err(TaskerError::Protocol(_))));
+        let junk = b"not a catalog".to_vec();
+        let undecodable = maknae_proto::ToolCatalogReply {
+            digest: maknae_proto::CatalogDigest(maknae_crypto::sha256(&junk)),
+            graph: maknae_proto::Bytes::new(zeroize::Zeroizing::new(junk)),
+        };
+        let c = client(
+            Default::default(),
+            vec![RespResult::Ok(Payload::ToolCatalog(undecodable))],
+        );
+        assert!(matches!(c.forges().await, Err(TaskerError::Protocol(_))));
+        let c = client(Default::default(), vec![refused()]);
+        assert_eq!(
+            c.forges().await,
+            Err(TaskerError::Refused {
+                outcome_unknown: false
+            })
+        );
     }
 
     #[tokio::test]
@@ -331,7 +451,7 @@ mod tests {
     async fn a_refused_submit_is_outcome_unknown() {
         let c = client(Default::default(), vec![refused()]);
         assert_eq!(
-            c.submit(&agent(), text("p")).await,
+            c.submit(&agent(), text("p"), Vec::new()).await,
             Err(TaskerError::Refused {
                 outcome_unknown: true
             })
@@ -382,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_kernel_is_unreachable_not_refused() {
         let c = TaskerClient::over(Unreachable, Default::default());
-        match c.submit(&agent(), text("p")).await {
+        match c.submit(&agent(), text("p"), Vec::new()).await {
             Err(TaskerError::Unreachable { after_write, why }) => {
                 assert!(!after_write);
                 assert!(why.contains("sentinel-630-unreachable"), "{why}");
@@ -394,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn a_connection_lost_after_a_submit_is_written_is_outcome_unknown() {
         let c = client(Default::default(), vec![]);
-        match c.submit(&agent(), text("p")).await {
+        match c.submit(&agent(), text("p"), Vec::new()).await {
             Err(TaskerError::Unreachable { after_write, .. }) => assert!(after_write),
             other => panic!("{other:?}"),
         }
@@ -516,7 +636,7 @@ mod tests {
                 agents_page(&[], None, 0, "B"),
             ],
         );
-        assert!(c.submit(&agent(), text("ask")).await.is_ok());
+        assert!(c.submit(&agent(), text("ask"), Vec::new()).await.is_ok());
         assert!(c.add(&task_ref(), text("more")).await.is_ok());
         assert!(c.stop(&task_ref()).await.is_ok());
         assert!(c.drop(&other).await.is_ok());
@@ -575,7 +695,7 @@ mod tests {
         let t = task_ref();
         let a = agent();
         assert_eq!(
-            refusal(|c| async move { c.submit(&a, text("p")).await }).await,
+            refusal(|c| async move { c.submit(&a, text("p"), Vec::new()).await }).await,
             want(true)
         );
         let (t1, t2, t3, t4) = (t.clone(), t.clone(), t.clone(), t.clone());
@@ -620,7 +740,7 @@ mod tests {
         let over = "p".repeat(maknae_proto::prompt_request_cap(4096));
         let c = client(transport, vec![]);
         assert!(matches!(
-            c.submit(&agent(), text(&over)).await,
+            c.submit(&agent(), text(&over), Vec::new()).await,
             Err(TaskerError::Unreachable {
                 after_write: false,
                 ..
