@@ -1224,6 +1224,7 @@ version = "0.0.0"
 dependencies = [
  "maknae-config",
  "maknae-proto",
+ "serde_json",
 ]
 
 [[package]]

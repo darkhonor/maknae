@@ -1,13 +1,32 @@
+mod tasker;
+
 use crate::{
     change_number, without_git, AgentSide, Forge, ForgeKind, ForgeReach, GithubKind, LinkPath,
-    Minting, Sigil,
+    Minting, Observer, Sigil,
 };
+use maknae_proto::{ReachRefusal, RepoAsk};
 
 pub(crate) struct Github;
 
 pub(crate) static GITHUB: Github = Github;
 
-impl ForgeReach for Github {}
+impl ForgeReach for Github {
+    fn tasker(&self, asks: &[RepoAsk]) -> Box<dyn Observer> {
+        Box::new(tasker::Tasker::new(asks))
+    }
+}
+
+/// The refusal class of a reply status, or `None` for 200, the only status read.
+pub(crate) fn status_refusal(status: u16) -> Option<ReachRefusal> {
+    match status {
+        200 => None,
+        401 => Some(ReachRefusal::Unauthorized),
+        403 | 429 => Some(ReachRefusal::Forbidden),
+        404 => Some(ReachRefusal::NotFound),
+        300..=399 => Some(ReachRefusal::Moved),
+        _ => Some(ReachRefusal::Upstream),
+    }
+}
 
 impl Forge for Github {
     fn link_path<'p>(&self, path: &'p str) -> LinkPath<'p> {

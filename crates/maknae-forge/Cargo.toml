@@ -14,3 +14,4 @@ workspace = true
 [dependencies]
 maknae-config = { path = "../maknae-config" }
 maknae-proto = { path = "../maknae-proto" }
+serde_json = "1"

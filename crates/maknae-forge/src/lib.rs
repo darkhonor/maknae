@@ -3,12 +3,14 @@
 
 mod github;
 mod gitlab;
+mod observe;
 
 pub use github::reserved_first_segment as github_reserved_first_segment;
 pub use gitlab::{
     reserved_first_segment as gitlab_reserved_first_segment, route_segment as gitlab_route_segment,
 };
 pub use maknae_config::{CredentialKind, ForgeProvider};
+pub use observe::{Auth, ForgeReach, HttpReply, Observer, Step};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Sigil {
@@ -83,9 +85,6 @@ impl CredentialForge for CredentialKind {
         }
     }
 }
-
-/// A forge's reach observers; only a forge that observes reach offers one.
-pub trait ForgeReach: Sync {}
 
 pub trait Forge: Sync {
     /// `path` has no leading `/`, query or fragment.
