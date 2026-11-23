@@ -100,7 +100,7 @@ binary. The other NON-PRIVILEGED rows are un-gated prose; that `isolation-contra
 | maknae-config | via kernel | linked | — |
 | maknae-llm | — *(2026-09-15, #240: linked by `maknae-egress` and nothing else (corrected 2026-09-25, #297: now through `maknae-deputy`, still into `maknae-egress` only; the column and its gated row are #359, #240 being closed); the deputy's fourth binary column, and the five-cell lint row it needs, are the deferred follow-up named in #240's closing body — until then this row says where the crate lives in prose)* | — | — |
 | maknae-deputy | — *(2026-09-25, #297: linked by `maknae-egress` and nothing else; same prose-until-a-column treatment as the `maknae-llm` row; gated by #359)* | — | — |
-| maknae-forge | — *(linked by `maknae-egress` via `maknae-deputy`)* | via maknae-agent (also by `maknae-agentd`) | — |
+| maknae-forge | via kernel *(also linked by `maknae-egress` via `maknae-deputy`)* | via maknae-agent (also by `maknae-agentd`) | — |
 | maknae-agent | forbidden | linked (also linked by `maknae-agentd`) | — |
 | maknae-loop | forbidden | linked (also linked by `maknae-agentd`) | — |
 | maknae-mcp | linked | — *(Corrected 2026-09-22, #344: this cell said `linked`, which was never true. `bins/maknae/Cargo.toml` declares no `maknae-mcp` dependency, its closing enumeration of the closed direct-dep set says so explicitly — "no maknae-mcp either" — and no transitive edge exists: `bins/maknaed/Cargo.toml` is the only DEPENDENT manifest in the tree that names the crate (the workspace root lists it as a member and the crate's own manifest declares its name). Pre-existing, not introduced by #241 or #264. The `maknaed` cell is correct and unchanged.)* | — |

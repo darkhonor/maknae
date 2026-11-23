@@ -70,10 +70,15 @@ pub(crate) fn caller(stamp: &Stamp<'_>, uid: u32) -> Tasker {
 
 /// A task verb's operands, read once from the wire verb.
 pub(crate) enum TaskVerb<'a> {
-    Submit(&'a TaskSubmission),
+    Submit {
+        task: &'a TaskSubmission,
+        tokens: &'a maknae_proto::ForgeTokens,
+    },
     Add {
         task: TaskId,
         text: &'a SecretText,
+        bindings: &'a [maknae_proto::BindingRequest],
+        tokens: &'a maknae_proto::ForgeTokens,
     },
     Status(TaskId),
     List {
@@ -101,10 +106,20 @@ pub(crate) enum TaskVerb<'a> {
 
 pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
     match verb {
-        Verb::TaskSubmit { task, .. } => Some(TaskVerb::Submit(task)),
-        Verb::TaskAdd { task, text, .. } => Some(TaskVerb::Add {
+        Verb::TaskSubmit { task, forge_tokens } => Some(TaskVerb::Submit {
+            task,
+            tokens: forge_tokens,
+        }),
+        Verb::TaskAdd {
+            task,
+            text,
+            bindings,
+            forge_tokens,
+        } => Some(TaskVerb::Add {
             task: task.to_id(),
             text,
+            bindings,
+            tokens: forge_tokens,
         }),
         Verb::TaskStatus { task } => Some(TaskVerb::Status(task.to_id())),
         Verb::TaskList { agent, after } => Some(TaskVerb::List {
@@ -203,7 +218,7 @@ impl TaskVerb<'_> {
             | TaskVerb::Status(task)
             | TaskVerb::Stop(task)
             | TaskVerb::Drop(task) => Some(*task),
-            TaskVerb::Submit(_)
+            TaskVerb::Submit { .. }
             | TaskVerb::List { .. }
             | TaskVerb::Collect { .. }
             | TaskVerb::Claim { .. }
@@ -215,7 +230,7 @@ impl TaskVerb<'_> {
     /// The agent a submission, list or collect names.
     pub(crate) fn named_agent(&self) -> Option<&str> {
         match self {
-            TaskVerb::Submit(sub) => Some(&sub.agent),
+            TaskVerb::Submit { task, .. } => Some(&task.agent),
             TaskVerb::List { agent, .. } | TaskVerb::Collect { agent, .. } => Some(agent),
             TaskVerb::Add { .. }
             | TaskVerb::Status(_)

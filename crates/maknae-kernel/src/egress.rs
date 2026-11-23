@@ -1270,6 +1270,7 @@ mod tests {
                 task_op: None,
                 tasker: None,
                 bindings: Vec::new(),
+                reach: Vec::new(),
             },
             action: "session.prompt".into(),
             object: Some("provider:openai".into()),

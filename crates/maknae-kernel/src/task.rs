@@ -286,6 +286,7 @@ pub enum TaskRefusal {
     NotWorking,
     Unavailable(String),
     Unbound(String),
+    Unreached(String),
 }
 
 impl std::fmt::Display for TaskRefusal {
@@ -328,6 +329,7 @@ impl std::fmt::Display for TaskRefusal {
             TaskRefusal::NotWorking => f.write_str("the task is not working"),
             TaskRefusal::Unavailable(why) => f.write_str(why),
             TaskRefusal::Unbound(why) => write!(f, "task not bound: {why}"),
+            TaskRefusal::Unreached(why) => write!(f, "task not reached: {why}"),
         }
     }
 }
@@ -1453,7 +1455,7 @@ impl TaskStore {
             tasker,
             parent,
             sub,
-            bindings,
+            (bindings, Vec::new()),
             None,
         )
     }
@@ -1468,7 +1470,7 @@ impl TaskStore {
         tasker: Tasker,
         parent: Option<TaskId>,
         sub: TaskSubmission,
-        bindings: Vec<Binding>,
+        (bindings, reach): (Vec<Binding>, Vec<maknae_proto::BindingReach>),
         ticket: Option<&Ticket>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let agent = target(&sub)?;
@@ -1482,7 +1484,7 @@ impl TaskStore {
             ask: sub.ask,
             labels: sub.labels,
             bindings,
-            reach: Vec::new(),
+            reach,
         };
         for attempt in 1..=ID_DRAWS {
             let signed = Arc::new(signer.sign(task)?);
@@ -2483,7 +2485,15 @@ impl TaskStore {
         bindings: Vec<Binding>,
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let t = self.mint_with(
-            draw, signer, view, enrolled, tasker, parent, sub, bindings, None,
+            draw,
+            signer,
+            view,
+            enrolled,
+            tasker,
+            parent,
+            sub,
+            (bindings, Vec::new()),
+            None,
         )?;
         self.confirm(&t.task.task_id, None, Confirm::Queued)?;
         Ok(t)
@@ -2818,6 +2828,7 @@ pub(crate) struct SubmitCtx<'a> {
     pub decide_timeout: std::time::Duration,
     pub text_max: usize,
     pub forges: &'a maknae_config::ForgeSet,
+    pub reach: crate::reach::ReachCtx<'a>,
 }
 
 struct Attempt {
@@ -2865,9 +2876,25 @@ impl Attempt {
         rec.subject.task_id = task.map(|t| t.task_id.to_string());
         rec.subject.bindings =
             task.map_or_else(Vec::new, |t| crate::run::record_bindings(&t.bindings));
+        rec.subject.reach = task.map_or_else(Vec::new, |t| crate::run::record_reach(&t.reach));
         rec.subject.parent_task_id = self.parent.map(|p| p.to_string());
         rec.subject.tasker = Some(maknae_proto::tasker_text(&self.tasker));
         rec.subject.task_op = Some("submit".into());
+        rec
+    }
+}
+
+impl Attempt {
+    /// A reach frame's intent or outcome, on the submission's own connection and target.
+    fn frame_record(
+        &self,
+        ctx: &SubmitCtx<'_>,
+        (result, reason, posture): (&str, &str, &str),
+    ) -> maknae_audit_append::AuditRecord {
+        let mut rec = self.record(ctx, None, None);
+        rec.outcome.result = result.into();
+        rec.outcome.reason = reason.into();
+        rec.outcome.posture = posture.into();
         rec
     }
 }
@@ -2898,6 +2925,8 @@ where
 pub(crate) const OUTCOME_UNKNOWN: &str = "outcome unknown: ";
 pub(crate) const LATE: &str = "the task store did not answer in time";
 pub(crate) const BUSY: &str = "the task store was busy";
+pub(crate) const ADDENDUM_NOT_TAKEN: &str =
+    "an addendum's bindings and forge tokens are not taken yet";
 
 /// What a submission says of a confirm that did not answer `Ok`. Once the confirm kept
 /// the ticket the record may be stored, so the outcome is unknown and nothing is taken
@@ -2988,10 +3017,20 @@ pub(crate) async fn submit_task<P: Authorizer + Send + Sync + 'static>(
     view: &Arc<dyn EnrollmentView>,
     ctx: &SubmitCtx<'_>,
     by: Submitter,
-    sub: TaskSubmission,
+    (sub, tokens): (TaskSubmission, maknae_proto::ForgeTokens),
     emit: &impl AuditEmit,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
-    submit_under(decider(authorizer), store, signer, view, ctx, by, sub, emit).await
+    submit_under(
+        decider(authorizer),
+        store,
+        signer,
+        view,
+        ctx,
+        by,
+        (sub, tokens),
+        emit,
+    )
+    .await
 }
 
 fn decider<P>(authorizer: Arc<P>) -> Decider<P> {
@@ -3017,7 +3056,7 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
     view: &Arc<dyn EnrollmentView>,
     ctx: &SubmitCtx<'_>,
     by: Submitter,
-    sub: TaskSubmission,
+    (sub, tokens): (TaskSubmission, maknae_proto::ForgeTokens),
     emit: &impl AuditEmit,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
     let deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
@@ -3048,8 +3087,8 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
         view,
         ctx,
         &by,
-        sub,
-        &mut attempt,
+        (sub, tokens),
+        (&mut attempt, emit),
         deadline,
     )
     .await;
@@ -3148,8 +3187,8 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     view: &Arc<dyn EnrollmentView>,
     ctx: &SubmitCtx<'_>,
     by: &Submitter,
-    sub: TaskSubmission,
-    attempt: &mut Attempt,
+    (sub, tokens): (TaskSubmission, maknae_proto::ForgeTokens),
+    (attempt, emit): (&mut Attempt, &impl AuditEmit),
     deadline: tokio::time::Instant,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
     maknae_proto::validate_submission(&sub).map_err(|e| TaskRefusal::Schema(e.to_string()))?;
@@ -3189,7 +3228,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     let req = task_request(by, target.as_str(), parent.as_ref(), &sub, ctx.lane);
     let decided = decide_admitted(pdp, ctx.decide_timeout, req).await?;
     attempt.role = decided.role;
-    let bindings = match maknae_security::finalize(decided.verdict) {
+    let mut bindings = match maknae_security::finalize(decided.verdict) {
         maknae_security::Decision::Permit { obligations } => {
             crate::handler::discharge_plan(&obligations)
                 .map_err(|u| TaskRefusal::Denied(format!("unhonorable obligation: {}", u.0)))?;
@@ -3203,6 +3242,32 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         maknae_security::Decision::Deny { reason } => return Err(TaskRefusal::Denied(reason)),
     };
     let agent_uid = enrolled.ok_or(TaskRefusal::AgentGone)?;
+    let asker = match by {
+        Submitter::User { .. } => crate::reach::Asker::Person { username: ctx.user },
+        Submitter::Agent { agent, uid, .. } => match &parent {
+            Some(p) => crate::reach::Asker::Parent(&p.signed.task),
+            None => crate::reach::Asker::Agent { agent, uid: *uid },
+        },
+    };
+    let seen: &Attempt = attempt;
+    let record = |result: &str, reason: &str, posture: &str| {
+        seen.frame_record(ctx, (result, reason, posture))
+    };
+    let reach = crate::reach::observe(
+        &ctx.reach,
+        &crate::reach::FrameTrail {
+            emit,
+            record: &record,
+        },
+        asker,
+        tokens,
+        crate::reach::Target {
+            agent: &target,
+            uid: agent_uid,
+        },
+        &mut bindings,
+    )
+    .await?;
     let first = store.next_id()?;
     let ticket = Arc::clone(&attempt.ticket);
     let (s, signer, view) = (Arc::clone(store), Arc::clone(signer), Arc::clone(view));
@@ -3224,7 +3289,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
             tasker,
             parent,
             sub,
-            bindings,
+            (bindings, reach),
             Some(&ticket),
         )
     })
@@ -3266,9 +3331,9 @@ pub(crate) fn seal_bindings(
                 head: None,
                 change: r.change,
             }),
-            Some(p) => p
+            Some(p) => crate::reach::TaskBound::of(p)
                 .bindings
-                .iter()
+                .into_iter()
                 .find(|Binding::Git(g)| {
                     g.server == r.server && g.base == r.base && g.change == r.change
                 })
@@ -4529,6 +4594,7 @@ mod tests {
     ) -> Result<Arc<SignedTask>, TaskRefusal> {
         let w = wctx();
         let seq = maknae_audit_append::Seq::new();
+        let settings = crate::reach::ReachSettings::of(forges, None, 1_000);
         let ctx = SubmitCtx {
             where_: &w,
             session_id: SESSION,
@@ -4539,13 +4605,47 @@ mod tests {
             decide_timeout: bound,
             text_max: 1 << 20,
             forges,
+            reach: crate::reach::ReachCtx {
+                settings: &settings,
+                ..unreachable()
+            },
         };
         let pdp = Decider {
             authorizer: a,
             breaker: breaker.unwrap_or_default(),
         };
         let v: Arc<dyn EnrollmentView> = Arc::new(v.clone());
-        submit_under(pdp, store, &shared_signer(), &v, &ctx, by, sub, emit).await
+        let none = maknae_proto::ForgeTokens::default();
+        submit_under(
+            pdp,
+            store,
+            &shared_signer(),
+            &v,
+            &ctx,
+            by,
+            (sub, none),
+            emit,
+        )
+        .await
+    }
+
+    fn no_credentials(_: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
+
+    /// Reach that no test here reaches: an absent socket, no forge traits, no credentials.
+    fn unreachable() -> crate::reach::ReachCtx<'static> {
+        static EGRESS: std::sync::OnceLock<Arc<dyn crate::egress_socket::ReachEgress>> =
+            std::sync::OnceLock::new();
+        static SETTINGS: std::sync::OnceLock<crate::reach::ReachSettings> =
+            std::sync::OnceLock::new();
+        static PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        crate::reach::ReachCtx {
+            egress: EGRESS.get_or_init(|| crate::egress_socket::no_reach("no socket in this test")),
+            settings: SETTINGS.get_or_init(crate::reach::ReachSettings::default),
+            permits: &PERMITS,
+            credentials: &no_credentials,
+        }
     }
 
     async fn submit(
@@ -8131,7 +8231,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, h)| {
-                format!("- {{ name: sentinel-168a-forge{i}, kind: git, host: \"{h}\", provider: github }}\n")
+                format!("- {{ name: sentinel-168a-forge{i}, kind: git, host: \"{h}\", provider: gitlab }}\n")
             })
             .collect();
         if yaml.is_empty() {
@@ -8208,19 +8308,46 @@ mod tests {
         );
     }
 
-    /// A working task of hobi's, tasked by this uid, holding exactly `bindings`.
+    /// A working task of hobi's, tasked by this uid, holding exactly `bindings`, each sealed
+    /// with the reach a binding without a reach check gets.
     fn bound_parent(pdp: &Pdp, store: &Arc<TaskStore>, bindings: Vec<Binding>) -> Arc<SignedTask> {
+        let reach = bindings
+            .iter()
+            .map(|_| {
+                maknae_proto::BindingReach::Git(maknae_proto::GitReach {
+                    tasker: maknae_proto::SideReach::EMPTY,
+                    basis: maknae_proto::TaskerBasis::Token,
+                    agent: maknae_proto::AgentReach::NoForgeCredential,
+                    why: Some(maknae_proto::EmptyReason::NoReachCheck),
+                })
+            })
+            .collect();
+        reached_parent(pdp, store, bindings, reach)
+    }
+
+    /// A working task of hobi's, tasked by this uid, sealed with exactly `bindings` and `reach`.
+    fn reached_parent(
+        pdp: &Pdp,
+        store: &Arc<TaskStore>,
+        bindings: Vec<Binding>,
+        reach: Vec<maknae_proto::BindingReach>,
+    ) -> Arc<SignedTask> {
         let v = SnapshotEnrollment(pdp.clone());
         let parent = store
-            .mint_live(
+            .mint_with(
+                &mut draw_id,
                 signer(),
                 &v,
                 at(store.generation(&id("hobi")), HOBI),
                 Tasker::Uid(me()),
                 None,
                 sub("hobi"),
-                bindings,
+                (bindings, reach),
+                None,
             )
+            .unwrap();
+        store
+            .confirm(&parent.task.task_id, None, Confirm::Queued)
             .unwrap();
         store.start_for_test(&parent.task.task_id);
         parent
@@ -9231,6 +9358,7 @@ mod tests {
             decide_timeout: BOUND,
             text_max: 1 << 20,
             forges: &maknae_config::ForgeSet::empty(),
+            reach: unreachable(),
         };
         let pdp_under = Decider {
             authorizer: capturing.clone(),
@@ -9243,7 +9371,7 @@ mod tests {
             &view,
             &ctx,
             agent("hobi", HOBI, Some(parent.task.task_id)),
-            sub("jin"),
+            (sub("jin"), maknae_proto::ForgeTokens::default()),
             &emit,
         )
         .await;
@@ -9277,6 +9405,7 @@ mod tests {
             decide_timeout: BOUND,
             text_max: 1 << 20,
             forges: &maknae_config::ForgeSet::empty(),
+            reach: unreachable(),
         };
         let view: Arc<dyn EnrollmentView> = Arc::new(SnapshotEnrollment(pdp.clone()));
         submit_task(
@@ -9286,7 +9415,7 @@ mod tests {
             &view,
             &ctx,
             user(),
-            sub("hobi"),
+            (sub("hobi"), maknae_proto::ForgeTokens::default()),
             &emit,
         )
         .await
@@ -9905,5 +10034,1029 @@ mod tests {
         clock.set(renewed);
         assert_eq!(store.perform(&stale), 0);
         assert_eq!(store.record(&task).unwrap().state, TaskState::Working);
+    }
+
+    mod reach_intake {
+        use super::*;
+        use crate::egress_socket::{ReachEgress, SocketEgress};
+        use maknae_proto::{
+            AgentReach, BindingReach, EgressFrame, EgressSocketReply, EmptyReason, ForgeOp,
+            ForgeOps, ForgeTokens, GitReach, Observations, ReachRefusal, ReachReply, ReachRequest,
+            ReachSide, RepoObservation, SealedForgeToken, SealedKey, SideReach, TaskerBasis,
+        };
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        const HOST: &str = "git.sentinel-168c.example";
+        const LAB: &str = "lab.sentinel-168c.example";
+        const BASE: &str = "sentinel-168c/alpha";
+        const FORK: &str = "sentinel-168c-fork/alpha";
+        const PREFIX: &str = "maknae/users";
+        const NONCE: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        fn sealed_token() -> Vec<u8> {
+            b"sentinel-168c-sealed-forge-token-".repeat(5)
+        }
+        const APP: &str = "maknae-github-read";
+        const GRANT: &str = "Tool(github-read gh pr view *)";
+
+        type Answer = Box<dyn Fn(&ReachRequest) -> (Duration, Option<EgressSocketReply>) + Send>;
+
+        /// The Egress Daemon's socket: each connection's reach frame, answered by `answer`.
+        struct Stub {
+            egress: Arc<dyn ReachEgress>,
+            seen: Arc<Mutex<Vec<ReachRequest>>>,
+            _dir: tempfile::TempDir,
+        }
+
+        impl Stub {
+            fn new(answer: Answer) -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("egress.sock");
+                let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+                let seen: Arc<Mutex<Vec<ReachRequest>>> = Arc::default();
+                let kept = Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    for conn in listener.incoming() {
+                        let Ok(mut c) = conn else { return };
+                        let mut len = [0u8; 4];
+                        if c.read_exact(&mut len).is_err() {
+                            continue;
+                        }
+                        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                        if c.read_exact(&mut body).is_err() {
+                            continue;
+                        }
+                        let Ok(EgressFrame::Reach(req)) = maknae_proto::decode_egress_frame(&body)
+                        else {
+                            continue;
+                        };
+                        let (delay, reply) = answer(&req);
+                        kept.lock().unwrap().push(req);
+                        std::thread::sleep(delay);
+                        if let Some(reply) = reply {
+                            let mut out = Vec::new();
+                            ciborium::into_writer(&reply, &mut out).unwrap();
+                            let _ = c.write_all(&(out.len() as u32).to_be_bytes());
+                            let _ = c.write_all(&out);
+                        }
+                    }
+                });
+                let egress: Arc<dyn ReachEgress> = Arc::new(SocketEgress::new(
+                    path,
+                    me(),
+                    Duration::from_secs(5),
+                    64 * 1024,
+                ));
+                Self {
+                    egress,
+                    seen,
+                    _dir: dir,
+                }
+            }
+
+            /// Answers the tasker side with `tasker` and every agent with `agent`.
+            fn sides(tasker: ReachReply, agent: ReachReply) -> Self {
+                let cbor = |r: ReachReply| {
+                    let mut out = Vec::new();
+                    ciborium::into_writer(&EgressSocketReply::Reach(r), &mut out).unwrap();
+                    out
+                };
+                let (tasker, agent) = (cbor(tasker), cbor(agent));
+                Self::new(Box::new(move |req| {
+                    let reply = match req.side() {
+                        ReachSide::Tasker { .. } => &tasker,
+                        ReachSide::Agent { .. } => &agent,
+                    };
+                    (
+                        Duration::ZERO,
+                        Some(ciborium::from_reader(&reply[..]).unwrap()),
+                    )
+                }))
+            }
+
+            fn frames(&self) -> usize {
+                self.seen.lock().unwrap().len()
+            }
+
+            fn side(&self, at: usize) -> String {
+                match self.seen.lock().unwrap()[at].side() {
+                    ReachSide::Tasker { tasker, .. } => format!("tasker {tasker}"),
+                    ReachSide::Agent { agent, .. } => format!("agent {agent}"),
+                }
+            }
+        }
+
+        fn ops(list: &[ForgeOp]) -> ForgeOps {
+            list.iter().copied().collect()
+        }
+
+        fn seen(
+            base: &[ForgeOp],
+            head: Option<(&str, &[ForgeOp])>,
+            covered: bool,
+        ) -> RepoObservation {
+            RepoObservation::new(
+                ops(base),
+                head.map(|(h, _)| h.to_owned()),
+                head.map_or(ForgeOps::EMPTY, |(_, o)| ops(o)),
+                false,
+                covered,
+            )
+            .unwrap()
+        }
+
+        fn observed(list: Vec<RepoObservation>) -> ReachReply {
+            ReachReply::Observed(Observations::new(list).unwrap())
+        }
+
+        const WRITE: &[ForgeOp] = &[
+            ForgeOp::Read,
+            ForgeOp::Review,
+            ForgeOp::IssueWrite,
+            ForgeOp::Merge,
+        ];
+        const READ: &[ForgeOp] = &[ForgeOp::Read, ForgeOp::Review];
+
+        fn forges(entries: &[(&str, &str)]) -> maknae_config::ForgeSet {
+            let yaml: String = entries
+                .iter()
+                .enumerate()
+                .map(|(i, (h, p))| {
+                    format!("- {{ name: sentinel-168c-forge{i}, kind: git, host: \"{h}\", provider: {p} }}\n")
+                })
+                .collect();
+            maknae_config::forges_from_section(Some(&maknae_config::load_str(&yaml).unwrap()))
+                .unwrap()
+        }
+
+        fn github() -> maknae_config::ForgeSet {
+            forges(&[(HOST, "github"), (LAB, "gitlab")])
+        }
+
+        /// `pdp`'s agents, with hobi and jin granted the homelab `github-read` entry.
+        fn reach_pdp(tag: &str) -> (DirGuard, Pdp) {
+            let (g, pdp) = pdp(&format!("reach-{tag}"));
+            crate::test_fixtures::write_tools(
+                &g.0,
+                include_str!("../../../packaging/common/tools-homelab.yaml"),
+            );
+            let site = format!(
+                "schema_version: 1\npermissions:\n  allow: [\"{GRANT}\"]\n  deny: []\nroles:\n  user:\n    allow: [\"session.task\"]\n"
+            );
+            std::fs::write(&maknae_authz_basic::PolicyPaths::in_dir(&g.0).authz, site).unwrap();
+            crate::test_fixtures::write_agent_policy(
+                &g.0,
+                "hobi",
+                &format!("schema_version: 1\npermissions:\n  allow: [\"{GRANT}\"]\n"),
+            );
+            crate::test_fixtures::write_agent_policy(
+                &g.0,
+                "jin",
+                &format!("schema_version: 1\ntaskers: [\"agent:hobi\", \"agent:suga\"]\npermissions:\n  allow: [\"{GRANT}\"]\n"),
+            );
+            pdp.baseline().reload_from_file().unwrap();
+            let app = maknae_proto::CredentialRef {
+                kind: "github-app-installation".into(),
+                name: APP.into(),
+            };
+            assert_eq!(
+                crate::CatalogNow::forge_credentials(&*pdp, HOBI),
+                [app.clone()]
+            );
+            assert_eq!(crate::CatalogNow::forge_credentials(&*pdp, JIN), [app]);
+            (g, pdp)
+        }
+
+        fn token(server: &str) -> ForgeTokens {
+            ForgeTokens::new(vec![SealedForgeToken::new(
+                server.into(),
+                NONCE.into(),
+                SealedKey::new(sealed_token()).unwrap(),
+            )
+            .unwrap()])
+            .unwrap()
+        }
+
+        fn change(server: &str, base: &str, change: Option<u64>) -> maknae_proto::BindingRequest {
+            maknae_proto::BindingRequest::Git(maknae_proto::GitRef {
+                server: server.into(),
+                base: base.into(),
+                change,
+            })
+        }
+
+        fn asking(agent: &str, bindings: Vec<maknae_proto::BindingRequest>) -> TaskSubmission {
+            TaskSubmission {
+                bindings,
+                ..sub(agent)
+            }
+        }
+
+        struct Reaching<'a> {
+            pdp: &'a Pdp,
+            stub: &'a Stub,
+            forges: maknae_config::ForgeSet,
+            deadline_ms: u64,
+            permits: tokio::sync::Semaphore,
+        }
+
+        impl<'a> Reaching<'a> {
+            fn new(pdp: &'a Pdp, stub: &'a Stub) -> Self {
+                Self {
+                    pdp,
+                    stub,
+                    forges: github(),
+                    deadline_ms: 5_000,
+                    permits: tokio::sync::Semaphore::new(maknae_config::REACH_CONCURRENCY_MAX),
+                }
+            }
+
+            async fn submit(
+                &self,
+                store: &Arc<TaskStore>,
+                by: Submitter,
+                (sub, tokens): (TaskSubmission, ForgeTokens),
+                emit: &impl AuditEmit,
+            ) -> Result<Arc<SignedTask>, TaskRefusal> {
+                let w = wctx();
+                let seq = maknae_audit_append::Seq::new();
+                let settings = crate::reach::ReachSettings::of(
+                    &self.forges,
+                    Some(PREFIX.into()),
+                    self.deadline_ms,
+                );
+                let pdp = Arc::clone(self.pdp);
+                let credentials = move |uid| crate::CatalogNow::forge_credentials(&*pdp, uid);
+                let ctx = SubmitCtx {
+                    where_: &w,
+                    session_id: SESSION,
+                    seq: &seq,
+                    user: Some(ACCOUNT),
+                    peer_uri: None,
+                    lane: maknae_security::Lane::Local,
+                    decide_timeout: BOUND,
+                    text_max: 1 << 20,
+                    forges: &self.forges,
+                    reach: crate::reach::ReachCtx {
+                        egress: &self.stub.egress,
+                        settings: &settings,
+                        permits: &self.permits,
+                        credentials: &credentials,
+                    },
+                };
+                let pdp = Decider {
+                    authorizer: Arc::clone(self.pdp),
+                    breaker: Breaker::default(),
+                };
+                let view: Arc<dyn EnrollmentView> =
+                    Arc::new(SnapshotEnrollment(Arc::clone(self.pdp)));
+                submit_under(
+                    pdp,
+                    store,
+                    &shared_signer(),
+                    &view,
+                    &ctx,
+                    by,
+                    (sub, tokens),
+                    emit,
+                )
+                .await
+            }
+        }
+
+        fn git_reach(t: &SignedTask, at: usize) -> GitReach {
+            let BindingReach::Git(g) = t.task.reach[at];
+            g
+        }
+
+        fn head_of(t: &SignedTask, at: usize) -> Option<String> {
+            let Binding::Git(g) = &t.task.bindings[at];
+            g.head.clone()
+        }
+
+        fn unreached(got: &Result<Arc<SignedTask>, TaskRefusal>) -> String {
+            match got {
+                Err(TaskRefusal::Unreached(why)) => why.clone(),
+                other => panic!("expected a reach refusal, got {other:?}"),
+            }
+        }
+
+        fn reasons(emit: &Recorder) -> Vec<String> {
+            emit.records()
+                .iter()
+                .map(|r| format!("{} {}", r.outcome.result, r.outcome.reason))
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn a_tasks_reach_is_the_intersection_of_tasker_and_agent() {
+            let (_g, pdp) = reach_pdp("intersection");
+            let stub = Stub::sides(
+                observed(vec![seen(
+                    WRITE,
+                    Some((BASE, &[ForgeOp::PushHead, ForgeOp::Read])),
+                    true,
+                )]),
+                observed(vec![seen(READ, Some((BASE, &[ForgeOp::PushHead])), true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let emit = Recorder::new();
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (
+                        asking("hobi", vec![change(HOST, BASE, Some(7))]),
+                        token(HOST),
+                    ),
+                    &emit,
+                )
+                .await
+                .unwrap();
+            let g = git_reach(&task, 0);
+            assert_eq!(g.basis, TaskerBasis::Token);
+            assert_eq!(
+                g.tasker,
+                SideReach::new(ops(WRITE), ops(&[ForgeOp::PushHead, ForgeOp::Read])).unwrap()
+            );
+            assert_eq!(
+                g.agent,
+                AgentReach::Observed(SideReach::new(ops(READ), ops(&[ForgeOp::PushHead])).unwrap())
+            );
+            assert_eq!(g.why, None);
+            assert_eq!(
+                maknae_proto::effective_reach(&task.task.reach[0]),
+                SideReach::new(ops(READ), ops(&[ForgeOp::PushHead])).unwrap()
+            );
+            assert_eq!(head_of(&task, 0).as_deref(), Some(BASE));
+            assert_eq!(stub.frames(), 2);
+            assert_eq!(stub.side(0), format!("tasker {ACCOUNT}"));
+            assert_eq!(stub.side(1), "agent hobi");
+            let frames = stub.seen.lock().unwrap();
+            let ReachSide::Tasker {
+                expected_path,
+                key_field,
+                nonce,
+                sealed,
+                ..
+            } = frames[0].side()
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                *expected_path,
+                format!("{PREFIX}/{ACCOUNT}/forges/git.sentinel-168c.example")
+            );
+            assert_eq!(key_field, "token");
+            assert_eq!(
+                (nonce.as_str(), sealed.as_bytes()),
+                (NONCE, &sealed_token()[..])
+            );
+            assert_eq!(frames[0].asks()[0].head, None);
+            assert_eq!(frames[0].provider(), "github");
+            let ReachSide::Agent { credentials, .. } = frames[1].side() else {
+                unreachable!()
+            };
+            assert_eq!(credentials.len(), 1);
+            assert_eq!(credentials[0].name, APP);
+            assert_eq!(frames[1].asks()[0].head.as_deref(), Some(BASE));
+            assert!(frames[1].deadline_ms() <= frames[0].deadline_ms());
+            drop(frames);
+            let trail = reasons(&emit);
+            assert_eq!(
+                trail,
+                [
+                    format!("permit reach intent recorded (tasker {HOST})"),
+                    format!("permit reach observed (tasker {HOST})"),
+                    format!("permit reach intent recorded (agent hobi {HOST})"),
+                    format!("permit reach observed (agent hobi {HOST})"),
+                    "permit task stored".to_owned(),
+                ]
+            );
+            let stored = emit.records().pop().unwrap();
+            assert_eq!(
+                stored.subject.reach,
+                crate::run::record_reach(&task.task.reach)
+            );
+            assert_eq!(stored.subject.reach.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_missing_login_refuses_the_task() {
+            let (_g, pdp) = reach_pdp("no-login");
+            let stub = Stub::sides(
+                ReachReply::Refused(ReachRefusal::Request),
+                ReachReply::NoForgeCredential,
+            );
+            let store = Arc::new(TaskStore::new());
+            let emit = Recorder::new();
+            let got = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (
+                        asking("hobi", vec![change(HOST, BASE, Some(7))]),
+                        ForgeTokens::default(),
+                    ),
+                    &emit,
+                )
+                .await;
+            assert_eq!(unreached(&got), format!("no forge login for {HOST}"));
+            assert_eq!((stub.frames(), store.len()), (0, 0));
+            let last = emit.records().pop().unwrap();
+            assert_eq!(last.outcome.result, "deny");
+            assert_eq!(
+                last.outcome.reason,
+                format!("task not reached: no forge login for {HOST}")
+            );
+        }
+
+        async fn refused_by(class: ReachRefusal, said: &str) {
+            let (_g, pdp) = reach_pdp(&format!("refused-{said}"));
+            for asked in [change(HOST, BASE, Some(7)), change(HOST, BASE, None)] {
+                let stub = Stub::sides(ReachReply::Refused(class), ReachReply::NoForgeCredential);
+                let store = Arc::new(TaskStore::new());
+                let emit = Recorder::new();
+                let got = Reaching::new(&pdp, &stub)
+                    .submit(
+                        &store,
+                        user(),
+                        (asking("hobi", vec![asked]), token(HOST)),
+                        &emit,
+                    )
+                    .await;
+                assert_eq!(
+                    unreached(&got),
+                    format!("reach refused: {said} (tasker {HOST})")
+                );
+                assert_eq!((stub.frames(), store.len()), (1, 0));
+                let trail = reasons(&emit);
+                assert_eq!(
+                    trail[1],
+                    format!("deny reach refused: {said} (tasker {HOST})")
+                );
+                assert_eq!(emit.records()[1].outcome.posture, "unauthorized");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_404_refuses_the_task() {
+            refused_by(ReachRefusal::NotFound, "not_found").await;
+        }
+
+        #[tokio::test]
+        async fn a_401_refuses_the_task() {
+            refused_by(ReachRefusal::Unauthorized, "unauthorized").await;
+        }
+
+        #[tokio::test]
+        async fn a_fork_fills_head_and_push_follows_the_agents_coverage() {
+            let (_g, pdp) = reach_pdp("fork");
+            let tasker = || observed(vec![seen(WRITE, Some((FORK, &[ForgeOp::PushHead])), true)]);
+            for (agent_head, pushes) in [
+                (Some((FORK, &[ForgeOp::PushHead][..])), true),
+                (None, false),
+            ] {
+                let agent = observed(vec![RepoObservation::new(
+                    ops(READ),
+                    Some(FORK.into()),
+                    agent_head.map_or(ForgeOps::EMPTY, |(_, o)| ops(o)),
+                    false,
+                    true,
+                )
+                .unwrap()]);
+                let stub = Stub::sides(tasker(), agent);
+                let store = Arc::new(TaskStore::new());
+                let task = Reaching::new(&pdp, &stub)
+                    .submit(
+                        &store,
+                        user(),
+                        (
+                            asking("hobi", vec![change(HOST, BASE, Some(7))]),
+                            token(HOST),
+                        ),
+                        &Recorder::new(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(head_of(&task, 0).as_deref(), Some(FORK));
+                assert_eq!(
+                    stub.seen.lock().unwrap()[1].asks()[0].head.as_deref(),
+                    Some(FORK)
+                );
+                let effective = maknae_proto::effective_reach(&task.task.reach[0]);
+                assert_eq!(effective.head().contains(ForgeOp::PushHead), pushes);
+                assert_eq!(effective.base(), ops(READ));
+            }
+        }
+
+        #[tokio::test]
+        async fn an_uncovered_agent_gives_empty_reach_not_a_refusal() {
+            let (_g, pdp) = reach_pdp("uncovered");
+            let stub = Stub::sides(
+                observed(vec![seen(WRITE, None, true)]),
+                observed(vec![seen(&[], None, false)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (asking("hobi", vec![change(HOST, BASE, None)]), token(HOST)),
+                    &Recorder::new(),
+                )
+                .await
+                .unwrap();
+            let g = git_reach(&task, 0);
+            assert_eq!(g.why, Some(EmptyReason::AgentNotCovered));
+            assert_eq!(g.tasker.base(), ops(WRITE));
+            assert_eq!(
+                maknae_proto::effective_reach(&task.task.reach[0]),
+                SideReach::EMPTY
+            );
+            assert_eq!(store.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_tasker_without_any_permission_seals_empty_reach() {
+            let (_g, pdp) = reach_pdp("no-permission");
+            let stub = Stub::sides(
+                observed(vec![seen(&[], None, true)]),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (asking("hobi", vec![change(HOST, BASE, None)]), token(HOST)),
+                    &Recorder::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(git_reach(&task, 0).tasker, SideReach::EMPTY);
+            assert_eq!(
+                maknae_proto::effective_reach(&task.task.reach[0]),
+                SideReach::EMPTY
+            );
+        }
+
+        #[tokio::test]
+        async fn a_gitlab_binding_seals_empty_reach_with_no_frame() {
+            let (_g, pdp) = reach_pdp("gitlab");
+            let stub = Stub::sides(
+                ReachReply::Refused(ReachRefusal::Request),
+                ReachReply::NoForgeCredential,
+            );
+            let store = Arc::new(TaskStore::new());
+            let emit = Recorder::new();
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (
+                        asking("hobi", vec![change(LAB, BASE, Some(3))]),
+                        ForgeTokens::default(),
+                    ),
+                    &emit,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                task.task.reach,
+                [BindingReach::Git(GitReach {
+                    tasker: SideReach::EMPTY,
+                    basis: TaskerBasis::Token,
+                    agent: AgentReach::NoForgeCredential,
+                    why: Some(EmptyReason::NoReachCheck),
+                })]
+            );
+            assert_eq!(head_of(&task, 0), None);
+            assert_eq!(stub.frames(), 0);
+            assert_eq!(reasons(&emit), ["permit task stored"]);
+        }
+
+        fn parent_reach(tasker: &[ForgeOp], agent: &[ForgeOp]) -> BindingReach {
+            BindingReach::Git(GitReach {
+                tasker: SideReach::new(ops(tasker), ForgeOps::EMPTY).unwrap(),
+                basis: TaskerBasis::Token,
+                agent: AgentReach::Observed(SideReach::new(ops(agent), ForgeOps::EMPTY).unwrap()),
+                why: None,
+            })
+        }
+
+        #[tokio::test]
+        async fn a_subtask_takes_its_parents_effective_reach_and_its_own_agent_side() {
+            let (_g, pdp) = reach_pdp("subtask");
+            let stub = Stub::sides(
+                ReachReply::Refused(ReachRefusal::Request),
+                observed(vec![seen(&[ForgeOp::Read, ForgeOp::Merge], None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let parent = reached_parent(
+                &pdp,
+                &store,
+                vec![sealed(HOST, BASE, None, Some(7))],
+                vec![parent_reach(WRITE, READ)],
+            );
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    agent("hobi", HOBI, Some(parent.task.task_id)),
+                    (
+                        asking("jin", vec![change(HOST, BASE, Some(7))]),
+                        ForgeTokens::default(),
+                    ),
+                    &Recorder::new(),
+                )
+                .await
+                .unwrap();
+            let g = git_reach(&task, 0);
+            assert_eq!(g.basis, TaskerBasis::Parent);
+            assert_eq!(
+                g.tasker,
+                SideReach::new(ops(READ), ForgeOps::EMPTY).unwrap()
+            );
+            assert_eq!(
+                maknae_proto::effective_reach(&task.task.reach[0]).base(),
+                ops(&[ForgeOp::Read])
+            );
+            assert_eq!(stub.frames(), 1);
+            assert_eq!(stub.side(0), "agent jin");
+        }
+
+        #[tokio::test]
+        async fn a_subtask_under_a_parent_without_reach_is_refused() {
+            let (_g, pdp) = reach_pdp("pr-a-parent");
+            let stub = Stub::sides(
+                ReachReply::Refused(ReachRefusal::Request),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let parent = reached_parent(
+                &pdp,
+                &store,
+                vec![sealed(HOST, BASE, None, Some(7))],
+                Vec::new(),
+            );
+            let got = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    agent("hobi", HOBI, Some(parent.task.task_id)),
+                    (
+                        asking("jin", vec![change(HOST, BASE, Some(7))]),
+                        ForgeTokens::default(),
+                    ),
+                    &Recorder::new(),
+                )
+                .await;
+            assert_eq!(unreached(&got), "parent task has no reach");
+            assert_eq!((stub.frames(), store.len()), (0, 1));
+        }
+
+        #[tokio::test]
+        async fn a_subtask_carrying_a_token_is_refused() {
+            let (_g, pdp) = reach_pdp("subtask-token");
+            let stub = Stub::sides(
+                ReachReply::Refused(ReachRefusal::Request),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let parent = reached_parent(
+                &pdp,
+                &store,
+                vec![sealed(HOST, BASE, None, Some(7))],
+                vec![parent_reach(WRITE, READ)],
+            );
+            let got = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    agent("hobi", HOBI, Some(parent.task.task_id)),
+                    (
+                        asking("jin", vec![change(HOST, BASE, Some(7))]),
+                        token(HOST),
+                    ),
+                    &Recorder::new(),
+                )
+                .await;
+            assert_eq!(
+                unreached(&got),
+                "an agent's submission carries no forge token"
+            );
+            assert_eq!((stub.frames(), store.len()), (0, 1));
+        }
+
+        #[tokio::test]
+        async fn an_agent_submission_carrying_a_token_is_refused() {
+            let (_g, pdp) = reach_pdp("agent-token");
+            let stub = Stub::sides(
+                ReachReply::Refused(ReachRefusal::Request),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            for asked in [vec![change(HOST, BASE, Some(7))], Vec::new()] {
+                let got = Reaching::new(&pdp, &stub)
+                    .submit(
+                        &store,
+                        agent("hobi", HOBI, None),
+                        (asking("jin", asked), token(HOST)),
+                        &Recorder::new(),
+                    )
+                    .await;
+                assert_eq!(
+                    unreached(&got),
+                    "an agent's submission carries no forge token"
+                );
+            }
+            assert_eq!((stub.frames(), store.len()), (0, 0));
+        }
+
+        #[tokio::test]
+        async fn a_token_for_an_unbound_server_is_refused() {
+            let (_g, pdp) = reach_pdp("unbound-token");
+            let stub = Stub::sides(
+                observed(vec![seen(WRITE, None, true)]),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            for asked in [vec![change(LAB, BASE, Some(7))], Vec::new()] {
+                let got = Reaching::new(&pdp, &stub)
+                    .submit(
+                        &store,
+                        user(),
+                        (asking("hobi", asked), token(HOST)),
+                        &Recorder::new(),
+                    )
+                    .await;
+                assert_eq!(
+                    unreached(&got),
+                    format!("a forge token for {HOST}, which no binding names")
+                );
+            }
+            assert_eq!((stub.frames(), store.len()), (0, 0));
+        }
+
+        #[tokio::test]
+        async fn an_own_initiative_task_intersects_the_two_agents() {
+            let (_g, pdp) = reach_pdp("own-initiative");
+            let stub = Stub::new(Box::new(|req| {
+                let base: &[ForgeOp] = match req.side() {
+                    ReachSide::Agent { agent, .. } if agent == "hobi" => WRITE,
+                    _ => &[ForgeOp::Read, ForgeOp::IssueWrite],
+                };
+                assert!(req.asks().iter().all(|a| a.head.is_none()));
+                let reply = observed(vec![seen(base, None, true)]);
+                (Duration::ZERO, Some(EgressSocketReply::Reach(reply)))
+            }));
+            let store = Arc::new(TaskStore::new());
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    agent("hobi", HOBI, None),
+                    (
+                        asking("jin", vec![change(HOST, BASE, Some(7))]),
+                        ForgeTokens::default(),
+                    ),
+                    &Recorder::new(),
+                )
+                .await
+                .unwrap();
+            let g = git_reach(&task, 0);
+            assert_eq!(g.basis, TaskerBasis::Submitter);
+            assert_eq!(g.tasker.base(), ops(WRITE));
+            assert_eq!(head_of(&task, 0), None);
+            assert_eq!(
+                maknae_proto::effective_reach(&task.task.reach[0]).base(),
+                ops(&[ForgeOp::Read, ForgeOp::IssueWrite])
+            );
+            assert_eq!(
+                (stub.side(0), stub.side(1)),
+                ("agent hobi".into(), "agent jin".into())
+            );
+        }
+
+        #[tokio::test]
+        async fn an_own_initiative_task_whose_submitter_has_no_credential_seals_empty() {
+            let (_g, pdp) = reach_pdp("own-initiative-none");
+            let stub = Stub::new(Box::new(|req| {
+                let reply = match req.side() {
+                    ReachSide::Agent { agent, .. } if agent == "hobi" => {
+                        ReachReply::NoForgeCredential
+                    }
+                    _ => observed(vec![seen(READ, None, true)]),
+                };
+                (Duration::ZERO, Some(EgressSocketReply::Reach(reply)))
+            }));
+            let store = Arc::new(TaskStore::new());
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    agent("hobi", HOBI, None),
+                    (
+                        asking("jin", vec![change(HOST, BASE, None)]),
+                        ForgeTokens::default(),
+                    ),
+                    &Recorder::new(),
+                )
+                .await
+                .unwrap();
+            let g = git_reach(&task, 0);
+            assert_eq!(g.tasker, SideReach::EMPTY);
+            assert_eq!(g.why, Some(EmptyReason::NoForgeCredential));
+            assert_eq!(
+                maknae_proto::effective_reach(&task.task.reach[0]),
+                SideReach::EMPTY
+            );
+        }
+
+        #[tokio::test]
+        async fn the_reach_deadline_refuses_the_task() {
+            let (_g, pdp) = reach_pdp("deadline");
+            let stub = Stub::new(Box::new(|req| {
+                let reply = observed(vec![seen(WRITE, None, true)]);
+                let delay = match req.side() {
+                    ReachSide::Tasker { .. } => Duration::from_millis(600),
+                    ReachSide::Agent { .. } => Duration::ZERO,
+                };
+                (delay, Some(EgressSocketReply::Reach(reply)))
+            }));
+            let store = Arc::new(TaskStore::new());
+            let emit = Recorder::new();
+            let reaching = Reaching {
+                deadline_ms: 300,
+                ..Reaching::new(&pdp, &stub)
+            };
+            let got = reaching
+                .submit(
+                    &store,
+                    user(),
+                    (asking("hobi", vec![change(HOST, BASE, None)]), token(HOST)),
+                    &emit,
+                )
+                .await;
+            assert_eq!(unreached(&got), "the reach deadline passed");
+            assert_eq!((stub.frames(), store.len()), (1, 0));
+            assert!(stub.seen.lock().unwrap()[0].deadline_ms() <= 300);
+        }
+
+        #[tokio::test]
+        async fn a_reach_at_the_kernels_capacity_is_outcome_unknown() {
+            let (_g, pdp) = reach_pdp("capacity");
+            let stub = Stub::sides(
+                observed(vec![seen(WRITE, None, true)]),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let reaching = Reaching {
+                deadline_ms: 200,
+                permits: tokio::sync::Semaphore::new(0),
+                ..Reaching::new(&pdp, &stub)
+            };
+            let got = reaching
+                .submit(
+                    &store,
+                    user(),
+                    (asking("hobi", vec![change(HOST, BASE, None)]), token(HOST)),
+                    &Recorder::new(),
+                )
+                .await;
+            assert_eq!(unreached(&got), "reach outcome unknown: at capacity");
+            assert_eq!((stub.frames(), store.len()), (0, 0));
+        }
+
+        #[tokio::test]
+        async fn no_frame_is_sent_without_a_durable_intent() {
+            let (_g, pdp) = reach_pdp("durable-intent");
+            let stub = Stub::sides(
+                observed(vec![seen(WRITE, None, true)]),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let store = Arc::new(TaskStore::new());
+            let emit = Recorder::failing();
+            let got = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (asking("hobi", vec![change(HOST, BASE, None)]), token(HOST)),
+                    &emit,
+                )
+                .await;
+            assert!(matches!(got, Err(TaskRefusal::Audit(_))), "{got:?}");
+            assert_eq!((stub.frames(), store.len()), (0, 0));
+            assert!(reasons(&emit)[0].starts_with("permit reach intent recorded"));
+        }
+
+        fn holds(hay: &[u8], needle: &[u8]) -> bool {
+            hay.windows(needle.len()).any(|w| w == needle)
+        }
+
+        fn hex(b: &[u8]) -> String {
+            b.iter().map(|x| format!("{x:02x}")).collect()
+        }
+
+        #[tokio::test]
+        async fn the_tasker_token_is_in_no_store_trail_or_delivery_bytes() {
+            let (_g, pdp) = reach_pdp("token-bytes");
+            let stub = Stub::sides(
+                observed(vec![seen(WRITE, Some((FORK, &[ForgeOp::PushHead])), true)]),
+                observed(vec![seen(READ, None, true)]),
+            );
+            let blobs = crate::task_store::MemTaskBlobs::default();
+            let store = Arc::new(
+                TaskStore::open(
+                    Box::new(blobs.clone()),
+                    Arc::new(crate::task_store::SystemClock),
+                )
+                .unwrap(),
+            );
+            let emit = Recorder::new();
+            let task = Reaching::new(&pdp, &stub)
+                .submit(
+                    &store,
+                    user(),
+                    (
+                        asking("hobi", vec![change(HOST, BASE, Some(7))]),
+                        token(HOST),
+                    ),
+                    &emit,
+                )
+                .await
+                .unwrap();
+            let frames = stub.seen.lock().unwrap();
+            let ReachSide::Tasker { sealed, .. } = frames[0].side() else {
+                panic!("the first frame is the tasker's");
+            };
+            assert_eq!(
+                sealed.as_bytes(),
+                sealed_token(),
+                "the token did reach the egress socket"
+            );
+            drop(frames);
+            let mut bytes: Vec<(String, Vec<u8>)> = Vec::new();
+            for name in crate::task_store::TaskBlobs::names(&blobs).unwrap() {
+                let b = crate::task_store::TaskBlobs::load(&blobs, &name).unwrap();
+                bytes.push((format!("store {name}"), b.to_vec()));
+            }
+            assert!(!bytes.is_empty());
+            for r in emit.records() {
+                bytes.push(("trail".into(), serde_json::to_vec(&r).unwrap()));
+            }
+            let mut delivered = Vec::new();
+            ciborium::into_writer(&*task, &mut delivered).unwrap();
+            bytes.push(("delivery".into(), delivered));
+            let reach = crate::task::Reach {
+                tasker: &Tasker::Uid(me()),
+                under: None,
+                task: None,
+            };
+            let view = store.status(&task.task.task_id, reach).unwrap();
+            let mut shown = Vec::new();
+            ciborium::into_writer(&view, &mut shown).unwrap();
+            bytes.push(("view".into(), shown));
+            for (at, b) in &bytes {
+                for needle in [
+                    sealed_token(),
+                    NONCE.as_bytes().to_vec(),
+                    hex(&sealed_token()).into_bytes(),
+                    hex(NONCE.as_bytes()).into_bytes(),
+                ] {
+                    assert!(!holds(b, &needle), "{at} holds the token");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn heads_over_the_sealed_bound_refuse_by_name() {
+            let (_g, pdp) = reach_pdp("heads-bound");
+            let bases: Vec<String> = (0..maknae_proto::TASK_BINDINGS_MAX)
+                .map(|i| format!("sentinel-168c/{i}{}", "b".repeat(40)))
+                .collect();
+            let asked: Vec<_> = bases.iter().map(|b| change(HOST, b, Some(1))).collect();
+            assert!(
+                maknae_proto::bindings_encoded_len(&asked)
+                    <= maknae_proto::TASK_BINDING_REQUESTS_MAX_BYTES
+            );
+            let head = format!("sentinel-168c-fork/{}", "h".repeat(200));
+            let tasker = observed(
+                (0..maknae_proto::TASK_BINDINGS_MAX)
+                    .map(|_| seen(WRITE, Some((&head, &[ForgeOp::PushHead])), true))
+                    .collect(),
+            );
+            let stub = Stub::sides(tasker, observed(vec![seen(READ, None, true)]));
+            let store = Arc::new(TaskStore::new());
+            let emit = Recorder::new();
+            let got = Reaching::new(&pdp, &stub)
+                .submit(&store, user(), (asking("hobi", asked), token(HOST)), &emit)
+                .await;
+            let Err(TaskRefusal::Unbound(why)) = &got else {
+                panic!("expected the bound refusal, got {got:?}");
+            };
+            assert!(
+                why.contains(&format!("{HOST} {} change 1 head {head}", bases[0])),
+                "{why}"
+            );
+            assert!(why.contains("more than 1280"), "{why}");
+            assert_eq!((stub.frames(), store.len()), (1, 0));
+        }
     }
 }

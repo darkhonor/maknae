@@ -466,6 +466,11 @@ impl ReachEgress for NoReachSocket {
     }
 }
 
+/// A reach handle that sends nothing, saying `why`.
+pub fn no_reach(why: &str) -> Arc<dyn ReachEgress> {
+    Arc::new(NoReachSocket(why.to_owned()))
+}
+
 /// The reach handle on `egress.socket_path`, whether or not any provider is authorized.
 pub fn production_reach_with(
     cfg: &maknae_config::EgressConfig,

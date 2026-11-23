@@ -234,6 +234,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         tasks,
         signer: Arc::new(FixedSigner),
         banner: Default::default(),
+        reach: maknae_kernel::no_reach("no egress socket in this test"),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -400,6 +401,7 @@ impl World {
                 tasks,
                 signer: self.agents.signer.clone(),
                 banner: self.agents.banner.clone(),
+                reach: self.agents.reach.clone(),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),
@@ -748,7 +750,7 @@ async fn a_bound_task_is_accepted_sealed_and_delivered_verified() {
     w.agents.signer = Arc::new(CaSigner(ca.kernel(PlaneKey::MlDsa87, None)));
     w.forges = maknae_config::forges_from_section(Some(
         &maknae_config::load_str(&format!(
-            "- {{ name: sentinel-168a-forge, kind: git, host: {HOST}, provider: github }}\n"
+            "- {{ name: sentinel-168a-forge, kind: git, host: {HOST}, provider: gitlab }}\n"
         ))
         .unwrap(),
     ))
@@ -997,6 +999,51 @@ async fn add_appends_a_follow_up_to_the_running_task_only() {
     let held = w.store().record(&working).unwrap().follow_ups;
     assert_eq!(held.len(), 1);
     assert_eq!(&*held[0].0, "sentinel-628-more");
+}
+
+#[tokio::test]
+async fn an_addendum_carrying_bindings_or_tokens_is_refused_until_addenda_are_taken() {
+    let w = world("add-bound", "user", true);
+    let working = w.submit("hobi", "a").await;
+    w.working(&working);
+    let token = maknae_proto::ForgeTokens::new(vec![maknae_proto::SealedForgeToken::new(
+        "git.sentinel-168c.example".into(),
+        "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
+        maknae_proto::SealedKey::new(vec![7; 200]).unwrap(),
+    )
+    .unwrap()])
+    .unwrap();
+    let bound = vec![maknae_proto::BindingRequest::Git(maknae_proto::GitRef {
+        server: "git.sentinel-168c.example".into(),
+        base: "sentinel-168c/alpha".into(),
+        change: None,
+    })];
+    for (bindings, forge_tokens) in [
+        (bound.clone(), maknae_proto::ForgeTokens::default()),
+        (vec![], token.clone()),
+    ] {
+        let records = Records::new(0);
+        let got = w
+            .ask_with(
+                Verb::TaskAdd {
+                    task: r(&working),
+                    text: secret("sentinel-168c-more"),
+                    bindings,
+                    forge_tokens,
+                },
+                &records,
+            )
+            .await;
+        assert!(unauthorized(&got), "{got:?}");
+        assert!(
+            reasons(&records)
+                .iter()
+                .any(|t| t.contains("an addendum's bindings and forge tokens are not taken yet")),
+            "{:?}",
+            reasons(&records)
+        );
+    }
+    assert!(w.store().record(&working).unwrap().follow_ups.is_empty());
 }
 
 #[tokio::test]

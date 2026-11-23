@@ -29,6 +29,7 @@ fn sample_record() -> AuditRecord {
             task_op: None,
             tasker: None,
             bindings: Vec::new(),
+            reach: Vec::new(),
         },
         action: "connect".into(),
         object: None,

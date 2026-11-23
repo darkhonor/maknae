@@ -1255,6 +1255,7 @@ dependencies = [
  "maknae-classification-aus",
  "maknae-config",
  "maknae-crypto",
+ "maknae-forge",
  "maknae-graph",
  "maknae-io",
  "maknae-kernel",

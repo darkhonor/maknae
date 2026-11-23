@@ -52,6 +52,9 @@ pub struct Subject {
     /// The task's sealed bindings, on the submission records that name a task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<RecordBinding>,
+    /// Index-aligned with `bindings`, on the submission records of a task sealed with reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<RecordReach>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +72,42 @@ pub struct RecordBinding {
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<u64>,
+}
+
+/// One binding's sealed reach. Each `u16` packs base ops in bits 0-4 and head ops in bits 5-9.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordReach {
+    pub effective: u16,
+    pub tasker: u16,
+    pub basis: ReachBasis,
+    pub agent: RecordAgentReach,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<ReachWhy>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachBasis {
+    Token,
+    Parent,
+    Submitter,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordAgentReach {
+    Observed(u16),
+    AtHandOut,
+    NoForgeCredential,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachWhy {
+    HeadGone,
+    AgentNotCovered,
+    NoForgeCredential,
+    NoReachCheck,
 }
 
 /// AU-3c: where the event occurred.
@@ -490,6 +529,7 @@ mod tests {
                 task_op: None,
                 tasker: None,
                 bindings: Vec::new(),
+                reach: Vec::new(),
             },
             action: "connect".into(),
             object: None,
@@ -802,6 +842,55 @@ mod tests {
     }
 
     #[test]
+    fn reach_is_omitted_when_empty_and_canonical_when_present() {
+        let s = canonical_json(&sample()).unwrap();
+        assert!(!s.contains("\"reach\""), "{s}");
+        let mut rec = sample();
+        rec.subject.reach = vec![
+            RecordReach {
+                effective: 0x21,
+                tasker: 0x3f7,
+                basis: ReachBasis::Token,
+                agent: RecordAgentReach::Observed(0x23),
+                why: None,
+            },
+            RecordReach {
+                effective: 0,
+                tasker: 0x17,
+                basis: ReachBasis::Submitter,
+                agent: RecordAgentReach::NoForgeCredential,
+                why: Some(ReachWhy::NoForgeCredential),
+            },
+            RecordReach {
+                effective: 0,
+                tasker: 0,
+                basis: ReachBasis::Parent,
+                agent: RecordAgentReach::AtHandOut,
+                why: Some(ReachWhy::AgentNotCovered),
+            },
+        ];
+        let s = canonical_json(&rec).unwrap();
+        let want = concat!(
+            "\"reach\":[",
+            "{\"agent\":{\"observed\":35},\"basis\":\"token\",\"effective\":33,\"tasker\":1015},",
+            "{\"agent\":\"no_forge_credential\",\"basis\":\"submitter\",\"effective\":0,\"tasker\":23,\"why\":\"no_forge_credential\"},",
+            "{\"agent\":\"at_hand_out\",\"basis\":\"parent\",\"effective\":0,\"tasker\":0,\"why\":\"agent_not_covered\"}]",
+        );
+        assert!(s.contains(want), "{s}");
+        let back: AuditRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.subject.reach, rec.subject.reach);
+        for (why, said) in [
+            (ReachWhy::HeadGone, "head_gone"),
+            (ReachWhy::NoReachCheck, "no_reach_check"),
+        ] {
+            assert_eq!(serde_json::to_string(&why).unwrap(), format!("\"{said}\""));
+        }
+        let old: Subject =
+            serde_json::from_str(r#"{"user":"alice","plane_uri_san":null}"#).unwrap();
+        assert!(old.reach.is_empty());
+    }
+
+    #[test]
     fn integrity_round_trips_empty() {
         let s = canonical_json(&sample()).unwrap();
         assert!(s.contains("\"integrity\""));
@@ -946,6 +1035,7 @@ mod tests {
                     task_op: None,
                     tasker: None,
                     bindings: Vec::new(),
+                    reach: Vec::new(),
                 },
                 action: "fs.read".into(),
                 object,

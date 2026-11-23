@@ -435,6 +435,7 @@ fn admission(
             unsigned: Arc::clone(unsigned),
         }),
         banner: Default::default(),
+        reach: maknae_kernel::no_reach("no egress socket in this test"),
     }
 }
 

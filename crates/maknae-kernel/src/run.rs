@@ -710,6 +710,7 @@ pub(crate) fn make_record(
             task_op: None,
             tasker: None,
             bindings: Vec::new(),
+            reach: Vec::new(),
         },
         action: action.to_string(),
         object: object.map(str::to_string),
@@ -2937,7 +2938,44 @@ pub(crate) fn submit_outcome_record(
     outcome.subject.task_id = Some(task.task_id.to_string());
     outcome.subject.parent_task_id = task.parent.as_ref().map(ToString::to_string);
     outcome.subject.bindings = record_bindings(&task.bindings);
+    outcome.subject.reach = record_reach(&task.reach);
     outcome
+}
+
+pub(crate) fn record_reach(
+    reach: &[maknae_proto::BindingReach],
+) -> Vec<maknae_audit_append::RecordReach> {
+    use maknae_audit_append::{ReachBasis, ReachWhy, RecordAgentReach, RecordReach};
+    use maknae_proto::{AgentReach, BindingReach, EmptyReason, SideReach, TaskerBasis};
+    let packed = |s: SideReach| {
+        u16::from(s.base().bits()) | u16::from(s.head().bits()) << maknae_proto::ForgeOp::ALL.len()
+    };
+    reach
+        .iter()
+        .map(|r| {
+            let BindingReach::Git(g) = r;
+            RecordReach {
+                effective: packed(maknae_proto::effective_reach(r)),
+                tasker: packed(g.tasker),
+                basis: match g.basis {
+                    TaskerBasis::Token => ReachBasis::Token,
+                    TaskerBasis::Parent => ReachBasis::Parent,
+                    TaskerBasis::Submitter => ReachBasis::Submitter,
+                },
+                agent: match g.agent {
+                    AgentReach::Observed(a) => RecordAgentReach::Observed(packed(a)),
+                    AgentReach::AtHandOut => RecordAgentReach::AtHandOut,
+                    AgentReach::NoForgeCredential => RecordAgentReach::NoForgeCredential,
+                },
+                why: g.why.map(|w| match w {
+                    EmptyReason::HeadGone => ReachWhy::HeadGone,
+                    EmptyReason::AgentNotCovered => ReachWhy::AgentNotCovered,
+                    EmptyReason::NoForgeCredential => ReachWhy::NoForgeCredential,
+                    EmptyReason::NoReachCheck => ReachWhy::NoReachCheck,
+                }),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn record_bindings(
@@ -3655,7 +3693,7 @@ async fn serve_task_verb<S, E, P>(
         )
     };
 
-    if let TaskVerb::Submit(task) = asked {
+    if let TaskVerb::Submit { task, tokens } = asked {
         let home = crate::authz::admitted_home(trail.uid, tasks.peer_dir.clone())
             .await
             .ok();
@@ -3686,6 +3724,12 @@ async fn serve_task_verb<S, E, P>(
             decide_timeout: timeout,
             text_max: tasks.text_max,
             forges: live.forges(),
+            reach: crate::reach::ReachCtx {
+                egress: &tasks.agents.reach,
+                settings: live.reach(),
+                permits: crate::reach::kernel_reach_permits(),
+                credentials: &|uid| authorizer.forge_credentials(uid),
+            },
         };
         let submitted = crate::task::submit_task(
             Arc::clone(authorizer),
@@ -3694,7 +3738,7 @@ async fn serve_task_verb<S, E, P>(
             &tasks.agents.view,
             &ctx,
             by,
-            task.clone(),
+            (task.clone(), tokens.clone()),
             &**trail.emit,
         )
         .await;
@@ -3872,7 +3916,19 @@ async fn serve_task_verb<S, E, P>(
                     .await;
             }
         },
-        TaskVerb::Add { task, text } => {
+        TaskVerb::Add {
+            task,
+            text,
+            bindings,
+            tokens,
+        } => {
+            if !bindings.is_empty() || !tokens.is_empty() {
+                let r = TaskRefusal::Unbound(crate::task::ADDENDUM_NOT_TAKEN.into());
+                trail
+                    .unauthorized(stream, &decided("deny", &r.to_string(), "unauthorized"))
+                    .await;
+                return;
+            }
             if text.0.len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 trail
@@ -4273,7 +4329,7 @@ async fn serve_task_verb<S, E, P>(
             )
             .await;
         }
-        TaskVerb::Submit(_) | TaskVerb::Agents { .. } => {
+        TaskVerb::Submit { .. } | TaskVerb::Agents { .. } => {
             trail
                 .unauthorized(
                     stream,
@@ -5229,6 +5285,7 @@ pub struct AgentAdmission {
     pub tasks: Arc<crate::task::TaskStore>,
     pub signer: Arc<dyn crate::task::TaskSigner>,
     pub banner: Banner,
+    pub reach: Arc<dyn crate::egress_socket::ReachEgress>,
 }
 
 /// The operator's banner: loaded at start, replaced by each applied reload.
@@ -5242,6 +5299,7 @@ impl AgentAdmission {
             tasks: Arc::new(crate::task::TaskStore::new()),
             signer: Arc::new(crate::task::UnverifiedSigner),
             banner: Banner::default(),
+            reach: crate::egress_socket::no_reach("no egress socket in this test"),
         }
     }
 }
@@ -7142,7 +7200,11 @@ where
     }
 
     /// What the agent listener admits against: this PDP's snapshot and the store it reconciles.
-    fn agent_admission(&self, signer: Arc<dyn crate::task::TaskSigner>) -> AgentAdmission {
+    fn agent_admission(
+        &self,
+        signer: Arc<dyn crate::task::TaskSigner>,
+        reach: Arc<dyn crate::egress_socket::ReachEgress>,
+    ) -> AgentAdmission {
         AgentAdmission {
             view: Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
                 &self.authorizer,
@@ -7150,6 +7212,7 @@ where
             tasks: Arc::clone(&self.tasks),
             signer,
             banner: Arc::clone(&self.banner),
+            reach,
         }
     }
 
@@ -10200,6 +10263,8 @@ async fn boot_after_sink(
         seams.env.egress_account()
     })
     .map_err(|e| RunError::Other(e.to_string()))?;
+    let reach =
+        crate::egress_socket::production_reach_with(&egress_cfg, |_| seams.env.egress_account());
     let banner = crate::boot_gate::banner_boot_gate(config_dir, seams.banner_load)
         .map_err(|e| RunError::Other(e.to_string()))?;
 
@@ -10557,7 +10622,7 @@ async fn boot_after_sink(
         classification_policy_name,
         plane_key_name,
         kernel_graph,
-        egress,
+        (egress, reach),
         hup,
         Arc::new(reloader),
         deployment,
@@ -10605,7 +10670,10 @@ async fn serve_after_mint<B>(
     classification_policy_name: Arc<String>,
     plane_key_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    egress: Arc<dyn crate::egress::Egress>,
+    (egress, reach): (
+        Arc<dyn crate::egress::Egress>,
+        Arc<dyn crate::egress_socket::ReachEgress>,
+    ),
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
     deployment: maknae_config::Deployment,
@@ -10708,7 +10776,10 @@ where
         bound: Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
     });
     let lifetime = handler_drain_bound(&transport, egress.deadline());
-    let agents = reloader.agent_admission(Arc::new(crate::task::PlaneSigner(Arc::clone(client))));
+    let agents = reloader.agent_admission(
+        Arc::new(crate::task::PlaneSigner(Arc::clone(client))),
+        reach,
+    );
     let sweep_stop = Arc::new(tokio::sync::Notify::new());
     let mut sweeper = tokio::spawn(sweep_tasks(
         Arc::clone(&reloader.tasks),
@@ -11137,6 +11208,39 @@ mod record_widths {
         bound
     }
 
+    /// The widest record entry per binding: every op on every side, the longest basis and reason.
+    fn widest_reach() -> Vec<maknae_proto::BindingReach> {
+        use maknae_proto::{AgentReach, BindingReach, EmptyReason, ForgeOp, GitReach, SideReach};
+        let all = |head: bool| {
+            ForgeOp::ALL
+                .into_iter()
+                .filter(|op| head || *op != ForgeOp::PushHead)
+                .collect()
+        };
+        let side = SideReach::new(all(false), all(true)).unwrap();
+        let entry = BindingReach::Git(GitReach {
+            tasker: side,
+            basis: maknae_proto::TaskerBasis::Submitter,
+            agent: AgentReach::Observed(side),
+            why: Some(EmptyReason::NoForgeCredential),
+        });
+        let widest = crate::run::record_reach(&[entry]);
+        for why in [
+            EmptyReason::HeadGone,
+            EmptyReason::AgentNotCovered,
+            EmptyReason::NoReachCheck,
+        ] {
+            let BindingReach::Git(mut g) = entry;
+            g.why = Some(why);
+            let other = crate::run::record_reach(&[BindingReach::Git(g)]);
+            assert!(
+                serde_json::to_vec(&other).unwrap().len()
+                    <= serde_json::to_vec(&widest).unwrap().len()
+            );
+        }
+        vec![entry; maknae_proto::TASK_BINDINGS_MAX]
+    }
+
     fn task_verbs(agent: &str) -> Vec<Verb> {
         let text = || maknae_proto::SecretText(String::new().into());
         let task = || maknae_proto::TaskRef::from_id(&TASK);
@@ -11241,6 +11345,7 @@ mod record_widths {
             TaskRefusal::NotWorking,
             TaskRefusal::Unavailable(String::new()),
             TaskRefusal::Unbound(String::new()),
+            TaskRefusal::Unreached(String::new()),
         ];
         kinds
             .iter()
@@ -11285,7 +11390,13 @@ mod record_widths {
                 .map(|r| permit((*r).into(), Shape::Submitted))
                 .collect(),
             ("add", _) => {
-                let mut all = vec![deny(too_long, Shape::Plain), intent(), done()];
+                let unbound = TaskRefusal::Unbound(crate::task::ADDENDUM_NOT_TAKEN.into());
+                let mut all = vec![
+                    deny(too_long, Shape::Plain),
+                    deny(unbound.to_string(), Shape::Plain),
+                    intent(),
+                    done(),
+                ];
                 all.extend(refusals(Shape::Plain));
                 all
             }
@@ -11435,6 +11546,7 @@ mod record_widths {
             task.task_id = TASK;
             task.parent = self.parent();
             task.bindings = maximal_bindings();
+            task.reach = widest_reach();
             task
         }
 
@@ -11738,7 +11850,8 @@ mod record_widths {
             | TaskRefusal::Audit(_)
             | TaskRefusal::Store(_)
             | TaskRefusal::Unavailable(_)
-            | TaskRefusal::Unbound(_) => None,
+            | TaskRefusal::Unbound(_)
+            | TaskRefusal::Unreached(_) => None,
             TaskRefusal::AtCapacity { .. } => Some(TaskRefusal::AtCapacity {
                 agent: agent.to_owned(),
             }),
@@ -11788,6 +11901,8 @@ mod record_widths {
             false => assert_eq!(bound, 0, "{at}"),
         }
         assert_eq!(line.matches("\"kind\":\"git\"").count(), bound, "{at}");
+        assert_eq!(c.rec.subject.reach.len(), bound, "{at}");
+        assert_eq!(line.matches("\"basis\":").count(), bound, "{at}");
     }
 
     fn assert_each_case_mirrors_as_measured(cases: &[Case], in_full: &[&str]) {
@@ -11828,14 +11943,20 @@ mod record_widths {
     fn a_persons_task_verb_records_mirror_as_measured() {
         let cases = Who::new(true).task_verb_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
-        assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
+        assert_eq!(
+            widest_label(&cases),
+            "submit: permit task gone before the answer"
+        );
     }
 
     #[test]
     fn the_task_verb_records_of_the_widest_agent_mirror_as_measured() {
         let cases = Who::new(false).task_verb_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
-        assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
+        assert_eq!(
+            widest_label(&cases),
+            "submit: permit task gone before the answer"
+        );
     }
 
     const WIDEST_RELEASE: &str =
@@ -26099,9 +26220,10 @@ mod agent_listener_tests {
 
     /// Admits hobi's leaf at connect against the agent listener's admission, then serves it.
     fn connect(fx: &Fx) -> Result<Session, crate::authz::DenyCause> {
-        let agents = fx
-            .reloader
-            .agent_admission(Arc::new(crate::task::UnverifiedSigner));
+        let agents = fx.reloader.agent_admission(
+            Arc::new(crate::task::UnverifiedSigner),
+            crate::egress_socket::no_reach("no egress socket in this test"),
+        );
         let peer = hobi_leaf();
         crate::authz::admit(
             crate::handler::Admission::EnrolledAgent,
@@ -26475,9 +26597,10 @@ mod agent_listener_tests {
     ) -> impl FnOnce(LoopRun) -> std::pin::Pin<Box<dyn Future<Output = ServeOutcome> + Send>> {
         let authorizer = Arc::clone(&fx.reloader.authorizer);
         let emit = Arc::clone(emit);
-        let agents = fx
-            .reloader
-            .agent_admission(Arc::new(crate::task::UnverifiedSigner));
+        let agents = fx.reloader.agent_admission(
+            Arc::new(crate::task::UnverifiedSigner),
+            crate::egress_socket::no_reach("no egress socket in this test"),
+        );
         move |run: LoopRun| {
             Box::pin(accept_loop(
                 acceptor,

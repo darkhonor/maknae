@@ -501,7 +501,7 @@ pub fn stamp_task_bindings(
     use maknae_security::{AttrValue, GitBoundValues};
     let mut kinds = std::collections::BTreeSet::new();
     let mut git = Vec::new();
-    for binding in &cited.signed.task.bindings {
+    for binding in crate::reach::TaskBound::of(&cited.signed.task).bindings {
         match binding {
             maknae_proto::Binding::Git(b) => {
                 kinds.insert(maknae_config::ForgeKind::Git.as_str().to_owned());

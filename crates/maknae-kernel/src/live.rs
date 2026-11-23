@@ -15,6 +15,7 @@ type Served = (Arc<ConfigView>, Arc<Option<ProviderAuthority>>, u64);
 pub struct LiveConfig {
     served: RwLock<Arc<Served>>,
     forges: Arc<ForgeSet>,
+    reach: crate::reach::ReachSettings,
 }
 
 /// One accepted live baseline, installed whole in the composition's live turn.
@@ -48,23 +49,45 @@ impl LiveConfig {
         Self::with_forges(view, providers, forges)
     }
 
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn with_reach_for_test(mut self, user_prefix: &str, deadline_ms: u64) -> Self {
+        self.reach =
+            crate::reach::ReachSettings::of(&self.forges, Some(user_prefix.into()), deadline_ms);
+        self
+    }
+
     fn with_forges(
         view: ConfigView,
         providers: Option<ProviderAuthority>,
         forges: ForgeSet,
     ) -> Self {
+        let deadline_ms = maknae_config::EgressConfig::default().reach_deadline_ms;
         Self {
             served: RwLock::new(Arc::new((Arc::new(view), Arc::new(providers), 0))),
+            reach: crate::reach::ReachSettings::of(&forges, None, deadline_ms),
             forges: Arc::new(forges),
         }
     }
 
     pub fn of(v: &Validated) -> Self {
-        Self::with_forges(config_view_of(v), providers_of(v), v.boot.forges().clone())
+        let forges = v.boot.forges().clone();
+        let reach = crate::reach::ReachSettings::of(
+            &forges,
+            v.egress_bounds.as_ref().map(|b| b.user_prefix.clone()),
+            v.egress.reach_deadline_ms,
+        );
+        Self {
+            reach,
+            ..Self::with_forges(config_view_of(v), providers_of(v), forges)
+        }
     }
 
     pub(crate) fn forges(&self) -> &Arc<ForgeSet> {
         &self.forges
+    }
+
+    pub(crate) fn reach(&self) -> &crate::reach::ReachSettings {
+        &self.reach
     }
 
     fn served(&self) -> Arc<Served> {

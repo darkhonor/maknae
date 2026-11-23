@@ -167,6 +167,11 @@ impl SealedForgeToken {
     pub fn sealed(&self) -> &SealedKey {
         &self.sealed
     }
+
+    /// `(server, nonce, sealed)`, consuming the token.
+    pub fn into_parts(self) -> (String, String, SealedKey) {
+        (self.server, self.nonce, self.sealed)
+    }
 }
 
 impl fmt::Debug for SealedForgeToken {
@@ -208,6 +213,10 @@ impl ForgeTokens {
 
     pub fn as_slice(&self) -> &[SealedForgeToken] {
         &self.0
+    }
+
+    pub fn into_vec(self) -> Vec<SealedForgeToken> {
+        self.0
     }
 }
 
