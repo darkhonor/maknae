@@ -55,9 +55,9 @@ pub use board_store::{
     BoardFinding, BoardKey, HeldFor, LabelValue, PostLabels, ReadPlan, Report, Settings, Stored,
     BOARD, BOARD_RECORD_MAX, BOARD_RETENTION,
 };
-#[cfg(any(test, feature = "hermetic-test-seam"))]
-pub use board_verbs::FixedSwitches;
 pub use board_verbs::{BoardSwitches, SwitchesOff};
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub use board_verbs::{FixedSwitches, READ_ROUNDS};
 pub use boot::{boot, read_files, BootConfig};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use boot::{boot_as_owner, read_files_as_owner};

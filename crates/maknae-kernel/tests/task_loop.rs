@@ -6251,4 +6251,137 @@ mod board {
             "only the chunk holding the undecided post is decided"
         );
     }
+
+    /// The installed view, except that its `contained_among` call number k (from 0) contains
+    /// the uid `base + k`, for the first `drops` calls: one more post dies at each pass.
+    struct OneDeathPerPass {
+        inner: Arc<dyn maknae_kernel::EnrollmentView>,
+        calls: std::sync::atomic::AtomicUsize,
+        drops: usize,
+        base: u32,
+    }
+
+    impl maknae_kernel::EnrollmentView for OneDeathPerPass {
+        fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+            self.inner.agent_uid(id)
+        }
+        fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+            self.inner.agents()
+        }
+        fn is_enrolled(&self, uid: u32) -> bool {
+            self.inner.is_enrolled(uid)
+        }
+        fn contained(&self, uid: u32) -> bool {
+            self.inner.contained(uid)
+        }
+        fn contained_among(
+            &self,
+            uids: &std::collections::BTreeSet<u32>,
+        ) -> std::collections::BTreeSet<u32> {
+            let k = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match k < self.drops {
+                true => uids
+                    .iter()
+                    .copied()
+                    .filter(|uid| *uid == self.base + k as u32)
+                    .collect(),
+                false => self.inner.contained_among(uids),
+            }
+        }
+        fn unresolved(&self, uid: u32) -> bool {
+            self.inner.unresolved(uid)
+        }
+        fn load(&self) -> maknae_kernel::Load {
+            self.inner.load()
+        }
+    }
+
+    /// A read over a board on which one more post dies at each of the first `drops` passes.
+    async fn read_with_one_death_per_pass(tag: &str, drops: usize) -> (RespResult, World) {
+        const BASE: u32 = 40_000;
+        let mut w = board_world(tag);
+        let j = w.at_work("jin");
+        for n in 0..drops + maknae_proto::BOARD_READ_PAGE_POSTS + 2 {
+            w.agents
+                .board
+                .post(
+                    w.key(),
+                    (Author::Agent("hobi".into()), Some(BASE + n as u32)),
+                    None,
+                    PostLabels::default(),
+                    note(&format!("sentinel-695-n{n}")),
+                    &FixedEnrollment(Default::default()),
+                )
+                .unwrap();
+        }
+        w.agents.view = Arc::new(OneDeathPerPass {
+            inner: w.agents.view.clone(),
+            calls: 0.into(),
+            drops,
+            base: BASE,
+        });
+        let answer = w.board("jin", read(None), j).await.0;
+        (answer, w)
+    }
+
+    #[tokio::test]
+    async fn a_read_changed_under_it_at_every_pass_short_of_the_bound_still_answers() {
+        let drops = maknae_kernel::READ_ROUNDS - 1;
+        let (answer, _) = read_with_one_death_per_pass("board-rounds-under", drops).await;
+        let page = page_of(answer);
+        assert_eq!(page.posts.len(), maknae_proto::BOARD_READ_PAGE_POSTS);
+        assert_eq!(bodies(&page)[0], format!("sentinel-695-n{drops}"));
+    }
+
+    #[tokio::test]
+    async fn a_read_changed_under_it_at_every_pass_to_the_bound_is_stalled_and_sends_nothing() {
+        let drops = maknae_kernel::READ_ROUNDS;
+        let (answer, w) = read_with_one_death_per_pass("board-rounds-over", drops).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(w.cursor("jin"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_read_whose_page_batch_alone_confirmed_its_request_is_answered() {
+        let w = board_world("board-base-page-only");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-a", PostLabels::default());
+        let pdp = Arc::new(common::BaseOnlyInFirstBatch {
+            inner: Arc::clone(&w.pdp),
+            batches: 0.into(),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-a"]);
+    }
+
+    #[tokio::test]
+    async fn a_read_whose_reply_target_batch_did_not_confirm_its_request_is_still_answered() {
+        let w = board_world("board-base-target-unconfirmed");
+        let j = w.at_work("jin");
+        let t = w.stored("suga", "sentinel-695-target", PostLabels::default());
+        page_of(w.board("jin", read(None), j).await.0);
+        page_of(w.board("jin", read(Some(t)), j).await.0);
+        w.agents
+            .board
+            .post(
+                w.key(),
+                (Author::Agent("hobi".into()), Some(HOBI_UID)),
+                None,
+                PostLabels::default(),
+                reply("sentinel-695-reply", t),
+                &FixedEnrollment(Default::default()),
+            )
+            .unwrap();
+        let pdp = Arc::new(common::BaseOnlyInFirstBatch {
+            inner: Arc::clone(&w.pdp),
+            batches: 0.into(),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-reply"]);
+        assert_eq!(
+            page.posts[0].draft.in_reply_to, None,
+            "the target batch did not confirm, so the link is not kept"
+        );
+        assert_eq!(pdp.batches.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 }

@@ -508,11 +508,17 @@ pub(crate) struct Read {
     pub stalled: bool,
 }
 
+/// The most passes one read makes. A page's influences are its posts, the lookahead and the
+/// stop; each can be found dead once and as many posts found alive below them, plus the
+/// final pass. A read changed under it for longer is stalled.
+pub const READ_ROUNDS: usize = 2 * (BOARD_READ_PAGE_POSTS + 2) + 1;
+
 /// One read's walk over the posts in `(cursor, upper]`, decided in batches. Each pass walks
 /// to a fixpoint, confirms the read's own request if no batch did, then checks every post
 /// that shaped the reply in one memory-only `still_live`; a dead one is walked as absent and
 /// the pass repeats. That check is the last observation: the walk is finished right after
-/// it, with no await between. An absent post is never decided again, so the passes end.
+/// it, with no await between. An absent post is never decided again; after `READ_ROUNDS`
+/// passes the read is stalled and sends nothing.
 pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
     store: &BoardStore,
     key: BoardKey,
@@ -531,7 +537,7 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
     let mut walker = Walker::new(budget);
     let mut after = cursor;
     let mut base_confirmed = false;
-    loop {
+    for _ in 0..READ_ROUNDS {
         while walker.wants_more() {
             let raw: Vec<_> = store
                 .candidates(key, after, BOARD_READ_PAGE_POSTS)
@@ -610,6 +616,11 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
             };
         }
         after = walker.resume_after().unwrap_or(cursor);
+    }
+    Read {
+        walk: Walker::new(budget).finish(&BTreeSet::new()),
+        base_confirmed,
+        stalled: true,
     }
 }
 
@@ -1404,6 +1415,100 @@ mod tests {
             },
             "a batch decided on a view since replaced yields nothing"
         );
+    }
+
+    fn kept(walk: Walk) -> Vec<u64> {
+        walk.sent
+    }
+
+    #[test]
+    fn a_walk_wants_more_until_its_page_fills_or_it_stops() {
+        let page = BOARD_READ_PAGE_POSTS as u64;
+        let mut w = Walker::new(BIG);
+        assert!(w.wants_more());
+        assert!(w.take(&plain(1..=page), &[P; BOARD_READ_PAGE_POSTS]));
+        assert!(
+            w.wants_more(),
+            "a full page has not yet found its lookahead"
+        );
+        assert!(!w.take(&plain(page + 1..=page + 1), &[P]));
+        assert!(!w.wants_more(), "the lookahead ends the walk");
+        let mut stopped = Walker::new(BIG);
+        assert!(!stopped.take(&plain(1..=2), &[P, U]));
+        assert!(!stopped.wants_more(), "an undecided post ends the walk");
+    }
+
+    #[test]
+    fn a_dead_kept_post_is_made_absent_and_the_walk_closes_over_it() {
+        let mut w = Walker::new(BIG);
+        w.take(&plain(1..=3), &[P, P, P]);
+        let live: BTreeSet<u64> = [1, 3].into_iter().collect();
+        assert!(w.drop_dead(&live));
+        assert!(w.is_absent(2));
+        assert!(!w.is_absent(1) && !w.is_absent(3) && !w.is_absent(4));
+        assert!(!w.drop_dead(&live), "nothing left to drop");
+        assert_eq!(kept(w.finish(&BTreeSet::new())), [1, 3]);
+    }
+
+    #[test]
+    fn a_dead_stop_drops_the_undecided_verdicts_after_it_and_keeps_the_rest() {
+        let mut w = Walker::new(BIG);
+        w.take(&plain(1..=4), &[P, U, U, P]);
+        assert!(w.stalled());
+        let live: BTreeSet<u64> = [1, 3, 4].into_iter().collect();
+        assert!(w.drop_dead(&live));
+        assert_eq!(
+            w.resume_after(),
+            Some(1),
+            "the undecided post 3 is decided again"
+        );
+        assert!(w.wants_more());
+    }
+
+    #[test]
+    fn hi_is_the_last_post_decided_once_the_walk_ends_and_upper_before() {
+        let mut w = Walker::new(BIG);
+        w.take(&plain(5..=7), &[P, P, P]);
+        assert_eq!(w.hi(100), 100, "still walking: the whole range");
+        let mut ended = Walker::new(BIG);
+        ended.take(&plain(5..=7), &[P, U, P]);
+        assert_eq!(ended.hi(100), 7);
+    }
+
+    #[test]
+    fn missing_is_the_lowest_live_post_neither_decided_nor_absent() {
+        let mut w = Walker::new(BIG);
+        w.take(&plain(2..=4), &[P, P, P]);
+        let live: BTreeSet<u64> = [2, 4].into_iter().collect();
+        w.drop_dead(&live);
+        let range = |seqs: &[u64]| seqs.iter().copied().collect::<BTreeSet<u64>>();
+        assert_eq!(w.missing(&range(&[2, 3, 4])), None, "decided or absent");
+        assert_eq!(w.missing(&range(&[2, 3, 4, 6, 9])), Some(6));
+        assert_eq!(w.missing(&range(&[])), None);
+    }
+
+    #[test]
+    fn rewalk_from_forgets_that_post_and_every_later_one() {
+        let mut w = Walker::new(BIG);
+        w.take(&plain(1..=5), &[P, P, P, P, P]);
+        w.rewalk_from(3);
+        assert_eq!(w.resume_after(), Some(2));
+        assert_eq!(kept(w.finish(&BTreeSet::new())), [1, 2]);
+    }
+
+    #[test]
+    fn a_read_makes_at_most_sixty_nine_passes() {
+        assert_eq!(READ_ROUNDS, 69);
+    }
+
+    #[test]
+    fn a_post_audit_names_the_post_it_replies_to() {
+        let mut d = draft("sentinel-695-body", Some(id(9)));
+        d.kind = PostKind::Answer;
+        let audit = post_audit(&d, "d1");
+        assert_eq!(audit.in_reply_to, Some(id(9).to_string()));
+        assert_eq!(audit.kind.as_deref(), Some("answer"));
+        assert_eq!(post_audit(&draft("b", None), "d1").in_reply_to, None);
     }
 
     #[test]

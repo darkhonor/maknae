@@ -2107,6 +2107,72 @@ impl<P> CountsPostBatches<P> {
 
 board_double!(CountsPostBatches);
 
+/// Decides through `inner`, but refuses the verb's own request (the head of a batch) in every
+/// post-decision batch after the first, as a grant revoked once the first batch confirmed it.
+pub struct BaseOnlyInFirstBatch<P> {
+    pub inner: Arc<P>,
+    pub batches: std::sync::atomic::AtomicUsize,
+}
+
+impl<P: Authorizer> Authorizer for BaseOnlyInFirstBatch<P> {
+    fn decide(&self, req: &Request) -> Verdict {
+        self.inner.decide(req)
+    }
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        self.inner.decide_reporting_role(req)
+    }
+    fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+        self.inner.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+        let mut all = self.inner.decide_cited_all(reqs);
+        let n = self
+            .batches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n > 0 {
+            if let Some(base) = all.first_mut() {
+                base.verdict = Verdict::Deny {
+                    reason: "sentinel-695: the grant is gone".into(),
+                };
+            }
+        }
+        all
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
+}
+
+impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for BaseOnlyInFirstBatch<P> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.inner.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.inner.catalog_stamp(uid, forges)
+    }
+}
+
+impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for BaseOnlyInFirstBatch<P> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
+}
+
 /// Stamps another person's board on a board request before the composition decides it.
 pub struct OtherBoard<P> {
     pub inner: Arc<P>,
