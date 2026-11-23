@@ -73,7 +73,7 @@ impl std::str::FromStr for PostId {
             let (Some(hi), Some(lo)) = (nibble(*hi), nibble(*lo)) else {
                 return Err(PostIdTextError);
             };
-            *out = hi << 4 | lo;
+            *out = hi * 16 + lo;
         }
         Ok(PostId(id))
     }
@@ -638,6 +638,45 @@ mod tests {
         assert!(
             !err.contains("agents"),
             "a truncated ninth entry fails to read: {err}"
+        );
+    }
+
+    #[test]
+    fn an_attachment_debugs_as_its_sizes_and_media_only() {
+        let a = Attachment {
+            label: "log".into(),
+            media: Media::TextDiff,
+            content: text(ATT),
+        };
+        assert_eq!(
+            format!("{a:?}"),
+            "Attachment { label_bytes: 3, media: TextDiff, content: <16 bytes> }"
+        );
+    }
+
+    #[test]
+    fn a_post_id_decoder_says_what_it_expects() {
+        use serde::de::IntoDeserializer;
+        let err = PostId::deserialize(
+            IntoDeserializer::<serde::de::value::Error>::into_deserializer(7u32),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "invalid type: integer `7`, expected a 16-byte byte string"
+        );
+    }
+
+    #[test]
+    fn each_hex_pair_is_the_high_nibble_times_sixteen_plus_the_low() {
+        let id: PostId = "f00f1001ff00a55a0123456789abcdef".parse().unwrap();
+        assert_eq!(
+            id.0,
+            [
+                0xf0, 0x0f, 0x10, 0x01, 0xff, 0x00, 0xa5, 0x5a, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef
+            ]
         );
     }
 
