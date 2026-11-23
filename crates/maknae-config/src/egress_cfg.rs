@@ -50,6 +50,16 @@ pub const REACH_DEADLINE_MS_MAX: u64 = 300_000;
 pub const REACH_CONCURRENCY_MAX: usize = 4;
 /// The most one forge call made by the Egress Daemon may take, the bound on its exit revokes.
 pub const FORGE_CALL_TIMEOUT_MS: u64 = 20_000;
+/// The bounded stages a submission passes through around its reach: three decision bounds
+/// and five audit appends.
+pub const TASK_REACH_REPLY_STAGES: u64 = 8;
+
+/// The daemon's bound on a submission past its frame read, given its `reach_deadline_ms`.
+pub const fn task_reach_reply_ms(reach_deadline_ms: u64) -> u64 {
+    reach_deadline_ms
+        .saturating_add(FORGE_CALL_TIMEOUT_MS)
+        .saturating_add(TASK_REACH_REPLY_STAGES * crate::transport::BLOCKING_STAGE_TIMEOUT_MS)
+}
 const REACH_DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=REACH_DEADLINE_MS_MAX as i64;
 
 /// Where the deputy is, and how long one send may take.

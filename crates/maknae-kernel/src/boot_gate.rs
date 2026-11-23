@@ -170,6 +170,20 @@ fn key_prefix_gate(name: &str, prefix: &str) -> Result<(), EgressBoundsRefusal> 
         .map_err(|why| EgressBoundsRefusal::Refused(format!("{name} {why}")))
 }
 
+/// The key prefixes of `egress-bounds.yaml`, which reach reads without any provider.
+pub fn key_prefixes_boot_gate(b: &maknae_config::EgressBounds) -> Result<(), EgressBoundsRefusal> {
+    key_prefix_gate("user_prefix", &b.user_prefix)?;
+    if let Some(agent_prefix) = &b.agent_prefix {
+        key_prefix_gate("agent_prefix", agent_prefix)?;
+        if maknae_config::prefixes_overlap(agent_prefix, &b.user_prefix) {
+            return Err(EgressBoundsRefusal::Refused(
+                "agent_prefix overlaps user_prefix: neither may equal or contain the other".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn egress_bounds_boot_gate(
     providers: &maknae_config::ProviderSet,
     bounds: Option<&maknae_config::EgressBounds>,
@@ -184,15 +198,7 @@ pub fn egress_bounds_boot_gate(
             maknae_config::EGRESS_BOUNDS_FILE
         )));
     };
-    key_prefix_gate("user_prefix", &b.user_prefix)?;
-    if let Some(agent_prefix) = &b.agent_prefix {
-        key_prefix_gate("agent_prefix", agent_prefix)?;
-        if maknae_config::prefixes_overlap(agent_prefix, &b.user_prefix) {
-            return Err(EgressBoundsRefusal::Refused(
-                "agent_prefix overlaps user_prefix: neither may equal or contain the other".into(),
-            ));
-        }
-    }
+    key_prefixes_boot_gate(b)?;
     if let Err(e) = maknae_vault::validate_vault_addr(&b.vault_addr) {
         return Err(EgressBoundsRefusal::Refused(format!("vault.addr: {e}")));
     }

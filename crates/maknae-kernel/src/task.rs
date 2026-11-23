@@ -3046,8 +3046,8 @@ struct Decider<P> {
     breaker: Arc<tokio::sync::Mutex<crate::blocking_guard::BlockingBreaker>>,
 }
 
-/// The decision and the store's steps share two decision bounds, the handler drain's
-/// decision and blocking-step terms.
+/// The decision and the steps before reach share two decision bounds; the store's steps
+/// after reach get two more (`maknae_config::TASK_REACH_REPLY_STAGES`).
 #[allow(clippy::too_many_arguments)]
 async fn submit_under<P: Authorizer + Send + Sync + 'static>(
     pdp: Decider<P>,
@@ -3059,7 +3059,7 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
     (sub, tokens): (TaskSubmission, maknae_proto::ForgeTokens),
     emit: &impl AuditEmit,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
-    let deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
+    let mut deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
     let (uid, agent, tasker) = match &by {
         Submitter::User { uid, .. } => (*uid, None, Tasker::Uid(*uid)),
         Submitter::Agent { agent, uid, .. } => (
@@ -3089,7 +3089,7 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
         &by,
         (sub, tokens),
         (&mut attempt, emit),
-        deadline,
+        &mut deadline,
     )
     .await;
     let rec = match &decided {
@@ -3189,7 +3189,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
     by: &Submitter,
     (sub, tokens): (TaskSubmission, maknae_proto::ForgeTokens),
     (attempt, emit): (&mut Attempt, &impl AuditEmit),
-    deadline: tokio::time::Instant,
+    deadline: &mut tokio::time::Instant,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
     maknae_proto::validate_submission(&sub).map_err(|e| TaskRefusal::Schema(e.to_string()))?;
     let maknae_proto::Ask::Prompt { prompt } = &sub.ask;
@@ -3268,11 +3268,12 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         &mut bindings,
     )
     .await?;
+    *deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
     let first = store.next_id()?;
     let ticket = Arc::clone(&attempt.ticket);
     let (s, signer, view) = (Arc::clone(store), Arc::clone(signer), Arc::clone(view));
     let (tasker, parent) = (attempt.tasker.clone(), attempt.parent);
-    offload(attempt.uid, deadline, move || {
+    offload(attempt.uid, *deadline, move || {
         let mut once = Some(first);
         let mut draw = || match once.take() {
             Some(id) => Ok(id),
@@ -10258,6 +10259,7 @@ mod tests {
             forges: maknae_config::ForgeSet,
             deadline_ms: u64,
             permits: tokio::sync::Semaphore,
+            decide_timeout: Duration,
         }
 
         impl<'a> Reaching<'a> {
@@ -10268,6 +10270,7 @@ mod tests {
                     forges: github(),
                     deadline_ms: 5_000,
                     permits: tokio::sync::Semaphore::new(maknae_config::REACH_CONCURRENCY_MAX),
+                    decide_timeout: BOUND,
                 }
             }
 
@@ -10294,7 +10297,7 @@ mod tests {
                     user: Some(ACCOUNT),
                     peer_uri: None,
                     lane: maknae_security::Lane::Local,
-                    decide_timeout: BOUND,
+                    decide_timeout: self.decide_timeout,
                     text_max: 1 << 20,
                     forges: &self.forges,
                     reach: crate::reach::ReachCtx {
@@ -10897,6 +10900,37 @@ mod tests {
             assert_eq!(unreached(&got), "the reach deadline passed");
             assert_eq!((stub.frames(), store.len()), (1, 0));
             assert!(stub.seen.lock().unwrap()[0].deadline_ms() <= 300);
+        }
+
+        #[tokio::test]
+        async fn a_slow_reach_still_stores_the_task() {
+            let (_g, pdp) = reach_pdp("slow-reach");
+            let decide_timeout = Duration::from_millis(200);
+            let slow = decide_timeout * 3;
+            let stub = Stub::new(Box::new(move |req| {
+                let reply = observed(vec![seen(WRITE, None, true)]);
+                let delay = match req.side() {
+                    ReachSide::Tasker { .. } => slow,
+                    ReachSide::Agent { .. } => Duration::ZERO,
+                };
+                (delay, Some(EgressSocketReply::Reach(reply)))
+            }));
+            let store = Arc::new(TaskStore::new());
+            let reaching = Reaching {
+                decide_timeout,
+                ..Reaching::new(&pdp, &stub)
+            };
+            let task = reaching
+                .submit(
+                    &store,
+                    user(),
+                    (asking("hobi", vec![change(HOST, BASE, None)]), token(HOST)),
+                    &Recorder::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!((stub.frames(), store.len()), (2, 1));
+            assert_eq!(task.task.reach.len(), 1);
         }
 
         #[tokio::test]

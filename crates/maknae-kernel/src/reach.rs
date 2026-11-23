@@ -99,6 +99,10 @@ impl ReachSettings {
         self.deadline_ms
     }
 
+    pub fn observes_reach(&self) -> bool {
+        self.forges.iter().any(|(_, _, t)| t.observes_reach)
+    }
+
     fn forge(&self, server: &str) -> Option<(ForgeProvider, &ForgeTraits)> {
         self.forges
             .iter()
