@@ -41,6 +41,8 @@ pub enum ForgeError {
     /// The grant's token is well formed but the rest of the grant does not
     /// parse or is malformed: a live token may exist unless `revoked`.
     Malformed { revoked: bool },
+    /// GitHub answered a 2xx other than the documented 201: a live token may exist unless `revoked`.
+    Undocumented { revoked: bool },
 }
 
 pub struct MintedToken {
@@ -61,6 +63,7 @@ impl std::fmt::Debug for MintedToken {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantError {
     Status(u16),
+    Undocumented { status: u16, revoked: bool },
     Forge(ForgeError),
 }
 
@@ -127,6 +130,7 @@ impl GithubClient {
             .await
             .map_err(|e| match e {
                 GrantError::Status(code) => ForgeError::Status(forge_status(code)),
+                GrantError::Undocumented { revoked, .. } => ForgeError::Undocumented { revoked },
                 GrantError::Forge(e) => e,
             })
     }
@@ -163,9 +167,21 @@ impl GithubClient {
             .send()
             .await
             .map_err(|e| forge(send_failure(e)))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(GrantError::Status(status.as_u16()));
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(GrantError::Status(status));
+        }
+        if status != 201 {
+            let bearer = read_capped(resp)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Bearer>(&bytes).ok())
+                .filter(|bearer| is_installation_token(&bearer.token));
+            let revoked = match bearer {
+                Some(bearer) => self.revoked(api, &bearer.token).await,
+                None => false,
+            };
+            return Err(GrantError::Undocumented { status, revoked });
         }
         let bytes = read_capped(resp).await.map_err(forge)?;
         let bearer: Bearer =
@@ -220,11 +236,19 @@ impl GithubClient {
         })
     }
 
+    /// Spawned so a caller cancelled mid-revoke does not abandon it; the client's call timeout bounds it.
     async fn revoked(&self, api: &ApiBase, token: &str) -> bool {
-        matches!(
-            self.revoke(api, token).await,
-            Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone)
-        )
+        let github = self.clone();
+        let api = api.clone();
+        let token = Zeroizing::new(token.to_owned());
+        tokio::spawn(async move {
+            matches!(
+                github.revoke(&api, &token).await,
+                Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone)
+            )
+        })
+        .await
+        .unwrap_or(false)
     }
 
     pub async fn revoke(&self, api: &ApiBase, token: &str) -> Result<RevokeReply, ForgeError> {
@@ -1285,6 +1309,67 @@ mod tests {
             GrantError::Forge(ForgeError::Shape)
         );
         assert_eq!(h.await.unwrap().requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_mint_answered_by_a_2xx_other_than_201_is_revoked_and_refused() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        for (line, revoke, revoked) in [
+            ("200 OK", "204 No Content", true),
+            ("202 Accepted", "401 Unauthorized", true),
+            ("200 OK", "500 Internal Server Error", false),
+        ] {
+            let (base, h) = stub(vec![
+                reply(line, &grant("ghs_ok", r#"{"contents":"read"}"#, &["alpha"])),
+                reply(revoke, ""),
+            ])
+            .await;
+            let c = GithubClient::loopback_for_tests(&base);
+            assert_eq!(
+                c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+                ForgeError::Undocumented { revoked },
+                "{line}"
+            );
+            let seen = h.await.unwrap();
+            assert_eq!((seen.requests.len(), seen.extra), (2, 0), "{line}");
+            let head = head_of(&seen.requests[1]);
+            assert!(head.starts_with("delete /installation/token"), "{head}");
+            assert!(head.contains("authorization: bearer ghs_ok"), "{head}");
+        }
+
+        let (base, h) = stub(vec![
+            reply(
+                "200 OK",
+                &metadata_grant("ghs_meta", r#"{"metadata":"read"}"#),
+            ),
+            reply("204 No Content", ""),
+        ])
+        .await;
+        let c = GithubClient::loopback_for_tests(&base);
+        assert_eq!(
+            c.mint_metadata_read(&api(), 77, JWT).await.unwrap_err(),
+            GrantError::Undocumented {
+                status: 200,
+                revoked: true
+            }
+        );
+        assert_eq!(h.await.unwrap().requests.len(), 2);
+
+        let (base, h) = stub(vec![reply("204 No Content", "")]).await;
+        let c = GithubClient::loopback_for_tests(&base);
+        assert_eq!(
+            c.mint_metadata_read(&api(), 77, JWT).await.unwrap_err(),
+            GrantError::Undocumented {
+                status: 204,
+                revoked: false
+            }
+        );
+        let seen = h.await.unwrap();
+        assert_eq!((seen.requests.len(), seen.extra), (1, 0));
     }
 
     #[tokio::test]

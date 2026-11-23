@@ -194,6 +194,9 @@ async fn exchange<S: Signer, O: ForgeOpener>(
                                 GrantError::Status(code) => {
                                     (Some(empty(code)), ForgeError::Status(forge_status(code)))
                                 }
+                                GrantError::Undocumented { status, revoked } => {
+                                    (Some(empty(status)), ForgeError::Undocumented { revoked })
+                                }
                                 GrantError::Forge(e) => (None, e),
                             };
                             if live_token_may_remain(forge) {
@@ -212,9 +215,8 @@ async fn exchange<S: Signer, O: ForgeOpener>(
                 };
                 match sent {
                     Some(Ok(status)) => {
-                        held.token = None;
-                        if !matches!(status, 204 | 401) {
-                            unrevoked(server, &format!("HTTP {status}"), d.journal);
+                        if matches!(status, 204 | 401) {
+                            held.token = None;
                         }
                         Some(empty(status))
                     }
@@ -392,6 +394,7 @@ mod tests {
     struct Seen {
         requests: Vec<String>,
         extra: usize,
+        abandoned: usize,
     }
 
     impl Seen {
@@ -451,6 +454,7 @@ mod tests {
         let addr = l.local_addr().unwrap();
         let h = tokio::spawn(async move {
             let mut requests = Vec::new();
+            let mut abandoned = 0;
             for answer in script {
                 let Ok(accepted) = tokio::time::timeout(Duration::from_secs(5), l.accept()).await
                 else {
@@ -465,6 +469,13 @@ mod tests {
                     }
                     Answer::Late(wait, st, body) => {
                         tokio::time::sleep(wait).await;
+                        let mut probe = [0u8; 1];
+                        let hung_up = matches!(
+                            tokio::time::timeout(Duration::from_millis(50), s.read(&mut probe))
+                                .await,
+                            Ok(Ok(0) | Err(_))
+                        );
+                        abandoned += usize::from(hung_up);
                         let _ = s.write_all(http(st, &body).as_bytes()).await;
                     }
                     Answer::Close => drop(s),
@@ -475,7 +486,11 @@ mod tests {
                     .await
                     .is_ok(),
             );
-            Seen { requests, extra }
+            Seen {
+                requests,
+                extra,
+                abandoned,
+            }
         });
         (format!("http://{addr}"), h)
     }
@@ -892,10 +907,11 @@ mod tests {
         script.extend([
             status("500 Internal Server Error"),
             status("500 Internal Server Error"),
+            status("500 Internal Server Error"),
         ]);
         let (reply, seen) = rig.run(&agent(), script).await;
         assert_eq!(refused(&reply), Some(ReachRefusal::Upstream));
-        assert_eq!(seen.requests.len(), 4);
+        assert_eq!((seen.requests.len(), seen.extra), (5, 0));
         assert!(
             rig.journal
                 .iter()
@@ -903,6 +919,81 @@ mod tests {
             "{:?}",
             rig.journal
         );
+    }
+
+    #[tokio::test]
+    async fn a_revoke_answered_other_than_204_or_401_is_sent_again_at_exit() {
+        let mut rig = Rig::new();
+        let mut script = app_flow_until_listing();
+        script.extend([
+            ok(&listing(&["o/r"])),
+            status("503 Service Unavailable"),
+            Answer::Reply("204 No Content", String::new()),
+        ]);
+        let (reply, seen) = rig.run(&agent(), script).await;
+        assert_eq!(refused(&reply), Some(ReachRefusal::Upstream));
+        assert_eq!((seen.requests.len(), seen.extra), (5, 0));
+        assert_eq!(
+            seen.lines()[3..],
+            [
+                "DELETE /installation/token HTTP/1.1",
+                "DELETE /installation/token HTTP/1.1"
+            ]
+        );
+        assert_eq!(seen.bearer(4), INSTALLATION_TOKEN);
+        assert!(
+            rig.journal
+                .iter()
+                .all(|l| !l.contains("could not be revoked")),
+            "{:?}",
+            rig.journal
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_grant_s_revoke_outlives_the_deadline() {
+        let mut rig = Rig::new();
+        let malformed =
+            metadata_grant(r#"{"metadata":"read"}"#).replace("2026-11-23T01:00:00Z", "tomorrow");
+        let script = vec![
+            ok(INSTALLATION),
+            Answer::Reply("201 Created", malformed),
+            Answer::Late(Duration::from_millis(1500), "204 No Content", String::new()),
+        ];
+        let (reply, seen) = rig.run(&app_frame_with_deadline(600), script).await;
+        assert_eq!(refused(&reply), Some(ReachRefusal::Unanswered));
+        assert_eq!(
+            seen.lines().last().map(String::as_str),
+            Some("DELETE /installation/token HTTP/1.1")
+        );
+        assert_eq!(seen.bearer(2), INSTALLATION_TOKEN);
+        assert_eq!(seen.abandoned, 0, "the revoke waited for its answer");
+    }
+
+    #[tokio::test]
+    async fn only_a_201_mint_is_passed_to_the_observer_as_minted() {
+        for line in ["200 OK", "202 Accepted"] {
+            let mut rig = Rig::new();
+            let (reply, seen) = rig
+                .run(
+                    &agent(),
+                    vec![
+                        ok(INSTALLATION),
+                        Answer::Reply(line, metadata_grant(r#"{"metadata":"read"}"#)),
+                        Answer::Reply("204 No Content", String::new()),
+                    ],
+                )
+                .await;
+            assert_eq!(refused(&reply), Some(ReachRefusal::Upstream), "{line}");
+            assert_eq!((seen.requests.len(), seen.extra), (3, 0), "{line}");
+            assert_eq!(seen.lines()[2], "DELETE /installation/token HTTP/1.1");
+            assert_eq!(seen.bearer(2), INSTALLATION_TOKEN);
+            assert!(
+                rig.journal.iter().all(|l| !l.contains("may exist")),
+                "{line}: {:?}",
+                rig.journal
+            );
+        }
     }
 
     #[test]
@@ -1014,6 +1105,7 @@ mod tests {
         let mut rig = Rig::new();
         let mut script = app_flow_until_listing();
         script.extend([
+            status("500 Internal Server Error"),
             status("500 Internal Server Error"),
             status("500 Internal Server Error"),
         ]);
