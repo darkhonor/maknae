@@ -1,9 +1,10 @@
 #![cfg(test)]
 
-use crate::serve::{serve_one, MintFrames, ServeError, FRAME_IO_TIMEOUT};
+use crate::serve::{serve_one, MintFrames, ReachFrames, ServeError, FRAME_IO_TIMEOUT};
 use maknae_config::EgressBounds;
 use maknae_proto::{
-    ContentBlock, EgressFrame, EgressFrameReply, EgressFrameRequest, EgressSocketReply, SecretText,
+    ContentBlock, EgressFrame, EgressFrameReply, EgressFrameRequest, EgressSocketReply, ReachReply,
+    ReachRequest, SecretText,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -78,10 +79,48 @@ pub(crate) fn canned_reply() -> EgressSocketReply {
     }))
 }
 
+/// Answers every reach frame with one reply, counting the frames it was handed.
+pub(crate) struct CannedReach {
+    reply: fn() -> ReachReply,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CannedReach {
+    pub(crate) fn answering(reply: fn() -> ReachReply) -> Self {
+        Self {
+            reply,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ReachFrames for CannedReach {
+    fn reach(&self, _req: &ReachRequest) -> ReachReply {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (self.reply)()
+    }
+}
+
+pub(crate) fn no_reach() -> CannedReach {
+    CannedReach::answering(|| ReachReply::Refused(maknae_proto::ReachRefusal::Request))
+}
+
 /// One connection carrying `frame`, served with `minting` and the canned provider.
 pub(crate) fn served_frame(
     frame: &EgressFrame,
     minting: Option<&dyn MintFrames>,
+) -> (Result<(), ServeError>, Option<EgressSocketReply>) {
+    served_frame_reaching(frame, minting, &no_reach())
+}
+
+pub(crate) fn served_frame_reaching(
+    frame: &EgressFrame,
+    minting: Option<&dyn MintFrames>,
+    reach: &dyn ReachFrames,
 ) -> (Result<(), ServeError>, Option<EgressSocketReply>) {
     let (a, b) = UnixStream::pair().unwrap();
     let bytes = prefixed(&encoded_frame(frame));
@@ -100,6 +139,7 @@ pub(crate) fn served_frame(
         FRAME_IO_TIMEOUT,
         &AtomicBool::new(false),
         minting,
+        reach,
         canned,
     );
     let back = h.join().unwrap();
@@ -109,4 +149,46 @@ pub(crate) fn served_frame(
         maknae_proto::decode_egress_socket_reply(&back[4..]).unwrap()
     });
     (out, reply)
+}
+
+pub(crate) fn tasker_reach(server: &str) -> ReachRequest {
+    ReachRequest::new(
+        server.into(),
+        "github".into(),
+        20_000,
+        maknae_proto::ReachSide::Tasker {
+            tasker: "alice".into(),
+            expected_path: format!("maknae/users/alice/forges/{server}"),
+            key_field: "token".into(),
+            nonce: "0123456789abcdef0123456789abcdef".into(),
+            sealed: maknae_proto::SealedKey::new(vec![7; 200]).unwrap(),
+        },
+        vec![repo_ask("o/r")],
+    )
+    .unwrap()
+}
+
+pub(crate) fn agent_reach(server: &str, app: &str) -> ReachRequest {
+    ReachRequest::new(
+        server.into(),
+        "github".into(),
+        20_000,
+        maknae_proto::ReachSide::Agent {
+            agent: "coder".into(),
+            credentials: vec![maknae_proto::CredentialRef {
+                kind: "github-app-installation".into(),
+                name: app.into(),
+            }],
+        },
+        vec![repo_ask("o/r")],
+    )
+    .unwrap()
+}
+
+fn repo_ask(base: &str) -> maknae_proto::RepoAsk {
+    maknae_proto::RepoAsk {
+        base: base.into(),
+        change: None,
+        head: None,
+    }
 }

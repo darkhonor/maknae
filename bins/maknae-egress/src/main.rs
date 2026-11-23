@@ -27,6 +27,7 @@ mod capacity;
 mod listen;
 mod minting;
 mod opener;
+mod reach;
 mod serve;
 #[cfg(test)]
 mod test_frames;
@@ -142,7 +143,17 @@ fn main() {
         &api,
         &minting::FileReads,
     );
-    let mint_frames = minting::frames(mint_state, key, egress_dir, rt.handle().clone());
+    let bounds = Arc::new(bounds);
+    let frames = minting::frames(
+        mint_state,
+        minting::Wiring {
+            own_key: key,
+            opener: Arc::clone(&opener),
+            bounds: Arc::clone(&bounds),
+            egress_dir,
+            rt: rt.handle().clone(),
+        },
+    );
 
     let listener = match listen::from_init_system() {
         Ok(Some(l)) => l,
@@ -178,9 +189,10 @@ fn main() {
         listener,
         capacity::Slots::new(capacity::deputy_capacity()),
         expected_uid,
-        Arc::new(bounds),
+        bounds,
         serve::FRAME_IO_TIMEOUT,
-        mint_frames,
+        frames.mint,
+        frames.reach,
         Arc::new(fulfil),
     );
 }

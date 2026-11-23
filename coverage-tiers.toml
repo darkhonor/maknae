@@ -618,8 +618,12 @@ path = "bins/maknae-egress/src/listen.rs"
 why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
 
 [[t3]]
+path = "bins/maknae-egress/src/reach.rs"
+why = "#168: glue from a reach frame to maknae-deputy's reach driver: the loaded minting.yaml, mint's signer when the minter is up, the shared GitHub client, the forge opener and one process-wide ReachGate, driven with block_on on the connection's thread. It decides nothing: admission, the exchange, the revokes and the journal line are T1/T2 in maknae-deputy's reach/admit.rs, reach/open.rs and reach/drive.rs. Its tests drive a tasker frame end to end against a loopback forge and pin the no-minter and no-client answers"
+
+[[t3]]
 path = "bins/maknae-egress/src/opener.rs"
-why = "#153: opens the turn's sealed key with the Egress Daemon's seal key and unwraps the wrapping token through maknae-vault; the Vault leg has no stub by design. Its tests open real seals, assert the expectation it hands Vault and the refusal mapping through the Unwrapper seam, and reach a dead Vault through the real VaultApi; the decisions are T1 in maknae-deputy's unseal.rs, maknae-seal and maknae-vault's wrap.rs"
+why = "#153, #168: opens the turn's sealed key (and a tasker's sealed forge token) with the Egress Daemon's seal key and unwraps the wrapping token through maknae-vault; the Vault leg has no stub by design. Its tests open real seals, assert the expectation it hands Vault and the refusal mapping through the Unwrapper seam, and reach a dead Vault through the real VaultApi; the decisions are T1 in maknae-deputy's unseal.rs, maknae-seal and maknae-vault's wrap.rs"
 
 [[t3]]
 path = "crates/maknae-llm/src/client.rs"
