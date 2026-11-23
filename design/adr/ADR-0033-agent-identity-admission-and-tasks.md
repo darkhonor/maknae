@@ -218,4 +218,4 @@ Dated as-built amendment; rides [#168](https://github.com/darkhonor/maknae/issue
 
 3. **`RECORD_MAX` grows** by `TASK_ADDENDUM_MARGIN` + `TASK_SIGNATURE_MAX_BYTES` (4096 + 32 KiB), to `3 × PROMPT_MAX_CEILING + TASK_ENVELOPE_MARGIN + 2 × TASK_SIGNATURE_MAX_BYTES + TASK_ADDENDUM_MARGIN + 4096` (`crates/maknae-kernel/src/task_store.rs`).
 
-4. **Residual: an addendum is not re-signed when the signing leaf rotates.** Decision 8's rotation re-signs the task at hand-out; nothing re-signs an addendum. If the leaf that signed an addendum expires while the task works, the agent refuses the addendum, keeps the task's own bindings, and journals the refusal.
+4. **An addendum is re-signed with its task.** Decision 8's rotation re-signs the task at hand-out; the same hand-out re-signs a stale addendum alongside it, in one write. An Agent Daemon that refuses an addendum lowers its heartbeat cursor to the beat that handed it, so the kernel hands it again, and skips the follow-ups it has already delivered; an addendum it accepts clears that floor. Until a re-signed copy arrives, the agent keeps the task's own bindings and journals each refusal.
