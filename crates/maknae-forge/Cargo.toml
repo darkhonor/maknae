@@ -1,0 +1,16 @@
+[package]
+name = "maknae-forge"
+publish.workspace = true
+description = "The forge seam: per-forge recognizers, reach observers and credential-kind dispatch. Pure, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+maknae-config = { path = "../maknae-config" }
+maknae-proto = { path = "../maknae-proto" }

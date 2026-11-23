@@ -347,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn forges_come_from_the_verified_catalog() {
-        use maknae_agent::hints::Provider;
+        use maknae_config::ForgeProvider;
         let reply = catalog(&[
             ("hub", "github.com", "github"),
             ("lab", "gitlab.example:8443", "gitlab"),
@@ -363,11 +363,11 @@ mod tests {
             [
                 Forge {
                     host: "github.com".into(),
-                    provider: Provider::Github,
+                    provider: ForgeProvider::Github,
                 },
                 Forge {
                     host: "gitlab.example:8443".into(),
-                    provider: Provider::Gitlab,
+                    provider: ForgeProvider::Gitlab,
                 },
             ]
         );

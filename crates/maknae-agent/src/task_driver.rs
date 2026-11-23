@@ -2034,7 +2034,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sub_task_is_submitted_with_only_the_bindings_its_parent_holds() {
-        use crate::hints::Provider;
+        use maknae_forge::ForgeProvider;
         use maknae_proto::{GitBinding, GitRef};
         let held = |base: &str, change| {
             Binding::Git(GitBinding {
@@ -2046,7 +2046,7 @@ mod tests {
         };
         let github = Some(vec![Forge {
             host: "github.com".into(),
-            provider: Provider::Github,
+            provider: ForgeProvider::Github,
         }]);
         let asked = r#"{"agent":"jin","prompt":"see https://github.com/o/held/pull/3 and https://github.com/o/other/pull/4 and https://github.com/o/repo"}"#;
         let want = vec![BindingRequest::Git(GitRef {

@@ -26,6 +26,7 @@ workspace = true
 # graph carries `process` too. What holds unconditionally is that no code here
 # calls any of it.
 maknae-proto = { path = "../maknae-proto" }
+maknae-forge = { path = "../maknae-forge" }
 serde = { workspace = true, features = ["derive"] }
 # Tool ARGUMENTS arrive as a JSON string the model produced; parsing them is the
 # one place this crate reads untrusted structure. Already in the workspace graph

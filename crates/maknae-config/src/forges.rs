@@ -27,6 +27,14 @@ pub enum ForgeProvider {
 }
 
 impl ForgeProvider {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "github" => Some(ForgeProvider::Github),
+            "gitlab" => Some(ForgeProvider::Gitlab),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             ForgeProvider::Github => "github",
@@ -135,11 +143,8 @@ fn forge_entry(i: usize, item: &Value) -> Result<AuthorizedForge, ConfigError> {
             maknae_proto::SERVER_MAX_BYTES
         )));
     }
-    let provider = match required_str(m, &at, "provider")? {
-        "github" => ForgeProvider::Github,
-        "gitlab" => ForgeProvider::Gitlab,
-        _ => return Err(err(format!("{at}.provider must be github or gitlab"))),
-    };
+    let provider = ForgeProvider::parse(required_str(m, &at, "provider")?)
+        .ok_or_else(|| err(format!("{at}.provider must be github or gitlab")))?;
     Ok(AuthorizedForge {
         name: name.to_string(),
         kind,
@@ -183,6 +188,18 @@ mod tests {
 
     fn entry(name: &str, kind: &str, host: &str, provider: &str) -> String {
         format!("- name: '{name}'\n  kind: '{kind}'\n  host: '{host}'\n  provider: '{provider}'\n")
+    }
+
+    #[test]
+    fn a_provider_name_parses_only_as_written() {
+        assert_eq!(ForgeProvider::parse("github"), Some(ForgeProvider::Github));
+        assert_eq!(ForgeProvider::parse("gitlab"), Some(ForgeProvider::Gitlab));
+        for other in ["GitHub", "bitbucket", ""] {
+            assert_eq!(ForgeProvider::parse(other), None, "{other}");
+        }
+        for p in [ForgeProvider::Github, ForgeProvider::Gitlab] {
+            assert_eq!(ForgeProvider::parse(p.as_str()), Some(p));
+        }
     }
 
     #[test]

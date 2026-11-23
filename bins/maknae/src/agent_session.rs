@@ -1083,7 +1083,7 @@ mod tests {
     fn github() -> Forge {
         Forge {
             host: "github.com".into(),
-            provider: maknae_agent::hints::Provider::Github,
+            provider: maknae_config::ForgeProvider::Github,
         }
     }
 

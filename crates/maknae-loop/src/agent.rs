@@ -796,7 +796,7 @@ mod tests {
     #[tokio::test]
     async fn the_planes_forges_are_the_held_catalogs() {
         use crate::plane::fake::FakeKernel;
-        use maknae_agent::hints::Provider;
+        use maknae_config::ForgeProvider;
         use maknae_graph::catalog::{self, CatalogForge, CatalogInput};
         use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply};
         let bytes = catalog::encode(&CatalogInput {
@@ -841,7 +841,7 @@ mod tests {
             plane.forges(),
             Some(vec![Forge {
                 host: "github.com".into(),
-                provider: Provider::Github,
+                provider: ForgeProvider::Github,
             }])
         );
     }

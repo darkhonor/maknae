@@ -422,6 +422,10 @@ files = [
   "crates/maknae-agent/src/tasking/text.rs",
   # #168: the tasker's binding candidates. A look-alike host read as a forge binds a task to a repository the tasker never named; a remote's userinfo copied out of .git/config puts a token in the echo.
   "crates/maknae-agent/src/hints.rs",
+  # #168: the forge seam. A wrong arm dispatches a credential kind to another forge's minter or reach observer, or reads a reserved page as a repository.
+  "crates/maknae-forge/src/lib.rs",
+  "crates/maknae-forge/src/github.rs",
+  "crates/maknae-forge/src/gitlab.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
@@ -465,7 +469,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-crypto", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-crypto", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state", "maknae-forge"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).

@@ -1099,6 +1099,7 @@ name = "maknae-agent"
 version = "0.0.0"
 dependencies = [
  "maknae-config",
+ "maknae-forge",
  "maknae-proto",
  "serde",
  "serde_json",
@@ -1186,6 +1187,7 @@ dependencies = [
  "base64 0.23.1",
  "maknae-config",
  "maknae-crypto",
+ "maknae-forge",
  "maknae-io",
  "maknae-llm",
  "maknae-proto",
@@ -1214,6 +1216,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "maknae-forge"
+version = "0.0.0"
+dependencies = [
+ "maknae-config",
+ "maknae-proto",
 ]
 
 [[package]]
