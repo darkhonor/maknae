@@ -43,8 +43,8 @@ MANIFEST=ci/gates/config-disclosure-manifest.txt
 # extractor cannot see all change a number a human must edit deliberately.
 SURFACE=(
   "crates/maknae-config/src/transport.rs|TransportConfig|transport|6|config"
-  # The `egress` section (#240): the deputy's socket and the provider deadline.
-  "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
+  # The `egress` section (#240): the deputy's socket, the provider deadline and the reach deadline (#168).
+  "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|3|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|2|config"
   "crates/maknae-config/src/deployment.rs|Deployment|deployment|2|config"

@@ -47,6 +47,7 @@ disclose	forges[].host	the forge's link server, host and optional port; a link s
 disclose	forges[].provider	which link forms the client recognizes for this forge: github or gitlab (#674)
 disclose	egress.socket_path	the socket the daemon connects to for egress (#240)
 disclose	egress.deadline_ms	the outer bound on one provider call — deployment shape (#240)
+disclose	egress.reach_deadline_ms	the bound on one reach exchange — deployment shape (#168)
 disclose	transport.socket_path	the socket the daemon is listening on
 disclose	transport.agent_socket_path	the socket the daemon accepts agents on
 disclose	transport.max_connections	transport shape

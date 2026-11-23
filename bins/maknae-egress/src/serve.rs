@@ -1688,6 +1688,7 @@ mod tests {
                 let app = GithubAppConfig {
                     app_id: 5834363,
                     installation_id: 77,
+                    host: "github.example".into(),
                     api: ApiBase::parse("https://api.github.example").unwrap(),
                     transit_mount: "transit".into(),
                     transit_key: "deploy-app".into(),

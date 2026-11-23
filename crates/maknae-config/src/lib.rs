@@ -127,11 +127,12 @@ pub use document::{
 };
 pub use egress_cfg::{
     egress_from_section, EgressConfig, CALL_TIMEOUT_MS_MAX, DEADLINE_MARGIN_MS,
-    EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION, MACOS_EGRESS_SOCKET_PATH, VAULT_CALLS_MS,
+    EGRESS_DEADLINE_MS_MAX, EGRESS_SECTION, MACOS_EGRESS_SOCKET_PATH, REACH_DEADLINE_MS_MAX,
+    VAULT_CALLS_MS,
 };
 pub use egress_mint::{
-    load_mint_role_id, load_minting, minting_from_document, ApiBase, GithubAppConfig, MintVault,
-    MintingConfig, MINTING_FILE, MINT_ROLE_ID_FILE,
+    load_mint_role_id, load_minting, minting_from_document, ApiBase, ForgeApi, GithubAppConfig,
+    MintVault, MintingConfig, MintingFile, MAX_APIS, MINTING_FILE, MINT_ROLE_ID_FILE,
 };
 pub use error::ConfigError;
 pub use forges::{

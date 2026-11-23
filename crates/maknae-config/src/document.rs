@@ -350,6 +350,7 @@ const DISCLOSABLE: &[&str] = &[
     // long one send may take — deployment shape, never a credential.
     "egress.socket_path",
     "egress.deadline_ms",
+    "egress.reach_deadline_ms",
     "transport.socket_path",
     "transport.agent_socket_path",
     "transport.max_connections",
@@ -827,6 +828,10 @@ pub fn effective_view(
                 Some(r.egress.socket_path.display().to_string()),
             ),
             ("deadline_ms", Some(r.egress.deadline_ms.to_string())),
+            (
+                "reach_deadline_ms",
+                Some(r.egress.reach_deadline_ms.to_string()),
+            ),
         ],
     );
     v
@@ -1234,6 +1239,54 @@ mod tests {
         // merge passed every other test and the disclosure gate.
         assert_eq!(v["egress"]["socket_path"], "/run/maknae-egress/egress.sock");
         assert_eq!(v["egress"]["deadline_ms"], "280000");
+    }
+
+    #[test]
+    fn reach_deadline_is_range_checked_and_disclosed() {
+        let reach = |n: i64| {
+            crate::egress_from_section(Some(&Value::Map(vec![(
+                "reach_deadline_ms".into(),
+                Value::Int(n),
+            )])))
+        };
+        assert_eq!(crate::EgressConfig::default().reach_deadline_ms, 20_000);
+        assert_eq!(crate::REACH_DEADLINE_MS_MAX, 300_000);
+        for ok in [1_000, 300_000] {
+            assert_eq!(reach(ok).unwrap().reach_deadline_ms as i64, ok);
+        }
+        for bad in [999, 300_001, 0, -1] {
+            let e = reach(bad).unwrap_err().to_string();
+            assert!(e.contains("egress.reach_deadline_ms"), "{bad}: {e}");
+        }
+        let e = crate::egress_from_section(Some(&Value::Map(vec![(
+            "reach_deadline_ms".into(),
+            Value::Str("20s".into()),
+        )])))
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("egress.reach_deadline_ms"), "{e}");
+
+        let audit = crate::AuditConfig {
+            readers: Vec::new(),
+            jsonl_path: "/var/log/maknae/audit.jsonl".into(),
+            siem: None,
+            au3_1: serde_json::json!({}),
+        };
+        let egress = reach(45_000).unwrap();
+        let v = effective_view(
+            &Document::new(Vec::new(), Vec::new(), Vec::new()),
+            &ResolvedSettings {
+                transport: &crate::TransportConfig::default(),
+                audit: &audit,
+                vault_approle_mount: None,
+                vault_pki_int_mount: None,
+                vault_user_auth_type: None,
+                vault_user_auth_mount: None,
+                vault_plane_key: None,
+                egress: &egress,
+            },
+        );
+        assert_eq!(v["egress"]["reach_deadline_ms"], "45000");
     }
 
     #[test]

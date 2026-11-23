@@ -1,8 +1,8 @@
 //! The `egress` section (#240) — where `maknaed` finds the deputy, and the
 //! outer bound on a provider call.
 //!
-//! Two keys, both optional, both defaulted to what the packaging ships:
-//! `socket_path` (the deputy's activation socket, `maknae-egress.socket`) and
+//! Three keys, all optional, all defaulted to what the packaging ships:
+//! `socket_path` (the deputy's activation socket, `maknae-egress.socket`),
 //! `deadline_ms`, the kernel's outer bound on one `session.prompt` send — the
 //! egress-specific deadline #172 handed to #240 by name. Before this section
 //! the outer bound was `transport.read_timeout_ms`, five seconds by default,
@@ -11,8 +11,8 @@
 //! provider call) by a margin, because at "equal" the kernel expires first
 //! and records delivery-unknown for a call the deputy would have answered;
 //! an operator with a slower provider raises the deputy's bound and this one
-//! with it. Fail-closed like `transport`: a present field is
-//! range-checked, a present-but-non-map section is refused, an unknown key is
+//! with it. `reach_deadline_ms` bounds one reach exchange (#168). Fail-closed
+//! like `transport`: a present field is range-checked, a present-but-non-map section is refused, an unknown key is
 //! refused by name.
 
 use crate::{ConfigError, Value};
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 pub const EGRESS_SECTION: &str = "egress";
 
 /// #210: the keys this section's parser reads — the closed vocabulary.
-pub(crate) const EGRESS_KEYS: [&str; 2] = ["socket_path", "deadline_ms"];
+pub(crate) const EGRESS_KEYS: [&str; 3] = ["socket_path", "deadline_ms", "reach_deadline_ms"];
 
 const DEFAULT_SOCKET_PATH: &str = "/run/maknae-egress/egress.sock";
 /// The macOS deputy's socket path.
@@ -42,12 +42,18 @@ const DEFAULT_DEADLINE_MS: u64 = 280_000;
 /// holds `TimeoutStopSec=` / `ExitTimeOut` to the chain at this ceiling).
 pub const EGRESS_DEADLINE_MS_MAX: u64 = 600_000;
 const DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=EGRESS_DEADLINE_MS_MAX as i64;
+const DEFAULT_REACH_DEADLINE_MS: u64 = 20_000;
+/// The ceiling on `reach_deadline_ms`, which the kernel's drain bound, the client's
+/// reply wait and the units' stop timeouts are derived from.
+pub const REACH_DEADLINE_MS_MAX: u64 = 300_000;
+const REACH_DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=REACH_DEADLINE_MS_MAX as i64;
 
 /// Where the deputy is, and how long one send may take.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EgressConfig {
     pub socket_path: PathBuf,
     pub deadline_ms: u64,
+    pub reach_deadline_ms: u64,
 }
 
 impl Default for EgressConfig {
@@ -55,6 +61,7 @@ impl Default for EgressConfig {
         EgressConfig {
             socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
             deadline_ms: DEFAULT_DEADLINE_MS,
+            reach_deadline_ms: DEFAULT_REACH_DEADLINE_MS,
         }
     }
 }
@@ -92,25 +99,38 @@ pub fn egress_from_section(v: Option<&Value>) -> Result<EgressConfig, ConfigErro
         Some(Value::Str(_)) => return Err(err("socket_path", "must not be empty")),
         Some(_) => return Err(err("socket_path", "must be a string")),
     };
-    let deadline_ms = match get(section, "deadline_ms") {
-        None => DEFAULT_DEADLINE_MS,
-        Some(Value::Int(n)) if DEADLINE_MS_RANGE.contains(n) => *n as u64,
-        Some(Value::Int(n)) => {
-            return Err(err(
-                "deadline_ms",
-                format!(
-                    "{n} out of range {}..={}",
-                    DEADLINE_MS_RANGE.start(),
-                    DEADLINE_MS_RANGE.end()
-                ),
-            ))
-        }
-        Some(_) => return Err(err("deadline_ms", "must be an integer")),
-    };
     Ok(EgressConfig {
         socket_path,
-        deadline_ms,
+        deadline_ms: bounded_ms(
+            section,
+            "deadline_ms",
+            DEFAULT_DEADLINE_MS,
+            DEADLINE_MS_RANGE,
+        )?,
+        reach_deadline_ms: bounded_ms(
+            section,
+            "reach_deadline_ms",
+            DEFAULT_REACH_DEADLINE_MS,
+            REACH_DEADLINE_MS_RANGE,
+        )?,
     })
+}
+
+fn bounded_ms(
+    section: &Value,
+    key: &str,
+    default: u64,
+    range: std::ops::RangeInclusive<i64>,
+) -> Result<u64, ConfigError> {
+    match get(section, key) {
+        None => Ok(default),
+        Some(Value::Int(n)) if range.contains(n) => Ok(*n as u64),
+        Some(Value::Int(n)) => Err(err(
+            key,
+            format!("{n} out of range {}..={}", range.start(), range.end()),
+        )),
+        Some(_) => Err(err(key, "must be an integer")),
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +236,7 @@ mod tests {
         let v = Value::Map(vec![
             ("socket_path".into(), Value::Null),
             ("deadline_ms".into(), Value::Null),
+            ("reach_deadline_ms".into(), Value::Null),
         ]);
         let e = egress_from_section(Some(&v));
         assert!(

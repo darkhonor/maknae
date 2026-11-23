@@ -3,7 +3,8 @@
 
 use crate::serve::MintFrames;
 use maknae_config::{
-    AgentId, ConfigError, GithubAppConfig, MintingConfig, MINTING_FILE, MINT_ROLE_ID_FILE,
+    AgentId, ConfigError, GithubAppConfig, MintingConfig, MintingFile, MINTING_FILE,
+    MINT_ROLE_ID_FILE,
 };
 use maknae_deputy::mint::admit::AdmittedMint;
 use maknae_deputy::mint::github::GithubClient;
@@ -103,7 +104,7 @@ pub(crate) struct FileReads;
 
 impl MintingReads for FileReads {
     fn minting(&self, path: &Path) -> Result<Option<MintingConfig>, ConfigError> {
-        maknae_config::load_minting(path)
+        maknae_config::load_minting(path).map(|f| f.and_then(MintingFile::into_minting))
     }
 
     fn role_id(&self, path: &Path) -> Result<String, ConfigError> {
@@ -334,6 +335,7 @@ mod tests {
                 GithubAppConfig {
                     app_id: 5834363,
                     installation_id: 77,
+                    host: "github.example".into(),
                     api: ApiBase::parse("https://api.github.example").unwrap(),
                     transit_mount: "transit".into(),
                     transit_key: "deploy-app".into(),
