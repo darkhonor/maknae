@@ -13,6 +13,16 @@ pub trait EnrollmentView: Send + Sync {
     fn is_enrolled(&self, uid: u32) -> bool;
     /// Whether the person or agent `uid` is contained.
     fn contained(&self, uid: u32) -> bool;
+    /// The uids among `uids` that are contained, every answer from one load.
+    fn contained_among(
+        &self,
+        uids: &std::collections::BTreeSet<u32>,
+    ) -> std::collections::BTreeSet<u32> {
+        uids.iter()
+            .copied()
+            .filter(|uid| self.contained(*uid))
+            .collect()
+    }
     /// Whether `uid`'s lack of a role may only be a name the load could not resolve.
     fn unresolved(&self, uid: u32) -> bool;
     /// The load these answers are read from.
@@ -96,6 +106,18 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
     fn contained(&self, uid: u32) -> bool {
         let baseline = self.0.baseline();
         baseline.snapshot().contained(uid, baseline.principal().uid)
+    }
+
+    fn contained_among(
+        &self,
+        uids: &std::collections::BTreeSet<u32>,
+    ) -> std::collections::BTreeSet<u32> {
+        let baseline = self.0.baseline();
+        let (snapshot, principal) = (baseline.snapshot(), baseline.principal().uid);
+        uids.iter()
+            .copied()
+            .filter(|uid| snapshot.contained(*uid, principal))
+            .collect()
     }
 
     fn unresolved(&self, uid: u32) -> bool {

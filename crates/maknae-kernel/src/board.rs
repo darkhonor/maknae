@@ -174,20 +174,31 @@ enum Step {
     Refused,
 }
 
-/// The holds `view` calls for on a post by `author_uid` on `key`'s board.
+/// The holds `contained` (one answer from the view) calls for on a post by `author_uid`
+/// on `key`'s board.
 fn contained_for(
     key: BoardKey,
     author_uid: Option<u32>,
-    view: &dyn EnrollmentView,
+    contained: &BTreeSet<u32>,
 ) -> BTreeSet<HeldFor> {
     let mut why = BTreeSet::new();
-    if author_uid.is_some_and(|uid| view.contained(uid)) {
+    if author_uid.is_some_and(|uid| contained.contains(&uid)) {
         why.insert(HeldFor::Author);
     }
-    if view.contained(key.0) {
+    if contained.contains(&key.0) {
         why.insert(HeldFor::Person);
     }
     why
+}
+
+/// The uids among `key`'s person and `authors` that `view` contains, from one answer.
+fn contained_on(
+    view: &dyn EnrollmentView,
+    key: BoardKey,
+    authors: impl Iterator<Item = Option<u32>>,
+) -> BTreeSet<u32> {
+    let uids: BTreeSet<u32> = std::iter::once(key.0).chain(authors.flatten()).collect();
+    view.contained_among(&uids)
 }
 
 fn expired(s: &Stored, now: i64) -> bool {
@@ -322,8 +333,9 @@ impl BoardStore {
     }
 
     pub fn get(&self, key: BoardKey, id: PostId) -> Option<Arc<Stored>> {
+        let held = self.held();
         let now = self.now();
-        self.held().live(key, id, now).cloned()
+        held.live(key, id, now).cloned()
     }
 
     /// Those of `seqs` that are on the board, not withheld, and whose author and person
@@ -334,15 +346,18 @@ impl BoardStore {
         seqs: &[u64],
         view: &dyn EnrollmentView,
     ) -> BTreeSet<u64> {
-        let now = self.now();
         let held = self.held();
+        let now = self.now();
         let Some(board) = held.boards.get(&key) else {
             return BTreeSet::new();
         };
-        seqs.iter()
-            .filter_map(|seq| board.posts.get(seq))
+        let posts: Vec<&Arc<Stored>> = seqs.iter().filter_map(|seq| board.posts.get(seq)).collect();
+        let contained = contained_on(view, key, posts.iter().map(|s| s.author_uid));
+        posts
+            .into_iter()
             .filter(|s| {
-                !held.withheld(key, s, now) && contained_for(key, s.author_uid, view).is_empty()
+                !held.withheld(key, s, now)
+                    && contained_for(key, s.author_uid, &contained).is_empty()
             })
             .map(|s| s.seq)
             .collect()
@@ -356,8 +371,8 @@ impl BoardStore {
         reader: &AgentId,
         seen_through: Option<PostId>,
     ) -> ReadPlan {
-        let now = self.now();
         let held = self.held();
+        let now = self.now();
         let board = held.boards.get(&key);
         let cursor = board
             .and_then(|b| b.cursors.get(reader))
@@ -457,8 +472,8 @@ impl BoardStore {
     }
 
     pub fn candidates(&self, key: BoardKey, after: u64, limit: usize) -> Vec<Arc<Stored>> {
-        let now = self.now();
         let held = self.held();
+        let now = self.now();
         let Some(board) = held.boards.get(&key) else {
             return Vec::new();
         };
@@ -479,14 +494,21 @@ impl BoardStore {
     pub(crate) fn mark(&self, view: &dyn EnrollmentView) {
         let mut guard = self.held();
         let held = &mut *guard;
-        let mut seen: BTreeMap<u32, bool> = BTreeMap::new();
-        let mut contained = |uid: u32| *seen.entry(uid).or_insert_with(|| view.contained(uid));
+        let uids: BTreeSet<u32> = held
+            .boards
+            .iter()
+            .flat_map(|(key, b)| {
+                std::iter::once(key.0).chain(b.posts.values().filter_map(|s| s.author_uid))
+            })
+            .collect();
+        let among = view.contained_among(&uids);
+        let contained = |uid: u32| among.contains(&uid);
         let mut marked = BTreeMap::new();
         for (key, board) in &held.boards {
             let person = contained(key.0);
             for (seq, s) in &board.posts {
                 let mut why = BTreeSet::new();
-                if s.author_uid.is_some_and(&mut contained) && !s.held.contains(&HeldFor::Author) {
+                if s.author_uid.is_some_and(contained) && !s.held.contains(&HeldFor::Author) {
                     why.insert(HeldFor::Author);
                 }
                 if person && !s.held.contains(&HeldFor::Person) {
@@ -537,8 +559,8 @@ impl BoardStore {
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
     /// retention that are neither held nor marked, then noted cursors.
     pub(crate) fn due(&self, limit: usize) -> Vec<BoardDue> {
-        let now = self.now();
         let guard = self.held();
+        let now = self.now();
         let held = &*guard;
         let holds = held
             .marked
@@ -618,9 +640,9 @@ impl BoardStore {
         view: &dyn EnrollmentView,
     ) -> Step {
         let item = Item::Post(key, seq, BoardDueFor::Expire);
-        let now = self.now();
         let name = {
             let mut held = self.held();
+            let now = self.now();
             let found = held
                 .at(key, seq, id)
                 .filter(|s| !held.held_back(key, s) && expired(s, now))
@@ -629,7 +651,8 @@ impl BoardStore {
                 held.said.remove(&item);
                 return Step::Skipped;
             };
-            let why = contained_for(key, author_uid, view);
+            let contained = contained_on(view, key, std::iter::once(author_uid));
+            let why = contained_for(key, author_uid, &contained);
             if !why.is_empty() {
                 held.said.remove(&item);
                 held.marked.entry((key, seq)).or_default().extend(why);
@@ -919,7 +942,8 @@ impl BoardStore {
                 board.posts.insert(seq, Arc::clone(&stored));
                 // A containment installed before this insert is in `view`; one installed after
                 // it is `mark`'s, which finds this post.
-                let why = contained_for(key, author_uid, view);
+                let contained = contained_on(view, key, std::iter::once(author_uid));
+                let why = contained_for(key, author_uid, &contained);
                 if !why.is_empty() {
                     held.marked.insert((key, seq), why);
                 }
@@ -946,8 +970,8 @@ impl BoardStore {
         in_reply_to: Option<PostId>,
         view: &dyn EnrollmentView,
     ) -> Result<(), BoardRefusal> {
-        let now = self.now();
         let held = self.held();
+        let now = self.now();
         if let Some(board) = held.boards.get(&key) {
             let live = board
                 .posts
@@ -967,8 +991,10 @@ impl BoardStore {
             }
         }
         let gone = |target| {
-            held.live(key, target, now)
-                .is_none_or(|s| !contained_for(key, s.author_uid, view).is_empty())
+            held.live(key, target, now).is_none_or(|s| {
+                let contained = contained_on(view, key, std::iter::once(s.author_uid));
+                !contained_for(key, s.author_uid, &contained).is_empty()
+            })
         };
         match in_reply_to {
             Some(target) if gone(target) => Err(BoardRefusal::NoSuchPost),
@@ -2513,6 +2539,68 @@ mod tests {
         fn unresolved(&self, _: u32) -> bool {
             false
         }
+    }
+
+    /// Answers each `contained` call from the next snapshot in turn, as if one were installed
+    /// between every two calls; `contained_among` answers from one.
+    struct Snapshots(Mutex<std::collections::VecDeque<BTreeSet<u32>>>);
+
+    impl Snapshots {
+        fn next(&self) -> BTreeSet<u32> {
+            let mut all = self.0.lock().unwrap();
+            let now = all.front().cloned().unwrap_or_default();
+            if all.len() > 1 {
+                all.pop_front();
+            }
+            now
+        }
+    }
+
+    impl EnrollmentView for Snapshots {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.next().contains(&uid)
+        }
+
+        fn contained_among(&self, uids: &BTreeSet<u32>) -> BTreeSet<u32> {
+            self.next().intersection(uids).copied().collect()
+        }
+
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+    }
+
+    fn installs(snapshots: &[&[u32]]) -> Snapshots {
+        Snapshots(Mutex::new(
+            snapshots
+                .iter()
+                .map(|s| s.iter().copied().collect())
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn a_check_over_several_posts_reads_one_snapshot() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let a = by(&store, BOB, hobi(), Some(2001), "sentinel-695-a");
+        let c = by(&store, BOB, jin(), Some(2002), "sentinel-695-c");
+        let live = store.still_live(BOB, &[a.seq, c.seq], &installs(&[&[], &[], &[2001, 2002]]));
+        assert_ne!(live.len(), 1, "a mix of two snapshots: {live:?}");
+        store.mark(&installs(&[&[], &[], &[2001, 2002]]));
+        assert_ne!(store.due(10).len(), 1, "a mix of two snapshots");
     }
 
     #[test]
