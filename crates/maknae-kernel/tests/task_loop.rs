@@ -5834,4 +5834,105 @@ mod board {
             )
         );
     }
+
+    /// Reads as jin while suga's labelled post is undecided and suga is contained inside the
+    /// batch that decides it.
+    async fn read_while_the_stop_is_contained(w: &World, j: TaskId) -> RespResult {
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let undecided = Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: undecided,
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone, [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: Some(LABEL),
+        });
+        w.board_as(&pdp, "jin", read(None), j).await.0
+    }
+
+    #[tokio::test]
+    async fn an_undecided_stop_contained_mid_decision_answers_as_an_empty_board() {
+        let w = board_world("board-stop-alone");
+        let j = w.at_work("jin");
+        w.stored("suga", "sentinel-695-stop", labelled());
+        let page = page_of(read_while_the_stop_is_contained(&w, j).await);
+        assert!(page.posts.is_empty());
+        assert!(!page.more, "the page of an empty board");
+        assert_eq!(w.cursor("jin"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_undecided_stop_contained_mid_decision_lets_the_walk_go_past_it() {
+        let w = board_world("board-stop-between");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-p1", PostLabels::default());
+        w.stored("suga", "sentinel-695-stop", labelled());
+        w.stored("hobi", "sentinel-695-p2", PostLabels::default());
+        let page = page_of(read_while_the_stop_is_contained(&w, j).await);
+        assert_eq!(bodies(&page), ["sentinel-695-p1", "sentinel-695-p2"]);
+        assert!(!page.more);
+    }
+
+    #[tokio::test]
+    async fn a_reply_target_contained_while_it_is_decided_loses_the_link() {
+        let w = board_world("board-target-contained");
+        let j = w.at_work("jin");
+        let t = w.stored("suga", "sentinel-695-target", labelled());
+        page_of(w.board("jin", read(None), j).await.0);
+        page_of(w.board("jin", read(Some(t)), j).await.0);
+        assert_eq!(w.cursor("jin"), w.seq(t));
+        w.agents
+            .board
+            .post(
+                w.key(),
+                (Author::Agent("hobi".into()), Some(HOBI_UID)),
+                None,
+                PostLabels::default(),
+                reply("sentinel-695-reply", t),
+                &*w.agents.view,
+            )
+            .unwrap();
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone, [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: Some(LABEL),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-reply"]);
+        assert_eq!(
+            page.posts[0].draft.in_reply_to, None,
+            "as for a target that is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_stop_is_never_decided_again_and_the_read_ends() {
+        let w = board_world("board-stop-dead-ends");
+        let j = w.at_work("jin");
+        w.stored("suga", "sentinel-695-stop", labelled());
+        w.stored("hobi", "sentinel-695-undecided-too", labelled());
+        let bound = format!("  user: [\"{}\", \"nobody\"]\n", w.user);
+        w.rebind(&format!("{bound}  adversary: [{{uid: {SUGA_UID}}}]\n"))();
+        let pdp = Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let read = tokio::time::timeout(
+            Duration::from_secs(20),
+            w.board_as(&pdp, "jin", read(None), j),
+        )
+        .await
+        .expect("the read ends");
+        assert_eq!(
+            refused(&read.0),
+            Some(BoardDefect::TryAgain),
+            "the live undecided post after it stops the read, as on a board without the dead one"
+        );
+    }
 }

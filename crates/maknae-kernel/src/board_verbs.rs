@@ -244,18 +244,29 @@ pub(crate) struct Walk {
     pub sent: Vec<u64>,
 }
 
-/// One read's page, built post by post in board order.
+/// One read's page, built post by post in board order, from every post decided so far.
+/// A post found no longer live is made absent and the page is built again without it.
 pub(crate) struct Walker {
     budget: usize,
+    decided: Vec<(Arc<Stored>, PostVerdict)>,
+    absent: BTreeSet<u64>,
+    at: Walked,
+}
+
+/// The walk over `decided`, as far as it went.
+#[derive(Default)]
+struct Walked {
     used: usize,
     kept: Vec<Arc<Stored>>,
     withheld: u32,
     skip_to: Option<u64>,
+    /// The leading run of denied posts `skip_to` passes.
+    run: Vec<u64>,
     permitted: bool,
-    more: bool,
     /// The permitted post the page had no room for: what `more` stands on.
     lookahead: Option<Arc<Stored>>,
-    stalled: bool,
+    /// The undecided post the walk stopped at.
+    stop: Option<Arc<Stored>>,
 }
 
 /// A post's encoded size, counted without a buffer.
@@ -271,95 +282,133 @@ impl Walker {
     pub(crate) fn new(budget: usize) -> Self {
         Walker {
             budget,
-            used: 0,
-            kept: Vec::new(),
-            withheld: 0,
-            skip_to: None,
-            permitted: false,
-            more: false,
-            lookahead: None,
-            stalled: false,
+            decided: Vec::new(),
+            absent: BTreeSet::new(),
+            at: Walked::default(),
         }
     }
 
     /// `false` once the walk has ended: a post undecided, or a permitted post left out.
     pub(crate) fn take(&mut self, chunk: &[Arc<Stored>], verdicts: &[PostVerdict]) -> bool {
-        for (i, stored) in chunk.iter().enumerate() {
-            match verdicts.get(i).copied().unwrap_or(PostVerdict::Undecided) {
-                PostVerdict::Undecided => {
-                    self.stalled = true;
-                    return false;
-                }
-                PostVerdict::Deny => {
-                    self.withheld = self.withheld.saturating_add(1);
-                    if !self.permitted {
-                        self.skip_to = Some(stored.seq);
-                    }
-                }
-                PostVerdict::Permit => {
-                    let size = post_size(stored);
-                    let fits = self.kept.len() < BOARD_READ_PAGE_POSTS
-                        && self.used.saturating_add(size) <= self.budget;
-                    if !self.kept.is_empty() && !fits {
-                        self.more = true;
-                        self.lookahead = Some(Arc::clone(stored));
-                        return false;
-                    }
-                    self.permitted = true;
-                    self.used = self.used.saturating_add(size);
-                    self.kept.push(Arc::clone(stored));
+        let from = self.decided.len();
+        self.decided.extend(chunk.iter().enumerate().map(|(i, s)| {
+            let verdict = verdicts.get(i).copied().unwrap_or(PostVerdict::Undecided);
+            (Arc::clone(s), verdict)
+        }));
+        self.walk_from(from)
+    }
+
+    fn ended(&self) -> bool {
+        self.at.stop.is_some() || self.at.lookahead.is_some()
+    }
+
+    /// Walks `decided[from..]` until the walk ends; `false` once it has.
+    fn walk_from(&mut self, from: usize) -> bool {
+        for i in from..self.decided.len() {
+            if self.ended() {
+                break;
+            }
+            let (stored, verdict) = (Arc::clone(&self.decided[i].0), self.decided[i].1);
+            self.step(stored, verdict);
+        }
+        !self.ended()
+    }
+
+    fn step(&mut self, stored: Arc<Stored>, verdict: PostVerdict) {
+        let at = &mut self.at;
+        match verdict {
+            PostVerdict::Undecided => at.stop = Some(stored),
+            PostVerdict::Deny => {
+                at.withheld = at.withheld.saturating_add(1);
+                if !at.permitted {
+                    at.skip_to = Some(stored.seq);
+                    at.run.push(stored.seq);
                 }
             }
+            PostVerdict::Permit => {
+                let size = post_size(&stored);
+                let fits = at.kept.len() < BOARD_READ_PAGE_POSTS
+                    && at.used.saturating_add(size) <= self.budget;
+                if !at.kept.is_empty() && !fits {
+                    at.lookahead = Some(stored);
+                    return;
+                }
+                at.permitted = true;
+                at.used = at.used.saturating_add(size);
+                at.kept.push(stored);
+            }
         }
-        true
     }
 
     pub(crate) fn stalled(&self) -> bool {
-        self.stalled
+        self.at.stop.is_some()
     }
 
-    /// The sequences the final check must find live: the kept posts and the lookahead.
-    pub(crate) fn checked_seqs(&self) -> Vec<u64> {
-        self.kept
+    pub(crate) fn wants_more(&self) -> bool {
+        !self.ended()
+    }
+
+    pub(crate) fn is_absent(&self, seq: u64) -> bool {
+        self.absent.contains(&seq)
+    }
+
+    /// Every post whose presence shaped the reply so far: each kept post, the lookahead,
+    /// the undecided stop, and the leading denied run.
+    pub(crate) fn influences(&self) -> Vec<u64> {
+        let at = &self.at;
+        at.kept
             .iter()
-            .chain(&self.lookahead)
+            .chain(&at.lookahead)
+            .chain(&at.stop)
             .map(|s| s.seq)
+            .chain(at.run.iter().copied())
             .collect()
     }
 
-    /// Drops each kept post `live` does not hold. When that frees room, or the lookahead is
-    /// no longer live, the walk is not what it would be without those posts: returns the
-    /// sequence to resume walking after, with the lookahead taken again if it is live.
-    pub(crate) fn revalidate(&mut self, live: &BTreeSet<u64>) -> Option<u64> {
-        let before = self.kept.len();
-        self.kept.retain(|s| live.contains(&s.seq));
-        let dropped = self.kept.len() != before;
-        if dropped {
-            self.used = self
-                .kept
+    /// Makes absent each kept post, lookahead or stop that `live` does not hold, and walks
+    /// again without them; a dead stop also drops the undecided verdicts after it, to be
+    /// decided again. `true` when anything changed. The leading denied run is not consulted:
+    /// a post denied to the reader is withheld either way.
+    pub(crate) fn drop_dead(&mut self, live: &BTreeSet<u64>) -> bool {
+        let at = &self.at;
+        let dead: Vec<u64> = at
+            .kept
+            .iter()
+            .chain(&at.lookahead)
+            .chain(&at.stop)
+            .map(|s| s.seq)
+            .filter(|seq| !live.contains(seq))
+            .collect();
+        if dead.is_empty() {
+            return false;
+        }
+        let stop_dead = at.stop.as_ref().is_some_and(|s| !live.contains(&s.seq));
+        self.absent.extend(dead);
+        let absent = &self.absent;
+        self.decided.retain(|(s, _)| !absent.contains(&s.seq));
+        if stop_dead {
+            if let Some(i) = self
+                .decided
                 .iter()
-                .map(|s| post_size(s))
-                .fold(0, usize::saturating_add);
+                .position(|(_, v)| *v == PostVerdict::Undecided)
+            {
+                self.decided.truncate(i);
+            }
         }
-        if self.stalled {
-            return None;
-        }
-        let lookahead = self.lookahead.take()?;
-        if !dropped && live.contains(&lookahead.seq) {
-            self.lookahead = Some(lookahead);
-            return None;
-        }
-        self.more = false;
-        let at = lookahead.seq;
-        if live.contains(&at) && !self.take(&[lookahead], &[PostVerdict::Permit]) {
-            return None;
-        }
-        Some(at)
+        self.at = Walked::default();
+        self.walk_from(0);
+        true
+    }
+
+    /// The sequence to fetch candidates after: the last post decided and still walked.
+    pub(crate) fn resume_after(&self) -> Option<u64> {
+        self.decided.last().map(|(s, _)| s.seq)
     }
 
     pub(crate) fn reply_targets(&self) -> Vec<PostId> {
-        let kept: BTreeSet<PostId> = self.kept.iter().map(|s| s.post.id).collect();
+        let kept: BTreeSet<PostId> = self.at.kept.iter().map(|s| s.post.id).collect();
         let targets: BTreeSet<PostId> = self
+            .at
             .kept
             .iter()
             .filter_map(|s| s.post.draft.in_reply_to)
@@ -369,8 +418,10 @@ impl Walker {
     }
 
     pub(crate) fn finish(self, visible_targets: &BTreeSet<PostId>) -> Walk {
-        let kept: BTreeSet<PostId> = self.kept.iter().map(|s| s.post.id).collect();
-        let posts = self
+        let at = self.at;
+        let more = at.lookahead.is_some() || at.stop.is_some();
+        let kept: BTreeSet<PostId> = at.kept.iter().map(|s| s.post.id).collect();
+        let posts = at
             .kept
             .iter()
             .map(|s| {
@@ -386,17 +437,127 @@ impl Walker {
             })
             .collect();
         Walk {
-            page: BoardPage {
-                posts,
-                more: self.more || self.stalled,
-            },
-            first_seq: self.kept.first().map(|s| s.seq),
-            last_seq: self.kept.last().map(|s| s.seq),
-            returned: u32::try_from(self.kept.len()).unwrap_or(u32::MAX),
-            withheld: self.withheld,
-            skip_to: self.skip_to,
-            sent: self.kept.iter().map(|s| s.seq).collect(),
+            page: BoardPage { posts, more },
+            first_seq: at.kept.first().map(|s| s.seq),
+            last_seq: at.kept.last().map(|s| s.seq),
+            returned: u32::try_from(at.kept.len()).unwrap_or(u32::MAX),
+            withheld: at.withheld,
+            skip_to: at.skip_to,
+            sent: at.kept.iter().map(|s| s.seq).collect(),
         }
+    }
+}
+
+/// How a verb's posts are decided: its own request, on one view of the policy.
+pub(crate) struct Deciding<'a, P> {
+    pub authorizer: &'a Arc<P>,
+    pub live: &'a Arc<crate::live::LiveConfig>,
+    pub generation: u64,
+    pub timeout: Duration,
+    pub request: &'a maknae_security::Request,
+}
+
+impl<P> Clone for Deciding<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for Deciding<'_, P> {}
+
+/// What the read walked: the page, the reply targets still visible, and whether any batch
+/// of posts was decided.
+pub(crate) struct Read {
+    pub walker: Walker,
+    pub visible: BTreeSet<PostId>,
+    pub decided_any: bool,
+}
+
+/// One read's walk over the posts in `(cursor, upper]`, decided in batches, with every post
+/// that shaped the reply revalidated together before it is returned. A post found no longer
+/// live is walked as absent and the reply is built again, until a check finds every
+/// influence live. Each pass makes at least one post absent, so it ends.
+pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
+    store: &BoardStore,
+    key: BoardKey,
+    view: &dyn crate::enrollment::EnrollmentView,
+    d: &Deciding<'_, P>,
+    (cursor, upper): (u64, u64),
+    budget: usize,
+) -> Read {
+    let Deciding {
+        authorizer,
+        live,
+        generation,
+        timeout,
+        request,
+    } = *d;
+    let mut walker = Walker::new(budget);
+    let mut after = cursor;
+    let mut decided_any = false;
+    loop {
+        while walker.wants_more() {
+            let raw: Vec<_> = store
+                .candidates(key, after, BOARD_READ_PAGE_POSTS)
+                .into_iter()
+                .take_while(|s| s.seq <= upper)
+                .collect();
+            let Some(last) = raw.last() else {
+                break;
+            };
+            after = last.seq;
+            let chunk: Vec<_> = raw
+                .into_iter()
+                .filter(|s| !walker.is_absent(s.seq))
+                .collect();
+            if chunk.is_empty() {
+                continue;
+            }
+            let asked = chunk
+                .iter()
+                .map(|s| post_request(request, key, s))
+                .collect();
+            let verdicts =
+                decide_posts(authorizer, live, generation, timeout, request, asked).await;
+            decided_any = true;
+            walker.take(&chunk, &verdicts);
+        }
+        let mut targets = Vec::new();
+        if !walker.stalled() {
+            let asked: Vec<_> = walker
+                .reply_targets()
+                .into_iter()
+                .filter_map(|id| store.get(key, id))
+                .collect();
+            let requests = asked
+                .iter()
+                .map(|t| post_request(request, key, t))
+                .collect();
+            let verdicts =
+                decide_posts(authorizer, live, generation, timeout, request, requests).await;
+            targets = asked
+                .into_iter()
+                .zip(verdicts)
+                .filter(|(_, v)| *v == PostVerdict::Permit)
+                .map(|(t, _)| t)
+                .collect();
+        }
+        let mut influences = walker.influences();
+        influences.extend(targets.iter().map(|t| t.seq));
+        let still = store.still_live(key, &influences, view);
+        let visible = targets
+            .iter()
+            .filter(|t| still.contains(&t.seq))
+            .map(|t| t.post.id)
+            .collect();
+        if !walker.drop_dead(&still) {
+            return Read {
+                walker,
+                visible,
+                decided_any,
+            };
+        }
+        after = walker.resume_after().unwrap_or(cursor);
     }
 }
 
