@@ -955,6 +955,42 @@ mod tests {
     }
 
     #[test]
+    fn a_record_with_an_addendum_decodes_with_it() {
+        use maknae_proto::{
+            AgentReach, BindingReach, GitBinding, GitReach, SideReach, TaskAddendum, TaskerBasis,
+        };
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "added");
+        let mut rec = store.record(&id).unwrap();
+        let addendum = TaskAddendum::new(
+            id,
+            1,
+            vec![maknae_proto::Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base: "o/r".into(),
+                head: None,
+                change: None,
+            })],
+            vec![BindingReach::Git(GitReach {
+                tasker: SideReach::EMPTY,
+                basis: TaskerBasis::Token,
+                agent: AgentReach::AtHandOut,
+                why: None,
+            })],
+        )
+        .unwrap();
+        let signed = SignedAddendum {
+            addendum,
+            signature: rec.signed.signature.clone(),
+        };
+        rec.addendum = Some(Arc::new(signed.clone()));
+        b.put(&name_of(&id), &encode(&rec).unwrap());
+        let loaded = read_record(&b, &name_of(&id)).unwrap();
+        assert_eq!(loaded.addendum.as_deref(), Some(&signed));
+    }
+
+    #[test]
     fn fifo_order_survives_reopen() {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b);

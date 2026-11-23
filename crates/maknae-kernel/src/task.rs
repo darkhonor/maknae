@@ -2248,12 +2248,7 @@ impl TaskStore {
             if rec.state != TaskState::Working || held.holding.contains_key(id) {
                 return Err(TaskRefusal::NotWorking);
             }
-            let total = rec.follow_ups.iter().map(|f| f.0.len()).sum::<usize>();
-            if rec.follow_ups.len() >= MAX_FOLLOW_UPS_PER_TASK
-                || total.saturating_add(text.0.len()) > total_max
-            {
-                return Err(TaskRefusal::FollowUps);
-            }
+            room_for(&rec.follow_ups, &text, total_max)?;
             rec.clone()
         };
         let mut next = prior.clone();
@@ -2301,12 +2296,7 @@ impl TaskStore {
     ) -> Result<TaskView, TaskRefusal> {
         let _w = self.writing();
         let prior = self.addendum_basis(view, id, by)?;
-        let total = prior.follow_ups.iter().map(|f| f.0.len()).sum::<usize>();
-        if prior.follow_ups.len() >= MAX_FOLLOW_UPS_PER_TASK
-            || total.saturating_add(text.0.len()) > total_max
-        {
-            return Err(TaskRefusal::FollowUps);
-        }
+        room_for(&prior.follow_ups, &text, total_max)?;
         let bound = prior.bound();
         addable(&bound, &added)?;
         let (mut bindings, mut so_far) = match &prior.addendum {
@@ -2754,6 +2744,14 @@ fn store(e: StoreError) -> TaskRefusal {
     TaskRefusal::Store(e.to_string())
 }
 
+fn room_for(prior: &[SecretText], text: &SecretText, total_max: usize) -> Result<(), TaskRefusal> {
+    let total = prior.iter().map(|f| f.0.len()).sum::<usize>();
+    match prior.len() >= MAX_FOLLOW_UPS_PER_TASK || total.saturating_add(text.0.len()) > total_max {
+        true => Err(TaskRefusal::FollowUps),
+        false => Ok(()),
+    }
+}
+
 fn tasker_record<'h>(held: &'h Held, id: &TaskId, by: Reach<'_>) -> Option<&'h TaskRecord> {
     held.live(id).filter(|r| by.reaches(held, r))
 }
@@ -3086,6 +3084,10 @@ impl Attempt {
 
 /// Runs one store step off the async worker, under the submitting uid's slot, the shared
 /// capacity and `deadline`.
+fn store_deadline(decide_timeout: std::time::Duration) -> tokio::time::Instant {
+    tokio::time::Instant::now() + decide_timeout * 2
+}
+
 pub(crate) async fn offload<T, F>(
     uid: u32,
     deadline: tokio::time::Instant,
@@ -3242,7 +3244,7 @@ async fn submit_under<P: Authorizer + Send + Sync + 'static>(
     (sub, tokens): (TaskSubmission, maknae_proto::ForgeTokens),
     emit: &impl AuditEmit,
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
-    let mut deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
+    let mut deadline = store_deadline(ctx.decide_timeout);
     let (uid, agent, tasker) = match &by {
         Submitter::User { uid, .. } => (*uid, None, Tasker::Uid(*uid)),
         Submitter::Agent { agent, uid, .. } => (
@@ -3447,7 +3449,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
         &mut bindings,
     )
     .await?;
-    *deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
+    *deadline = store_deadline(ctx.decide_timeout);
     let first = store.next_id()?;
     let ticket = Arc::clone(&attempt.ticket);
     let (s, signer, view) = (Arc::clone(store), Arc::clone(signer), Arc::clone(view));
@@ -3579,21 +3581,26 @@ fn within_bounds(
     bindings: &[&Binding],
     reach: &[&maknae_proto::BindingReach],
 ) -> Result<(), TaskRefusal> {
-    let len = maknae_proto::bindings_encoded_len(bindings);
-    if len > maknae_proto::TASK_BINDINGS_MAX_BYTES {
-        return Err(TaskRefusal::Unbound(format!(
+    encoded_within(bindings, maknae_proto::TASK_BINDINGS_MAX_BYTES).map_err(|len| {
+        TaskRefusal::Unbound(format!(
             "the task's own and added bindings encode to {len} bytes, more than {}",
             maknae_proto::TASK_BINDINGS_MAX_BYTES
-        )));
-    }
-    let len = maknae_proto::bindings_encoded_len(reach);
-    if len > maknae_proto::TASK_REACH_MAX_BYTES {
-        return Err(TaskRefusal::Unreached(format!(
+        ))
+    })?;
+    encoded_within(reach, maknae_proto::TASK_REACH_MAX_BYTES).map_err(|len| {
+        TaskRefusal::Unreached(format!(
             "the task's own and added reach encode to {len} bytes, more than {}",
             maknae_proto::TASK_REACH_MAX_BYTES
-        )));
+        ))
+    })
+}
+
+fn encoded_within<T: serde::Serialize>(items: &[T], max: usize) -> Result<(), usize> {
+    let len = maknae_proto::bindings_encoded_len(items);
+    match len > max {
+        true => Err(len),
+        false => Ok(()),
     }
-    Ok(())
 }
 
 pub(crate) struct AddCtx<'a> {
@@ -3672,7 +3679,7 @@ pub(crate) async fn add_task_bindings<E: AuditEmit>(
             "an addendum adds at least one binding".into(),
         ));
     }
-    let deadline = tokio::time::Instant::now() + ctx.decide_timeout * 2;
+    let deadline = store_deadline(ctx.decide_timeout);
     let (s, signer, max) = (Arc::clone(store), Arc::clone(signer), ctx.text_max);
     let (sealed, sealed_reach) = (added.clone(), reach.clone());
     let enrolled = Arc::clone(ctx.view);
@@ -3991,27 +3998,11 @@ mod tests {
         assert_eq!(Some(fingerprint(&handed)), signing.current_leaf());
     }
 
-    #[test]
-    fn resign_if_stale_re_signs_a_stale_addendum_with_its_task() {
+    fn one_binding_addendum(task_id: TaskId) -> maknae_proto::TaskAddendum {
         use maknae_proto::{
             AgentReach, BindingReach, EmptyReason, GitBinding, GitReach, SideReach, TaskerBasis,
         };
-        let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
-        let store = Arc::new(TaskStore::new());
-        let v = view(&[("hobi", HOBI)]);
-        let task = store
-            .mint_live(
-                &signing,
-                &v,
-                at(0, HOBI),
-                Tasker::Uid(1000),
-                None,
-                sub("hobi"),
-                Vec::new(),
-            )
-            .unwrap();
-        let task_id = task.task.task_id;
-        let added = maknae_proto::TaskAddendum::new(
+        maknae_proto::TaskAddendum::new(
             task_id,
             1,
             vec![Binding::Git(GitBinding {
@@ -4027,7 +4018,51 @@ mod tests {
                 why: Some(EmptyReason::NoForgeCredential),
             })],
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn hobi_task(store: &TaskStore, signing: &LeafSigner) -> TaskId {
+        store
+            .mint_live(
+                signing,
+                &view(&[("hobi", HOBI)]),
+                at(0, HOBI),
+                Tasker::Uid(1000),
+                None,
+                sub("hobi"),
+                Vec::new(),
+            )
+            .unwrap()
+            .task
+            .task_id
+    }
+
+    #[test]
+    fn resign_if_stale_keeps_a_current_addendum_when_only_its_task_is_stale() {
+        let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
+        let store = Arc::new(TaskStore::new());
+        let task_id = hobi_task(&store, &signing);
+        signing.rotate();
+        let current = Arc::new(
+            signing
+                .sign_addendum(one_binding_addendum(task_id))
+                .unwrap(),
+        );
+        store.held().tasks.get_mut(&task_id).unwrap().addendum = Some(Arc::clone(&current));
+        let handed = store
+            .resign_if_stale(&task_id, &id("hobi"), HOBI, &signing)
+            .unwrap();
+        assert_eq!(Some(fingerprint(&handed)), signing.current_leaf());
+        let kept = store.record(&task_id).unwrap().addendum.unwrap();
+        assert!(Arc::ptr_eq(&kept, &current));
+    }
+
+    #[test]
+    fn resign_if_stale_re_signs_a_stale_addendum_with_its_task() {
+        let signing = LeafSigner::new(PlaneKey::EcdsaP384Sha384);
+        let store = Arc::new(TaskStore::new());
+        let task_id = hobi_task(&store, &signing);
+        let added = one_binding_addendum(task_id);
         let leaf = |a: &maknae_proto::SignedAddendum| {
             maknae_vault::task_sig::leaf_fingerprint(&a.signature.leaf.0)
         };
@@ -4466,6 +4501,75 @@ mod tests {
 
     fn text(s: &str) -> SecretText {
         SecretText(String::from(s).into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_store_steps_get_two_decision_bounds() {
+        let bound = std::time::Duration::from_millis(1_500);
+        let now = tokio::time::Instant::now();
+        assert_eq!(
+            store_deadline(bound) - now,
+            std::time::Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn a_follow_up_fits_below_the_count_and_up_to_the_byte_total() {
+        let some = vec![text("ab"); MAX_FOLLOW_UPS_PER_TASK - 1];
+        let total = 2 * (MAX_FOLLOW_UPS_PER_TASK - 1);
+        assert_eq!(room_for(&some, &text("xyz"), total + 3), Ok(()));
+        assert_eq!(
+            room_for(&some, &text("xyz"), total + 2),
+            Err(TaskRefusal::FollowUps)
+        );
+        let full = vec![text(""); MAX_FOLLOW_UPS_PER_TASK];
+        assert_eq!(
+            room_for(&full, &text(""), usize::MAX),
+            Err(TaskRefusal::FollowUps)
+        );
+        assert_eq!(room_for(&[], &text(""), 0), Ok(()));
+    }
+
+    #[test]
+    fn bindings_and_reach_are_bounded_by_their_encoded_length() {
+        use maknae_proto::{
+            AgentReach, BindingReach, GitBinding, GitReach, SideReach, TaskerBasis,
+        };
+        let binding = |base: String| {
+            Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base,
+                head: None,
+                change: None,
+            })
+        };
+        let one = [binding("o/r".into())];
+        let len = maknae_proto::bindings_encoded_len(&one);
+        assert_eq!(encoded_within(&one, len), Ok(()));
+        assert_eq!(encoded_within(&one, len - 1), Err(len));
+
+        let small = binding("o/r".into());
+        let large = binding(format!(
+            "o/{}",
+            "r".repeat(maknae_proto::TASK_BINDINGS_MAX_BYTES)
+        ));
+        let entry = BindingReach::Git(GitReach {
+            tasker: SideReach::EMPTY,
+            basis: TaskerBasis::Token,
+            agent: AgentReach::AtHandOut,
+            why: None,
+        });
+        let reach_of = |n: usize| vec![&entry; n];
+        let many = maknae_proto::TASK_REACH_MAX_BYTES;
+        assert_eq!(within_bounds(&[&small], &reach_of(1)), Ok(()));
+        assert!(matches!(
+            within_bounds(&[&large], &reach_of(1)),
+            Err(TaskRefusal::Unbound(_))
+        ));
+        assert!(matches!(
+            within_bounds(&[&small], &reach_of(many)),
+            Err(TaskRefusal::Unreached(_))
+        ));
     }
 
     #[test]

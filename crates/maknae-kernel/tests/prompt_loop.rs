@@ -1675,6 +1675,10 @@ impl<B: maknae_authz_basic::Baseline> maknae_kernel::CatalogNow for InstallsAtTh
     ) -> Option<maknae_proto::CatalogDigest> {
         self.pdp.catalog_stamp(uid, forges)
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 impl<B: maknae_authz_basic::Baseline> maknae_kernel::SensitiveNow

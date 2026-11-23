@@ -1593,6 +1593,10 @@ impl maknae_kernel::CatalogNow for AlwaysPermit {
     ) -> Option<maknae_proto::CatalogDigest> {
         None
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 /// Permits every request, then finds the subject not admitted when the catalog is built:
@@ -1628,6 +1632,10 @@ impl maknae_kernel::CatalogNow for PermitThenNotAdmitted {
     ) -> Option<maknae_proto::CatalogDigest> {
         None
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 impl maknae_kernel::SensitiveNow for PermitThenNotAdmitted {
@@ -1661,6 +1669,10 @@ impl maknae_kernel::CatalogNow for SleepAuthorizer {
     ) -> Option<maknae_proto::CatalogDigest> {
         None
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 impl maknae_kernel::SensitiveNow for SleepAuthorizer {
@@ -1687,6 +1699,10 @@ impl maknae_kernel::CatalogNow for HostileObligation {
         _forges: &maknae_config::ForgeSet,
     ) -> Option<maknae_proto::CatalogDigest> {
         None
+    }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
     }
 }
 
@@ -1715,6 +1731,10 @@ impl maknae_kernel::CatalogNow for CitingPermit {
     ) -> Option<maknae_proto::CatalogDigest> {
         None
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 impl maknae_kernel::SensitiveNow for CitingPermit {
@@ -1742,6 +1762,10 @@ impl maknae_kernel::CatalogNow for PanickingName {
     ) -> Option<maknae_proto::CatalogDigest> {
         None
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 impl maknae_kernel::SensitiveNow for PanickingName {
@@ -1768,6 +1792,10 @@ impl<A: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for Counting<A> {
         forges: &maknae_config::ForgeSet,
     ) -> Option<maknae_proto::CatalogDigest> {
         self.inner.catalog_stamp(uid, forges)
+    }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
     }
 }
 

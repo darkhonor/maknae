@@ -51,6 +51,11 @@ impl<'a> AdmittedReach<'a> {
     pub fn side(&self) -> &AdmittedSide<'a> {
         &self.side
     }
+
+    #[cfg(test)]
+    pub(super) fn observed_by(self, reach: &'static dyn ForgeReach) -> Self {
+        Self { reach, ..self }
+    }
 }
 
 impl std::fmt::Debug for AdmittedReach<'_> {
@@ -111,10 +116,11 @@ fn app_side<'a>(
     let mut found = Vec::with_capacity(credentials.len());
     for c in credentials {
         let kind = CredentialKind::parse(&c.kind).ok_or(ReachRefusal::Request)?;
-        let observed = kind
-            .forge()
-            .is_some_and(|k| forge(provider).agent_side(k) == AgentSide::Observe);
-        if !observed || trust_plane_kind(kind) != Some(TrustPlaneKind::GithubApp) {
+        let side = kind.forge().map(|k| forge(provider).agent_side(k));
+        if !matches!(
+            (side, trust_plane_kind(kind)),
+            (Some(AgentSide::Observe), Some(TrustPlaneKind::GithubApp))
+        ) {
             continue;
         }
         if let Some(app) = apps

@@ -280,9 +280,7 @@ pub trait CatalogNow {
     fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest>;
 
     /// An agent's forge credentials on the installed snapshot; empty for anything else.
-    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
-        Vec::new()
-    }
+    fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef>;
 }
 
 impl<B: Baseline> CatalogNow for B {

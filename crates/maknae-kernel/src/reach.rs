@@ -1374,6 +1374,44 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_submitter_whose_credential_does_not_cover_a_binding_empties_it() {
+            let lead = AgentId::parse("lead").unwrap();
+            for (lead_covers, why) in [(false, Some(EmptyReason::AgentNotCovered)), (true, None)] {
+                let mut w = World::new(Box::new(move |req: &ReachRequest| {
+                    let covered = match req.side() {
+                        ReachSide::Agent { agent, .. } if agent == "lead" => lead_covers,
+                        _ => true,
+                    };
+                    let one = || {
+                        RepoObservation::new(
+                            ops(&[ForgeOp::Read]),
+                            None,
+                            ForgeOps::EMPTY,
+                            false,
+                            covered,
+                        )
+                        .unwrap()
+                    };
+                    observed(req.asks().iter().map(|_| one()).collect())
+                }));
+                w.submitter = vec![app("lead-app")];
+                let mut b = [git(GH, "o/r", None)];
+                let s = run(w, agent_asker(&lead), ForgeTokens::default(), &mut b).await;
+                assert_eq!(s.asked, ["lead", "coder"]);
+                assert_eq!(
+                    agent_reach(&s),
+                    [(
+                        AgentReach::Observed(
+                            SideReach::new(ops(&[ForgeOp::Read]), ForgeOps::EMPTY).unwrap()
+                        ),
+                        why
+                    )],
+                    "{lead_covers}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn target_head_ops_for_a_binding_without_a_head_are_refused_shape() {
             let lead = AgentId::parse("lead").unwrap();
             let mut b = [git(GH, "o/r", Some(3))];

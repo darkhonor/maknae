@@ -269,6 +269,14 @@ mod tests {
     }
 
     #[test]
+    fn the_reach_settings_carry_the_validated_reach_deadline() {
+        let env = FakeEnv::default();
+        let v = validated(&with(&[("egress", r#"{"reach_deadline_ms":45000}"#)]), &env).unwrap();
+        assert_eq!(v.egress.reach_deadline_ms, 45_000);
+        assert_eq!(LiveConfig::of(&v).reach().deadline_ms(), 45_000);
+    }
+
+    #[test]
     fn install_serves_the_accepted_principal_view_and_providers_and_never_a_ceiling() {
         let (g, basic) = fixture("live-accepted", READ_POLICY, None);
         let pdp = crate::Composition::new(

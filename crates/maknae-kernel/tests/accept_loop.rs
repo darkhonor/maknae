@@ -2546,6 +2546,10 @@ impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for Seen<P> {
     ) -> Option<maknae_proto::CatalogDigest> {
         self.inner.catalog_stamp(uid, forges)
     }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
+    }
 }
 
 impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Seen<P> {

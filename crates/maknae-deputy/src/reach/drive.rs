@@ -77,13 +77,20 @@ impl Drop for Held {
                     .build()
                     .ok()
                     .and_then(|rt| rt.block_on(github.revoke_status(&api, &token)).ok());
-                if !matches!(status, Some(204 | 401)) {
-                    eprintln!("{UNWOUND}");
+                if let Some(line) = unwound_line(status) {
+                    eprintln!("{line}");
                 }
             });
         if spawned.is_err() {
             eprintln!("{UNWOUND}");
         }
+    }
+}
+
+fn unwound_line(revoke_status: Option<u16>) -> Option<&'static str> {
+    match revoke_status {
+        Some(204 | 401) => None,
+        _ => Some(UNWOUND),
     }
 }
 
@@ -331,7 +338,8 @@ mod tests {
     use crate::reach::testutil::{app_frame, bounds, file, tasker_frame, MINTING};
     use crate::unseal::{ForgeOpenRequest, OpenFailure};
     use maknae_config::{EgressBounds, MintingFile};
-    use maknae_proto::ForgeOp;
+    use maknae_forge::{ForgeReach, Observer};
+    use maknae_proto::{ForgeOp, RepoAsk};
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -580,6 +588,83 @@ mod tests {
             let reply = reach(req, &cfg, &mut d).await;
             (reply, h.await.unwrap())
         }
+
+        async fn observed_by(
+            &mut self,
+            req: &ReachRequest,
+            reach: &'static dyn ForgeReach,
+            script: Vec<Answer>,
+        ) -> (ReachReply, Seen) {
+            let (base, h) = stub(script).await;
+            let github = GithubClient::loopback_for_tests(&base);
+            let cfg = ReachConfig {
+                file: Some(&self.file),
+                minter_ready: self.minter_ready,
+                bounds: &self.bounds,
+            };
+            let clock = self.clock;
+            let mut journal = |l: &str| self.journal.push(l.to_owned());
+            let mut d = ReachDeps {
+                signer: &self.signer,
+                opener: &self.opener,
+                github: &github,
+                gate: &self.gate,
+                clock: &move || clock,
+                journal: &mut journal,
+            };
+            let admitted = admit_reach(req, &cfg).unwrap().observed_by(reach);
+            let by = tokio::time::Instant::now() + Duration::from_millis(req.deadline_ms());
+            let (reply, _) = drive(&admitted, &mut d, by).await;
+            (reply, h.await.unwrap())
+        }
+    }
+
+    struct Scripted {
+        steps: Vec<Step>,
+        answered: std::sync::Arc<Mutex<Vec<Option<u16>>>>,
+    }
+
+    struct ScriptedObserver {
+        steps: std::vec::IntoIter<Step>,
+        answered: std::sync::Arc<Mutex<Vec<Option<u16>>>>,
+        started: bool,
+    }
+
+    impl Observer for ScriptedObserver {
+        fn next(&mut self, last: Option<HttpReply>) -> Step {
+            if self.started {
+                self.answered.lock().unwrap().push(last.map(|r| r.status));
+            }
+            self.started = true;
+            self.steps
+                .next()
+                .unwrap_or(Step::Done(Err(ReachRefusal::Shape)))
+        }
+
+        fn calls_max(&self) -> usize {
+            8
+        }
+    }
+
+    impl ForgeReach for Scripted {
+        fn tasker(&self, _: &[RepoAsk]) -> Box<dyn Observer> {
+            unreachable!("only the agent side is scripted")
+        }
+
+        fn agent(&self, _: u64, _: &[RepoAsk]) -> Box<dyn Observer> {
+            Box::new(ScriptedObserver {
+                steps: self.steps.clone().into_iter(),
+                answered: std::sync::Arc::clone(&self.answered),
+                started: false,
+            })
+        }
+    }
+
+    fn scripted(steps: Vec<Step>) -> &'static Scripted {
+        Box::leak(Box::new(Scripted {
+            steps,
+            answered: std::sync::Arc::default(),
+        }))
     }
 
     fn tasker() -> ReachRequest {
@@ -1147,5 +1232,45 @@ mod tests {
             &r#"reach server="github.com" provider="github" side=agent asks=1: observed"#
                 .to_owned()
         ));
+    }
+
+    #[tokio::test]
+    async fn a_mint_for_another_installation_or_while_a_token_is_held_is_not_sent() {
+        let mint = |installation| Step::MintMetadataRead { installation };
+        let other = scripted(vec![mint(78)]);
+        let mut rig = Rig::new();
+        let (reply, seen) = rig.observed_by(&agent(), other, vec![]).await;
+        assert_eq!(refused(&reply), Some(ReachRefusal::Shape));
+        assert_eq!((seen.requests.len(), seen.extra), (0, 0));
+        assert_eq!(*other.answered.lock().unwrap(), [None]);
+        assert!(rig.signer.calls().is_empty());
+
+        let twice = scripted(vec![mint(77), mint(77)]);
+        let mut rig = Rig::new();
+        let script = vec![
+            Answer::Reply("201 Created", metadata_grant(r#"{"metadata":"read"}"#)),
+            Answer::Reply("204 No Content", String::new()),
+        ];
+        let (reply, seen) = rig.observed_by(&agent(), twice, script).await;
+        assert_eq!(refused(&reply), Some(ReachRefusal::Shape));
+        assert_eq!(
+            seen.lines(),
+            [
+                "POST /app/installations/77/access_tokens HTTP/1.1",
+                "DELETE /installation/token HTTP/1.1",
+            ]
+        );
+        assert_eq!(seen.extra, 0);
+        assert_eq!(*twice.answered.lock().unwrap(), [Some(201), None]);
+    }
+
+    #[test]
+    fn only_a_204_or_401_revoke_at_unwind_is_silent() {
+        for status in [Some(204), Some(401)] {
+            assert_eq!(unwound_line(status), None, "{status:?}");
+        }
+        for status in [None, Some(200), Some(500)] {
+            assert_eq!(unwound_line(status), Some(UNWOUND), "{status:?}");
+        }
     }
 }
