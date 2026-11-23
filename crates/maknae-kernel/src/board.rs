@@ -203,6 +203,8 @@ pub struct BoardStore {
     writer: Mutex<()>,
     blobs: Box<dyn TaskBlobs>,
     clock: Arc<dyn Clock>,
+    /// The highest time this store has read, so that its now never runs backwards.
+    seen: std::sync::atomic::AtomicI64,
     caps: Caps,
 }
 
@@ -245,8 +247,17 @@ impl BoardStore {
             writer: Mutex::new(()),
             blobs,
             clock,
+            seen: std::sync::atomic::AtomicI64::new(i64::MIN),
             caps,
         })
+    }
+
+    /// The clock's reading, or the highest one this store has read before.
+    fn now(&self) -> i64 {
+        let read = self.clock.now_secs();
+        self.seen
+            .fetch_max(read, std::sync::atomic::Ordering::SeqCst)
+            .max(read)
     }
 
     pub fn take_boot_findings(&self) -> Vec<BoardFinding> {
@@ -309,7 +320,7 @@ impl BoardStore {
     }
 
     pub fn get(&self, key: BoardKey, id: PostId) -> Option<Arc<Stored>> {
-        let now = self.clock.now_secs();
+        let now = self.now();
         self.held().live(key, id, now).cloned()
     }
 
@@ -321,7 +332,7 @@ impl BoardStore {
         seqs: &[u64],
         view: &dyn EnrollmentView,
     ) -> BTreeSet<u64> {
-        let now = self.clock.now_secs();
+        let now = self.now();
         let held = self.held();
         let Some(board) = held.boards.get(&key) else {
             return BTreeSet::new();
@@ -336,13 +347,14 @@ impl BoardStore {
     }
 
     /// An acknowledgement moves the cursor to `seen_through` only when that post was sent to
-    /// `reader` and is above its cursor.
+    /// `reader`, is above its cursor, and is not past retention.
     pub fn plan_read(
         &self,
         key: BoardKey,
         reader: &AgentId,
         seen_through: Option<PostId>,
     ) -> ReadPlan {
+        let now = self.now();
         let held = self.held();
         let board = held.boards.get(&key);
         let cursor = board
@@ -352,8 +364,9 @@ impl BoardStore {
         let ack_to = seen_through.and_then(|id| {
             let board = board?;
             let seq = *board.ids.get(&id)?;
+            let current = board.posts.get(&seq).is_some_and(|s| !expired(s, now));
             let sent = board.sent.get(reader)?.contains(&seq);
-            (sent && seq > cursor).then_some(seq)
+            (sent && current && seq > cursor).then_some(seq)
         });
         let upper = board
             .and_then(|b| b.posts.last_key_value())
@@ -407,7 +420,7 @@ impl BoardStore {
     }
 
     pub fn candidates(&self, key: BoardKey, after: u64, limit: usize) -> Vec<Arc<Stored>> {
-        let now = self.clock.now_secs();
+        let now = self.now();
         let held = self.held();
         let Some(board) = held.boards.get(&key) else {
             return Vec::new();
@@ -487,7 +500,7 @@ impl BoardStore {
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
     /// retention that are neither held nor marked, then noted cursors.
     pub(crate) fn due(&self, limit: usize) -> Vec<BoardDue> {
-        let now = self.clock.now_secs();
+        let now = self.now();
         let guard = self.held();
         let held = &*guard;
         let holds = held
@@ -568,7 +581,7 @@ impl BoardStore {
         view: &dyn EnrollmentView,
     ) -> Step {
         let item = Item::Post(key, seq, BoardDueFor::Expire);
-        let now = self.clock.now_secs();
+        let now = self.now();
         let name = {
             let mut held = self.held();
             let found = held
@@ -837,7 +850,7 @@ impl BoardStore {
                 id,
                 author,
                 task,
-                at_secs: self.clock.now_secs(),
+                at_secs: self.now(),
                 labels: Labels {},
                 draft,
             },
@@ -888,7 +901,7 @@ impl BoardStore {
         in_reply_to: Option<PostId>,
         view: &dyn EnrollmentView,
     ) -> Result<(), BoardRefusal> {
-        let now = self.clock.now_secs();
+        let now = self.now();
         let held = self.held();
         if let Some(board) = held.boards.get(&key) {
             let live = board
@@ -2295,6 +2308,60 @@ mod tests {
         assert!(
             a.seq < to,
             "the acknowledgement passed a post that was never deliverable"
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_of_a_post_past_retention_moves_nothing_swept_or_not() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let old = by(&store, BOB, hobi(), Some(2001), "sentinel-695-old");
+        let r = reader("rm");
+        store.sent(BOB, &r, &[old.seq]);
+        assert_eq!(
+            store.plan_read(BOB, &r, Some(old.post.id)).ack_to,
+            Some(old.seq)
+        );
+        clock.set(T0 + RETAIN);
+        assert_eq!(
+            store.plan_read(BOB, &r, Some(old.post.id)).ack_to,
+            None,
+            "expired, not yet swept"
+        );
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
+        assert_eq!(
+            store.plan_read(BOB, &r, Some(old.post.id)).ack_to,
+            None,
+            "swept"
+        );
+    }
+
+    #[test]
+    fn a_clock_set_back_does_not_make_an_expired_post_readable_again() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let old = by(&store, BOB, hobi(), Some(2001), "sentinel-695-old");
+        let r = reader("rm");
+        store.sent(BOB, &r, &[old.seq]);
+        clock.set(T0 + RETAIN);
+        assert!(store.get(BOB, old.post.id).is_none());
+        clock.set(T0);
+        assert!(store.get(BOB, old.post.id).is_none(), "get");
+        assert!(store.candidates(BOB, 0, 10).is_empty(), "candidates");
+        assert!(
+            store.still_live(BOB, &[old.seq], &free()).is_empty(),
+            "still_live"
+        );
+        assert_eq!(
+            store.plan_read(BOB, &r, Some(old.post.id)).ack_to,
+            None,
+            "plan_read"
+        );
+        let young = by(&store, BOB, hobi(), Some(2001), "sentinel-695-young");
+        assert_eq!(
+            young.post.at_secs,
+            T0 + RETAIN,
+            "a post is stamped with the store's now"
         );
     }
 
