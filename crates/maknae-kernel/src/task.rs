@@ -342,10 +342,8 @@ pub trait TaskSigner: Send + Sync {
     fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal>;
     fn sign_addendum(
         &self,
-        _addendum: maknae_proto::TaskAddendum,
-    ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
-        Err(TaskRefusal::Unsigned)
-    }
+        addendum: maknae_proto::TaskAddendum,
+    ) -> Result<maknae_proto::SignedAddendum, TaskRefusal>;
     fn current_leaf(&self) -> Option<[u8; 32]>;
 }
 
@@ -452,6 +450,15 @@ struct Held {
 }
 
 impl Held {
+    fn holds_working(&self, agent: &str, uid: u32) -> bool {
+        self.tasks.values().any(|r| {
+            !r.pending
+                && r.state == TaskState::Working
+                && r.agent.as_str() == agent
+                && r.agent_uid == uid
+        })
+    }
+
     fn start(&mut self, id: TaskId, lease: i64) {
         self.starts += 1;
         let hot = self.hot.entry(id).or_default();
@@ -1757,9 +1764,7 @@ impl TaskStore {
 
     /// Whether `agent` holds a working task under `uid`, marked or not.
     pub fn holds_working(&self, agent: &AgentId, uid: u32) -> bool {
-        self.held().tasks.values().any(|r| {
-            !r.pending && r.state == TaskState::Working && r.agent == *agent && r.agent_uid == uid
-        })
+        self.held().holds_working(agent.as_str(), uid)
     }
 
     /// The task a claim would hand `agent`: its working task, else its oldest queued one.
@@ -2245,6 +2250,13 @@ impl TaskStore {
         let rec = tasker_record(&held, id, by.into()).ok_or(TaskRefusal::Unknown)?;
         if rec.state != TaskState::Working || held.holding.contains_key(id) {
             return Err(TaskRefusal::NotWorking);
+        }
+        if let (Tasker::Agent { agent, uid }, None) = (&rec.tasker, rec.parent) {
+            if held.holds_working(agent, *uid) {
+                return Err(TaskRefusal::Denied(
+                    "an agent submits under the task it holds".into(),
+                ));
+            }
         }
         Ok(rec.clone())
     }
@@ -3744,6 +3756,12 @@ mod tests {
         fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
             signed_by(None, task)
         }
+        fn sign_addendum(
+            &self,
+            _addendum: maknae_proto::TaskAddendum,
+        ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+            Err(TaskRefusal::Unsigned)
+        }
         fn current_leaf(&self) -> Option<[u8; 32]> {
             leaf_of(None)
         }
@@ -3825,6 +3843,12 @@ mod tests {
             (self.during)();
             self.inner.sign(task)
         }
+        fn sign_addendum(
+            &self,
+            addendum: maknae_proto::TaskAddendum,
+        ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+            self.inner.sign_addendum(addendum)
+        }
         fn current_leaf(&self) -> Option<[u8; 32]> {
             self.inner.current_leaf()
         }
@@ -3839,6 +3863,12 @@ mod tests {
         fn sign(&self, task: TaskObject) -> Result<SignedTask, TaskRefusal> {
             self.signs.fetch_add(1, Ordering::SeqCst);
             self.inner.sign(task)
+        }
+        fn sign_addendum(
+            &self,
+            addendum: maknae_proto::TaskAddendum,
+        ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+            self.inner.sign_addendum(addendum)
         }
         fn current_leaf(&self) -> Option<[u8; 32]> {
             self.inner.current_leaf()
@@ -7598,6 +7628,12 @@ mod tests {
             self.1.fetch_add(1, Ordering::SeqCst);
             self.0.sign(task)
         }
+        fn sign_addendum(
+            &self,
+            addendum: maknae_proto::TaskAddendum,
+        ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+            self.0.sign_addendum(addendum)
+        }
         fn current_leaf(&self) -> Option<[u8; 32]> {
             self.0.current_leaf()
         }
@@ -10795,6 +10831,73 @@ mod tests {
             let rec = store.record(&id).unwrap();
             assert!(rec.addendum.is_none() && rec.follow_ups.is_empty());
             assert_eq!(stub.frames(), 0);
+        }
+
+        #[tokio::test]
+        async fn an_agent_holding_a_task_cannot_widen_its_own_task_by_addendum() {
+            let (_g, pdp) = reach_pdp("addendum-held");
+            let stub = each_ask(WRITE, READ);
+            let store = Arc::new(TaskStore::new());
+            let r = Reaching::new(&pdp, &stub);
+            let emit = Recorder::new();
+            let own = r
+                .submit(
+                    &store,
+                    agent("hobi", HOBI, None),
+                    (
+                        asking("jin", vec![change(HOST, BASE, Some(7))]),
+                        ForgeTokens::default(),
+                    ),
+                    &emit,
+                )
+                .await
+                .unwrap();
+            let task = own.task.task_id;
+            store.start_for_test(&task);
+            let hobi = || {
+                (
+                    task,
+                    Tasker::Agent {
+                        agent: "hobi".into(),
+                        uid: HOBI,
+                    },
+                    None,
+                    HOBI,
+                )
+            };
+            r.add(
+                &store,
+                hobi(),
+                "also beta",
+                (vec![change(HOST, BETA, Some(9))], ForgeTokens::default()),
+                &emit,
+            )
+            .await
+            .unwrap();
+            alpha_parent(&pdp, &store);
+            assert!(store.holds_working(&id("hobi"), HOBI));
+            let before = store.record(&task).unwrap();
+            let frames = stub.frames();
+            let got = r
+                .add(
+                    &store,
+                    hobi(),
+                    "and gamma",
+                    (
+                        vec![change(HOST, "sentinel-168c/gamma", Some(3))],
+                        ForgeTokens::default(),
+                    ),
+                    &emit,
+                )
+                .await;
+            assert_eq!(
+                added_refusal(&got),
+                &TaskRefusal::Denied("an agent submits under the task it holds".into())
+            );
+            assert_eq!(stub.frames(), frames);
+            let after = store.record(&task).unwrap();
+            assert_eq!(after.follow_ups.len(), before.follow_ups.len());
+            assert_eq!(after.addendum, before.addendum);
         }
 
         #[tokio::test]

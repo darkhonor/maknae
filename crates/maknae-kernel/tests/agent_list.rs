@@ -61,6 +61,12 @@ impl maknae_kernel::TaskSigner for FixedSigner {
     ) -> Result<maknae_proto::SignedTask, TaskRefusal> {
         Ok(signed(task))
     }
+    fn sign_addendum(
+        &self,
+        _addendum: maknae_proto::TaskAddendum,
+    ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+        Err(TaskRefusal::Unsigned)
+    }
     fn current_leaf(&self) -> Option<[u8; 32]> {
         Some(maknae_crypto::sha256(&[1]))
     }

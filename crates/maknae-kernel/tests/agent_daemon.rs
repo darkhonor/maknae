@@ -66,6 +66,13 @@ impl maknae_kernel::TaskSigner for CaSigner {
         maknae_vault::task_sig::sign_task(&self.identity, task)
             .map_err(|e| TaskRefusal::Unavailable(e.to_string()))
     }
+    fn sign_addendum(
+        &self,
+        addendum: maknae_proto::TaskAddendum,
+    ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+        maknae_vault::task_sig::sign_addendum(&self.identity, addendum)
+            .map_err(|e| TaskRefusal::Unavailable(e.to_string()))
+    }
     fn current_leaf(&self) -> Option<[u8; 32]> {
         let skip = self
             .unsigned
