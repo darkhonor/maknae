@@ -3,7 +3,7 @@
 
 use crate::opener::SealedOpener;
 use crate::reach::{EgressReach, Parts};
-use crate::serve::{MintFrames, ReachFrames};
+use crate::serve::{Frames, MintFrames};
 use maknae_config::{
     AgentId, ConfigError, EgressBounds, GithubAppConfig, MintingConfig, MintingFile, MINTING_FILE,
     MINT_ROLE_ID_FILE,
@@ -212,12 +212,6 @@ impl Ready {
 pub(crate) struct EgressMinting {
     ready: Result<Ready, &'static str>,
     journal: Journal,
-}
-
-/// What serve is handed: `MintFrames` (none when minting is off) and `ReachFrames`.
-pub(crate) struct Frames {
-    pub(crate) mint: Option<Arc<dyn MintFrames>>,
-    pub(crate) reach: Arc<dyn ReachFrames>,
 }
 
 pub(crate) struct Wiring {

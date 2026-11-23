@@ -191,8 +191,7 @@ fn main() {
         expected_uid,
         bounds,
         serve::FRAME_IO_TIMEOUT,
-        frames.mint,
-        frames.reach,
+        frames,
         Arc::new(fulfil),
     );
 }

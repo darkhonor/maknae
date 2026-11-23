@@ -191,6 +191,17 @@ fn write_all_by(stream: &mut UnixStream, buf: &[u8], by: Instant) -> Result<(), 
     out.and(stream.set_nonblocking(false).map_err(io))
 }
 
+pub struct Frames {
+    pub mint: Option<Arc<dyn MintFrames>>,
+    pub reach: Arc<dyn ReachFrames>,
+}
+
+#[derive(Clone, Copy)]
+pub struct FrameRefs<'a> {
+    pub mint: Option<&'a dyn MintFrames>,
+    pub reach: &'a dyn ReachFrames,
+}
+
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
 ///
 /// `fulfil` is what turns an admitted frame into a provider call. It is passed
@@ -206,8 +217,7 @@ pub fn serve_one<F>(
     bounds: &EgressBounds,
     io_timeout: Duration,
     committed: &AtomicBool,
-    minting: Option<&dyn MintFrames>,
-    reach: &dyn ReachFrames,
+    frames: FrameRefs<'_>,
     fulfil: F,
 ) -> Result<(), ServeError>
 where
@@ -220,14 +230,14 @@ where
     let req = match maknae_proto::decode_egress_frame(&body).map_err(io)? {
         EgressFrame::Prompt(req) => req,
         EgressFrame::Mint(req) => {
-            return serve_mint(&mut stream, &req, minting, io_timeout, committed)
+            return serve_mint(&mut stream, &req, frames.mint, io_timeout, committed)
         }
         EgressFrame::Revoke(req) => {
-            return serve_revoke(&mut stream, &req, minting, io_timeout, committed)
+            return serve_revoke(&mut stream, &req, frames.mint, io_timeout, committed)
         }
         EgressFrame::Reach(req) => {
             committed.store(true, Ordering::Release);
-            let reply = reach.reach(&req);
+            let reply = frames.reach.reach(&req);
             return write_reply(
                 &mut stream,
                 &EgressSocketReply::Reach(reply),
@@ -400,8 +410,7 @@ pub fn accept_loop<H>(
     expected_uid: u32,
     bounds: Arc<EgressBounds>,
     io_timeout: Duration,
-    minting: Option<Arc<dyn MintFrames>>,
-    reach: Arc<dyn ReachFrames>,
+    frames: Frames,
     handler: Arc<H>,
 ) where
     H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
@@ -426,8 +435,8 @@ pub fn accept_loop<H>(
         let (bounds, handler, minting, reach) = (
             Arc::clone(&bounds),
             Arc::clone(&handler),
-            minting.clone(),
-            Arc::clone(&reach),
+            frames.mint.clone(),
+            Arc::clone(&frames.reach),
         );
         let spawned = spawn_contained(
             "maknae-egress-conn",
@@ -442,8 +451,10 @@ pub fn accept_loop<H>(
                     &bounds,
                     io_timeout,
                     committed,
-                    minting.as_deref(),
-                    &*reach,
+                    FrameRefs {
+                        mint: minting.as_deref(),
+                        reach: &*reach,
+                    },
                     |a| handler(a),
                 ) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
@@ -622,8 +633,10 @@ mod tests {
             bounds,
             io_timeout,
             &AtomicBool::new(false),
-            None,
-            &no_reach(),
+            FrameRefs {
+                mint: None,
+                reach: &no_reach(),
+            },
             fulfil,
         )
     }
@@ -900,8 +913,7 @@ mod tests {
                 me,
                 Arc::new(bounds()),
                 Duration::from_secs(5),
-                None,
-                reach,
+                Frames { mint: None, reach },
                 Arc::new(handler),
             )
         });
@@ -1698,8 +1710,10 @@ mod tests {
                 &bounds(),
                 FRAME_IO_TIMEOUT,
                 &AtomicBool::new(false),
-                None,
-                &reach,
+                FrameRefs {
+                    mint: None,
+                    reach: &reach,
+                },
                 |_| panic!("a reach frame reached the provider path"),
             ),
             Err(ServeError::WrongPeer)
@@ -2035,8 +2049,10 @@ mod tests {
                 &bounds(),
                 FRAME_IO_TIMEOUT,
                 &AtomicBool::new(false),
-                Some(m),
-                &no_reach(),
+                FrameRefs {
+                    mint: Some(m),
+                    reach: &no_reach(),
+                },
                 |_| panic!("a credential frame reached the provider path"),
             );
             let _ = done_tx.send(());

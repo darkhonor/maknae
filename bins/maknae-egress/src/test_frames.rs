@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::serve::{serve_one, MintFrames, ReachFrames, ServeError, FRAME_IO_TIMEOUT};
+use crate::serve::{serve_one, FrameRefs, MintFrames, ReachFrames, ServeError, FRAME_IO_TIMEOUT};
 use maknae_config::EgressBounds;
 use maknae_proto::{
     ContentBlock, EgressFrame, EgressFrameReply, EgressFrameRequest, EgressSocketReply, ReachReply,
@@ -138,8 +138,10 @@ pub(crate) fn served_frame_reaching(
         &bounds(),
         FRAME_IO_TIMEOUT,
         &AtomicBool::new(false),
-        minting,
-        reach,
+        FrameRefs {
+            mint: minting,
+            reach,
+        },
         canned,
     );
     let back = h.join().unwrap();

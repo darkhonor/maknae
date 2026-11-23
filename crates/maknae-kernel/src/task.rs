@@ -10692,7 +10692,7 @@ mod tests {
             };
             assert_eq!(
                 crate::CatalogNow::forge_credentials(&*pdp, HOBI),
-                [app.clone()]
+                std::slice::from_ref(&app)
             );
             assert_eq!(crate::CatalogNow::forge_credentials(&*pdp, JIN), [app]);
             (g, pdp)
@@ -12276,16 +12276,17 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let frames = stub.seen.lock().unwrap();
-            let ReachSide::Tasker { sealed, .. } = frames[0].side() else {
-                panic!("the first frame is the tasker's");
-            };
-            assert_eq!(
-                sealed.as_bytes(),
-                sealed_token(),
-                "the token did reach the egress socket"
-            );
-            drop(frames);
+            {
+                let frames = stub.seen.lock().unwrap();
+                let ReachSide::Tasker { sealed, .. } = frames[0].side() else {
+                    panic!("the first frame is the tasker's");
+                };
+                assert_eq!(
+                    sealed.as_bytes(),
+                    sealed_token(),
+                    "the token did reach the egress socket"
+                );
+            }
             let id = task.task.task_id;
             store.start_for_test(&id);
             let seen = stub.frames();
