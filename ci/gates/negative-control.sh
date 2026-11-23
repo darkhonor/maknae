@@ -1306,11 +1306,13 @@ pub struct TaskFollowUps {
     pub task: TaskRef,
     pub from: u32,
     pub items: Vec<SecretText>,
+    pub addendum: Option<Bytes>,
 }
 
 const _: fn(&TaskReportView) -> &crate::wire::SecretText = |c| &c.text;
 const _: fn(&TaskDelivery) -> &crate::bytes::Bytes = |c| &c.signed;
 const _: fn(&TaskFollowUps) -> &Vec<crate::wire::SecretText> = |c| &c.items;
+const _: fn(&TaskFollowUps) -> &Option<crate::bytes::Bytes> = |c| &c.addendum;
 FIX
   cat > "$fixture/crates/maknae-proto/src/conversation.rs" <<'FIX'
 pub struct ConversationId(String);
@@ -1674,6 +1676,7 @@ always	task_delivery.fresh	ships by construction
 always	task_follow_ups.task	ships by construction
 always	task_follow_ups.from	ships by construction
 always	task_follow_ups.items	ships by construction
+always	task_follow_ups.addendum	ships by construction
 mask	lake	the Knowledge Lake schema, not ours
 '
 

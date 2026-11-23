@@ -162,6 +162,7 @@ always	task_delivery.fresh	task.claim (#632): whether the agent starts the task 
 always	task_follow_ups.task	task.claim (#629): the id of the claimed task these follow-ups belong to, released only to the agent holding it
 always	task_follow_ups.from	task.claim (#628): the index of the first follow-up in this answer; a count, never content
 always	task_follow_ups.items	task.claim (#628): the tasker's follow-ups to the claimed task, released only to the agent holding it
+always	task_follow_ups.addendum	task.claim (#168): the kernel-signed addendum of bindings the tasker added, released only to the agent holding the task
 always	agent_list.entries.agent	agent.list (#630): an agent the caller may task, or one with which it holds tasks or reports: its id
 always	agent_list.entries.standing	agent.list (#630): one agent: one fixed token: enrolled, contained, withdrawn, removed or undecided
 always	agent_list.entries.waiting	agent.list (#630): one agent: how many of the caller's own tasks wait on it; a count, never content

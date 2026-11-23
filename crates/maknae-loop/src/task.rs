@@ -104,6 +104,7 @@ impl<D: Dial> TaskClient<D> {
 pub fn verify_class(e: TaskSignatureError) -> VerifyClass {
     match e {
         TaskSignatureError::AgentMismatch => VerifyClass::Agent,
+        TaskSignatureError::TaskMismatch => VerifyClass::Task,
         TaskSignatureError::Algorithm => VerifyClass::Algorithm,
         TaskSignatureError::NotKernel => VerifyClass::NotKernel,
         TaskSignatureError::KeyMismatch => VerifyClass::Key,
@@ -353,6 +354,7 @@ mod tests {
         use maknae_vault::task_sig::TaskSignatureError;
         let all = [
             TaskSignatureError::AgentMismatch,
+            TaskSignatureError::TaskMismatch,
             TaskSignatureError::Algorithm,
             TaskSignatureError::NotKernel,
             TaskSignatureError::KeyMismatch,
@@ -362,6 +364,7 @@ mod tests {
         for e in all {
             let want = match e {
                 TaskSignatureError::AgentMismatch => (VerifyClass::Agent, "agent"),
+                TaskSignatureError::TaskMismatch => (VerifyClass::Task, "task"),
                 TaskSignatureError::Algorithm => (VerifyClass::Algorithm, "algorithm"),
                 TaskSignatureError::NotKernel => (VerifyClass::NotKernel, "not-kernel"),
                 TaskSignatureError::KeyMismatch => (VerifyClass::Key, "key"),

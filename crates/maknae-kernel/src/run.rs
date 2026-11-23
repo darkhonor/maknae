@@ -3954,13 +3954,6 @@ async fn serve_task_verb<S, E, P>(
             bindings,
             tokens,
         } => {
-            if !bindings.is_empty() || !tokens.is_empty() {
-                let r = TaskRefusal::Unbound(crate::task::ADDENDUM_NOT_TAKEN.into());
-                trail
-                    .unauthorized(stream, &decided("deny", &r.to_string(), "unauthorized"))
-                    .await;
-                return;
-            }
             if text.0.len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 trail
@@ -3970,6 +3963,52 @@ async fn serve_task_verb<S, E, P>(
             }
             let intent = decided("permit", "intent recorded", "authorized");
             if !trail.record_bounded(&intent).await {
+                return;
+            }
+            if !bindings.is_empty() || !tokens.is_empty() {
+                let ctx = crate::task::AddCtx {
+                    user: trail.peer_user,
+                    decide_timeout: timeout,
+                    text_max: tasks.text_max,
+                    forges: live.forges(),
+                    reach: crate::reach::ReachCtx {
+                        egress: &tasks.agents.reach,
+                        settings: live.reach(),
+                        permits: crate::reach::kernel_reach_permits(),
+                        credentials: &|uid| authorizer.forge_credentials(uid),
+                    },
+                };
+                let added = crate::task::add_task_bindings(
+                    store,
+                    &tasks.agents.signer,
+                    &ctx,
+                    (task, caller.clone(), tasks.under, trail.uid),
+                    text.clone(),
+                    (bindings, tokens.clone()),
+                    &crate::reach::FrameTrail {
+                        emit: &**trail.emit,
+                        record: &decided,
+                    },
+                )
+                .await;
+                match added {
+                    Ok((view, added, reach)) => {
+                        let mut outcome = trail.outcome(&intent, "addendum sealed", "authorized");
+                        outcome.subject.bindings = record_bindings(&added);
+                        outcome.subject.reach = record_reach(&reach);
+                        trail
+                            .deliver(
+                                stream,
+                                &outcome,
+                                Payload::TaskAcknowledged(view),
+                                role,
+                                rule.as_ref(),
+                                action,
+                            )
+                            .await;
+                    }
+                    Err(r) => trail.unauthorized(stream, &refused(&intent, &r)).await,
+                }
                 return;
             }
             let (who, under, text, max) =
@@ -4135,22 +4174,39 @@ async fn serve_task_verb<S, E, P>(
                         tasker,
                         from,
                         items,
-                    } => (
-                        of(
-                            decided(
-                                "permit",
-                                &format!("heartbeat: {} follow-ups after {from}", items.len()),
-                                "authorized",
+                        addendum,
+                    } => {
+                        let addendum =
+                            match addendum.map(|a| crate::task_store::encode(&*a)).transpose() {
+                                Ok(wire) => wire.map(maknae_proto::Bytes::new),
+                                Err(e) => {
+                                    let r = crate::task::TaskRefusal::Store(e.to_string());
+                                    let rec = of(
+                                        decided("deny", &r.to_string(), "unavailable"),
+                                        &task,
+                                        &tasker,
+                                    );
+                                    trail.unauthorized(stream, &rec).await;
+                                    return;
+                                }
+                            };
+                        let said = match addendum {
+                            Some(_) => format!(
+                                "heartbeat: the addendum and {} follow-ups after {from}",
+                                items.len()
                             ),
-                            &task,
-                            &tasker,
-                        ),
-                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
-                            task: maknae_proto::TaskRef::from_id(&task),
-                            from,
-                            items,
-                        }),
-                    ),
+                            None => format!("heartbeat: {} follow-ups after {from}", items.len()),
+                        };
+                        (
+                            of(decided("permit", &said, "authorized"), &task, &tasker),
+                            Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                                task: maknae_proto::TaskRef::from_id(&task),
+                                from,
+                                items,
+                                addendum,
+                            }),
+                        )
+                    }
                     crate::task::Heartbeat::Closed(view) => {
                         let said = match view.state {
                             maknae_proto::TaskState::Held => "heartbeat: the task is held",
@@ -11349,6 +11405,7 @@ mod record_widths {
         NoTasker,
         Cites(Option<String>),
         Submitted,
+        Added,
     }
 
     struct Say {
@@ -11431,12 +11488,11 @@ mod record_widths {
                 .map(|r| permit((*r).into(), Shape::Submitted))
                 .collect(),
             ("add", _) => {
-                let unbound = TaskRefusal::Unbound(crate::task::ADDENDUM_NOT_TAKEN.into());
                 let mut all = vec![
                     deny(too_long, Shape::Plain),
-                    deny(unbound.to_string(), Shape::Plain),
                     intent(),
                     done(),
+                    permit("addendum sealed".into(), Shape::Added),
                 ];
                 all.extend(refusals(Shape::Plain));
                 all
@@ -11479,6 +11535,14 @@ mod record_widths {
                     permit(
                         format!(
                             "heartbeat: {} follow-ups after {}",
+                            crate::task::MAX_FOLLOW_UPS_PER_TASK,
+                            u32::MAX
+                        ),
+                        Shape::Cites(Some(tasker.to_owned())),
+                    ),
+                    permit(
+                        format!(
+                            "heartbeat: the addendum and {} follow-ups after {}",
                             crate::task::MAX_FOLLOW_UPS_PER_TASK,
                             u32::MAX
                         ),
@@ -11737,6 +11801,13 @@ mod record_widths {
                             (tasker, task) = (Some(own), asked.cited().map(|id| id.to_string()));
                             rec
                         }
+                        Shape::Added => {
+                            (tasker, task) = (Some(own), asked.cited().map(|id| id.to_string()));
+                            let mut rec = rec;
+                            rec.subject.bindings = record_bindings(&maximal_bindings());
+                            rec.subject.reach = record_reach(&widest_reach());
+                            rec
+                        }
                         Shape::NoTasker => {
                             (tasker, task) = (None, asked.cited().map(|id| id.to_string()));
                             without_tasker(rec)
@@ -11937,7 +12008,7 @@ mod record_widths {
             assert!(line.contains(&format!("op={op}")), "op in {line}");
         }
         let bound = c.rec.subject.bindings.len();
-        match c.label.starts_with("submit: ") {
+        match c.label.starts_with("submit: ") || c.label == "add: permit addendum sealed" {
             true => assert_eq!(bound, maknae_proto::TASK_BINDINGS_MAX, "{at}"),
             false => assert_eq!(bound, 0, "{at}"),
         }

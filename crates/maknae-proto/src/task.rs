@@ -524,17 +524,141 @@ pub fn task_signing_bytes(
     task: &TaskObject,
     max_bytes: usize,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::ProtoCodecError> {
+    signing_bytes(TASK_SIGNING_CONTEXT, task, max_bytes)
+}
+
+fn signing_bytes<T: Serialize>(
+    context: &[u8],
+    value: &T,
+    max_bytes: usize,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::ProtoCodecError> {
     use std::io::Write;
     let mut buf = zeroize::Zeroizing::new(vec![0; max_bytes]);
     let mut writer = std::io::Cursor::new(buf.as_mut_slice());
     writer
-        .write_all(TASK_SIGNING_CONTEXT)
+        .write_all(context)
         .map_err(|e| crate::ProtoCodecError::Encode(e.to_string()))?;
-    ciborium::into_writer(task, &mut writer)
+    ciborium::into_writer(value, &mut writer)
         .map_err(|e| crate::ProtoCodecError::Encode(e.to_string()))?;
     let len = writer.position() as usize;
     buf.truncate(len);
     Ok(buf)
+}
+
+pub const TASK_ADDENDUM_SCHEMA: &str = "maknae.task.addendum";
+pub const TASK_ADDENDUM_VERSION: u16 = 1;
+pub const TASK_ADDENDUM_SIGNING_CONTEXT: &[u8] = b"maknae.task.addendum.v1\0";
+/// The most an addendum's signing bytes, its context included, may hold.
+pub const TASK_ADDENDUM_MARGIN: usize = 4096;
+
+/// The bindings a task's tasker added while it was working, cumulative: each addendum
+/// holds every binding added so far, after the task's own. `seq` is the task's follow-up
+/// count when it was sealed, so an agent that has seen that many follow-ups has seen it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "TaskAddendumWire")]
+pub struct TaskAddendum {
+    schema: String,
+    version: u16,
+    task_id: TaskId,
+    seq: u32,
+    bindings: Vec<Binding>,
+    reach: Vec<BindingReach>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskAddendumWire {
+    schema: String,
+    version: u16,
+    task_id: TaskId,
+    seq: u32,
+    #[serde(deserialize_with = "bounded_bindings")]
+    bindings: Vec<Binding>,
+    #[serde(deserialize_with = "bounded_reach")]
+    reach: Vec<BindingReach>,
+}
+
+impl TryFrom<TaskAddendumWire> for TaskAddendum {
+    type Error = String;
+    fn try_from(w: TaskAddendumWire) -> Result<Self, String> {
+        if w.schema != TASK_ADDENDUM_SCHEMA {
+            return Err(format!(
+                "addendum schema {:?} is not {TASK_ADDENDUM_SCHEMA}",
+                w.schema
+            ));
+        }
+        if w.version != TASK_ADDENDUM_VERSION {
+            return Err(format!(
+                "addendum version {} is not {TASK_ADDENDUM_VERSION}",
+                w.version
+            ));
+        }
+        TaskAddendum::new(w.task_id, w.seq, w.bindings, w.reach)
+    }
+}
+
+impl TaskAddendum {
+    /// Refuses a `seq` of 0, an empty list, and reach not aligned with the bindings.
+    pub fn new(
+        task_id: TaskId,
+        seq: u32,
+        bindings: Vec<Binding>,
+        reach: Vec<BindingReach>,
+    ) -> Result<Self, String> {
+        if seq == 0 {
+            return Err("an addendum's seq starts at 1".into());
+        }
+        if bindings.is_empty() || reach.len() != bindings.len() {
+            return Err(format!(
+                "an addendum of {} bindings and {} reach entries",
+                bindings.len(),
+                reach.len()
+            ));
+        }
+        reach_refusal(&bindings, &reach, BindingReach::has_head_ops)?;
+        Ok(TaskAddendum {
+            schema: TASK_ADDENDUM_SCHEMA.into(),
+            version: TASK_ADDENDUM_VERSION,
+            task_id,
+            seq,
+            bindings,
+            reach,
+        })
+    }
+
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    pub fn seq(&self) -> u32 {
+        self.seq
+    }
+
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
+    pub fn reach(&self) -> &[BindingReach] {
+        &self.reach
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedAddendum {
+    pub addendum: TaskAddendum,
+    pub signature: TaskSignature,
+}
+
+/// The addendum context, then the addendum's CBOR, within [`TASK_ADDENDUM_MARGIN`].
+pub fn addendum_signing_bytes(
+    addendum: &TaskAddendum,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::ProtoCodecError> {
+    signing_bytes(
+        TASK_ADDENDUM_SIGNING_CONTEXT,
+        addendum,
+        TASK_ADDENDUM_MARGIN,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -991,16 +1115,21 @@ pub struct TaskDelivery {
     pub fresh: bool,
 }
 
+/// `addendum` is the CBOR of the task's [`SignedAddendum`] when the agent has not seen it;
+/// it is taken before `items`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskFollowUps {
     pub task: TaskRef,
     pub from: u32,
     pub items: Vec<SecretText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addendum: Option<Bytes>,
 }
 
 const _: fn(&TaskReportView) -> &crate::wire::SecretText = |c| &c.text;
 const _: fn(&TaskDelivery) -> &crate::bytes::Bytes = |c| &c.signed;
 const _: fn(&TaskFollowUps) -> &Vec<crate::wire::SecretText> = |c| &c.items;
+const _: fn(&TaskFollowUps) -> &Option<crate::bytes::Bytes> = |c| &c.addendum;
 
 /// The one formatter for the audit field and the `tasker` subject attribute.
 pub fn tasker_text(t: &Tasker) -> String {
@@ -1515,6 +1644,7 @@ mod tests {
                 task: TaskRef::from_id(&TaskId([7; 16])),
                 from: 1,
                 items: vec![secret(text), secret("second")],
+                addendum: Some(Bytes::new(text.as_bytes().to_vec().into())),
             }),
             Payload::TaskIdle,
             Payload::Agents(AgentPage {
@@ -1819,6 +1949,7 @@ mod tests {
                         task: TaskRef::from_id(&TaskId([7; 16])),
                         from: 0,
                         items: vec![secret(sentinel)],
+                        addendum: Some(Bytes::new(sentinel.as_bytes().to_vec().into())),
                     }
                 ),
             ])
@@ -3136,5 +3267,120 @@ mod tests {
         assert_eq!(dec::<Within<MOST_REACH_BYTES>>(&bytes).unwrap().0, most);
         let err = dec::<Within<{ MOST_REACH_BYTES - 1 }>>(&bytes).unwrap_err();
         assert!(err.contains("encodes to more than"), "{err}");
+    }
+
+    fn max_addendum() -> SignedAddendum {
+        let alg = "ml-dsa-87";
+        let each = (TASK_SIGNATURE_MAX_BYTES - alg.len()) / (2 + TASK_CHAIN_MAX);
+        let part = vec![0xa5; each];
+        let chain: Vec<&[u8]> = vec![&part; TASK_CHAIN_MAX];
+        let rest = TASK_SIGNATURE_MAX_BYTES - alg.len() - each * (1 + TASK_CHAIN_MAX);
+        SignedAddendum {
+            addendum: TaskAddendum::new(
+                id(0xf0),
+                u32::MAX,
+                sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES),
+                most_reach(),
+            )
+            .unwrap(),
+            signature: signature(alg, &part, &chain, &vec![0x5a; rest]),
+        }
+    }
+
+    #[test]
+    fn addendum_and_task_signing_contexts_are_disjoint() {
+        let (task, added) = (TASK_SIGNING_CONTEXT, TASK_ADDENDUM_SIGNING_CONTEXT);
+        assert!(!task.starts_with(added) && !added.starts_with(task));
+        assert_eq!(added, b"maknae.task.addendum.v1\0");
+        let addendum = max_addendum().addendum;
+        let bytes = addendum_signing_bytes(&addendum).unwrap();
+        assert_eq!(&bytes[..added.len()], added);
+        assert_eq!(
+            dec::<TaskAddendum>(&bytes[added.len()..]).unwrap(),
+            addendum
+        );
+        let object =
+            task_signing_bytes(&object(Tasker::Uid(1000), None), TASK_ENVELOPE_MARGIN).unwrap();
+        assert!(dec::<TaskAddendum>(&object[task.len()..]).is_err());
+        assert!(dec::<TaskObject>(&bytes[added.len()..]).is_err());
+    }
+
+    #[test]
+    fn the_largest_addendum_signs_within_its_margin() {
+        let addendum = max_addendum().addendum;
+        let len = addendum_signing_bytes(&addendum).unwrap().len();
+        let reach_len = bindings_encoded_len(addendum.reach());
+        assert!(len <= TASK_ADDENDUM_MARGIN, "{len}");
+        assert!(
+            len >= TASK_BINDINGS_MAX_BYTES + reach_len,
+            "{len} holds the bindings and the reach"
+        );
+    }
+
+    #[test]
+    fn an_addendum_that_is_empty_unaligned_or_unnumbered_never_decodes() {
+        use ciborium::Value;
+        let good = max_addendum().addendum;
+        let with = |key: &str, value: Value| {
+            let mut map: Value = dec(&enc(&good)).unwrap();
+            for (k, v) in map.as_map_mut().unwrap() {
+                if k.as_text() == Some(key) {
+                    *v = value.clone();
+                }
+            }
+            dec::<TaskAddendum>(&enc(&map))
+        };
+        assert_eq!(dec::<TaskAddendum>(&enc(&good)).unwrap(), good);
+        let one_reach: Value = dec(&enc(&good.reach()[..1].to_vec())).unwrap();
+        for (key, value, says) in [
+            ("seq", Value::Integer(0.into()), "seq starts at 1"),
+            (
+                "bindings",
+                Value::Array(vec![]),
+                "an addendum of 0 bindings",
+            ),
+            ("reach", one_reach, "8 bindings and 1 reach"),
+            ("reach", Value::Array(vec![]), "8 bindings and 0 reach"),
+            (
+                "schema",
+                Value::Text("maknae.task".into()),
+                "addendum schema",
+            ),
+            ("version", Value::Integer(2.into()), "addendum version 2"),
+        ] {
+            let err = with(key, value).unwrap_err();
+            assert!(err.contains(says), "{key}: {err}");
+        }
+        assert!(
+            TaskAddendum::new(id(1), 0, good.bindings().to_vec(), good.reach().to_vec()).is_err()
+        );
+    }
+
+    #[test]
+    fn an_addendum_with_the_most_follow_ups_fits_the_response_cap() {
+        const KERNEL_FOLLOW_UPS_MAX: usize = 32;
+        let signed = max_addendum();
+        for prompt_max in [1, 4096, 1 << 20] {
+            let each = prompt_max / KERNEL_FOLLOW_UPS_MAX;
+            let mut items: Vec<SecretText> = (0..KERNEL_FOLLOW_UPS_MAX)
+                .map(|_| secret(&"f".repeat(each)))
+                .collect();
+            items[0] = secret(&"f".repeat(prompt_max - each * (items.len() - 1)));
+            let response = crate::Response {
+                protocol_version: crate::PROTOCOL_VERSION,
+                result: crate::RespResult::Ok(crate::Payload::TaskFollowUps(TaskFollowUps {
+                    task: TaskRef::from_id(&id(0xf0)),
+                    from: u32::MAX,
+                    items,
+                    addendum: Some(Bytes::new(enc(&signed).into())),
+                })),
+                catalog_digest: Some(crate::CatalogDigest([0xff; 32])),
+            };
+            let len = crate::encode_response(&response).unwrap().len();
+            assert!(
+                len <= prompt_response_cap(prompt_max),
+                "{prompt_max}: {len}"
+            );
+        }
     }
 }

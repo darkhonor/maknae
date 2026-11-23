@@ -6,7 +6,8 @@ use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rustls::client::danger::ServerCertVerifier;
 use maknae_crypto::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use maknae_proto::{
-    task_signing_bytes, Ask, Bytes, SignedTask, TaskObject, TaskSignature, TASK_ENVELOPE_MARGIN,
+    addendum_signing_bytes, task_signing_bytes, Ask, Bytes, SignedAddendum, SignedTask,
+    TaskAddendum, TaskId, TaskObject, TaskSignature, TASK_ENVELOPE_MARGIN,
 };
 use std::time::Duration;
 use x509_parser::certificate::X509Certificate;
@@ -15,6 +16,7 @@ use x509_parser::prelude::FromDer;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskSignatureError {
     AgentMismatch,
+    TaskMismatch,
     Algorithm,
     NotKernel,
     KeyMismatch,
@@ -26,6 +28,7 @@ impl std::fmt::Display for TaskSignatureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             TaskSignatureError::AgentMismatch => "the task names another agent",
+            TaskSignatureError::TaskMismatch => "the addendum names another task",
             TaskSignatureError::Algorithm => "the signature names no plane key algorithm",
             TaskSignatureError::NotKernel => "the signing leaf is not a valid kernel leaf",
             TaskSignatureError::KeyMismatch => "the signing leaf's key is not the named algorithm",
@@ -46,16 +49,32 @@ fn signing_bound(task: &TaskObject) -> usize {
 pub fn sign_task(identity: &PlaneIdentity, task: TaskObject) -> Result<SignedTask, VaultError> {
     let msg = task_signing_bytes(&task, signing_bound(&task))
         .map_err(|e| VaultError::Crypto(format!("task signing bytes: {}", e.category())))?;
-    let sig = identity.sign(&msg)?;
-    let (leaf, chain) = certificates(identity)?;
     Ok(SignedTask {
+        signature: signature_over(identity, &msg)?,
         task,
-        signature: TaskSignature {
-            alg: identity.plane_key().as_str().into(),
-            leaf: Bytes::new(leaf.into()),
-            chain: chain.into_iter().map(|c| Bytes::new(c.into())).collect(),
-            sig: Bytes::new(sig.into()),
-        },
+    })
+}
+
+pub fn sign_addendum(
+    identity: &PlaneIdentity,
+    addendum: TaskAddendum,
+) -> Result<SignedAddendum, VaultError> {
+    let msg = addendum_signing_bytes(&addendum)
+        .map_err(|e| VaultError::Crypto(format!("addendum signing bytes: {}", e.category())))?;
+    Ok(SignedAddendum {
+        signature: signature_over(identity, &msg)?,
+        addendum,
+    })
+}
+
+fn signature_over(identity: &PlaneIdentity, msg: &[u8]) -> Result<TaskSignature, VaultError> {
+    let sig = identity.sign(msg)?;
+    let (leaf, chain) = certificates(identity)?;
+    Ok(TaskSignature {
+        alg: identity.plane_key().as_str().into(),
+        leaf: Bytes::new(leaf.into()),
+        chain: chain.into_iter().map(|c| Bytes::new(c.into())).collect(),
+        sig: Bytes::new(sig.into()),
     })
 }
 
@@ -116,19 +135,42 @@ pub fn verify_task(
     if signed.task.agent != expected_agent.as_str() {
         return Err(TaskSignatureError::AgentMismatch);
     }
-    let sig = &signed.signature;
+    let msg = task_signing_bytes(&signed.task, signing_bound(&signed.task))
+        .map_err(|_| TaskSignatureError::Encoding)?;
+    verify_signed(trust, trust_domain, &signed.signature, &msg, now)
+}
+
+pub fn verify_addendum(
+    trust: &TrustBundle,
+    trust_domain: &str,
+    expected_task: &TaskId,
+    signed: &SignedAddendum,
+    now: Duration,
+) -> Result<(), TaskSignatureError> {
+    if signed.addendum.task_id() != expected_task {
+        return Err(TaskSignatureError::TaskMismatch);
+    }
+    let msg = addendum_signing_bytes(&signed.addendum).map_err(|_| TaskSignatureError::Encoding)?;
+    verify_signed(trust, trust_domain, &signed.signature, &msg, now)
+}
+
+fn verify_signed(
+    trust: &TrustBundle,
+    trust_domain: &str,
+    sig: &TaskSignature,
+    msg: &[u8],
+    now: Duration,
+) -> Result<(), TaskSignatureError> {
     let alg = PlaneKey::parse(&sig.alg).ok_or(TaskSignatureError::Algorithm)?;
     let leaf = kernel_leaf(trust, trust_domain, sig, now).ok_or(TaskSignatureError::NotKernel)?;
     if !crate::csr::spki_is(leaf.public_key(), alg) {
         return Err(TaskSignatureError::KeyMismatch);
     }
-    let msg = task_signing_bytes(&signed.task, signing_bound(&signed.task))
-        .map_err(|_| TaskSignatureError::Encoding)?;
     maknae_crypto::signature::verify(
         maknae_crypto::admitted(),
         alg.into(),
         &leaf.public_key().subject_public_key.data,
-        &msg,
+        msg,
         &sig.sig.0,
     )
     .map_err(|_| TaskSignatureError::BadSignature)
@@ -224,6 +266,74 @@ mod tests {
             assert!(signed.task.bindings.is_empty());
             assert_eq!(verify(&ca, "hobi", &signed), Ok(()), "{k:?}");
         }
+    }
+
+    fn addendum(task: TaskId) -> TaskAddendum {
+        let reach = maknae_proto::BindingReach::Git(maknae_proto::GitReach {
+            tasker: maknae_proto::SideReach::EMPTY,
+            basis: maknae_proto::TaskerBasis::Token,
+            agent: maknae_proto::AgentReach::NoForgeCredential,
+            why: Some(maknae_proto::EmptyReason::NoForgeCredential),
+        });
+        TaskAddendum::new(task, 1, vec![binding(8)], vec![reach]).unwrap()
+    }
+
+    fn verify_added(
+        ca: &TestCa,
+        expected: &TaskId,
+        signed: &SignedAddendum,
+    ) -> Result<(), TaskSignatureError> {
+        verify_addendum(&ca.trust(), TRUST_DOMAIN, expected, signed, now())
+    }
+
+    #[test]
+    fn the_agent_refuses_an_addendum_signed_for_another_task() {
+        for k in PlaneKey::ALL {
+            let ca = TestCa::new(k);
+            let id = ca.kernel(k, None);
+            let held = task("suga").task_id;
+            let signed = sign_addendum(&id, addendum(held)).unwrap();
+            assert_eq!(verify_added(&ca, &held, &signed), Ok(()), "{k:?}");
+            assert_eq!(
+                verify_added(&ca, &TaskId([8; 16]), &signed),
+                Err(TaskSignatureError::TaskMismatch),
+                "{k:?}"
+            );
+            let other = sign_addendum(&id, addendum(TaskId([8; 16]))).unwrap();
+            let forged = SignedAddendum {
+                addendum: addendum(held),
+                signature: other.signature,
+            };
+            assert_eq!(
+                verify_added(&ca, &held, &forged),
+                Err(TaskSignatureError::BadSignature),
+                "{k:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_signature_never_verifies_an_addendum() {
+        let k = PlaneKey::EcdsaP384Sha384;
+        let ca = TestCa::new(k);
+        let id = ca.kernel(k, None);
+        let added = addendum(TaskId([9; 16]));
+        let body = maknae_proto::addendum_signing_bytes(&added).unwrap();
+        let body = &body[maknae_proto::TASK_ADDENDUM_SIGNING_CONTEXT.len()..];
+        let mut as_task = TASK_SIGNING_CONTEXT.to_vec();
+        as_task.extend_from_slice(body);
+        let template = sign_addendum(&id, added.clone()).unwrap();
+        let signed = SignedAddendum {
+            addendum: added,
+            signature: TaskSignature {
+                sig: Bytes::new(id.sign(&as_task).unwrap().into()),
+                ..template.signature
+            },
+        };
+        assert_eq!(
+            verify_added(&ca, &TaskId([9; 16]), &signed),
+            Err(TaskSignatureError::BadSignature)
+        );
     }
 
     #[test]
@@ -487,6 +597,10 @@ mod tests {
             (
                 TaskSignatureError::AgentMismatch,
                 "the task names another agent",
+            ),
+            (
+                TaskSignatureError::TaskMismatch,
+                "the addendum names another task",
             ),
             (
                 TaskSignatureError::Algorithm,

@@ -107,7 +107,7 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|TaskReportPage|task_reports|2|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_reports.entries|6|wire"
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|3|wire"
-  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|3|wire"
+  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|4|wire"
   "crates/maknae-proto/src/task.rs|AgentPage|agent_list|4|wire"
   "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|3|wire"
   "crates/maknae-proto/src/task.rs|BannerSpec|agent_list.banner|2|wire"
@@ -192,6 +192,7 @@ LEAF_SECRETS=(
   "task_report.text|crates/maknae-proto/src/wire.rs|SecretText"
   "task_reports.entries.text|crates/maknae-proto/src/wire.rs|SecretText"
   "task_follow_ups.items|crates/maknae-proto/src/wire.rs|SecretText"
+  "task_follow_ups.addendum|crates/maknae-proto/src/bytes.rs|Bytes"
 )
 
 secret_decl() { # <type>

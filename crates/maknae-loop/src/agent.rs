@@ -10,15 +10,15 @@ use maknae_agent::plane::{
     StatOutcome, WriteOutcome,
 };
 use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
-use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified};
+use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified, VerifyClass};
 use maknae_config::AgentId;
 use maknae_graph::graph::Graph;
 use maknae_io::{
     AnchorRequired, DescendantRequired, IoError, IoKind, StrategyPref, TargetRequired, Zeroizing,
 };
 use maknae_proto::{
-    BindingRequest, Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskCursor,
-    TaskId, TaskRef, TaskReportPage, TaskView, Turn,
+    BindingRequest, Bytes, ConversationId, ConversationView, SecretText, SignedAddendum,
+    SignedTask, TaskCursor, TaskId, TaskRef, TaskReportPage, TaskView, Turn,
 };
 use maknae_vault::TrustBundle;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,21 @@ impl TaskTrust {
             class: crate::task::verify_class(e),
         })?;
         Ok(task)
+    }
+
+    pub fn verify_addendum(
+        &self,
+        task: &TaskId,
+        signed: &Bytes,
+        now: Result<std::time::Duration, String>,
+    ) -> Result<SignedAddendum, VerifyClass> {
+        use maknae_vault::task_sig::TaskSignatureError;
+        let added: SignedAddendum = ciborium::from_reader(signed.0.as_slice())
+            .map_err(|_| crate::task::verify_class(TaskSignatureError::Encoding))?;
+        let now = now.map_err(|_| crate::task::verify_class(TaskSignatureError::NotKernel))?;
+        maknae_vault::task_sig::verify_addendum(&self.trust, &self.trust_domain, task, &added, now)
+            .map_err(crate::task::verify_class)?;
+        Ok(added)
     }
 }
 
@@ -248,6 +263,14 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     }
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified> {
         self.trust.verify(signed, maknae_io::now_since_epoch())
+    }
+    fn verify_addendum(
+        &mut self,
+        task: &TaskId,
+        signed: &Bytes,
+    ) -> Result<SignedAddendum, VerifyClass> {
+        self.trust
+            .verify_addendum(task, signed, maknae_io::now_since_epoch())
     }
     async fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
         let rel = match at {

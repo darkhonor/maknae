@@ -10,8 +10,8 @@ use crate::session::Session;
 use crate::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use crate::transcript::Transcript;
 use maknae_proto::{
-    Ask, Binding, BindingRequest, Bytes, SecretText, SignedTask, TaskCursor, TaskId, TaskRef,
-    TaskReportPage, TaskState, TaskView,
+    Ask, Binding, BindingRequest, Bytes, SecretText, SignedAddendum, SignedTask, TaskAddendum,
+    TaskCursor, TaskId, TaskRef, TaskReportPage, TaskState, TaskView,
 };
 use std::future::Future;
 use std::path::Path;
@@ -44,6 +44,7 @@ pub const SESSION_UNAVAILABLE: &str = "session-unavailable";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyClass {
     Agent,
+    Task,
     Algorithm,
     NotKernel,
     Key,
@@ -55,6 +56,7 @@ impl VerifyClass {
     pub fn as_str(self) -> &'static str {
         match self {
             VerifyClass::Agent => "agent",
+            VerifyClass::Task => "task",
             VerifyClass::Algorithm => "algorithm",
             VerifyClass::NotKernel => "not-kernel",
             VerifyClass::Key => "key",
@@ -121,6 +123,11 @@ pub enum DriverEvent {
     },
     Loop(LoopEvent),
     CloseFailed(PlaneError),
+    /// The addendum was not taken; the task keeps the bindings it had.
+    AddendumRefused {
+        task: TaskId,
+        class: VerifyClass,
+    },
 }
 
 pub trait Clock {
@@ -143,6 +150,12 @@ pub trait TaskPlane: Plane {
     /// Creates mode 0700. An existing directory is `Applied`.
     fn make_partition_dir(&mut self, path: &str) -> impl Future<Output = WriteOutcome> + Send;
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified>;
+    /// An addendum verifies only for `task`, the one held.
+    fn verify_addendum(
+        &mut self,
+        task: &TaskId,
+        signed: &Bytes,
+    ) -> Result<SignedAddendum, VerifyClass>;
     /// Cited: a home or partition persona is read as the task's own request.
     fn persona(
         &mut self,
@@ -191,12 +204,59 @@ impl ShutdownHandle {
     }
 }
 
+/// The held task's bindings, then its latest addendum's.
+struct Bound {
+    all: Vec<Binding>,
+    own: usize,
+    seq: u32,
+}
+
+impl Bound {
+    fn of(own: Vec<Binding>) -> Self {
+        Bound {
+            own: own.len(),
+            all: own,
+            seq: 0,
+        }
+    }
+
+    fn take(&mut self, added: &TaskAddendum) {
+        if added.seq() <= self.seq {
+            return;
+        }
+        self.all.truncate(self.own);
+        self.all.extend_from_slice(added.bindings());
+        self.seq = added.seq();
+    }
+}
+
+#[derive(Default)]
+struct News {
+    addendum: Option<Bytes>,
+    items: Vec<SecretText>,
+}
+
+fn take_addendum<P: TaskPlane>(
+    plane: &mut P,
+    id: TaskId,
+    bound: &mut Bound,
+    signed: Option<Bytes>,
+) {
+    let Some(signed) = signed else {
+        return;
+    };
+    match plane.verify_addendum(&id, &signed) {
+        Ok(added) => bound.take(&added.addendum),
+        Err(class) => plane.note(DriverEvent::AddendumRefused { task: id, class }),
+    }
+}
+
 struct Held {
     id: TaskId,
     session: Session,
     /// The partition, where `task_agent` stores a report.
     cwd: String,
-    bindings: Vec<Binding>,
+    bindings: Bound,
     seen: u32,
     last_beat: Duration,
     answer: Option<Zeroizing<String>>,
@@ -224,8 +284,8 @@ impl Renewal {
 }
 
 enum Beat {
-    /// The task is still `Working`; the items not yet seen, possibly none.
-    More(Vec<SecretText>),
+    /// The task is still `Working`; what is not yet seen, possibly nothing.
+    More(News),
     Held,
     Gone,
     Refused,
@@ -234,14 +294,22 @@ enum Beat {
 
 fn read_beat(answer: Result<BeatAnswer, String>, seen: &mut u32) -> Beat {
     match answer {
-        Ok(BeatAnswer::FollowUps { from, items, .. }) => {
+        Ok(BeatAnswer::FollowUps {
+            from,
+            items,
+            addendum,
+            ..
+        }) => {
             let skip = seen.saturating_sub(from) as usize;
             let end = from.saturating_add(u32::try_from(items.len()).unwrap_or(u32::MAX));
             *seen = (*seen).max(end);
-            Beat::More(items.into_iter().skip(skip).collect())
+            Beat::More(News {
+                addendum,
+                items: items.into_iter().skip(skip).collect(),
+            })
         }
         Ok(BeatAnswer::State(view)) => match view.state {
-            TaskState::Working => Beat::More(vec![]),
+            TaskState::Working => Beat::More(News::default()),
             TaskState::Held => Beat::Held,
             TaskState::Queued | TaskState::Reported | TaskState::Closed => Beat::Gone,
         },
@@ -258,6 +326,7 @@ enum HookEnd {
 }
 
 struct TaskHook<'a> {
+    id: TaskId,
     shutdown: &'a AtomicBool,
     seen: &'a mut u32,
     last_beat: &'a mut Duration,
@@ -272,7 +341,7 @@ struct Tool<'a, P, C> {
     clock: &'a mut C,
     shutdown: &'a AtomicBool,
     cwd: &'a str,
-    bindings: &'a [Binding],
+    bindings: &'a mut Bound,
 }
 
 impl<P: TaskPlane + Send, C: Clock + Send + Sync> Plane for Tool<'_, P, C> {
@@ -352,7 +421,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> Plane for Tool<'_, P, C> {
             &mut *self.plane,
             wait,
             self.cwd,
-            self.bindings,
+            &self.bindings.all,
             conversation,
             agent,
             prompt,
@@ -383,9 +452,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> StepHook<Tool<'_, P, C>> for T
             }
         }
         match read_beat(answer, self.seen) {
-            Beat::More(items) => {
+            Beat::More(news) => {
                 *self.last_beat = now;
-                for item in &items {
+                take_addendum(tool.plane, self.id, tool.bindings, news.addendum);
+                for item in &news.items {
                     transcript.push_user(&item.0);
                 }
                 StepControl::Continue
@@ -406,7 +476,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> StepHook<Tool<'_, P, C>> for T
 enum Reported {
     /// `Some` names the fixed report sent in place of the one asked for.
     Done(Option<&'static str>),
-    FollowUps(Vec<SecretText>),
+    FollowUps(News),
     Held,
     Gone,
     Unsendable,
@@ -417,14 +487,14 @@ enum Reported {
 struct Lapsed;
 
 enum Reconnected {
-    Resume(Vec<SecretText>),
+    Resume(News),
     Ended(Ending),
     Hold,
 }
 
 enum Then {
     Run,
-    Resume(Vec<SecretText>),
+    Resume(News),
 }
 
 struct Backoff(Duration);
@@ -659,7 +729,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         if let Some(held) = self.held.take() {
             if held.id == id && !fresh {
                 self.plane.cite(Some(id));
-                self.work(held, Then::Resume(vec![])).await;
+                self.work(held, Then::Resume(News::default())).await;
                 return;
             }
             self.drop_held(held).await;
@@ -746,8 +816,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                     return Reported::Unsendable;
                 };
                 match read_beat(answer, seen) {
-                    Beat::More(items) if content && !items.is_empty() => {
-                        return Reported::FollowUps(items)
+                    Beat::More(news) if content && !news.items.is_empty() => {
+                        return Reported::FollowUps(news)
                     }
                     Beat::More(_) => break,
                     Beat::Held => return Reported::Held,
@@ -800,7 +870,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             id,
             session,
             cwd,
-            bindings: task.task.bindings.clone(),
+            bindings: Bound::of(task.task.bindings.clone()),
             seen: 0,
             last_beat: self.clock.now(),
             answer: None,
@@ -868,7 +938,16 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         let mut then = then;
         loop {
             let mut events = vec![];
+            if let Then::Resume(news) = &mut then {
+                take_addendum(
+                    &mut self.plane,
+                    held.id,
+                    &mut held.bindings,
+                    news.addendum.take(),
+                );
+            }
             let mut hook = TaskHook {
+                id: held.id,
                 shutdown: &self.shutdown,
                 seen: &mut held.seen,
                 last_beat: &mut held.last_beat,
@@ -880,7 +959,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 clock: &mut self.clock,
                 shutdown: &self.shutdown,
                 cwd: &held.cwd,
-                bindings: &held.bindings,
+                bindings: &mut held.bindings,
             };
             let outcome = match then {
                 Then::Run => {
@@ -888,9 +967,9 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                         .run_with(&mut tool, &mut hook, &mut |e| events.push(e))
                         .await
                 }
-                Then::Resume(items) => {
+                Then::Resume(news) => {
                     held.session
-                        .resume(&mut tool, &items, &mut hook, &mut |e| events.push(e))
+                        .resume(&mut tool, &news.items, &mut hook, &mut |e| events.push(e))
                         .await
                 }
             };
@@ -904,8 +983,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             let stopped = match outcome.stopped {
                 None | Some(StopReason::NothingPending) => match held.answer.take() {
                     Some(answer) => match self.done(&mut held, SecretText(answer)).await {
-                        Ok(items) => {
-                            then = Then::Resume(items);
+                        Ok(news) => {
+                            then = Then::Resume(news);
                             continue;
                         }
                         Err(ending) => {
@@ -932,8 +1011,8 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 StopReason::Transport(_) if held.resumes < MAX_RESUMES => {
                     held.resumes += 1;
                     match self.reconnect(&mut held).await {
-                        Reconnected::Resume(items) => {
-                            then = Then::Resume(items);
+                        Reconnected::Resume(news) => {
+                            then = Then::Resume(news);
                             continue;
                         }
                         Reconnected::Ended(ending) => {
@@ -966,11 +1045,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
     }
 
     /// Ending 1. `Ok` carries follow-ups to continue the session with.
-    async fn done(
-        &mut self,
-        held: &mut Held,
-        answer: SecretText,
-    ) -> Result<Vec<SecretText>, Ending> {
+    async fn done(&mut self, held: &mut Held, answer: SecretText) -> Result<News, Ending> {
         loop {
             if self.stopping() {
                 return Err(Ending::Shutdown);
@@ -979,7 +1054,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 return Err(Ending::Unsendable);
             };
             match read_beat(beat, &mut held.seen) {
-                Beat::More(items) if !items.is_empty() => return Ok(items),
+                Beat::More(news) if !news.items.is_empty() => return Ok(news),
                 Beat::More(_) => break,
                 Beat::Held => return Err(Ending::Held),
                 Beat::Gone => return Err(Ending::Gone),
@@ -988,7 +1063,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             }
         }
         match self.report(answer, true, &mut held.seen).await {
-            Reported::FollowUps(items) => Ok(items),
+            Reported::FollowUps(news) => Ok(news),
             done => Err(fixed_ending(done, Ending::Answered)),
         }
     }
@@ -1005,7 +1080,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 return Reconnected::Ended(Ending::Unsendable);
             };
             match read_beat(answer, &mut held.seen) {
-                Beat::More(items) => return Reconnected::Resume(items),
+                Beat::More(news) => return Reconnected::Resume(news),
                 Beat::Held => return Reconnected::Ended(Ending::Held),
                 Beat::Gone => return Reconnected::Ended(Ending::Gone),
                 Beat::Refused => return Reconnected::Hold,
@@ -1101,6 +1176,7 @@ mod tests {
         reports: VecDeque<Result<ReportOutcome, String>>,
         mkdirs: VecDeque<WriteOutcome>,
         tasks: HashMap<u8, Result<SignedTask, Unverified>>,
+        addenda: HashMap<u8, Result<SignedAddendum, VerifyClass>>,
         personas: HashMap<String, Result<Option<SecretText>, String>>,
         replies: VecDeque<Result<PromptReply, PlaneError>>,
         step_cost: Duration,
@@ -1246,6 +1322,7 @@ mod tests {
                 task: id(1),
                 from: seen,
                 items: vec![],
+                addendum: None,
             }))
         }
         async fn report(
@@ -1310,6 +1387,14 @@ mod tests {
             self.log("verify".into());
             self.tasks[&signed.0[0]].clone()
         }
+        fn verify_addendum(
+            &mut self,
+            task: &TaskId,
+            signed: &Bytes,
+        ) -> Result<SignedAddendum, VerifyClass> {
+            self.log(format!("verify addendum {}", tag(task)));
+            self.addenda[&signed.0[0]].clone()
+        }
         async fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
             let key = match at {
                 PersonaAt::Etc => "etc".to_string(),
@@ -1320,7 +1405,10 @@ mod tests {
             self.personas.get(&key).cloned().unwrap_or(Ok(None))
         }
         fn note(&mut self, event: DriverEvent) {
-            if let DriverEvent::Ended { .. } | DriverEvent::Loop(LoopEvent::Diagnostic(_)) = event {
+            if let DriverEvent::Ended { .. }
+            | DriverEvent::AddendumRefused { .. }
+            | DriverEvent::Loop(LoopEvent::Diagnostic(_)) = event
+            {
                 self.w.lock().unwrap().events.push(event);
             }
         }
@@ -1393,6 +1481,7 @@ mod tests {
             task: id(1),
             from,
             items: items.iter().map(|s| st(s)).collect(),
+            addendum: None,
         })
     }
     fn answer(s: &str) -> Result<PromptReply, PlaneError> {
@@ -1573,19 +1662,19 @@ mod tests {
     #[test]
     fn a_heartbeat_reads_only_the_follow_ups_not_yet_seen() {
         let mut seen = 2;
-        let Beat::More(items) = read_beat(follow_ups(1, &["a", "b", "c"]), &mut seen) else {
+        let Beat::More(news) = read_beat(follow_ups(1, &["a", "b", "c"]), &mut seen) else {
             panic!()
         };
-        assert_eq!(items, vec![st("b"), st("c")]);
+        assert_eq!(news.items, vec![st("b"), st("c")]);
         assert_eq!(seen, 4);
-        let Beat::More(items) = read_beat(follow_ups(4, &[]), &mut seen) else {
+        let Beat::More(news) = read_beat(follow_ups(4, &[]), &mut seen) else {
             panic!()
         };
-        assert!(items.is_empty());
+        assert!(news.items.is_empty() && news.addendum.is_none());
         assert_eq!(seen, 4);
         assert!(matches!(
             read_beat(Ok(BeatAnswer::State(view(TaskState::Working))), &mut seen),
-            Beat::More(v) if v.is_empty()
+            Beat::More(v) if v.items.is_empty() && v.addendum.is_none()
         ));
         assert!(matches!(
             read_beat(Ok(BeatAnswer::State(view(TaskState::Held))), &mut seen),
@@ -1999,7 +2088,7 @@ mod tests {
             clock: &mut clock,
             shutdown: &shutdown,
             cwd: HOME,
-            bindings: &[],
+            bindings: &mut Bound::of(vec![]),
         };
         let id = tool.open(Path::new(HOME), &[]).await.unwrap();
         assert!(tool.close(&id).await.is_ok());
@@ -2072,6 +2161,89 @@ mod tests {
             f.replies = VecDeque::from([call("task_agent", "t1", asked), answer("a1")]);
             let (_, _, w) = run_with(f, PersonaMode::Own).await;
             assert_eq!(w.lock().unwrap().submitted, [sent]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_added_binding_reaches_a_sub_task_only_once_its_addendum_verifies() {
+        use maknae_forge::ForgeProvider;
+        use maknae_proto::{
+            AgentReach, BindingReach, EmptyReason, GitBinding, GitReach, GitRef, SideReach,
+            TaskerBasis,
+        };
+        let bound = |base: &str, change| {
+            Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base: base.into(),
+                head: None,
+                change,
+            })
+        };
+        let reach = BindingReach::Git(GitReach {
+            tasker: SideReach::EMPTY,
+            basis: TaskerBasis::Token,
+            agent: AgentReach::NoForgeCredential,
+            why: Some(EmptyReason::NoForgeCredential),
+        });
+        let added = SignedAddendum {
+            addendum: TaskAddendum::new(id(1), 1, vec![bound("o/added", Some(5))], vec![reach])
+                .unwrap(),
+            signature: signed(1, "p").signature,
+        };
+        let asked = r#"{"agent":"jin","prompt":"see https://github.com/o/held/pull/3 and https://github.com/o/added/pull/5"}"#;
+        let request = |base: &str, change| {
+            BindingRequest::Git(GitRef {
+                server: "github.com".into(),
+                base: base.into(),
+                change: Some(change),
+            })
+        };
+        for (verified, sent, refused) in [
+            (
+                Ok(added.clone()),
+                vec![request("o/held", 3), request("o/added", 5)],
+                0,
+            ),
+            (Err(VerifyClass::Task), vec![request("o/held", 3)], 1),
+        ] {
+            let mut f = fake();
+            let mut task = signed(1, "prompt-1");
+            task.task.bindings = vec![bound("o/held", Some(3))];
+            f.tasks.insert(1, Ok(task));
+            f.addenda.insert(9, verified);
+            f.forges = Some(vec![Forge {
+                host: "github.com".into(),
+                provider: ForgeProvider::Github,
+            }]);
+            f.claims = VecDeque::from([delivered(1, PART)]);
+            f.beats = VecDeque::from([
+                Ok(BeatAnswer::Idle),
+                Ok(BeatAnswer::FollowUps {
+                    task: id(1),
+                    from: 0,
+                    items: vec![st("also o/added")],
+                    addendum: Some(Bytes::new(Zeroizing::new(vec![9]))),
+                }),
+            ]);
+            f.replies =
+                VecDeque::from([answer("a1"), call("task_agent", "t1", asked), answer("a2")]);
+            let (log, events, w) = run_with(f, PersonaMode::Own).await;
+            assert_eq!(w.lock().unwrap().submitted, [sent]);
+            let at = |line: &str| log.iter().position(|l| l == line).unwrap();
+            assert!(at("verify addendum t1") < at("submit jin"), "{log:?}");
+            let noted = events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        DriverEvent::AddendumRefused {
+                            class: VerifyClass::Task,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(noted, refused);
         }
     }
 
@@ -3251,13 +3423,13 @@ mod tests {
             id: id(1),
             session,
             cwd: format!("{HOME}/{PART}"),
-            bindings: vec![],
+            bindings: Bound::of(vec![]),
             seen: 0,
             last_beat: Duration::ZERO,
             answer: first.answer.map(|a| a.0),
             resumes: 0,
         };
-        d.work(held, Then::Resume(vec![])).await;
+        d.work(held, Then::Resume(News::default())).await;
         let log = w.lock().unwrap().log.clone();
         assert_eq!(
             log,

@@ -316,6 +316,13 @@ mod tests {
         fn verify(&mut self, _: &Bytes) -> Result<SignedTask, Unverified> {
             unreachable!()
         }
+        fn verify_addendum(
+            &mut self,
+            _: &TaskId,
+            _: &Bytes,
+        ) -> Result<maknae_proto::SignedAddendum, crate::task_driver::VerifyClass> {
+            unreachable!()
+        }
         async fn persona(&mut self, _: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
             unreachable!()
         }

@@ -14,7 +14,7 @@ use maknae_forge::{AgentSide, CredentialForge};
 use maknae_proto::{
     AgentReach, Binding, BindingReach, CredentialRef, EmptyReason, ForgeTokens, GitReach,
     Observations, ReachRefusal, ReachReply, ReachRequest, ReachSide, RepoAsk, SealedForgeToken,
-    SideReach, TaskObject, TaskerBasis, REACH_CREDENTIALS_MAX,
+    SideReach, SignedAddendum, TaskAddendum, TaskObject, TaskerBasis, REACH_CREDENTIALS_MAX,
 };
 
 use crate::egress_socket::{ReachEgress, ReachOutcome, Unanswered};
@@ -117,19 +117,30 @@ pub fn kernel_reach_permits() -> &'static tokio::sync::Semaphore {
     PERMITS.get_or_init(|| tokio::sync::Semaphore::new(maknae_config::REACH_CONCURRENCY_MAX))
 }
 
-/// A task's bindings and their reach, index-aligned: the task's own, then each addendum's.
+/// A task's bindings and their reach, index-aligned: the task's own, then its addendum's.
+/// `reach` is empty when the task's own bindings were sealed without it.
 pub(crate) struct TaskBound<'a> {
     pub bindings: Vec<&'a Binding>,
     pub reach: Vec<&'a BindingReach>,
 }
 
 impl<'a> TaskBound<'a> {
-    /// The original task's lists. Addenda (#168 slice 4, Task 12) append theirs here.
-    pub fn of(task: &'a TaskObject) -> Self {
-        Self {
-            bindings: task.bindings.iter().collect(),
-            reach: task.reach.iter().collect(),
-        }
+    pub fn of(task: &'a TaskObject, addendum: Option<&'a SignedAddendum>) -> Self {
+        let added = addendum.map(|a| &a.addendum);
+        let bindings = task
+            .bindings
+            .iter()
+            .chain(added.into_iter().flat_map(TaskAddendum::bindings))
+            .collect();
+        let reach = match task.reach.len() == task.bindings.len() {
+            true => task
+                .reach
+                .iter()
+                .chain(added.into_iter().flat_map(TaskAddendum::reach))
+                .collect(),
+            false => Vec::new(),
+        };
+        Self { bindings, reach }
     }
 }
 
@@ -144,7 +155,7 @@ pub(crate) struct ReachCtx<'a> {
 /// Who the tasker side is.
 pub(crate) enum Asker<'a> {
     Person { username: Option<&'a str> },
-    Parent(&'a TaskObject),
+    Parent(TaskBound<'a>),
     Agent { agent: &'a AgentId, uid: u32 },
 }
 
@@ -490,8 +501,7 @@ pub(crate) async fn observe<E: AuditEmit>(
             drop(held);
             heads_fit(bindings)?;
         }
-        Asker::Parent(parent) => {
-            let bound = TaskBound::of(parent);
+        Asker::Parent(bound) => {
             if bound.reach.is_empty() {
                 return Err(unreached("parent task has no reach"));
             }

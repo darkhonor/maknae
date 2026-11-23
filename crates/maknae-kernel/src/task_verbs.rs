@@ -371,6 +371,7 @@ pub(crate) fn decided(said: &[String]) -> String {
 }
 
 pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
+    let bound = rec.bound();
     TaskView {
         task: TaskRef::from_id(&rec.signed.task.task_id),
         agent: rec.agent.as_str().to_owned(),
@@ -381,12 +382,10 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
         actions: hot.actions,
         last_action_secs: hot.last_action,
         cursor: TaskCursor::from_seq(rec.tseq),
-        bindings: rec.signed.task.bindings.clone(),
-        reach: rec
-            .signed
-            .task
+        bindings: bound.bindings.into_iter().cloned().collect(),
+        reach: bound
             .reach
-            .iter()
+            .into_iter()
             .map(maknae_proto::ReachSummary::of)
             .collect(),
     }
@@ -628,6 +627,7 @@ mod tests {
             unseen: false,
             starts: 0,
             parent_start: None,
+            addendum: None,
         }
     }
 
