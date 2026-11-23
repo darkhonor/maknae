@@ -3852,7 +3852,6 @@ async fn serve_board_verb<S, E, P>(
             budget,
         )
         .await;
-        let skip_to = walk.skip_to.filter(|s| base_confirmed && *s > cursor);
         if !base_confirmed || (stalled && walk.page.posts.is_empty()) {
             let mut outcome = trail.outcome(&intent, bv::UNDECIDED, "unavailable");
             outcome.outcome.result = "deny".into();
@@ -3870,13 +3869,6 @@ async fn serve_board_verb<S, E, P>(
                 .await
             {
                 store.sent(key, agent, &sent);
-            }
-        }
-        if let Some(to) = skip_to {
-            if let Err(r) = advance(to).await {
-                let mut failed = trail.outcome(&intent, &r.to_string(), "unavailable");
-                failed.outcome.result = "deny".into();
-                trail.record_bounded(&failed).await;
             }
         }
         return;
@@ -12740,7 +12732,6 @@ mod record_widths {
                 last_seq: Some(u64::MAX),
                 returned: u32::MAX,
                 withheld: u32::MAX,
-                skip_to: None,
                 sent: Vec::new(),
             };
             let at = bv::cursor_audit(u64::MAX);

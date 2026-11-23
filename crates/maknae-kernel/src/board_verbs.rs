@@ -259,7 +259,6 @@ pub(crate) struct Walk {
     pub last_seq: Option<u64>,
     pub returned: u32,
     pub withheld: u32,
-    pub skip_to: Option<u64>,
     /// The sequences of the posts on the page.
     pub sent: Vec<u64>,
 }
@@ -279,8 +278,6 @@ struct Walked {
     used: usize,
     kept: Vec<Arc<Stored>>,
     withheld: u32,
-    skip_to: Option<u64>,
-    permitted: bool,
     /// The permitted post the page had no room for: what `more` stands on.
     lookahead: Option<Arc<Stored>>,
     /// The undecided post the walk stopped at.
@@ -336,12 +333,7 @@ impl Walker {
         let at = &mut self.at;
         match verdict {
             PostVerdict::Undecided => at.stop = Some(stored),
-            PostVerdict::Deny => {
-                at.withheld = at.withheld.saturating_add(1);
-                if !at.permitted {
-                    at.skip_to = Some(stored.seq);
-                }
-            }
+            PostVerdict::Deny => at.withheld = at.withheld.saturating_add(1),
             PostVerdict::Permit => {
                 let size = post_size(&stored);
                 let fits = at.kept.len() < BOARD_READ_PAGE_POSTS
@@ -350,7 +342,6 @@ impl Walker {
                     at.lookahead = Some(stored);
                     return;
                 }
-                at.permitted = true;
                 at.used = at.used.saturating_add(size);
                 at.kept.push(stored);
             }
@@ -458,7 +449,6 @@ impl Walker {
             last_seq: at.kept.last().map(|s| s.seq),
             returned: u32::try_from(at.kept.len()).unwrap_or(u32::MAX),
             withheld: at.withheld,
-            skip_to: at.skip_to,
             sent: at.kept.iter().map(|s| s.seq).collect(),
         }
     }
@@ -1015,7 +1005,6 @@ mod tests {
         assert_eq!(seqs(&walk), [id(1), id(3)]);
         assert_eq!((walk.withheld, walk.returned), (1, 2));
         assert_eq!((walk.first_seq, walk.last_seq), (Some(1), Some(3)));
-        assert_eq!(walk.skip_to, None);
         assert_eq!(walk.sent, [1, 3], "only what is returned is sent");
         assert!(!walk.page.more);
     }
@@ -1029,7 +1018,6 @@ mod tests {
         assert_eq!(seqs(&walk), [id(1)]);
         assert_eq!(walk.withheld, 0);
         assert_eq!(walk.sent, [1], "a stalled walk sends only what it kept");
-        assert_eq!(walk.skip_to, None);
         assert!(walk.page.more, "a stalled walk says more");
     }
 
@@ -1040,26 +1028,24 @@ mod tests {
         assert!(w.stalled());
         let walk = w.finish(&BTreeSet::new());
         assert!(walk.page.posts.is_empty());
-        assert_eq!(walk.skip_to, Some(2));
         assert_eq!(walk.withheld, 2);
         assert!(walk.sent.is_empty(), "a denied post is never sent");
     }
 
     #[test]
-    fn a_leading_withheld_run_sets_skip_to_and_a_later_one_does_not() {
+    fn a_withheld_post_costs_no_room_on_the_page() {
         let mut w = Walker::new(BIG);
         let posts = plain(1..=5);
         assert!(w.take(&posts[..2], &[D, D]));
         assert!(w.take(&posts[2..], &[P, D, D]));
         let walk = w.finish(&BTreeSet::new());
         assert_eq!(seqs(&walk), [id(3)]);
-        assert_eq!(walk.skip_to, Some(2));
         assert_eq!(walk.withheld, 4);
         assert_eq!(walk.sent, [3]);
         let mut none = Walker::new(BIG);
         assert!(none.take(&[], &[]));
         let walk = none.finish(&BTreeSet::new());
-        assert_eq!((walk.skip_to, walk.sent), (None, vec![]));
+        assert!(walk.sent.is_empty());
     }
 
     #[test]
@@ -1184,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_post_whose_obligations_conflict_stalls_the_walk_and_skips_nothing() {
+    fn a_leading_post_whose_obligations_conflict_stalls_the_walk() {
         let verdicts: Vec<_> = [
             conflicted(),
             Verdict::Permit {
@@ -1198,7 +1184,6 @@ mod tests {
         assert!(!w.take(&plain(1..=2), &verdicts));
         assert!(w.stalled());
         let walk = w.finish(&BTreeSet::new());
-        assert_eq!(walk.skip_to, None);
         assert!(walk.page.posts.is_empty());
     }
 

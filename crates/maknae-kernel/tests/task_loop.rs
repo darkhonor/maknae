@@ -5098,7 +5098,7 @@ mod board {
     }
 
     #[tokio::test]
-    async fn a_reader_behind_only_withheld_posts_gets_an_empty_page_and_moves_on() {
+    async fn a_reader_behind_only_withheld_posts_gets_an_empty_page_and_its_cursor_stays() {
         let w = board_world("board-behind");
         let j = w.at_work("jin");
         let posted: Vec<PostId> = (0..40)
@@ -5110,17 +5110,25 @@ mod board {
         let page = page_of(answer);
         assert!(page.posts.is_empty());
         assert!(!page.more);
-        assert_eq!(w.cursor("jin"), w.seq(last), "skipped after the reply");
+        assert_eq!(
+            w.cursor("jin"),
+            0,
+            "only an acknowledgement moves the cursor"
+        );
+        assert!(!w.board_blobs.has(&format!("cursor.{}.jin", w.me)));
+        assert!(w.seq(last) > 0);
         let b = read_outcome(&records);
         assert_eq!(
             (b.returned, b.withheld, b.cursor),
-            (Some(0), Some(40), Some(0)),
-            "the outcome names the cursor the reply was built from"
+            (Some(0), Some(40), Some(0))
         );
         w.stored("hobi", "p", PostLabels::default());
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        assert_eq!(bodies(&page_of(answer)), ["p"]);
         assert_eq!(
-            bodies(&page_of(w.board_as(&pdp, "jin", read(None), j).await.0)),
-            ["p"]
+            read_outcome(&records).withheld,
+            Some(40),
+            "the next read decides them again"
         );
     }
 
@@ -5749,10 +5757,10 @@ mod board {
     }
 
     #[tokio::test]
-    async fn a_failed_skip_past_withheld_posts_is_recorded_and_the_page_is_given() {
-        let w = board_world("board-skip-fails");
+    async fn a_read_behind_withheld_posts_writes_no_cursor_even_when_the_disk_refuses() {
+        let w = board_world("board-no-skip-refused");
         let j = w.at_work("jin");
-        let withheld = w.stored("hobi", "sentinel-695-withheld", labelled());
+        w.stored("hobi", "sentinel-695-withheld", labelled());
         let pdp = denies(&w, &["jin"]);
         w.board_blobs.fail(Some(Fail::Every));
         let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
@@ -5762,18 +5770,13 @@ mod board {
             page.posts.is_empty() && !page.more,
             "the page of an empty board"
         );
-        assert_eq!(w.cursor("jin"), 0);
-        let said = said(&records);
-        assert_eq!(said.len(), 3, "{said:?}");
-        assert_eq!((said[1].0.as_str(), said[1].1.as_str()), ("permit", "done"));
         assert_eq!(
-            (said[2].0.as_str(), said[2].2.as_str()),
-            ("deny", "unavailable"),
-            "the failed skip is recorded after the reply"
+            said(&records)[1..],
+            one("permit", "done", "authorized"),
+            "nothing is written after the reply"
         );
-        assert!(said[2].1.starts_with("store: "), "{said:?}");
         page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
-        assert_eq!(w.cursor("jin"), w.seq(withheld));
+        assert_eq!(w.cursor("jin"), 0, "and nothing on the next read either");
     }
 
     #[tokio::test]
@@ -5798,7 +5801,8 @@ mod board {
             1,
             "a post appended during the read is for the next read"
         );
-        assert_eq!(w.cursor("jin"), w.seq(first));
+        assert_eq!(w.cursor("jin"), 0);
+        assert!(w.seq(first) > 0);
     }
 
     #[tokio::test]
@@ -5976,7 +5980,7 @@ mod board {
     }
 
     #[tokio::test]
-    async fn the_reply_never_depends_on_whether_the_skip_was_written() {
+    async fn the_reply_behind_a_withheld_post_is_the_same_whatever_the_disk_does() {
         let stored = read_behind_a_withheld_post("board-skip-stored", |_| {}).await;
         let refused =
             read_behind_a_withheld_post("board-skip-refused", |b| b.fail(Some(Fail::Every))).await;
@@ -6122,7 +6126,7 @@ mod board {
     }
 
     #[tokio::test]
-    async fn the_reply_is_built_and_sent_before_the_skip_is_written() {
+    async fn a_read_behind_a_withheld_post_records_nothing_after_its_reply() {
         let (_, written, done) = skip_behind_a_withheld_post("board-skip-after-ok", |_| {}).await;
         let outcome = |records: &[AuditRecord]| {
             records
@@ -6152,10 +6156,15 @@ mod board {
                 outcome(&done),
                 "{tag}: the outcome record"
             );
+            assert_eq!(
+                records.len(),
+                2,
+                "{tag}: intent and outcome only: {records:?}"
+            );
             if slow {
                 assert!(
                     took < Duration::from_millis(1500),
-                    "the reply arrived while the skip was stalled: {took:?}"
+                    "the reply does not wait on the disk: {took:?}"
                 );
             }
         }
