@@ -1311,67 +1311,67 @@ pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
 pub fn takes_task_request_cap(verb: &Verb) -> bool {
     match verb {
         Verb::TaskSubmit { .. } | Verb::TaskAdd { .. } => true,
-        Verb::Ping { .. }
-        | Verb::Whoami { .. }
+        Verb::Ping
+        | Verb::Whoami
         | Verb::ToolCatalog { .. }
-        | Verb::AdminStatus { .. }
-        | Verb::AdminConfigShow { .. }
-        | Verb::AdminAuditTail { .. }
-        | Verb::AdminPolicyReload { .. }
-        | Verb::AdminSubjectList { .. }
-        | Verb::AdminBaselineShow { .. }
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminBaselineShow
         | Verb::AdminBaselineAccept { .. }
-        | Verb::AdminSubjectBind { .. }
-        | Verb::AdminSubjectUnbind { .. }
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
         | Verb::AdminContain { .. }
         | Verb::AdminRelease { .. }
         | Verb::AdminHeldList { .. }
         | Verb::AdminHeldRelease { .. }
-        | Verb::AdminCredentialRotate { .. }
-        | Verb::AdminProviderList { .. }
-        | Verb::AdminProviderSet { .. }
-        | Verb::AdminProviderDisable { .. }
-        | Verb::AdminSessionList { .. }
-        | Verb::AdminSessionTerminate { .. }
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
         | Verb::SessionNew { .. }
-        | Verb::SessionResume { .. }
+        | Verb::SessionResume
         | Verb::SessionClose { .. }
         | Verb::SessionDelete { .. }
         | Verb::SessionList { .. }
-        | Verb::SessionFork { .. }
+        | Verb::SessionFork
         | Verb::SessionPrompt { .. }
-        | Verb::SessionCancel { .. }
-        | Verb::SessionSetconfigoption { .. }
-        | Verb::SessionSetmode { .. }
-        | Verb::SessionLoad { .. }
-        | Verb::SessionUpdate { .. }
-        | Verb::SessionRequestpermission { .. }
-        | Verb::SessionElicitCreate { .. }
-        | Verb::SessionElicitComplete { .. }
-        | Verb::SessionCompact { .. }
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
         | Verb::Read { .. }
         | Verb::FsWrite { .. }
         | Verb::FsDelete { .. }
-        | Verb::FsMove { .. }
+        | Verb::FsMove
         | Verb::FsList { .. }
         | Verb::FsStat { .. }
         | Verb::FsMkdir { .. }
-        | Verb::FsLink { .. }
-        | Verb::FsChmod { .. }
-        | Verb::FsChown { .. }
-        | Verb::TerminalCreate { .. }
-        | Verb::TerminalOutput { .. }
-        | Verb::TerminalWaitforexit { .. }
-        | Verb::TerminalKill { .. }
-        | Verb::TerminalRelease { .. }
-        | Verb::TerminalInput { .. }
-        | Verb::McpConnect { .. }
-        | Verb::McpDisconnect { .. }
-        | Verb::McpMessage { .. }
-        | Verb::McpToolCall { .. }
-        | Verb::McpResourceRead { .. }
-        | Verb::McpPromptGet { .. }
-        | Verb::McpSamplingCreate { .. }
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate
         | Verb::TaskStatus { .. }
         | Verb::TaskList { .. }
         | Verb::TaskStop { .. }

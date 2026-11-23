@@ -25,7 +25,7 @@ enum Stage {
 
 #[derive(Clone, Copy)]
 enum Role {
-    NoRole,
+    Unheld,
     Pull,
     Triage,
     Push,
@@ -37,7 +37,7 @@ impl Role {
     fn base_ops(self) -> ForgeOps {
         let read = [ForgeOp::Read, ForgeOp::Review, ForgeOp::IssueWrite];
         match self {
-            Role::NoRole => ForgeOps::EMPTY,
+            Role::Unheld => ForgeOps::EMPTY,
             Role::Pull | Role::Triage => read.into_iter().collect(),
             Role::Push | Role::Maintain | Role::Admin => {
                 read.into_iter().chain([ForgeOp::Merge]).collect()
@@ -47,7 +47,7 @@ impl Role {
 
     fn head_ops(self) -> ForgeOps {
         match self {
-            Role::NoRole | Role::Pull | Role::Triage => ForgeOps::EMPTY,
+            Role::Unheld | Role::Pull | Role::Triage => ForgeOps::EMPTY,
             Role::Push | Role::Maintain | Role::Admin => ForgeOps::EMPTY.with(ForgeOp::PushHead),
         }
     }
@@ -74,7 +74,7 @@ impl Role {
         Ok(held
             .into_iter()
             .find_map(|(held, role)| held.then_some(role))
-            .unwrap_or(Role::NoRole))
+            .unwrap_or(Role::Unheld))
     }
 }
 
