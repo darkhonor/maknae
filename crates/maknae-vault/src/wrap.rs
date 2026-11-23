@@ -15,8 +15,51 @@ use zeroize::Zeroizing;
 pub const MAX_WRAP_TTL: Duration = Duration::from_secs(300);
 pub const USER_KEY_WRAP_TTL: Duration = Duration::from_secs(60);
 pub const MAX_KV_DATA_PATH_BYTES: usize = 1024;
+pub const FORGE_TOKEN_FIELD: &str = "token";
 const LEAF_DEPTH: u8 = 2;
 const KV_DATA_SEGMENT: &str = "/data/";
+const KV_METADATA_SEGMENT: &str = "/metadata/";
+const FORGE_SUBPATH_PREFIX: &str = "forges/";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeTokenSubpath(String);
+
+impl ForgeTokenSubpath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub fn forge_token_subpath(server: &str) -> Option<ForgeTokenSubpath> {
+    if !maknae_proto::server_is_acceptable(server) || server.starts_with('[') {
+        return None;
+    }
+    let subpath = format!("{FORGE_SUBPATH_PREFIX}{}", server.replace(':', "_"));
+    maknae_config::key_subpath_is_acceptable(&subpath).ok()?;
+    Some(ForgeTokenSubpath(subpath))
+}
+
+pub struct KvSecret(Zeroizing<String>);
+
+impl KvSecret {
+    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
+        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
+            what: "KV secret",
+            why,
+        })?;
+        Ok(Self(secret))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for KvSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KvSecret(<redacted>)")
+    }
+}
 
 pub struct WrappingToken(Zeroizing<String>);
 
@@ -62,10 +105,27 @@ impl KvDataPath {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvMetadataPath(String);
+
+impl KvMetadataPath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 pub fn kv_data_path(kv_mount: &str, secret_path: &str) -> Result<KvDataPath, VaultError> {
+    kv_path(kv_mount, KV_DATA_SEGMENT, secret_path).map(KvDataPath)
+}
+
+pub fn kv_metadata_path(kv_mount: &str, secret_path: &str) -> Result<KvMetadataPath, VaultError> {
+    kv_path(kv_mount, KV_METADATA_SEGMENT, secret_path).map(KvMetadataPath)
+}
+
+fn kv_path(kv_mount: &str, segment: &str, secret_path: &str) -> Result<String, VaultError> {
     let composed = kv_mount
         .len()
-        .saturating_add(KV_DATA_SEGMENT.len())
+        .saturating_add(segment.len())
         .saturating_add(secret_path.len());
     if composed > MAX_KV_DATA_PATH_BYTES {
         return Err(VaultError::InvalidKeyVaultPath(format!(
@@ -81,9 +141,7 @@ pub fn kv_data_path(kv_mount: &str, secret_path: &str) -> Result<KvDataPath, Vau
             )));
         }
     }
-    Ok(KvDataPath(format!(
-        "{kv_mount}{KV_DATA_SEGMENT}{secret_path}"
-    )))
+    Ok(format!("{kv_mount}{segment}{secret_path}"))
 }
 
 pub(crate) fn wrap_ttl_value(ttl: Duration) -> Result<String, VaultError> {
@@ -112,7 +170,10 @@ pub(crate) fn client_token<'a>(
 ) -> Result<Option<&'a str>, VaultError> {
     match op {
         VaultOp::UserpassLogin | VaultOp::WrapLookup | VaultOp::AppRoleLogin => Ok(None),
-        VaultOp::WrappedRead | VaultOp::RevokeSelf => user
+        VaultOp::WrappedRead
+        | VaultOp::WrappedWrite
+        | VaultOp::DeleteMetadata
+        | VaultOp::RevokeSelf => user
             .map(|t| Some(t.expose()))
             .ok_or_else(missing_client_token),
         VaultOp::Unwrap => wrapping
@@ -124,13 +185,13 @@ pub(crate) fn client_token<'a>(
     }
 }
 
-fn kv_field_is_acceptable(field: &str) -> bool {
+pub(crate) fn kv_field_is_acceptable(field: &str) -> bool {
     !field.is_empty()
         && field.len() <= maknae_config::MAX_KEY_FIELD_BYTES
         && !field.chars().any(char::is_whitespace)
 }
 
-fn field_echo(field: &str) -> &str {
+pub(crate) fn field_echo(field: &str) -> &str {
     let end = field
         .char_indices()
         .map(|(i, c)| i + c.len_utf8())
@@ -250,8 +311,24 @@ pub(crate) fn parse_wrapped_read(
     expected: &KvDataPath,
     requested_ttl: Duration,
 ) -> Result<WrappedSecret, VaultError> {
-    let dto: WrappedReadDto =
-        serde_json::from_slice(body).map_err(|e| json_refusal(VaultOp::WrappedRead, &e))?;
+    parse_wrapped(VaultOp::WrappedRead, body, expected, requested_ttl)
+}
+
+pub(crate) fn parse_wrapped_write(
+    body: &[u8],
+    expected: &KvDataPath,
+    requested_ttl: Duration,
+) -> Result<(), VaultError> {
+    parse_wrapped(VaultOp::WrappedWrite, body, expected, requested_ttl).map(drop)
+}
+
+fn parse_wrapped(
+    op: VaultOp,
+    body: &[u8],
+    expected: &KvDataPath,
+    requested_ttl: Duration,
+) -> Result<WrappedSecret, VaultError> {
+    let dto: WrappedReadDto = serde_json::from_slice(body).map_err(|e| json_refusal(op, &e))?;
     if dto.data.is_some() {
         return Err(VaultError::WrapMismatch(WrapMismatch::NotWrapped));
     }
@@ -421,6 +498,158 @@ mod tests {
     }
 
     #[test]
+    fn a_forge_subpath_is_injective_and_refuses_ipv6_literals() {
+        assert_eq!(FORGE_TOKEN_FIELD, "token");
+        let servers = [
+            "github.com",
+            "github.com:443",
+            "ghe.example",
+            "ghe.example:8443",
+            "ghe.example:844",
+            "ghe.example8443",
+            "10.0.0.5",
+            "10.0.0.5:22",
+            "localhost",
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for server in servers {
+            let sub = forge_token_subpath(server).unwrap();
+            let host = sub.as_str().strip_prefix("forges/").unwrap();
+            assert_eq!(host.replace('_', ":"), server);
+            assert!(seen.insert(sub.as_str().to_owned()), "{server}");
+        }
+        assert_eq!(
+            forge_token_subpath("ghe.example:8443").unwrap().as_str(),
+            "forges/ghe.example_8443"
+        );
+        for v6 in ["[::1]", "[::1]:8443", "[fe80::1]", "[2001:db8::1]:443"] {
+            assert!(forge_token_subpath(v6).is_none(), "{v6}");
+        }
+    }
+
+    #[test]
+    fn a_forge_path_never_leaves_the_users_subtree() {
+        let long = format!("{}.com", "a".repeat(250));
+        for server in [
+            "github.com",
+            "ghe.example:8443",
+            "data",
+            "..",
+            ".",
+            "a/../b",
+            "../bob",
+            "GitHub.com",
+            "github.com/org",
+            "github.com:443/../../bob",
+            "u@a",
+            "a b",
+            "a_b",
+            "",
+            "x:0",
+            "%2e%2e",
+            "[::1]",
+            long.as_str(),
+        ] {
+            let Some(sub) = forge_token_subpath(server) else {
+                continue;
+            };
+            let path = maknae_config::user_key_path("maknae/users", "alice", sub.as_str()).unwrap();
+            let leaf = path.strip_prefix("maknae/users/alice/forges/").unwrap();
+            assert!(
+                !leaf.contains('/') && leaf != ".." && leaf != ".",
+                "{server}"
+            );
+            kv_data_path("maknae-kv", &path).unwrap();
+        }
+        for refused in [
+            "data",
+            "GitHub.com",
+            "a_b",
+            "",
+            long.as_str(),
+            "github.com/org",
+        ] {
+            assert!(forge_token_subpath(refused).is_none(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_kv_secret_is_shape_checked_and_redacted() {
+        let s = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
+        assert!(s.expose() == "github_pat_SENTINEL");
+        assert_eq!(format!("{s:?}"), "KvSecret(<redacted>)");
+        for bad in ["", "a b", "a\"b", "tok\n"] {
+            assert!(
+                matches!(
+                    KvSecret::new(Zeroizing::new(bad.into())),
+                    Err(VaultError::InvalidSecret {
+                        what: "KV secret",
+                        ..
+                    })
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_write_answer_must_wrap_the_written_path() {
+        let path = kv_data_path("maknae-kv", "maknae/users/alice/openai/personal").unwrap();
+        let ttl = Duration::from_secs(60);
+        assert!(
+            parse_wrapped_write(wrapped_body(ALICE, 60, "null").as_bytes(), &path, ttl).is_ok()
+        );
+        assert!(matches!(
+            parse_wrapped_write(wrapped_body(BOB, 60, "null").as_bytes(), &path, ttl),
+            Err(VaultError::WrapMismatch(WrapMismatch::CreationPath))
+        ));
+        assert!(matches!(
+            parse_wrapped_write(
+                wrapped_body(ALICE, 60, r#"{"version":1}"#).as_bytes(),
+                &path,
+                ttl
+            ),
+            Err(VaultError::WrapMismatch(WrapMismatch::NotWrapped))
+        ));
+        assert!(matches!(
+            parse_wrapped_write(wrapped_body(ALICE, 61, "null").as_bytes(), &path, ttl),
+            Err(VaultError::WrapMismatch(WrapMismatch::CreationTtl { .. }))
+        ));
+        let e = parse_wrapped_write(b"{", &path, ttl)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("Vault wrapped KV write response refused"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_kv_metadata_path_is_mount_metadata_path_and_checked_like_a_data_path() {
+        assert_eq!(
+            kv_metadata_path("maknae-kv", "maknae/users/alice/forges/github.com")
+                .unwrap()
+                .as_str(),
+            "maknae-kv/metadata/maknae/users/alice/forges/github.com"
+        );
+        for (mount, path) in [("maknae-kv", "../bob/x"), ("maknae-kv", "a?b"), ("", "a")] {
+            assert!(
+                matches!(
+                    kv_metadata_path(mount, path),
+                    Err(VaultError::InvalidKeyVaultPath(_))
+                ),
+                "{mount:?} {path:?}"
+            );
+        }
+        let fits = "a".repeat(MAX_KV_DATA_PATH_BYTES - "kv/metadata/".len());
+        assert!(kv_metadata_path("kv", &fits).is_ok());
+        assert!(matches!(
+            kv_metadata_path("kv", &format!("{fits}a")),
+            Err(VaultError::InvalidKeyVaultPath(m)) if m == "the full path exceeds 1024 bytes"
+        ));
+    }
+
+    #[test]
     fn the_aad_parts_are_the_turn_and_the_expectations_path_and_field() {
         let e = expect();
         let parts = aad_parts(&e, "conv-aad", "openai", "gpt-5.6-luna");
@@ -472,6 +701,20 @@ mod tests {
         assert!(pick(VaultOp::WrappedRead) == Some("hvs.user"));
         assert!(pick(VaultOp::Unwrap) == Some("hvs.wrap"));
         assert!(pick(VaultOp::RevokeSelf) == Some("hvs.user"));
+        assert!(pick(VaultOp::WrappedWrite) == Some("hvs.user"));
+        assert!(pick(VaultOp::DeleteMetadata) == Some("hvs.user"));
+        for op in [VaultOp::WrappedWrite, VaultOp::DeleteMetadata] {
+            assert!(
+                matches!(
+                    client_token(op, None, Some(&wrap), None),
+                    Err(VaultError::InvalidSecret {
+                        what: "client token",
+                        ..
+                    })
+                ),
+                "{op:?}"
+            );
+        }
         assert!(matches!(
             client_token(VaultOp::RevokeSelf, None, Some(&wrap), None),
             Err(VaultError::InvalidSecret {

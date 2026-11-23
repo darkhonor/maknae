@@ -1,14 +1,15 @@
 use crate::api_request::{
-    approle_login_body, approle_login_request, login_body, login_request, lookup_body,
-    lookup_request, revoke_self_request, transit_sign_body, transit_sign_request, unwrap_request,
-    wrapped_read_request, ApiBase,
+    approle_login_body, approle_login_request, delete_metadata_request, kv_write_body, login_body,
+    login_request, lookup_body, lookup_request, revoke_self_request, transit_sign_body,
+    transit_sign_request, unwrap_request, wrapped_read_request, wrapped_write_request, ApiBase,
 };
 use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
 use crate::transit::{parse_service_login, parse_sign_reply, ServiceLogin, ServiceToken};
 use crate::user_login::{parse_login, Password, UserLogin, UserToken};
 use crate::wrap::{
-    kv_data_path, parse_lookup, parse_wrapped_read, unwrap_checked, CheckedLookup, UnwrapOps,
-    WrapExpectation, WrapLookup, WrappedSecret, WrappingToken,
+    kv_data_path, kv_metadata_path, parse_lookup, parse_wrapped_read, parse_wrapped_write,
+    unwrap_checked, CheckedLookup, KvSecret, UnwrapOps, WrapExpectation, WrapLookup, WrappedSecret,
+    WrappingToken,
 };
 use crate::{UserAuth, UserAuthMethod, VaultError};
 use maknae_crypto::assert_fips_provider;
@@ -69,6 +70,33 @@ impl VaultApi {
         let req = wrapped_read_request(&self.http, &self.base, token, &path, wrap_ttl)?;
         let body = self.execute(VaultOp::WrappedRead, req).await?;
         parse_wrapped_read(&body, &path, wrap_ttl)
+    }
+
+    pub async fn write_wrapped(
+        &self,
+        token: &UserToken,
+        kv_mount: &str,
+        secret_path: &str,
+        field: &str,
+        secret: &KvSecret,
+        wrap_ttl: Duration,
+    ) -> Result<(), VaultError> {
+        let path = kv_data_path(kv_mount, secret_path)?;
+        let body = kv_write_body(field, secret)?;
+        let req = wrapped_write_request(&self.http, &self.base, token, &path, wrap_ttl, body)?;
+        let body = self.execute(VaultOp::WrappedWrite, req).await?;
+        parse_wrapped_write(&body, &path, wrap_ttl)
+    }
+
+    pub async fn delete_metadata(
+        &self,
+        token: &UserToken,
+        kv_mount: &str,
+        secret_path: &str,
+    ) -> Result<(), VaultError> {
+        let path = kv_metadata_path(kv_mount, secret_path)?;
+        let req = delete_metadata_request(&self.http, &self.base, token, &path)?;
+        self.execute(VaultOp::DeleteMetadata, req).await.map(drop)
     }
 
     pub async fn lookup_wrapping(&self, token: &WrappingToken) -> Result<WrapLookup, VaultError> {
@@ -150,6 +178,7 @@ impl UnwrapOps for VaultApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wrap::{KvSecret, FORGE_TOKEN_FIELD};
     use maknae_crypto::rcgen;
 
     fn ca() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -226,6 +255,32 @@ mod tests {
             rt.block_on(api.revoke_self(&user)),
             Err(VaultError::VaultTransport { .. })
         ));
+        let secret = KvSecret::new(Zeroizing::new("github_pat_x".into())).unwrap();
+        assert!(matches!(
+            rt.block_on(api.write_wrapped(
+                &user,
+                "maknae-kv",
+                "maknae/users/alice/forges/github.com",
+                FORGE_TOKEN_FIELD,
+                &secret,
+                Duration::from_secs(60)
+            )),
+            Err(VaultError::VaultTransport {
+                op: "wrapped KV write",
+                ..
+            })
+        ));
+        assert!(matches!(
+            rt.block_on(api.delete_metadata(
+                &user,
+                "maknae-kv",
+                "maknae/users/alice/forges/github.com"
+            )),
+            Err(VaultError::VaultTransport {
+                op: "KV metadata delete",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -275,6 +330,22 @@ mod tests {
         let user = UserToken::new(Zeroizing::new("hvs.u".into())).unwrap();
         assert!(matches!(
             rt.block_on(api.read_wrapped(&user, "maknae-kv", "../bob/x", Duration::from_secs(60))),
+            Err(VaultError::InvalidKeyVaultPath(_))
+        ));
+        let secret = KvSecret::new(Zeroizing::new("github_pat_x".into())).unwrap();
+        assert!(matches!(
+            rt.block_on(api.write_wrapped(
+                &user,
+                "maknae-kv",
+                "../bob/x",
+                FORGE_TOKEN_FIELD,
+                &secret,
+                Duration::from_secs(60)
+            )),
+            Err(VaultError::InvalidKeyVaultPath(_))
+        ));
+        assert!(matches!(
+            rt.block_on(api.delete_metadata(&user, "maknae-kv", "../bob/x")),
             Err(VaultError::InvalidKeyVaultPath(_))
         ));
     }

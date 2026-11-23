@@ -137,8 +137,9 @@ pub use user_login::{
 pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
 pub use verify::{leaf_not_after, verify_uri_san, VerifyError};
 pub use wrap::{
-    aad_parts, kv_data_path, AadParts, KvDataPath, WrapExpectation, WrapLookup, WrappedSecret,
-    WrappingToken, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
+    aad_parts, forge_token_subpath, kv_data_path, kv_metadata_path, AadParts, ForgeTokenSubpath,
+    KvDataPath, KvMetadataPath, KvSecret, WrapExpectation, WrapLookup, WrappedSecret,
+    WrappingToken, FORGE_TOKEN_FIELD, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
 };
 
 #[used]
