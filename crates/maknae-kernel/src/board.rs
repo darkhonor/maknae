@@ -373,15 +373,11 @@ impl BoardStore {
         };
         let listed: Vec<&Arc<Stored>> =
             seqs.iter().filter_map(|seq| board.posts.get(seq)).collect();
-        let ranged: Vec<&Arc<Stored>> = if lo < hi {
-            board
-                .posts
-                .range((Bound::Excluded(lo), Bound::Included(hi)))
-                .map(|(_, s)| s)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let ranged: Vec<&Arc<Stored>> = board
+            .posts
+            .range((Bound::Excluded(lo), Bound::Included(hi.max(lo))))
+            .map(|(_, s)| s)
+            .collect();
         let contained = contained_on(
             view,
             key,
@@ -397,7 +393,7 @@ impl BoardStore {
     }
 
     /// An acknowledgement moves the cursor to `seen_through` only when that post was sent to
-    /// `reader`, is above its cursor, and is not past retention.
+    /// `reader` and is not past retention. A sent set holds only posts above the cursor.
     pub fn plan_read(
         &self,
         key: BoardKey,
@@ -416,7 +412,7 @@ impl BoardStore {
             let seq = *board.ids.get(&id)?;
             let current = board.posts.get(&seq).is_some_and(|s| !expired(s, now));
             let sent = board.sent.get(reader)?.contains(&seq);
-            (sent && current && seq > cursor).then_some(seq)
+            (sent && current).then_some(seq)
         });
         let upper = board
             .and_then(|b| b.posts.last_key_value())
@@ -429,8 +425,9 @@ impl BoardStore {
     }
 
     /// Moves `reader`'s cursor to `to` for an acknowledgement, checked again under the
-    /// writer as `plan_read` checked it: `to` is a post on the board, sent to `reader`, above
-    /// its cursor and not past retention. Otherwise nothing moves and the cursor is returned.
+    /// writer as `plan_read` checked it: `to` is a post on the board, sent to `reader` (so
+    /// above its cursor) and not past retention. Otherwise nothing moves and the cursor is
+    /// returned.
     pub fn acknowledge(
         &self,
         key: BoardKey,
@@ -450,7 +447,7 @@ impl BoardStore {
                 b.posts.get(&to).is_some_and(|s| !expired(s, now))
                     && b.sent.get(reader).is_some_and(|sent| sent.contains(&to))
             });
-            (cursor, still && to > cursor)
+            (cursor, still)
         };
         if !still {
             return Ok(cursor);
@@ -2266,6 +2263,80 @@ mod tests {
 
     fn sent_set(store: &BoardStore, key: BoardKey, r: &AgentId) -> Option<BTreeSet<u64>> {
         store.held().boards.get(&key)?.sent.get(r).cloned()
+    }
+
+    #[test]
+    fn the_record_bound_and_the_retention_are_exact() {
+        assert_eq!(crate::board_store::BOARD_RECORD_MAX, 40_960);
+        assert_eq!(crate::board_store::BOARD_RETENTION.as_secs(), 604_800);
+    }
+
+    #[test]
+    fn a_sent_set_never_holds_a_post_at_or_below_the_cursor() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let posted: Vec<_> = (0..3).map(|_| put(&store, BOB, hobi(), "p")).collect();
+        let r = reader("rm");
+        store.advance(BOB, &r, posted[1].seq).unwrap();
+        store.sent(BOB, &r, &[posted[0].seq, posted[1].seq, posted[2].seq]);
+        assert_eq!(
+            sent_set(&store, BOB, &r),
+            Some([posted[2].seq].into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_keeps_the_later_sent_posts_acknowledgeable() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let posted: Vec<_> = (0..3).map(|_| put(&store, BOB, hobi(), "p")).collect();
+        let r = reader("rm");
+        store.sent(BOB, &r, &[posted[0].seq, posted[1].seq, posted[2].seq]);
+        assert_eq!(store.acknowledge(BOB, &r, posted[1].seq), Ok(posted[1].seq));
+        assert_eq!(
+            sent_set(&store, BOB, &r),
+            Some([posted[2].seq].into_iter().collect()),
+            "the acknowledged and earlier ones go, the later one stays"
+        );
+        assert_eq!(
+            store.plan_read(BOB, &r, Some(posted[2].post.id)).ack_to,
+            Some(posted[2].seq)
+        );
+    }
+
+    #[test]
+    fn an_expiry_forgets_only_its_own_due_records() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let old = by(&store, BOB, jin(), Some(2002), "sentinel-695-old");
+        clock.set(T0 + 10);
+        let marked = by(&store, BOB, hobi(), Some(2001), "sentinel-695-marked");
+        clock.set(T0 + RETAIN);
+        store.mark(&containing(&[], &[2001]));
+        let due = store.due(10);
+        assert_eq!(
+            whys(&due),
+            vec![
+                (
+                    Some(marked.post.id),
+                    None,
+                    BoardDueFor::Hold(HeldFor::Author)
+                ),
+                (Some(old.post.id), None, BoardDueFor::Expire),
+            ]
+        );
+        b.fail(Some(Fail::Unsynced));
+        assert_eq!(store.perform(&due, &free()), 0);
+        b.fail(None);
+        assert_eq!(store.perform(&due[1..], &free()), 1);
+        let left = store.due(10);
+        assert_eq!(
+            left.iter()
+                .map(|d| (d.post, d.recorded))
+                .collect::<Vec<_>>(),
+            [(Some(marked.post.id), true)],
+            "the hold's record, refused before, is still known as recorded"
+        );
     }
 
     #[test]
