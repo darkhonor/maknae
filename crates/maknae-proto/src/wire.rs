@@ -1307,6 +1307,82 @@ pub fn admits(declared: FrameClass, verb: &Verb) -> bool {
     class_of(verb) == declared
 }
 
+/// Whether `verb` is held to the task request cap rather than the prompt request cap.
+pub fn takes_task_request_cap(verb: &Verb) -> bool {
+    match verb {
+        Verb::TaskSubmit { .. } | Verb::TaskAdd { .. } => true,
+        Verb::Ping { .. }
+        | Verb::Whoami { .. }
+        | Verb::ToolCatalog { .. }
+        | Verb::AdminStatus { .. }
+        | Verb::AdminConfigShow { .. }
+        | Verb::AdminAuditTail { .. }
+        | Verb::AdminPolicyReload { .. }
+        | Verb::AdminSubjectList { .. }
+        | Verb::AdminBaselineShow { .. }
+        | Verb::AdminBaselineAccept { .. }
+        | Verb::AdminSubjectBind { .. }
+        | Verb::AdminSubjectUnbind { .. }
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
+        | Verb::AdminHeldList { .. }
+        | Verb::AdminHeldRelease { .. }
+        | Verb::AdminCredentialRotate { .. }
+        | Verb::AdminProviderList { .. }
+        | Verb::AdminProviderSet { .. }
+        | Verb::AdminProviderDisable { .. }
+        | Verb::AdminSessionList { .. }
+        | Verb::AdminSessionTerminate { .. }
+        | Verb::SessionNew { .. }
+        | Verb::SessionResume { .. }
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
+        | Verb::SessionFork { .. }
+        | Verb::SessionPrompt { .. }
+        | Verb::SessionCancel { .. }
+        | Verb::SessionSetconfigoption { .. }
+        | Verb::SessionSetmode { .. }
+        | Verb::SessionLoad { .. }
+        | Verb::SessionUpdate { .. }
+        | Verb::SessionRequestpermission { .. }
+        | Verb::SessionElicitCreate { .. }
+        | Verb::SessionElicitComplete { .. }
+        | Verb::SessionCompact { .. }
+        | Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMove { .. }
+        | Verb::FsList { .. }
+        | Verb::FsStat { .. }
+        | Verb::FsMkdir { .. }
+        | Verb::FsLink { .. }
+        | Verb::FsChmod { .. }
+        | Verb::FsChown { .. }
+        | Verb::TerminalCreate { .. }
+        | Verb::TerminalOutput { .. }
+        | Verb::TerminalWaitforexit { .. }
+        | Verb::TerminalKill { .. }
+        | Verb::TerminalRelease { .. }
+        | Verb::TerminalInput { .. }
+        | Verb::McpConnect { .. }
+        | Verb::McpDisconnect { .. }
+        | Verb::McpMessage { .. }
+        | Verb::McpToolCall { .. }
+        | Verb::McpResourceRead { .. }
+        | Verb::McpPromptGet { .. }
+        | Verb::McpSamplingCreate { .. }
+        | Verb::TaskStatus { .. }
+        | Verb::TaskList { .. }
+        | Verb::TaskStop { .. }
+        | Verb::TaskDrop { .. }
+        | Verb::TaskCollect { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskReport { .. }
+        | Verb::AgentList { .. } => false,
+    }
+}
+
 pub fn class_of(verb: &Verb) -> FrameClass {
     match verb {
         Verb::SessionPrompt { .. }
@@ -3966,6 +4042,13 @@ mod tests {
                 (Verb::McpPromptGet, FrameClass::Control),
                 (Verb::McpSamplingCreate, FrameClass::Control),
             ]
+        }
+
+        #[test]
+        fn no_session_admin_or_filesystem_verb_takes_the_task_request_cap() {
+            for (verb, _) in every_verb() {
+                assert!(!takes_task_request_cap(&verb), "{verb:?}");
+            }
         }
 
         #[test]

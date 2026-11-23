@@ -1016,30 +1016,36 @@ egress:
   refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by one connection's whole
   work — the handshake, the frame read and the response write (each at
-  its `transport` timeout), the session-fact lookups at connect and at the request and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, this
-  deadline, a task submission's reach (`reach_deadline_ms`, one 20 s forge call, and eight
-  5 s stages for its decisions, store steps and audit appends), the close, and a
+  its `transport` timeout), the session-fact lookups at connect and at the request and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, the
+  longer of this deadline and a task submission's reach (`reach_deadline_ms`, one 20 s
+  forge call, the 100 s margin, and eight 5 s stages for its decisions, store steps and
+  audit appends; a connection carries one request, so never both), the close, and a
   ten-second margin for the audit appends — so the outcome
-  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=1262`, launchd
+  record is written, and the shipped units' stop timeouts (`TimeoutStopSec=902`, launchd
   `ExitTimeOut`) cover that drain at every ceiling (60 s transport timeouts, 600 s
   deadline, 300 s reach deadline) plus every other term of the shutdown chain — the bounded wait for a policy reload's turn, the stop record's append, the
   credential supervisor's abort and reap, the reap of aborted handlers, the audit drain,
   the plane client's bounded lock wait and token revoke, the runtime teardown and the diagnostics flush — and
   a kernel test holds the unit values to that chain, two-sided. At the defaults the
-  chain is 497 s; a stop with nothing in flight exits in milliseconds. One more bound at
+  chain is 417 s; a stop with nothing in flight exits in milliseconds. One more bound at
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
   MiB maximum still reaches the deputy.
 - **`reach_deadline_ms`** (default 20000, `1000..=300000`): the bound on one task
   submission's or addition's reach check (§6.6), from when the check starts. Each reach frame
   carries the time left, and the deputy stops at it, revoking any token it holds; its exit
-  revoke can take up to 20 s more, which `maknaed`'s wait allows for. At most 4 reach exchanges
+  revoke can take up to 20 s more, and `maknaed` waits that plus a 100 s margin before it
+  calls the outcome unknown. At most 4 reach exchanges
   run at once on each side of the deputy socket, and waiting for a turn counts against this
   bound. Reach shares the deputy's connection pool with prompts but is not counted in the
   prompt breaker. After the check, storing the task gets its own fresh bound. The client waits
-  for a submit or an add for its control-class wait plus 360 s (this key's ceiling, one 20 s
-  forge call and eight 5 s stages), whatever the host sets. Out of range refuses boot by name;
-  `admin.config.show` shows it.
+  for a submit or an add for its control-class wait plus 460 s (this key's ceiling, one 20 s
+  forge call, the 100 s margin and eight 5 s stages), whatever the host sets. The tasker's
+  forge token travels as a Vault wrapping token that lives 60 s from the client's read, which
+  is shorter than this key's ceiling: a token whose tasker side is reached more than 60 s
+  after the read, after a long wait for a reach turn, cannot be unwrapped, and the task is
+  refused as `reach refused: login`, not as a timeout. Resubmitting reads a fresh token. Out of
+  range refuses boot by name; `admin.config.show` shows it.
 - **A provider's error reaches the deputy's journal** (#372). When the provider answers
   non-2xx, the deputy reads at most 4 KiB of the body, masks the provider key wherever it
   appears, escapes everything outside printable ASCII and writes one line:

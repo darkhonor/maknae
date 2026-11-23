@@ -2,8 +2,8 @@ mod agent;
 mod tasker;
 
 use crate::{
-    change_number, without_git, AgentSide, Forge, ForgeKind, ForgeReach, GithubKind, HttpReply,
-    LinkPath, Minting, Observer, Sigil,
+    change_number, without_git, AgentSide, Forge, ForgeCredentialKind, ForgeReach, GithubKind,
+    GitlabKind, HttpReply, LinkPath, Minting, Observer, Sigil,
 };
 use maknae_proto::{ReachRefusal, RepoAsk};
 use serde_json::Value;
@@ -80,23 +80,23 @@ impl Forge for Github {
         Some(self)
     }
 
-    fn agent_side(&self, kind: ForgeKind) -> AgentSide {
-        let ForgeKind::Github(kind) = kind else {
-            return AgentSide::NotThisForge;
-        };
+    fn agent_side(&self, kind: ForgeCredentialKind) -> AgentSide {
         match kind {
-            GithubKind::AppInstallation => AgentSide::Observe,
-            GithubKind::MachineUser => AgentSide::AtHandOut,
+            ForgeCredentialKind::Github(GithubKind::AppInstallation) => AgentSide::Observe,
+            ForgeCredentialKind::Github(GithubKind::MachineUser) => AgentSide::AtHandOut,
+            ForgeCredentialKind::Gitlab(GitlabKind::ProjectToken | GitlabKind::BotToken) => {
+                AgentSide::NotThisForge
+            }
         }
     }
 
-    fn minting(&self, kind: ForgeKind) -> Minting {
-        let ForgeKind::Github(kind) = kind else {
-            return Minting::NotThisForge;
-        };
+    fn minting(&self, kind: ForgeCredentialKind) -> Minting {
         match kind {
-            GithubKind::AppInstallation => Minting::TrustPlane,
-            GithubKind::MachineUser => Minting::FrontEnd,
+            ForgeCredentialKind::Github(GithubKind::AppInstallation) => Minting::TrustPlane,
+            ForgeCredentialKind::Github(GithubKind::MachineUser) => Minting::FrontEnd,
+            ForgeCredentialKind::Gitlab(GitlabKind::ProjectToken | GitlabKind::BotToken) => {
+                Minting::NotThisForge
+            }
         }
     }
 }

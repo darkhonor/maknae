@@ -58,6 +58,7 @@ pub const TASK_REACH_REPLY_STAGES: u64 = 8;
 pub const fn task_reach_reply_ms(reach_deadline_ms: u64) -> u64 {
     reach_deadline_ms
         .saturating_add(FORGE_CALL_TIMEOUT_MS)
+        .saturating_add(DEADLINE_MARGIN_MS)
         .saturating_add(TASK_REACH_REPLY_STAGES * crate::transport::BLOCKING_STAGE_TIMEOUT_MS)
 }
 const REACH_DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=REACH_DEADLINE_MS_MAX as i64;

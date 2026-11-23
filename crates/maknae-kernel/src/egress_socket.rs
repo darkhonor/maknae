@@ -418,9 +418,13 @@ impl Unanswered {
 }
 
 /// How long the kernel waits on one reach frame: its `deadline_ms`, then one more forge call
-/// for the revokes the Egress Daemon makes on exit.
+/// for the revokes the Egress Daemon makes on exit, then the deadline margin.
 pub fn reach_socket_wait(deadline_ms: u64) -> Duration {
-    Duration::from_millis(deadline_ms.saturating_add(maknae_config::FORGE_CALL_TIMEOUT_MS))
+    Duration::from_millis(
+        deadline_ms
+            .saturating_add(maknae_config::FORGE_CALL_TIMEOUT_MS)
+            .saturating_add(maknae_config::DEADLINE_MARGIN_MS),
+    )
 }
 
 /// Observes reach through the Egress Daemon, one frame per call.
@@ -1561,7 +1565,9 @@ mod tests {
     fn the_reach_socket_wait_allows_egress_exit_revokes() {
         assert_eq!(
             reach_socket_wait(1_000),
-            Duration::from_millis(1_000 + maknae_config::FORGE_CALL_TIMEOUT_MS)
+            Duration::from_millis(
+                1_000 + maknae_config::FORGE_CALL_TIMEOUT_MS + maknae_config::DEADLINE_MARGIN_MS
+            )
         );
         assert_eq!(reach_socket_wait(u64::MAX), Duration::from_millis(u64::MAX));
         let d = tempfile::tempdir().unwrap();

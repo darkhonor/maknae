@@ -1617,6 +1617,19 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn only_a_submit_or_an_add_takes_the_task_request_cap() {
+        let submit = crate::Verb::TaskSubmit {
+            task: submission(),
+            forge_tokens: crate::ForgeTokens::default(),
+        };
+        assert!(crate::takes_task_request_cap(&submit));
+        for verb in task_verbs("x") {
+            let add = format!("{verb:?}").starts_with("TaskAdd ");
+            assert_eq!(crate::takes_task_request_cap(&verb), add, "{verb:?}");
+        }
+    }
+
     fn task_payloads(text: &str) -> Vec<crate::Payload> {
         use crate::Payload;
         let mut closed = task_view();

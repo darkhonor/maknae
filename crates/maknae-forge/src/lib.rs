@@ -53,34 +53,40 @@ pub enum GitlabKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ForgeKind {
+pub enum ForgeCredentialKind {
     Github(GithubKind),
     Gitlab(GitlabKind),
 }
 
-impl ForgeKind {
+impl ForgeCredentialKind {
     pub fn provider(self) -> ForgeProvider {
         match self {
-            ForgeKind::Github(_) => ForgeProvider::Github,
-            ForgeKind::Gitlab(_) => ForgeProvider::Gitlab,
+            ForgeCredentialKind::Github(_) => ForgeProvider::Github,
+            ForgeCredentialKind::Gitlab(_) => ForgeProvider::Gitlab,
         }
     }
 }
 
 pub trait CredentialForge {
     /// The forge kind this credential kind is, or `None` for a kind no forge owns.
-    fn forge(self) -> Option<ForgeKind>;
+    fn forge(self) -> Option<ForgeCredentialKind>;
 }
 
 impl CredentialForge for CredentialKind {
-    fn forge(self) -> Option<ForgeKind> {
+    fn forge(self) -> Option<ForgeCredentialKind> {
         match self {
             CredentialKind::GithubAppInstallation => {
-                Some(ForgeKind::Github(GithubKind::AppInstallation))
+                Some(ForgeCredentialKind::Github(GithubKind::AppInstallation))
             }
-            CredentialKind::GithubMachineUser => Some(ForgeKind::Github(GithubKind::MachineUser)),
-            CredentialKind::GitlabProjectToken => Some(ForgeKind::Gitlab(GitlabKind::ProjectToken)),
-            CredentialKind::GitlabBotToken => Some(ForgeKind::Gitlab(GitlabKind::BotToken)),
+            CredentialKind::GithubMachineUser => {
+                Some(ForgeCredentialKind::Github(GithubKind::MachineUser))
+            }
+            CredentialKind::GitlabProjectToken => {
+                Some(ForgeCredentialKind::Gitlab(GitlabKind::ProjectToken))
+            }
+            CredentialKind::GitlabBotToken => {
+                Some(ForgeCredentialKind::Gitlab(GitlabKind::BotToken))
+            }
             CredentialKind::VaultChildToken | CredentialKind::VaultDynamicSecret => None,
         }
     }
@@ -94,8 +100,8 @@ pub trait Forge: Sync {
     /// repository (`Some(false)`), or is not a shorthand here (`None`).
     fn shorthand(&self, sigil: Sigil) -> Option<bool>;
     fn reach(&self) -> Option<&dyn ForgeReach>;
-    fn agent_side(&self, kind: ForgeKind) -> AgentSide;
-    fn minting(&self, kind: ForgeKind) -> Minting;
+    fn agent_side(&self, kind: ForgeCredentialKind) -> AgentSide;
+    fn minting(&self, kind: ForgeCredentialKind) -> Minting;
 }
 
 pub fn forge(p: ForgeProvider) -> &'static dyn Forge {
@@ -209,7 +215,7 @@ mod tests {
         assert!(observes_reach(ForgeProvider::Github));
         for kind in [GitlabKind::ProjectToken, GitlabKind::BotToken] {
             assert_eq!(
-                forge(ForgeProvider::Gitlab).agent_side(ForgeKind::Gitlab(kind)),
+                forge(ForgeProvider::Gitlab).agent_side(ForgeCredentialKind::Gitlab(kind)),
                 AgentSide::AtHandOut,
                 "{kind:?}"
             );
@@ -220,10 +226,10 @@ mod tests {
     fn each_forge_decides_its_own_kinds() {
         let gh = forge(ForgeProvider::Github);
         let gl = forge(ForgeProvider::Gitlab);
-        let app = ForgeKind::Github(GithubKind::AppInstallation);
-        let user = ForgeKind::Github(GithubKind::MachineUser);
-        let project = ForgeKind::Gitlab(GitlabKind::ProjectToken);
-        let bot = ForgeKind::Gitlab(GitlabKind::BotToken);
+        let app = ForgeCredentialKind::Github(GithubKind::AppInstallation);
+        let user = ForgeCredentialKind::Github(GithubKind::MachineUser);
+        let project = ForgeCredentialKind::Gitlab(GitlabKind::ProjectToken);
+        let bot = ForgeCredentialKind::Gitlab(GitlabKind::BotToken);
         assert_eq!(gh.agent_side(app), AgentSide::Observe);
         assert_eq!(gh.agent_side(user), AgentSide::AtHandOut);
         assert_eq!(gh.minting(app), Minting::TrustPlane);

@@ -522,8 +522,9 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// restart that races it — for a prompt: content left, `IntentOnly` in the
 /// trail, no outcome record. The units give the supervisor the matching
 /// patience (`TimeoutStopSec=`, launchd's `ExitTimeOut`), held to this sum at
-/// both ceilings by a test. A submission's reach and the store steps after it
-/// (`maknae_config::task_reach_reply_ms`) are added on top.
+/// both ceilings by a test. A connection reads one request frame, so a submission's reach
+/// and the store steps after it (`maknae_config::task_reach_reply_ms`) replace the egress
+/// deadline when longer, never add to it.
 fn handler_drain_bound(
     cfg: &TransportConfig,
     egress_deadline: Duration,
@@ -535,7 +536,7 @@ fn handler_drain_bound(
     // request's session-fact gather (#115), the requester home's resolution (filesystem
     // verbs only), the PDP decision, the verb's own blocking step under the
     // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
-    // review round 6), the provider call, the response write (bounded by the
+    // review round 6), the provider call or a reach, the response write (bounded by the
     // read timeout), the close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
         + Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS)
@@ -545,8 +546,9 @@ fn handler_drain_bound(
         + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
-        + egress_deadline
-        + Duration::from_millis(maknae_config::task_reach_reply_ms(reach_deadline_ms))
+        + egress_deadline.max(Duration::from_millis(maknae_config::task_reach_reply_ms(
+            reach_deadline_ms,
+        )))
         + Duration::from_millis(cfg.read_timeout_ms)
         + STREAM_CLOSE_TIMEOUT
         + HANDLER_DRAIN_SHUTDOWN_TIMEOUT
@@ -3968,6 +3970,7 @@ async fn serve_task_verb<S, E, P>(
             if !bindings.is_empty() || !tokens.is_empty() {
                 let ctx = crate::task::AddCtx {
                     user: trail.peer_user,
+                    view: &tasks.agents.view,
                     decide_timeout: timeout,
                     text_max: tasks.text_max,
                     forges: live.forges(),
@@ -5085,7 +5088,7 @@ fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCap
 }
 
 fn over_prompt_cap(class: FrameClass, verb: &Verb, len: usize, cfg: &TransportConfig) -> bool {
-    let task = matches!(verb, Verb::TaskSubmit { .. } | Verb::TaskAdd { .. });
+    let task = maknae_proto::takes_task_request_cap(verb);
     class == FrameClass::Prompt
         && !task
         && len > maknae_proto::prompt_request_cap(cfg.prompt_max_bytes)
@@ -12798,21 +12801,30 @@ mod tests {
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
         // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5 + 5
-        // + 5 + 5 + 5 + 0 + 5 + 1 + 10 = 56 s with no provider, plus the deadline with one,
-        // plus a reach submission: the 20 s reach deadline, a 20 s forge call and 8 stages
+        // + 5 + 5 + 5 + 5 + 1 + 10 = 56 s, plus the longer of the egress deadline and a
+        // submission's reach (the reach deadline, a forge call, the margin and 8 stages)
         let cfg = maknae_config::transport_from_section(None).unwrap();
-        let reach = maknae_config::EgressConfig::default().reach_deadline_ms;
+        let egress = maknae_config::EgressConfig::default();
+        let reach = egress.reach_deadline_ms;
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO, reach),
-            Duration::from_secs(136)
+            Duration::from_secs(236)
         );
         assert_eq!(
-            handler_drain_bound(&cfg, Duration::from_secs(120), reach),
-            Duration::from_secs(256)
+            handler_drain_bound(&cfg, Duration::from_millis(egress.deadline_ms), reach),
+            Duration::from_secs(336)
         );
         assert_eq!(
             handler_drain_bound(&cfg, Duration::ZERO, maknae_config::REACH_DEADLINE_MS_MAX),
-            Duration::from_secs(416)
+            Duration::from_secs(516)
+        );
+        assert_eq!(
+            handler_drain_bound(
+                &cfg,
+                Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
+                maknae_config::REACH_DEADLINE_MS_MAX
+            ),
+            Duration::from_secs(656)
         );
     }
 

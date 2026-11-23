@@ -1,6 +1,6 @@
 use crate::{
-    change_number, without_git, AgentSide, Forge, ForgeKind, ForgeReach, GitlabKind, LinkPath,
-    Minting, Sigil,
+    change_number, without_git, AgentSide, Forge, ForgeCredentialKind, ForgeReach, GithubKind,
+    GitlabKind, LinkPath, Minting, Sigil,
 };
 
 pub(crate) struct Gitlab;
@@ -51,22 +51,23 @@ impl Forge for Gitlab {
         None
     }
 
-    fn agent_side(&self, kind: ForgeKind) -> AgentSide {
-        let ForgeKind::Gitlab(kind) = kind else {
-            return AgentSide::NotThisForge;
-        };
+    fn agent_side(&self, kind: ForgeCredentialKind) -> AgentSide {
         match kind {
-            GitlabKind::ProjectToken | GitlabKind::BotToken => AgentSide::AtHandOut,
+            ForgeCredentialKind::Gitlab(GitlabKind::ProjectToken)
+            | ForgeCredentialKind::Gitlab(GitlabKind::BotToken) => AgentSide::AtHandOut,
+            ForgeCredentialKind::Github(GithubKind::AppInstallation | GithubKind::MachineUser) => {
+                AgentSide::NotThisForge
+            }
         }
     }
 
-    fn minting(&self, kind: ForgeKind) -> Minting {
-        let ForgeKind::Gitlab(kind) = kind else {
-            return Minting::NotThisForge;
-        };
+    fn minting(&self, kind: ForgeCredentialKind) -> Minting {
         match kind {
-            GitlabKind::ProjectToken => Minting::TrustPlane,
-            GitlabKind::BotToken => Minting::FrontEnd,
+            ForgeCredentialKind::Gitlab(GitlabKind::ProjectToken) => Minting::TrustPlane,
+            ForgeCredentialKind::Gitlab(GitlabKind::BotToken) => Minting::FrontEnd,
+            ForgeCredentialKind::Github(GithubKind::AppInstallation | GithubKind::MachineUser) => {
+                Minting::NotThisForge
+            }
         }
     }
 }

@@ -122,11 +122,9 @@ fn request_caps(
     verb: &maknae_proto::Verb,
     transport: &maknae_config::TransportConfig,
 ) -> FrameCaps {
-    let prompt = match verb {
-        maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. } => {
-            maknae_proto::task_request_cap(transport.prompt_max_bytes)
-        }
-        _ => maknae_proto::prompt_request_cap(transport.prompt_max_bytes),
+    let prompt = match maknae_proto::takes_task_request_cap(verb) {
+        true => maknae_proto::task_request_cap(transport.prompt_max_bytes),
+        false => maknae_proto::prompt_request_cap(transport.prompt_max_bytes),
     };
     FrameCaps {
         control: CONTROL_REQUEST_MAX,
@@ -741,7 +739,7 @@ mod tests {
         let reach = std::time::Duration::from_millis(maknae_config::task_reach_reply_ms(
             maknae_config::REACH_DEADLINE_MS_MAX,
         ));
-        assert_eq!(reach, std::time::Duration::from_secs(360));
+        assert_eq!(reach, std::time::Duration::from_secs(460));
         let mut reached = 0;
         for verb in tasker_verbs() {
             if matches!(
@@ -761,15 +759,17 @@ mod tests {
             prompt_max_bytes: 4096,
             ..Default::default()
         };
+        let mut tasked = 0;
         for verb in tasker_verbs() {
-            let want = match verb {
-                maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. } => {
-                    maknae_proto::task_request_cap(4096)
-                }
-                _ => maknae_proto::prompt_request_cap(4096),
+            let task = maknae_proto::takes_task_request_cap(&verb);
+            let want = match task {
+                true => maknae_proto::task_request_cap(4096),
+                false => maknae_proto::prompt_request_cap(4096),
             };
             assert_eq!(request_caps(&verb, &transport).prompt, want, "{verb:?}");
+            tasked += usize::from(task);
         }
+        assert_eq!(tasked, 2);
     }
 
     #[test]

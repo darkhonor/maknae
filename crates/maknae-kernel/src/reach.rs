@@ -552,8 +552,7 @@ pub(crate) async fn observe<E: AuditEmit>(
                             }
                         }
                     }
-                    Credentials::AtHandOut => {}
-                    Credentials::NoForgeCredential => {
+                    Credentials::AtHandOut | Credentials::NoForgeCredential => {
                         for &i in &idx {
                             slots[i].submitter_unseen = true;
                         }
