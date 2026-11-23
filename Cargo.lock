@@ -1080,6 +1080,7 @@ dependencies = [
  "maknae-agent",
  "maknae-config",
  "maknae-crypto",
+ "maknae-forge",
  "maknae-graph",
  "maknae-io",
  "maknae-loop",

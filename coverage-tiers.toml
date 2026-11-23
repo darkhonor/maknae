@@ -940,7 +940,7 @@ why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 o
 
 [[t3]]
 path = "bins/maknae/src/tty.rs"
-why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs. Amended 2026-11-15 (#630): Restore is shared with the session screen's raw mode (screen/term.rs), and raw() is hidden() with ICRNL, INLCR, IXON, ISTRIP, BRKINT, IGNCR and PARMRK cleared."
+why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs. Amended 2026-11-15 (#630): Restore is shared with the session screen's raw mode (screen/term.rs), and raw() is hidden() with ICRNL, INLCR, IXON, ISTRIP, BRKINT, IGNCR and PARMRK cleared. Amended (#168): the same prompt reads maknae forge login's token through the HiddenLine seam; forge.rs's TokenLine is that line."
 
 [[t3]]
 path = "bins/maknae/src/screen/mod.rs"
@@ -961,6 +961,10 @@ why = "#630: maknae agent list and maknae agent <name> wired to the kernel: the 
 [[t3]]
 path = "bins/maknae/src/screen/plain.rs"
 why = "#630: the plain-line session's reader and writer: lines in through one fixed zeroizing buffer, an over-long or non-UTF-8 line refused on the diagnostics descriptor (stderr), lines out through maknae-agent's display_safe (T1). Tested over pipes with bounded reads."
+
+[[t3]]
+path = "bins/maknae/src/forge.rs"
+why = "#168: maknae forge login and logout — config, the user's Vault login, the kernel's tool catalog over a minted plane client, the hidden prompt, then one wrapped KV write or one metadata delete; it needs a live daemon, Vault and a terminal. Its decisions are tested here against a recording store: login_path (a server the catalog does not name, a forge whose provider observes no reach per maknae-forge observes_reach, and a host with no forge_token_subpath are refused before the prompt, and the path equals the one the submission's wrapped read uses), login and logout (one write_wrapped at FORGE_TOKEN_FIELD with USER_KEY_WRAP_TTL, or one delete_metadata), and TokenLine (one zeroizing buffer sized once to MAX_TOKEN_BYTES that refuses rather than grows, and refuses any byte outside the token alphabet). The path rules are T1 in maknae-vault and maknae-config."
 
 [[t3]]
 path = "bins/maknae/src/login.rs"

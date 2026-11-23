@@ -239,6 +239,11 @@ enum Command {
     Login,
     /// Revoke and erase your stored Vault token.
     Logout,
+    /// Your logins to the forges this host's catalog names, kept in your own Vault space.
+    Forge {
+        #[command(subcommand)]
+        action: ForgeCommand,
+    },
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(Box<crate::enroll::EnrollArgs>),
@@ -327,6 +332,20 @@ enum SessionCommand {
     },
     /// Close the conversation with this id; its record is kept.
     Close { conversation: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ForgeCommand {
+    /// Store a token for SERVER, read from a hidden prompt.
+    Login {
+        /// The forge as the catalog names it, port included (e.g. ghe.example:8443).
+        server: String,
+    },
+    /// Erase the token stored for SERVER.
+    Logout {
+        /// The forge as the catalog names it, port included.
+        server: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1495,6 +1514,12 @@ pub async fn run_cli() -> ExitCode {
         Command::Agent(_) => ExitCode::from(2),
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
+        Command::Forge {
+            action: ForgeCommand::Login { server },
+        } => crate::forge::run_login(&server).await,
+        Command::Forge {
+            action: ForgeCommand::Logout { server },
+        } => crate::forge::run_logout(&server).await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
         Command::Reseed => crate::reseed::run_reseed(),
         Command::Policy {
@@ -1808,6 +1833,30 @@ mod tests {
     fn parses_whoami() {
         let cli = Cli::try_parse_from(["maknae", "whoami"]).expect("parses");
         assert!(matches!(cli.command.unwrap(), Command::Whoami));
+    }
+
+    #[test]
+    fn forge_login_and_logout_take_one_server_and_no_token() {
+        for (verb, login) in [("login", true), ("logout", false)] {
+            let cli =
+                Cli::try_parse_from(["maknae", "forge", verb, "ghe.example:8443"]).expect("parses");
+            match cli.command.unwrap() {
+                Command::Forge {
+                    action: ForgeCommand::Login { server },
+                } if login => assert_eq!(server, "ghe.example:8443"),
+                Command::Forge {
+                    action: ForgeCommand::Logout { server },
+                } if !login => assert_eq!(server, "ghe.example:8443"),
+                other => panic!("{verb}: {other:?}"),
+            }
+            for argv in [
+                ["maknae", "forge", verb].as_slice(),
+                ["maknae", "forge", verb, "github.com", "ghp_abc"].as_slice(),
+                ["maknae", "forge", verb, "github.com", "--token", "ghp_abc"].as_slice(),
+            ] {
+                assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} parsed");
+            }
+        }
     }
 
     #[test]
