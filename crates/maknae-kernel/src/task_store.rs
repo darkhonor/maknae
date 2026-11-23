@@ -757,6 +757,7 @@ mod tests {
                 },
                 labels: Labels {},
                 bindings: vec![],
+                reach: vec![],
             },
             signature: TaskSignature {
                 alg: "test".into(),

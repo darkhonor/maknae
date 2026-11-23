@@ -1,5 +1,5 @@
 //! The task object (#609): a fixed, versioned CBOR record of one task given to an agent.
-use crate::{Bytes, SecretText};
+use crate::{BindingReach, Bytes, ReachSummary, SecretText};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 pub const TASK_SCHEMA: &str = "maknae.task";
@@ -95,12 +95,12 @@ impl std::fmt::Debug for Ask {
 pub struct Labels {}
 
 pub const TASK_BINDINGS_MAX: usize = 8;
-/// The most a task's sealed `Vec<Binding>` may encode to.
-pub const TASK_BINDINGS_MAX_BYTES: usize = 1024;
-/// Sealing adds `head` (6 bytes as `null`) to each request, so a request set within this
-/// bound seals within [`TASK_BINDINGS_MAX_BYTES`].
-pub const TASK_BINDING_REQUESTS_MAX_BYTES: usize = TASK_BINDINGS_MAX_BYTES - 6 * TASK_BINDINGS_MAX;
-/// Reserved in [`TASK_ENVELOPE_MARGIN`] for the task's reach; no field carries it yet.
+/// The most a task's sealed `Vec<Binding>` may encode to, its heads included.
+pub const TASK_BINDINGS_MAX_BYTES: usize = 1280;
+/// Sealing adds `head` to each request, 6 bytes as `null`; a request set at this bound seals
+/// with one head of [`REPOSITORY_PATH_MAX_BYTES`] at exactly [`TASK_BINDINGS_MAX_BYTES`].
+pub const TASK_BINDING_REQUESTS_MAX_BYTES: usize = 976;
+/// The most a task's sealed `Vec<BindingReach>` may encode to.
 pub const TASK_REACH_MAX_BYTES: usize = 1024;
 pub const REPOSITORY_PATH_MAX_BYTES: usize = 255;
 
@@ -232,31 +232,40 @@ pub fn bindings_encoded_len<T: Serialize>(bindings: &[T]) -> usize {
     }
 }
 
+fn at_most<'de, D, T>(d: D, noun: &'static str) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct AtMost<T>(&'static str, std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for AtMost<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a list of at most {TASK_BINDINGS_MAX} {}", self.0)
+        }
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut list = Vec::new();
+            while let Some(item) = seq.next_element()? {
+                if list.len() == TASK_BINDINGS_MAX {
+                    return Err(de::Error::custom(format!(
+                        "more than {TASK_BINDINGS_MAX} {}",
+                        self.0
+                    )));
+                }
+                list.push(item);
+            }
+            Ok(list)
+        }
+    }
+    d.deserialize_seq(AtMost(noun, std::marker::PhantomData))
+}
+
 fn bounded<'de, D, T>(d: D, max_bytes: usize) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de> + Serialize + PartialEq,
 {
-    struct AtMost<T>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for AtMost<T> {
-        type Value = Vec<T>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "a list of at most {TASK_BINDINGS_MAX} bindings")
-        }
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
-            let mut list = Vec::new();
-            while let Some(binding) = seq.next_element()? {
-                if list.len() == TASK_BINDINGS_MAX {
-                    return Err(de::Error::custom(format!(
-                        "more than {TASK_BINDINGS_MAX} bindings"
-                    )));
-                }
-                list.push(binding);
-            }
-            Ok(list)
-        }
-    }
-    let list = d.deserialize_seq(AtMost(std::marker::PhantomData))?;
+    let list = at_most(d, "bindings")?;
     if list.iter().enumerate().any(|(i, b)| list[..i].contains(b)) {
         return Err(de::Error::custom("a duplicate binding"));
     }
@@ -275,6 +284,55 @@ fn bounded_requests<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<BindingReques
 
 fn bounded_bindings<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Binding>, D::Error> {
     bounded(d, TASK_BINDINGS_MAX_BYTES)
+}
+
+fn reach_within<'de, D: Deserializer<'de>>(
+    d: D,
+    max_bytes: usize,
+) -> Result<Vec<BindingReach>, D::Error> {
+    let list = at_most(d, "reach entries")?;
+    let len = bindings_encoded_len(&list);
+    if len > max_bytes {
+        return Err(de::Error::custom(format!(
+            "reach of {len} bytes encodes to more than {max_bytes}"
+        )));
+    }
+    Ok(list)
+}
+
+fn bounded_reach<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<BindingReach>, D::Error> {
+    reach_within(d, TASK_REACH_MAX_BYTES)
+}
+
+fn bounded_summaries<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<ReachSummary>, D::Error> {
+    at_most(d, "reach entries")
+}
+
+/// `reach`, when present, is index-aligned with `bindings`, and a binding with no head has no head ops.
+fn reach_refusal<R>(
+    bindings: &[Binding],
+    reach: &[R],
+    head_ops: impl Fn(&R) -> bool,
+) -> Result<(), String> {
+    if reach.is_empty() {
+        return Ok(());
+    }
+    if bindings.is_empty() {
+        return Err("reach without bindings".into());
+    }
+    if reach.len() != bindings.len() {
+        return Err(format!(
+            "{} reach entries for {} bindings",
+            reach.len(),
+            bindings.len()
+        ));
+    }
+    for (Binding::Git(binding), entry) in bindings.iter().zip(reach) {
+        if binding.head.is_none() && head_ops(entry) {
+            return Err("head reach without a head".into());
+        }
+    }
+    Ok(())
 }
 
 /// What a tasker sends. The id, the tasker and the parent are the kernel's.
@@ -308,9 +366,10 @@ impl std::fmt::Debug for TaskSubmission {
 }
 
 /// `parent` is the task the submitting request cited, derived by the kernel;
-/// `None` is a person's task or an agent's own initiative.
+/// `None` is a person's task or an agent's own initiative. `reach` is empty on a task sealed
+/// before reach existed.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, try_from = "TaskObjectWire")]
 pub struct TaskObject {
     pub schema: String,
     pub version: u16,
@@ -320,12 +379,46 @@ pub struct TaskObject {
     pub agent: String,
     pub ask: Ask,
     pub labels: Labels,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "bounded_bindings"
-    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<BindingReach>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskObjectWire {
+    schema: String,
+    version: u16,
+    task_id: TaskId,
+    tasker: Tasker,
+    parent: Option<TaskId>,
+    agent: String,
+    ask: Ask,
+    labels: Labels,
+    #[serde(default, deserialize_with = "bounded_bindings")]
+    bindings: Vec<Binding>,
+    #[serde(default, deserialize_with = "bounded_reach")]
+    reach: Vec<BindingReach>,
+}
+
+impl TryFrom<TaskObjectWire> for TaskObject {
+    type Error = String;
+    fn try_from(w: TaskObjectWire) -> Result<Self, String> {
+        reach_refusal(&w.bindings, &w.reach, BindingReach::has_head_ops)?;
+        Ok(TaskObject {
+            schema: w.schema,
+            version: w.version,
+            task_id: w.task_id,
+            tasker: w.tasker,
+            parent: w.parent,
+            agent: w.agent,
+            ask: w.ask,
+            labels: w.labels,
+            bindings: w.bindings,
+            reach: w.reach,
+        })
+    }
 }
 
 impl std::fmt::Debug for TaskObject {
@@ -340,6 +433,7 @@ impl std::fmt::Debug for TaskObject {
             .field("ask", &self.ask)
             .field("labels", &self.labels)
             .field("bindings", &self.bindings)
+            .field("reach", &self.reach)
             .finish()
     }
 }
@@ -548,7 +642,9 @@ pub enum TaskClose {
     ParentEnded,
 }
 
+/// `reach` holds one summary per binding, or none for a task sealed before reach existed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(try_from = "TaskViewWire")]
 pub struct TaskView {
     pub task: TaskRef,
     pub agent: String,
@@ -559,12 +655,47 @@ pub struct TaskView {
     pub actions: u32,
     pub last_action_secs: Option<i64>,
     pub cursor: TaskCursor,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "bounded_bindings"
-    )]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<Binding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reach: Vec<ReachSummary>,
+}
+
+#[derive(Deserialize)]
+struct TaskViewWire {
+    task: TaskRef,
+    agent: String,
+    state: TaskState,
+    close: Option<TaskClose>,
+    submitted_secs: i64,
+    elapsed_secs: u64,
+    actions: u32,
+    last_action_secs: Option<i64>,
+    cursor: TaskCursor,
+    #[serde(default, deserialize_with = "bounded_bindings")]
+    bindings: Vec<Binding>,
+    #[serde(default, deserialize_with = "bounded_summaries")]
+    reach: Vec<ReachSummary>,
+}
+
+impl TryFrom<TaskViewWire> for TaskView {
+    type Error = String;
+    fn try_from(w: TaskViewWire) -> Result<Self, String> {
+        reach_refusal(&w.bindings, &w.reach, |s| !s.head().is_empty())?;
+        Ok(TaskView {
+            task: w.task,
+            agent: w.agent,
+            state: w.state,
+            close: w.close,
+            submitted_secs: w.submitted_secs,
+            elapsed_secs: w.elapsed_secs,
+            actions: w.actions,
+            last_action_secs: w.last_action_secs,
+            cursor: w.cursor,
+            bindings: w.bindings,
+            reach: w.reach,
+        })
+    }
 }
 
 /// `next` is the submission sequence to resume after.
@@ -885,6 +1016,7 @@ pub fn validate_submission(sub: &TaskSubmission) -> Result<(), TaskSchemaError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentReach, EmptyReason, ForgeOp, ForgeOps, GitReach, SideReach, TaskerBasis};
 
     const SENTINEL: &str = "task-609-prompt-sentinel";
 
@@ -924,6 +1056,7 @@ mod tests {
             ask: prompt("hi"),
             labels: Labels {},
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -1276,6 +1409,7 @@ mod tests {
             last_action_secs: Some(1_700_000_040),
             cursor: TaskCursor::from_seq(4),
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -1380,7 +1514,7 @@ mod tests {
         ]
     }
 
-    fn delivery_envelope(bindings: Vec<Binding>) -> usize {
+    fn delivery_envelope(bindings: Vec<Binding>, reach: Vec<BindingReach>) -> usize {
         const CATALOG_DIGEST_ENCODED_MAX: usize = 49;
         let prompt_max = 1 << 20;
         let agent = "a".repeat(32);
@@ -1403,6 +1537,7 @@ mod tests {
                 ask: prompt(&"p".repeat(prompt_max)),
                 labels: Labels {},
                 bindings,
+                reach,
             },
             signature: signature(alg, &part, &chain, &vec![0x5a; rest]),
         };
@@ -1427,18 +1562,26 @@ mod tests {
 
     #[test]
     fn a_max_size_task_delivery_fits_with_a_stamp() {
-        let envelope = delivery_envelope(vec![]);
+        let envelope = delivery_envelope(vec![], vec![]);
         assert!(envelope <= TASK_ENVELOPE_MARGIN, "{envelope}");
     }
 
     #[test]
-    fn the_worst_case_bindings_and_the_reach_reserve_fit_the_envelope() {
+    fn the_worst_case_bindings_heads_and_reach_fit_the_envelope() {
         let bindings = sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES);
-        let bare = delivery_envelope(vec![]);
-        let bound = delivery_envelope(bindings);
+        assert!(bindings
+            .iter()
+            .all(|Binding::Git(b)| b.head.as_deref().is_some_and(|h| h.len() == HEAD_LEN)));
+        let reach = most_reach();
+        let reach_len = bindings_encoded_len(&reach);
+        let bare = delivery_envelope(vec![], vec![]);
+        let bound = delivery_envelope(bindings.clone(), vec![]);
+        let reached = delivery_envelope(bindings, reach);
         assert_eq!(bound - bare, 1 + "bindings".len() + TASK_BINDINGS_MAX_BYTES);
+        assert_eq!(reached - bound, 1 + "reach".len() + reach_len);
+        assert!(reached <= TASK_ENVELOPE_MARGIN, "{reached}");
         assert!(
-            bound + TASK_REACH_MAX_BYTES <= TASK_ENVELOPE_MARGIN,
+            bound + 1 + "reach".len() + TASK_REACH_MAX_BYTES <= TASK_ENVELOPE_MARGIN,
             "{bound} + {TASK_REACH_MAX_BYTES}"
         );
     }
@@ -1704,6 +1847,7 @@ mod tests {
                 last_action_secs: optional.then_some(14),
                 cursor: TaskCursor::from_seq(9),
                 bindings: vec![],
+                reach: vec![],
             },
             tasker: "uid 1234".into(),
             held_from: TaskState::Working,
@@ -1897,11 +2041,12 @@ mod tests {
             last_action_secs: Some(i64::MAX),
             cursor: TaskCursor::from_seq(u64::MAX),
             bindings: sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES),
+            reach: most_reach().iter().map(ReachSummary::of).collect(),
         }
     }
 
     #[test]
-    fn a_maximal_held_page_with_bindings_fits_a_control_frame() {
+    fn a_maximal_held_page_with_heads_and_reach_fits_a_control_frame() {
         let entry = HeldView {
             view: maximal_view(TaskState::Held),
             tasker: "é".repeat(128),
@@ -1917,7 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn a_maximal_task_page_with_bindings_fits_a_control_frame() {
+    fn a_maximal_task_page_with_heads_and_reach_fits_a_control_frame() {
         assert_fits_a_control_frame(crate::Payload::TaskList(TaskPage {
             entries: vec![maximal_view(TaskState::Working); TASK_PAGE_MAX],
             next: Some(TaskCursor::from_seq(u64::MAX)),
@@ -2145,9 +2290,16 @@ mod tests {
         })
     }
 
+    const HEAD_LEN: usize = 40;
+
     fn sealed_at(count: usize, target: usize) -> Vec<Binding> {
         sized(count, target, |i, len| {
-            git_binding(FORGE, &path(i, len), None, Some(u64::MAX))
+            git_binding(
+                FORGE,
+                &path(i, len),
+                Some(&path(i, HEAD_LEN)),
+                Some(u64::MAX),
+            )
         })
     }
 
@@ -2184,6 +2336,8 @@ mod tests {
         let signed = hex(V1_OBJECT);
         let object: TaskObject = dec(&signed).unwrap();
         assert!(object.bindings.is_empty());
+        assert!(object.reach.is_empty());
+        assert!(!keys(&signed).contains(&"reach".to_string()));
         assert_eq!(enc(&object), signed);
         let bytes = task_signing_bytes(&object, TASK_ENVELOPE_MARGIN).unwrap();
         let (context, body) = bytes.split_at(TASK_SIGNING_CONTEXT.len());
@@ -2195,6 +2349,7 @@ mod tests {
         assert_eq!(enc(&sub), sent);
         let view = task_view();
         assert!(!keys(&enc(&view)).contains(&"bindings".to_string()));
+        assert!(!keys(&enc(&view)).contains(&"reach".to_string()));
     }
 
     #[test]
@@ -2481,7 +2636,21 @@ mod tests {
             assert_eq!(len, TASK_BINDING_REQUESTS_MAX_BYTES + 6 * count);
             assert!(len <= TASK_BINDINGS_MAX_BYTES, "{count}: {len}");
             assert_eq!(object_with(sealed.clone()).unwrap().bindings, sealed);
+            let mut headed = sealed;
+            let Binding::Git(first) = &mut headed[0];
+            first.head = Some(path(99, REPOSITORY_PATH_MAX_BYTES));
+            let headed_len = bindings_encoded_len(&headed);
+            assert_eq!(headed_len, len + REPOSITORY_PATH_MAX_BYTES + 1);
+            assert!(
+                headed_len <= TASK_BINDINGS_MAX_BYTES,
+                "{count}: {headed_len}"
+            );
+            assert_eq!(object_with(headed.clone()).unwrap().bindings, headed);
         }
+        assert_eq!(
+            TASK_BINDING_REQUESTS_MAX_BYTES + 6 * TASK_BINDINGS_MAX + REPOSITORY_PATH_MAX_BYTES + 1,
+            TASK_BINDINGS_MAX_BYTES
+        );
     }
 
     #[test]
@@ -2492,5 +2661,407 @@ mod tests {
         ];
         assert_eq!(bindings_encoded_len(&list), enc(&list).len());
         assert_eq!(bindings_encoded_len::<Binding>(&[]), 1);
+    }
+
+    fn ops(list: &[ForgeOp]) -> ForgeOps {
+        list.iter().copied().collect()
+    }
+
+    fn side(base: &[ForgeOp], head: &[ForgeOp]) -> SideReach {
+        SideReach::new(ops(base), ops(head)).unwrap()
+    }
+
+    fn git_reach(tasker: SideReach, agent: AgentReach, why: Option<EmptyReason>) -> BindingReach {
+        BindingReach::Git(GitReach {
+            tasker,
+            basis: TaskerBasis::Token,
+            agent,
+            why,
+        })
+    }
+
+    fn widest_side() -> SideReach {
+        use ForgeOp::*;
+        side(&[Read, Review, IssueWrite, Merge], &ForgeOp::ALL)
+    }
+
+    fn widest_entry(
+        basis: TaskerBasis,
+        agent: AgentReach,
+        why: Option<EmptyReason>,
+    ) -> BindingReach {
+        BindingReach::Git(GitReach {
+            tasker: widest_side(),
+            basis,
+            agent,
+            why,
+        })
+    }
+
+    fn most_reach() -> Vec<BindingReach> {
+        let entry = widest_entry(
+            TaskerBasis::Submitter,
+            AgentReach::Observed(widest_side()),
+            Some(EmptyReason::NoForgeCredential),
+        );
+        vec![entry; TASK_BINDINGS_MAX]
+    }
+
+    fn reached(bindings: Vec<Binding>, reach: Vec<BindingReach>) -> Result<TaskObject, String> {
+        let mut obj = object(Tasker::Uid(1000), None);
+        obj.bindings = bindings;
+        obj.reach = reach;
+        dec(&enc(&obj))
+    }
+
+    fn summarized(bindings: Vec<Binding>, reach: Vec<ReachSummary>) -> Result<TaskView, String> {
+        let mut view = task_view();
+        view.bindings = bindings;
+        view.reach = reach;
+        dec(&enc(&view))
+    }
+
+    fn summary(ops: u16, why: Option<u8>) -> ciborium::Value {
+        use ciborium::Value;
+        Value::Array(vec![
+            Value::Integer(ops.into()),
+            why.map_or(Value::Null, |w| Value::Integer(w.into())),
+        ])
+    }
+
+    fn view_with_summaries(bindings: Vec<Binding>, summaries: Vec<ciborium::Value>) -> Vec<u8> {
+        let mut view = task_view();
+        view.bindings = bindings;
+        let mut value: ciborium::Value = dec(&enc(&view)).unwrap();
+        if let ciborium::Value::Map(m) = &mut value {
+            m.push(("reach".into(), ciborium::Value::Array(summaries)));
+        }
+        enc(&value)
+    }
+
+    fn set_in(value: &mut ciborium::Value, path: &[&str], to: ciborium::Value) {
+        let Some((last, rest)) = path.split_last() else {
+            *value = to;
+            return;
+        };
+        let mut at = value;
+        for key in rest {
+            at = match at {
+                ciborium::Value::Map(m) => m
+                    .iter_mut()
+                    .find(|(k, _)| k.as_text() == Some(key))
+                    .map(|(_, v)| v)
+                    .unwrap(),
+                ciborium::Value::Array(a) => &mut a[key.parse::<usize>().unwrap()],
+                _ => panic!("{key}"),
+            };
+        }
+        let ciborium::Value::Map(m) = at else {
+            panic!("{last}")
+        };
+        m.iter_mut()
+            .find(|(k, _)| k.as_text() == Some(last))
+            .unwrap()
+            .1 = to;
+    }
+
+    fn reached_with(
+        obj: &TaskObject,
+        path: &[&str],
+        to: ciborium::Value,
+    ) -> Result<TaskObject, String> {
+        let mut value: ciborium::Value = dec(&enc(obj)).unwrap();
+        set_in(&mut value, path, to);
+        dec(&enc(&value))
+    }
+
+    fn headed(head: Option<&str>) -> Binding {
+        git_binding(FORGE, "o/r", head, Some(7))
+    }
+
+    const PR_A_BOUND_OBJECT: &str = concat!(
+        "a966736368656d616b6d616b6e61652e7461736b6776657273696f6e01677461",
+        "736b5f696450000102030405060708090a0b0c0d0e0f667461736b6572a16355",
+        "69641903e866706172656e74f6656167656e7464686f62696361736ba1665072",
+        "6f6d7074a16670726f6d7074626869666c6162656c73a06862696e64696e6773",
+        "82a163476974a4667365727665726d666f7267652e6578616d706c6564626173",
+        "65636f2f726468656164f6666368616e676507a163476974a466736572766572",
+        "72666f7267652e6578616d706c653a3834343364626173656e67726f75702f73",
+        "75622f7265706f6468656164f6666368616e6765f6",
+    );
+
+    #[test]
+    fn a_pr_a_bound_task_still_verifies() {
+        let signed = hex(PR_A_BOUND_OBJECT);
+        let object: TaskObject = dec(&signed).unwrap();
+        assert_eq!(
+            object.bindings,
+            [
+                git_binding(FORGE, "o/r", None, Some(7)),
+                git_binding("forge.example:8443", "group/sub/repo", None, None),
+            ]
+        );
+        assert!(object.reach.is_empty());
+        assert_eq!(enc(&object), signed);
+        let bytes = task_signing_bytes(&object, TASK_ENVELOPE_MARGIN).unwrap();
+        let (context, body) = bytes.split_at(TASK_SIGNING_CONTEXT.len());
+        assert_eq!(context, TASK_SIGNING_CONTEXT);
+        assert_eq!(body, signed.as_slice());
+    }
+
+    #[test]
+    fn reach_round_trips_after_bindings_and_is_omitted_when_empty() {
+        use ForgeOp::*;
+        let entry = git_reach(
+            side(&[Read], &[PushHead]),
+            AgentReach::AtHandOut,
+            Some(EmptyReason::AgentNotCovered),
+        );
+        let golden = hex("a1 63 476974
+             a4 66 7461736b6572 a2 64 62617365 01 64 68656164 08
+                65 6261736973 65 546f6b656e
+                65 6167656e74 69 417448616e644f7574
+                63 776879 6f 4167656e744e6f74436f7665726564");
+        assert_eq!(enc(&entry), golden);
+        assert_eq!(dec::<BindingReach>(&golden).unwrap(), entry);
+
+        let observed = git_reach(
+            side(&[Read, Review, Merge], &[PushHead]),
+            AgentReach::Observed(side(&[Read, Merge], &[PushHead, Read])),
+            None,
+        );
+        let obj = reached(
+            vec![
+                headed(Some("f/r")),
+                git_binding(FORGE, "o/s", Some("g/s"), None),
+            ],
+            vec![observed, entry],
+        )
+        .unwrap();
+        let bytes = enc(&obj);
+        let k = keys(&bytes);
+        assert_eq!(&k[k.len() - 2..], ["bindings", "reach"]);
+        assert_eq!(obj.reach, [observed, entry]);
+
+        let view = summarized(
+            obj.bindings.clone(),
+            obj.reach.iter().map(ReachSummary::of).collect(),
+        )
+        .unwrap();
+        let bytes = enc(&view);
+        let k = keys(&bytes);
+        assert_eq!(&k[k.len() - 2..], ["bindings", "reach"]);
+        let reach = hex("82 82 19 0111 f6 82 00 01");
+        let value: ciborium::Value = dec(&bytes).unwrap();
+        let (_, got) = value.as_map().unwrap().last().unwrap();
+        assert_eq!(enc(got), reach);
+    }
+
+    #[test]
+    fn a_reach_without_bindings_never_decodes() {
+        let entry = git_reach(SideReach::EMPTY, AgentReach::NoForgeCredential, None);
+        let err = reached(vec![], vec![entry]).unwrap_err();
+        assert!(err.contains("reach without bindings"), "{err}");
+        let err = summarized(vec![], vec![ReachSummary::of(&entry)]).unwrap_err();
+        assert!(err.contains("reach without bindings"), "{err}");
+        assert!(reached(vec![headed(None)], vec![entry]).is_ok());
+        assert!(reached(vec![headed(None)], vec![]).is_ok());
+        assert!(summarized(vec![headed(None)], vec![]).is_ok());
+    }
+
+    #[test]
+    fn a_reach_of_another_length_never_decodes() {
+        let entry = git_reach(SideReach::EMPTY, AgentReach::NoForgeCredential, None);
+        let two = vec![headed(None), git_binding(FORGE, "o/s", None, None)];
+        for n in [1, 3] {
+            let err = reached(two.clone(), vec![entry; n]).unwrap_err();
+            assert!(
+                err.contains(&format!("{n} reach entries for 2 bindings")),
+                "{err}"
+            );
+            let err = summarized(two.clone(), vec![ReachSummary::of(&entry); n]).unwrap_err();
+            assert!(
+                err.contains(&format!("{n} reach entries for 2 bindings")),
+                "{err}"
+            );
+        }
+        assert!(reached(two.clone(), vec![entry; 2]).is_ok());
+        assert!(summarized(two, vec![ReachSummary::of(&entry); 2]).is_ok());
+        let nine = vec![entry; TASK_BINDINGS_MAX + 1];
+        let err = reached(sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES), nine).unwrap_err();
+        assert!(err.contains("more than 8 reach entries"), "{err}");
+        let nine = vec![summary(0, None); TASK_BINDINGS_MAX + 1];
+        let err = dec::<TaskView>(&view_with_summaries(
+            sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES),
+            nine,
+        ))
+        .unwrap_err();
+        assert!(err.contains("more than 8 reach entries"), "{err}");
+    }
+
+    #[test]
+    fn unknown_reach_bits_never_decode() {
+        use ciborium::Value;
+        let obj = reached(
+            vec![headed(Some("f/r"))],
+            vec![git_reach(
+                SideReach::EMPTY,
+                AgentReach::Observed(SideReach::EMPTY),
+                None,
+            )],
+        )
+        .unwrap();
+        let tasker = &["reach", "0", "Git", "tasker"][..];
+        let agent = &["reach", "0", "Git", "agent", "Observed"][..];
+        for bits in [1u8 << 5, 1 << 6, 1 << 7, 0xff] {
+            for (at, field) in [
+                (tasker, "base"),
+                (tasker, "head"),
+                (agent, "base"),
+                (agent, "head"),
+            ] {
+                let path: Vec<&str> = at.iter().copied().chain([field]).collect();
+                let err = reached_with(&obj, &path, Value::Integer(bits.into())).unwrap_err();
+                assert!(
+                    err.contains("name no operation"),
+                    "{bits:#x} {field}: {err}"
+                );
+            }
+        }
+        let max = reached_with(
+            &obj,
+            &["reach", "0", "Git", "tasker", "head"],
+            Value::Integer(0x1f.into()),
+        );
+        assert!(max.is_ok(), "{max:?}");
+
+        let one = || vec![headed(Some("f/r"))];
+        assert!(
+            dec::<TaskView>(&view_with_summaries(one(), vec![summary(0x3f7, Some(3))])).is_ok()
+        );
+        for ops in [1u16 << 10, 1 << 11, 1 << 15, 0x3f7 | 1 << 10] {
+            let err =
+                dec::<TaskView>(&view_with_summaries(one(), vec![summary(ops, None)])).unwrap_err();
+            assert!(err.contains("name no operation"), "{ops:#x}: {err}");
+        }
+        for tag in [4u8, 5, 0xff] {
+            let err = dec::<TaskView>(&view_with_summaries(one(), vec![summary(0, Some(tag))]))
+                .unwrap_err();
+            assert!(err.contains("no empty reason"), "{tag}: {err}");
+        }
+    }
+
+    #[test]
+    fn push_head_in_a_base_set_never_decodes() {
+        use ciborium::Value;
+        let push = ForgeOps::EMPTY.with(ForgeOp::PushHead);
+        let err = SideReach::new(push, ForgeOps::EMPTY).unwrap_err();
+        assert!(err.contains("`PushHead` in a base set"), "{err}");
+        assert!(SideReach::new(ForgeOps::EMPTY, push).is_ok());
+        let obj = reached(
+            vec![headed(Some("f/r"))],
+            vec![git_reach(
+                SideReach::EMPTY,
+                AgentReach::Observed(SideReach::EMPTY),
+                None,
+            )],
+        )
+        .unwrap();
+        for path in [
+            &["reach", "0", "Git", "tasker", "base"][..],
+            &["reach", "0", "Git", "agent", "Observed", "base"][..],
+        ] {
+            let err = reached_with(&obj, path, Value::Integer(push.bits().into())).unwrap_err();
+            assert!(err.contains("`PushHead` in a base set"), "{path:?}: {err}");
+        }
+        let one = || vec![headed(Some("f/r"))];
+        let err = dec::<TaskView>(&view_with_summaries(one(), vec![summary(8, None)])).unwrap_err();
+        assert!(err.contains("`PushHead` in a base set"), "{err}");
+        assert!(dec::<TaskView>(&view_with_summaries(one(), vec![summary(8 << 5, None)])).is_ok());
+    }
+
+    #[test]
+    fn head_ops_without_a_head_never_decode() {
+        use ForgeOp::*;
+        let on_head = side(&[Read], &[PushHead]);
+        let cases = [
+            git_reach(on_head, AgentReach::AtHandOut, None),
+            git_reach(side(&[Read], &[]), AgentReach::Observed(on_head), None),
+        ];
+        for entry in cases {
+            let err = reached(vec![headed(None)], vec![entry]).unwrap_err();
+            assert!(err.contains("head reach without a head"), "{err}");
+            assert!(reached(vec![headed(Some("f/r"))], vec![entry]).is_ok());
+        }
+        let base_only = git_reach(
+            side(&[Read], &[]),
+            AgentReach::Observed(side(&[Read], &[])),
+            None,
+        );
+        assert!(reached(vec![headed(None)], vec![base_only]).is_ok());
+
+        let entry = git_reach(on_head, AgentReach::Observed(on_head), None);
+        let err = summarized(vec![headed(None)], vec![ReachSummary::of(&entry)]).unwrap_err();
+        assert!(err.contains("head reach without a head"), "{err}");
+        assert!(summarized(vec![headed(Some("f/r"))], vec![ReachSummary::of(&entry)]).is_ok());
+    }
+
+    const MOST_REACH_BYTES: usize = 761;
+
+    fn within<'de, D: Deserializer<'de>, const MAX: usize>(
+        d: D,
+    ) -> Result<Vec<BindingReach>, D::Error> {
+        reach_within(d, MAX)
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Within<const MAX: usize>(
+        #[serde(deserialize_with = "within::<_, MAX>")] Vec<BindingReach>,
+    );
+
+    #[test]
+    fn the_most_reach_encodes_within_its_bound() {
+        let most = most_reach();
+        let entry = enc(&most[0]).len();
+        let bases = [
+            TaskerBasis::Token,
+            TaskerBasis::Parent,
+            TaskerBasis::Submitter,
+        ];
+        let agents = [
+            AgentReach::Observed(widest_side()),
+            AgentReach::AtHandOut,
+            AgentReach::NoForgeCredential,
+        ];
+        let whys = [
+            None,
+            Some(EmptyReason::HeadGone),
+            Some(EmptyReason::AgentNotCovered),
+            Some(EmptyReason::NoForgeCredential),
+            Some(EmptyReason::NoReachCheck),
+        ];
+        for basis in bases {
+            for agent in agents {
+                for why in whys {
+                    let len = enc(&widest_entry(basis, agent, why)).len();
+                    assert!(len <= entry, "{basis:?} {agent:?} {why:?}: {len}");
+                }
+            }
+        }
+        let len = bindings_encoded_len(&most);
+        assert_eq!(len, 1 + TASK_BINDINGS_MAX * entry);
+        assert!(len <= TASK_REACH_MAX_BYTES, "{len}");
+        let obj = reached(
+            sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES),
+            most.clone(),
+        )
+        .unwrap();
+        assert_eq!(obj.reach, most);
+
+        assert_eq!(len, MOST_REACH_BYTES);
+        let bytes = enc(&most);
+        assert_eq!(dec::<Within<MOST_REACH_BYTES>>(&bytes).unwrap().0, most);
+        let err = dec::<Within<{ MOST_REACH_BYTES - 1 }>>(&bytes).unwrap_err();
+        assert!(err.contains("encodes to more than"), "{err}");
     }
 }

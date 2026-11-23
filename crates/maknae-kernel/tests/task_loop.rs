@@ -844,6 +844,7 @@ async fn status_reports_elapsed_actions_and_last_action_and_nothing_about_others
             last_action_secs: Some(T0 + 40),
             cursor: maknae_proto::TaskCursor::from_seq(1),
             bindings: vec![],
+            reach: vec![],
         }
     );
 }

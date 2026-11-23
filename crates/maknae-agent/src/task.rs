@@ -110,6 +110,7 @@ mod tests {
             last_action_secs: None,
             cursor: maknae_proto::TaskCursor::from_seq(1),
             bindings: vec![],
+            reach: vec![],
         }
     }
 

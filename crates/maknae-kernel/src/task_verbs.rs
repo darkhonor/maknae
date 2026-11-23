@@ -367,6 +367,13 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
         last_action_secs: hot.last_action,
         cursor: TaskCursor::from_seq(rec.tseq),
         bindings: rec.signed.task.bindings.clone(),
+        reach: rec
+            .signed
+            .task
+            .reach
+            .iter()
+            .map(maknae_proto::ReachSummary::of)
+            .collect(),
     }
 }
 
@@ -977,9 +984,54 @@ mod tests {
                 last_action_secs: Some(140),
                 cursor: TaskCursor::from_seq(7),
                 bindings: vec![],
+                reach: vec![],
             }
         );
         assert_eq!(view(&r, &hot, 50).elapsed_secs, 0);
+    }
+
+    #[test]
+    fn a_view_shows_each_bindings_effective_reach() {
+        use maknae_proto::{
+            AgentReach, Binding, BindingReach, EmptyReason, ForgeOp, GitBinding, GitReach,
+            SideReach, TaskerBasis,
+        };
+        let side = |base: &[ForgeOp]| {
+            SideReach::new(base.iter().copied().collect(), Default::default()).unwrap()
+        };
+        let mut r = rec(1, None, "");
+        let mut signed = (*r.signed).clone();
+        signed.task.bindings = ["o/r", "o/s"]
+            .map(|base| {
+                Binding::Git(GitBinding {
+                    server: "forge.example".into(),
+                    base: base.into(),
+                    head: None,
+                    change: None,
+                })
+            })
+            .to_vec();
+        signed.task.reach = vec![
+            BindingReach::Git(GitReach {
+                tasker: side(&[ForgeOp::Read, ForgeOp::Merge]),
+                basis: TaskerBasis::Token,
+                agent: AgentReach::Observed(side(&[ForgeOp::Read, ForgeOp::Review])),
+                why: None,
+            }),
+            BindingReach::Git(GitReach {
+                tasker: side(&[ForgeOp::Read]),
+                basis: TaskerBasis::Token,
+                agent: AgentReach::NoForgeCredential,
+                why: Some(EmptyReason::NoForgeCredential),
+            }),
+        ];
+        r.signed = std::sync::Arc::new(signed);
+        let v = view(&r, &Hot::default(), 100);
+        assert_eq!(v.reach.len(), 2);
+        assert_eq!(v.reach[0].base(), [ForgeOp::Read].into_iter().collect());
+        assert_eq!(v.reach[0].why(), None);
+        assert!(v.reach[1].base().is_empty());
+        assert_eq!(v.reach[1].why(), Some(EmptyReason::NoForgeCredential));
     }
 
     #[test]

@@ -1482,6 +1482,7 @@ impl TaskStore {
             ask: sub.ask,
             labels: sub.labels,
             bindings,
+            reach: Vec::new(),
         };
         for attempt in 1..=ID_DRAWS {
             let signed = Arc::new(signer.sign(task)?);
@@ -2751,6 +2752,7 @@ impl TaskObjectForTest for TaskObject {
             },
             labels: maknae_proto::Labels {},
             bindings: Vec::new(),
+            reach: Vec::new(),
         }
     }
 }
@@ -8715,10 +8717,12 @@ mod tests {
         .await
         .unwrap();
         let id_ = task.task.task_id;
+        let sealed = maknae_proto::bindings_encoded_len(&task.task.bindings);
         assert_eq!(
-            maknae_proto::bindings_encoded_len(&task.task.bindings),
-            maknae_proto::TASK_BINDINGS_MAX_BYTES
+            sealed,
+            maknae_proto::TASK_BINDING_REQUESTS_MAX_BYTES + 6 * maknae_proto::TASK_BINDINGS_MAX
         );
+        assert!(sealed <= maknae_proto::TASK_BINDINGS_MAX_BYTES, "{sealed}");
         let me = Tasker::Uid(me());
         let accepted = store.status(&id_, &me).unwrap();
         let body = maknae_proto::encode_response(&maknae_proto::Response {
@@ -8757,13 +8761,21 @@ mod tests {
             .into_iter()
             .map(|maknae_proto::BindingRequest::Git(r)| {
                 Binding::Git(maknae_proto::GitBinding {
-                    head: Some("h/".to_owned() + &"x".repeat(8)),
+                    head: Some(
+                        "h/".to_owned()
+                            + &"x".repeat(
+                                (maknae_proto::TASK_BINDINGS_MAX_BYTES
+                                    - maknae_proto::TASK_BINDING_REQUESTS_MAX_BYTES)
+                                    / maknae_proto::TASK_BINDINGS_MAX,
+                            ),
+                    ),
                     server: r.server,
                     base: r.base,
                     change: r.change,
                 })
             })
             .collect();
+        assert!(maknae_proto::bindings_encoded_len(&held) > maknae_proto::TASK_BINDINGS_MAX_BYTES);
         let parent = TaskObject {
             bindings: held.clone(),
             ..TaskObject::for_test("hobi", 1000)

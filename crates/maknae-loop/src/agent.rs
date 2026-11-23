@@ -346,6 +346,7 @@ mod tests {
             },
             labels: Labels {},
             bindings: vec![],
+            reach: vec![],
         }
     }
 
