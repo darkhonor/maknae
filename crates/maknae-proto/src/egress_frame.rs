@@ -2146,4 +2146,55 @@ mod tests {
         *field(field(&mut v, "reach"), "refused") = "teapot".into();
         assert!(crate::decode_egress_socket_reply(&cbor(&v)).is_err());
     }
+
+    #[test]
+    fn reach_frames_return_what_they_were_built_with() {
+        let wanted = vec![ask("o/r", Some(3), Some("fork/r")), ask("o/s", None, None)];
+        let r = ReachRequest::new(
+            "forge.example".into(),
+            "prov".into(),
+            12_345,
+            agent_side(2),
+            wanted.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            (r.server(), r.provider(), r.deadline_ms(), r.asks()),
+            ("forge.example", "prov", 12_345, &wanted[..])
+        );
+        assert!(r.side() == &agent_side(2));
+
+        for (kind, name) in [("kind-a", ""), ("", "entry0")] {
+            let side = ReachSide::Agent {
+                agent: "hobi".into(),
+                credentials: vec![CredentialRef {
+                    kind: kind.into(),
+                    name: name.into(),
+                }],
+            };
+            assert!(reach(side, asks(1)).is_err(), "{kind:?} {name:?}");
+        }
+
+        let ops = |o: &[crate::ForgeOp]| o.iter().copied().collect::<crate::ForgeOps>();
+        let base = ops(&[crate::ForgeOp::Read, crate::ForgeOp::Merge]);
+        let head = ops(&[crate::ForgeOp::PushHead]);
+        let named = RepoObservation::new(base, Some("fork/r".into()), head, false, true).unwrap();
+        assert_eq!(
+            (
+                named.base(),
+                named.head_path(),
+                named.head(),
+                named.head_gone(),
+                named.covered()
+            ),
+            (base, Some("fork/r"), head, false, true)
+        );
+        let gone = RepoObservation::new(base, None, crate::ForgeOps::EMPTY, true, false).unwrap();
+        assert_eq!(
+            (gone.head_path(), gone.head_gone(), gone.covered()),
+            (None, true, false)
+        );
+        let both = Observations::new(vec![named.clone(), gone.clone()]).unwrap();
+        assert_eq!(both.as_slice(), [named, gone]);
+    }
 }

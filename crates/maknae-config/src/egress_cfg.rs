@@ -259,4 +259,11 @@ mod tests {
             "a key the parser reads was rejected: {e:?}"
         );
     }
+
+    #[test]
+    fn the_task_reach_reply_bound_sums_the_reach_its_revoke_margin_and_stages() {
+        assert_eq!(task_reach_reply_ms(20_000), 180_000);
+        assert_eq!(task_reach_reply_ms(REACH_DEADLINE_MS_MAX), 460_000);
+        assert_eq!(task_reach_reply_ms(u64::MAX), u64::MAX);
+    }
 }

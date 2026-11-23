@@ -3397,4 +3397,15 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn an_addendum_returns_what_it_was_built_with() {
+        let bindings = sealed_at(TASK_BINDINGS_MAX, TASK_BINDINGS_MAX_BYTES);
+        let reach = most_reach();
+        let built = TaskAddendum::new(id(3), 7, bindings.clone(), reach.clone()).unwrap();
+        assert_eq!(*built.task_id(), id(3));
+        assert_eq!(built.seq(), 7);
+        assert_eq!(built.bindings(), &bindings[..]);
+        assert_eq!(built.reach(), &reach[..]);
+    }
 }

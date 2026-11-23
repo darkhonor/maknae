@@ -432,4 +432,10 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn forge_tokens_give_back_the_tokens_they_hold() {
+        let two = crate::testutil::widest_forge_tokens(2);
+        assert_eq!(ForgeTokens::new(two.clone()).unwrap().into_vec(), two);
+    }
 }

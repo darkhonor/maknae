@@ -23,7 +23,7 @@ impl ForgeOp {
 
     const fn bit(self) -> u8 {
         match self {
-            Self::Read => 1 << 0,
+            Self::Read => 1,
             Self::Review => 1 << 1,
             Self::IssueWrite => 1 << 2,
             Self::PushHead => 1 << 3,
@@ -237,7 +237,7 @@ impl ReachSummary {
         let BindingReach::Git(git) = reach;
         let effective = effective_reach(reach);
         Self {
-            ops: u16::from(effective.base.0) | u16::from(effective.head.0) << OPS_BITS,
+            ops: u16::from(effective.base.0) + (u16::from(effective.head.0) << OPS_BITS),
             why: git.why.map(EmptyReason::tag),
         }
     }
@@ -411,5 +411,16 @@ mod tests {
         for tag in 4..=u8::MAX {
             assert_eq!(EmptyReason::from_tag(tag), None, "{tag}");
         }
+    }
+
+    #[test]
+    fn ops_and_sides_hold_what_they_were_built_with() {
+        use ForgeOp::*;
+        let base: ForgeOps = [Read, Merge].into_iter().collect();
+        let head: ForgeOps = [PushHead, Review].into_iter().collect();
+        let side = SideReach::new(base, head).unwrap();
+        assert_eq!((side.base(), side.head()), (base, head));
+        assert_eq!(base.with(Read), base);
+        assert_eq!(base.with(Review).bits(), 0b1_0011);
     }
 }
