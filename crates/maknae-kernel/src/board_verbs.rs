@@ -217,8 +217,9 @@ pub(crate) async fn base_holds<P: Authorizer + Send + Sync + 'static>(
     .is_some()
 }
 
-/// The posts' verdicts, or `None` when `base` is not permitted again or the batch did not
-/// complete.
+/// The posts' verdicts, or `None` when `base` is not permitted again, the batch did not
+/// complete, or the live values were replaced while it ran. `guarded_decide_cited_all`
+/// answers one verdict per request.
 async fn decide_batch<P: Authorizer + Send + Sync + 'static>(
     authorizer: &Arc<P>,
     live: &Arc<crate::live::LiveConfig>,
@@ -240,7 +241,7 @@ async fn decide_batch<P: Authorizer + Send + Sync + 'static>(
         })
         .await;
     match decided {
-        Ok((all, generation)) if generation == admitted_generation && all.len() == n + 1 => {
+        Ok((all, generation)) if generation == admitted_generation => {
             let mut all = all.into_iter().map(|d| post_verdict(d.verdict));
             match all.next() {
                 Some(PostVerdict::Permit) => Some(all.collect()),
@@ -1321,6 +1322,79 @@ mod tests {
         assert!(none.verdicts.is_empty(), "an empty batch permits nothing");
         assert!(!none.confirmed, "and confirms nothing");
         assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Decides through `inner`, then installs new live values before the batch returns, as a
+    /// reload landing while a batch is in flight.
+    struct InstallsDuring<A> {
+        inner: Arc<A>,
+        live: Arc<crate::live::LiveConfig>,
+    }
+
+    impl<A: Authorizer> Authorizer for InstallsDuring<A> {
+        fn decide(&self, req: &maknae_security::Request) -> Verdict {
+            self.inner.decide(req)
+        }
+
+        fn decide_cited_all(
+            &self,
+            reqs: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            let all = self.inner.decide_cited_all(reqs);
+            let lock = maknae_authz_basic::LiveTurnLock::hermetic();
+            let turn = lock.try_take().expect("a hermetic turn is free");
+            self.live.install(&turn, Default::default(), None);
+            all
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_decided_across_a_live_install_yields_no_verdicts() {
+        let (home, basic) = crate::test_fixtures::fixture(
+            "board-generation",
+            crate::test_fixtures::READ_POLICY,
+            None,
+        );
+        let us = &maknae_config::BasicPolicy;
+        let pdp = Arc::new(crate::Composition::new(
+            basic,
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ));
+        let req = crate::test_fixtures::permitted_read_marked(&home.0, None);
+        let live = Arc::new(crate::live::LiveConfig::new(Default::default(), None));
+        let generation = live.generation();
+        let timeout = Duration::from_secs(5);
+        let held = decide_posts(&pdp, &live, generation, timeout, &req, vec![req.clone()]).await;
+        assert_eq!(
+            held,
+            Decided {
+                confirmed: true,
+                verdicts: vec![P]
+            },
+            "the real composition permits both"
+        );
+        let installing = Arc::new(InstallsDuring {
+            inner: pdp,
+            live: Arc::clone(&live),
+        });
+        let moved = decide_posts(
+            &installing,
+            &live,
+            generation,
+            timeout,
+            &req,
+            vec![req.clone()],
+        )
+        .await;
+        assert_eq!(live.generation(), generation + 1);
+        assert_eq!(
+            moved,
+            Decided {
+                confirmed: false,
+                verdicts: vec![U]
+            },
+            "a batch decided on a view since replaced yields nothing"
+        );
     }
 
     #[test]
