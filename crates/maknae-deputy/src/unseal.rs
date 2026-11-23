@@ -2,6 +2,8 @@
 use crate::handle::Refusal;
 use maknae_config::EgressBounds;
 use maknae_proto::EgressFrameRequest;
+use maknae_seal::{ForgePurpose, ForgeSealContext, SealAad, SealPrivateKey};
+use maknae_vault::FORGE_TOKEN_FIELD;
 use std::fmt;
 use std::future::Future;
 use zeroize::Zeroizing;
@@ -68,6 +70,88 @@ pub trait KeyOpener {
         sealed: &[u8],
         req: &OpenRequest<'_>,
     ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send;
+}
+
+/// Where a tasker's sealed forge token was read from, checked against the tasker
+/// and server by `reach::open` before it can be built.
+#[derive(Clone, Copy)]
+pub struct ForgeOpenRequest<'a> {
+    server: &'a str,
+    nonce: &'a str,
+    kv_mount: &'a str,
+    expected_path: &'a str,
+}
+
+impl<'a> ForgeOpenRequest<'a> {
+    pub(crate) fn checked(
+        server: &'a str,
+        nonce: &'a str,
+        kv_mount: &'a str,
+        expected_path: &'a str,
+    ) -> Self {
+        Self {
+            server,
+            nonce,
+            kv_mount,
+            expected_path,
+        }
+    }
+
+    pub fn server(&self) -> &'a str {
+        self.server
+    }
+
+    pub fn kv_mount(&self) -> &'a str {
+        self.kv_mount
+    }
+
+    pub fn expected_path(&self) -> &'a str {
+        self.expected_path
+    }
+
+    pub fn key_field(&self) -> &'static str {
+        FORGE_TOKEN_FIELD
+    }
+
+    pub fn aad(&self) -> Result<SealAad, OpenFailure> {
+        SealAad::forge(&ForgeSealContext {
+            purpose: ForgePurpose::TaskerReach,
+            nonce: self.nonce,
+            server: self.server,
+            expected_path: self.expected_path,
+            key_field: FORGE_TOKEN_FIELD,
+        })
+        .map_err(|_| OpenFailure::Seal)
+    }
+}
+
+impl fmt::Debug for ForgeOpenRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ForgeOpenRequest")
+            .field("server", &self.server)
+            .field("kv_mount", &self.kv_mount)
+            .field("nonce", &"<omitted>")
+            .field("expected_path", &"<omitted>")
+            .finish()
+    }
+}
+
+/// Opens a tasker's sealed forge token into the token itself.
+pub trait ForgeOpener {
+    fn open(
+        &self,
+        sealed: &[u8],
+        req: &ForgeOpenRequest<'_>,
+    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send;
+}
+
+/// The seal alone: what it holds is the wrapping token the tasker's client read.
+pub fn open_forge_seal(
+    key: &SealPrivateKey,
+    sealed: &[u8],
+    req: &ForgeOpenRequest<'_>,
+) -> Result<Zeroizing<Vec<u8>>, OpenFailure> {
+    maknae_seal::open(key, &req.aad()?, sealed).map_err(|_| OpenFailure::Seal)
 }
 
 pub fn open_request<'a>(

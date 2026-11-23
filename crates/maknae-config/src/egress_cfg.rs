@@ -46,6 +46,8 @@ const DEFAULT_REACH_DEADLINE_MS: u64 = 20_000;
 /// The ceiling on `reach_deadline_ms`, which the kernel's drain bound, the client's
 /// reply wait and the units' stop timeouts are derived from.
 pub const REACH_DEADLINE_MS_MAX: u64 = 300_000;
+/// How many reach exchanges run at once, on each side of the egress socket.
+pub const REACH_CONCURRENCY_MAX: usize = 4;
 const REACH_DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=REACH_DEADLINE_MS_MAX as i64;
 
 /// Where the deputy is, and how long one send may take.

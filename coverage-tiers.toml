@@ -270,6 +270,11 @@ files = [
   "crates/maknae-deputy/src/mint/minter.rs",
   "crates/maknae-deputy/src/mint/recipient.rs",
   "crates/maknae-deputy/src/mint/signer.rs",
+  # #168: reach admission before any I/O (bounds, the server's `apis:` entry, a
+  # forge that observes reach, the one App on the host) and the tasker token's
+  # own Vault path and open-failure classes.
+  "crates/maknae-deputy/src/reach/admit.rs",
+  "crates/maknae-deputy/src/reach/open.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
@@ -527,6 +532,10 @@ files = [
   # grant check they apply is mint/grant.rs (T1), pinned end to end by the
   # loopback-stub tests here.
   "crates/maknae-deputy/src/mint/github.rs",
+  # #168: the reach driver. T2: it carries the observer's steps to the forge
+  # under the frame deadline and a permit, and revokes any token it minted on
+  # every exit; the decisions are reach/admit.rs, reach/open.rs and maknae-forge.
+  "crates/maknae-deputy/src/reach/drive.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
@@ -751,6 +760,10 @@ why = "module declarations only; the decisions are handle/unseal/call (T1)"
 [[t3]]
 path = "crates/maknae-deputy/src/mint/mod.rs"
 why = "#168: module declarations only; the GitHub client is mint/github.rs (T2), its grant check mint/grant.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-deputy/src/reach/mod.rs"
+why = "#168: module declarations only; reach admission is reach/admit.rs and reach/open.rs (T1), the driver reach/drive.rs (T2)"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"

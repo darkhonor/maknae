@@ -198,7 +198,7 @@ fn forge_refusal(e: ForgeError) -> MintRefusal {
     }
 }
 
-fn live_token_may_remain(e: ForgeError) -> bool {
+pub(crate) fn live_token_may_remain(e: ForgeError) -> bool {
     match e {
         ForgeError::Unanswered
         | ForgeError::Unread
