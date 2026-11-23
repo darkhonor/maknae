@@ -3834,7 +3834,11 @@ async fn serve_board_verb<S, E, P>(
         let mut after = cursor;
         let visible = loop {
             loop {
-                let chunk = store.candidates(key, after, maknae_proto::BOARD_READ_PAGE_POSTS);
+                let chunk: Vec<_> = store
+                    .candidates(key, after, maknae_proto::BOARD_READ_PAGE_POSTS)
+                    .into_iter()
+                    .take_while(|s| s.seq <= plan.upper)
+                    .collect();
                 let Some(last) = chunk.last() else {
                     break;
                 };

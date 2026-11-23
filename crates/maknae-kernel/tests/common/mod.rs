@@ -1967,6 +1967,62 @@ impl<P> MarksDuringBatch<P> {
 
 board_double!(MarksDuringBatch);
 
+/// Denies every request holding `label`, and inside each batch of more than one request
+/// appends to `board` a post carrying it, up to `limit` posts, as posts arriving while a
+/// read is decided. Counts the batches.
+pub struct AppendsDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub board: Arc<maknae_kernel::BoardStore>,
+    pub key: maknae_kernel::BoardKey,
+    pub label: &'static str,
+    pub labels: maknae_kernel::PostLabels,
+    pub limit: usize,
+    pub batches: std::sync::atomic::AtomicUsize,
+}
+
+impl<P> AppendsDuringBatch<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        if holds(req, self.label) {
+            Verdict::Deny {
+                reason: "sentinel-695: appended withheld".into(),
+            }
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() < 2 {
+            return;
+        }
+        let n = self
+            .batches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.limit {
+            self.board
+                .post(
+                    self.key,
+                    (maknae_proto::Author::Agent("hobi".into()), Some(12_101)),
+                    None,
+                    self.labels.clone(),
+                    maknae_proto::PostDraft {
+                        kind: maknae_proto::PostKind::Note,
+                        to: maknae_proto::Addressee::Board,
+                        in_reply_to: None,
+                        body: maknae_proto::SecretText(maknae_io::Zeroizing::new(
+                            "sentinel-695-appended".into(),
+                        )),
+                        attachments: Vec::new(),
+                    },
+                    &maknae_kernel::FixedEnrollment(Default::default()),
+                )
+                .unwrap();
+        }
+    }
+}
+
+board_double!(AppendsDuringBatch);
+
 /// Stamps another person's board on a board request before the composition decides it.
 pub struct OtherBoard<P> {
     pub inner: Arc<P>,

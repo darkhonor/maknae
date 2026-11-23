@@ -5738,4 +5738,29 @@ mod board {
         page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
         assert_eq!(w.cursor("jin"), w.seq(withheld));
     }
+
+    #[tokio::test]
+    async fn a_read_never_walks_past_the_posts_there_when_it_was_admitted() {
+        let w = board_world("board-upper-bound");
+        let j = w.at_work("jin");
+        let first = w.stored("hobi", "sentinel-695-first", labelled());
+        let pdp = Arc::new(common::AppendsDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            key: w.key(),
+            label: LABEL,
+            labels: labelled(),
+            limit: 5,
+            batches: 0.into(),
+        });
+        let (answer, _) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert!(page.posts.is_empty() && !page.more);
+        assert_eq!(
+            pdp.batches.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a post appended during the read is for the next read"
+        );
+        assert_eq!(w.cursor("jin"), w.seq(first));
+    }
 }

@@ -99,6 +99,8 @@ pub enum BoardFinding {
 pub struct ReadPlan {
     pub cursor: u64,
     pub ack_to: Option<u64>,
+    /// The board's highest sequence when the read was admitted; the read walks no further.
+    pub upper: u64,
 }
 
 #[derive(Serialize, Deserialize)]

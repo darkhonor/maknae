@@ -345,7 +345,12 @@ impl BoardStore {
             let sent = board.sent.get(reader)?.contains(&seq);
             (sent && seq > cursor).then_some(seq)
         });
-        ReadPlan { cursor, ack_to }
+        let upper = board.map_or(0, |b| b.next_seq.saturating_sub(1));
+        ReadPlan {
+            cursor,
+            ack_to,
+            upper,
+        }
     }
 
     pub fn advance(&self, key: BoardKey, reader: &AgentId, to: u64) -> Result<u64, BoardRefusal> {
@@ -382,6 +387,9 @@ impl BoardStore {
         board.cursors.insert(reader.clone(), to);
         if let Some(sent) = board.sent.get_mut(reader) {
             sent.retain(|seq| *seq > to);
+            if sent.is_empty() {
+                board.sent.remove(reader);
+            }
         }
         Ok(to)
     }
@@ -446,7 +454,7 @@ impl BoardStore {
         for board in held.boards.values_mut() {
             board.sent.retain(|agent, _| !gone.contains(agent));
         }
-        let noted: Vec<(BoardKey, AgentId)> = held
+        held.noted = held
             .boards
             .iter()
             .flat_map(|(key, b)| {
@@ -456,7 +464,11 @@ impl BoardStore {
                     .map(|a| (*key, a.clone()))
             })
             .collect();
-        held.noted.extend(noted);
+        let noted = &held.noted;
+        held.said.retain(|item| match item {
+            Item::Cursor(key, reader) => noted.contains(&(*key, reader.clone())),
+            Item::Post(..) => true,
+        });
     }
 
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
@@ -522,7 +534,7 @@ impl BoardStore {
             let step = match (d.why, d.seq, &d.reader) {
                 (BoardDueFor::Expire, Some(seq), _) => self.expire(d.key, seq, d.post, view),
                 (BoardDueFor::Hold(f), Some(seq), _) => self.hold(d.key, seq, d.post, f),
-                (BoardDueFor::DropCursor, _, Some(reader)) => self.drop_cursor(d.key, reader),
+                (BoardDueFor::DropCursor, _, Some(reader)) => self.drop_cursor(d.key, reader, view),
                 (BoardDueFor::Expire | BoardDueFor::Hold(_), None, _)
                 | (BoardDueFor::DropCursor, _, None) => Step::Skipped,
             };
@@ -580,6 +592,10 @@ impl BoardStore {
             if let Some(gone) = board.posts.remove(&seq) {
                 board.ids.remove(&gone.post.id);
             }
+            for sent in board.sent.values_mut() {
+                sent.remove(&seq);
+            }
+            board.sent.retain(|_, sent| !sent.is_empty());
         }
         held.marked.remove(&(key, seq));
         held.said
@@ -628,12 +644,13 @@ impl BoardStore {
         Step::Done
     }
 
-    fn drop_cursor(&self, key: BoardKey, reader: &AgentId) -> Step {
+    fn drop_cursor(&self, key: BoardKey, reader: &AgentId, view: &dyn EnrollmentView) -> Step {
         let item = Item::Cursor(key, reader.clone());
         let noted = (key, reader.clone());
         {
             let mut held = self.held();
-            if !held.noted.contains(&noted) {
+            if !held.noted.contains(&noted) || view.agent_uid(reader).is_some() {
+                held.noted.remove(&noted);
                 held.said.remove(&item);
                 return Step::Skipped;
             }
@@ -765,11 +782,14 @@ impl BoardStore {
         let mut held = self.held();
         let board = held.boards.entry(key).or_default();
         let cursor = board.cursors.get(reader).copied().unwrap_or(0);
-        board
-            .sent
-            .entry(reader.clone())
-            .or_default()
-            .extend(seqs.iter().filter(|seq| **seq > cursor));
+        let on: Vec<u64> = seqs
+            .iter()
+            .copied()
+            .filter(|seq| *seq > cursor && board.posts.contains_key(seq))
+            .collect();
+        if !on.is_empty() {
+            board.sent.entry(reader.clone()).or_default().extend(on);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1582,7 +1602,8 @@ mod tests {
             store.plan_read(BOB, &r, last),
             ReadPlan {
                 cursor: 0,
-                ack_to: None
+                ack_to: None,
+                upper: posted[2].seq
             }
         );
         store.sent(BOB, &r, &[posted[0].seq, posted[1].seq]);
@@ -1603,7 +1624,8 @@ mod tests {
             store.plan_read(BOB, &r, Some(posted[0].post.id)),
             ReadPlan {
                 cursor: posted[1].seq,
-                ack_to: None
+                ack_to: None,
+                upper: posted[2].seq
             }
         );
         assert_eq!(store.plan_read(BOB, &r, last).ack_to, None);
@@ -2017,6 +2039,77 @@ mod tests {
             BoardRefusal::NoSuchPost
         );
         assert!(replied(free_post.post.id).is_ok());
+    }
+
+    fn sent_set(store: &BoardStore, key: BoardKey, r: &AgentId) -> Option<BTreeSet<u64>> {
+        store.held().boards.get(&key)?.sent.get(r).cloned()
+    }
+
+    #[test]
+    fn a_sent_set_holds_only_posts_on_the_board_and_goes_when_empty() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let old = by(&store, BOB, hobi(), Some(2001), "sentinel-695-old");
+        clock.set(T0 + 10);
+        let young = by(&store, BOB, hobi(), Some(2001), "sentinel-695-young");
+        let r = reader("rm");
+        store.sent(BOB, &r, &[old.seq, young.seq, 99]);
+        assert_eq!(
+            sent_set(&store, BOB, &r),
+            Some([old.seq, young.seq].into_iter().collect()),
+            "a sequence not on the board is not noted"
+        );
+        clock.set(T0 + RETAIN);
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
+        assert_eq!(
+            sent_set(&store, BOB, &r),
+            Some([young.seq].into_iter().collect()),
+            "an expired post leaves every sent set"
+        );
+        store.advance(BOB, &r, young.seq).unwrap();
+        assert_eq!(sent_set(&store, BOB, &r), None, "an empty set is dropped");
+    }
+
+    #[test]
+    fn a_reader_enrolled_again_before_the_sweep_keeps_its_cursor() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let p = by(&store, BOB, hobi(), Some(2001), "p");
+        let r = reader("rm");
+        store.advance(BOB, &r, p.seq).unwrap();
+        store.mark(&enrolled(&[]));
+        let due = store.due(10);
+        assert_eq!(
+            whys(&due),
+            vec![(None, Some(r.clone()), BoardDueFor::DropCursor)]
+        );
+        let back = enrolled(&[("rm", 3000)]);
+        assert_eq!(store.perform(&due, &back), 0, "re-checked at the delete");
+        assert!(b.has("cursor.1000.rm"));
+        store.mark(&enrolled(&[]));
+        let due = store.due(10);
+        store.mark(&back);
+        assert!(
+            store.due(10).is_empty(),
+            "the mark reconciles what it noted"
+        );
+        assert_eq!(store.perform(&due, &enrolled(&[])), 0);
+        assert!(b.has("cursor.1000.rm"));
+        assert_eq!(store.plan_read(BOB, &r, None).cursor, p.seq);
+        assert!(store.held().said.is_empty());
+        store.mark(&enrolled(&[]));
+        b.fail(Some(Fail::Every));
+        assert_eq!(store.perform(&store.due(10), &enrolled(&[])), 0);
+        b.fail(None);
+        assert!(
+            store.due(10).iter().all(|d| d.recorded),
+            "the refused drop was recorded"
+        );
+        store.mark(&back);
+        assert!(
+            store.held().said.is_empty(),
+            "a re-enrolled reader's recorded drop is forgotten"
+        );
     }
 
     #[test]
