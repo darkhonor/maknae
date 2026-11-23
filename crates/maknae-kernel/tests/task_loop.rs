@@ -5935,4 +5935,57 @@ mod board {
             "the live undecided post after it stops the read, as on a board without the dead one"
         );
     }
+
+    /// jin's read behind one post denied to it, with the board's disk in `disk`'s state while
+    /// the read's skip is written; the answer.
+    async fn read_behind_a_withheld_post(
+        tag: &str,
+        disk: impl FnOnce(&MemTaskBlobs),
+    ) -> RespResult {
+        let w = board_world(tag);
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-withheld", labelled());
+        let pdp = denies(&w, &["jin"]);
+        let _alone = STORE.write().await;
+        disk(&w.board_blobs);
+        let (session, gate) = w.agent_session("jin");
+        let records = Records::new(0);
+        let raw = w
+            .serve_as(
+                pdp,
+                session,
+                gate,
+                read(None),
+                Some(j),
+                &records,
+                None,
+                Wiring {
+                    live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                    egress: maknae_kernel::unavailable_egress(),
+                    conversations: common::conversations(),
+                },
+            )
+            .await;
+        w.board_blobs.slow(None);
+        w.board_blobs.fail(None);
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+        maknae_proto::decode_response(&frame).unwrap().result
+    }
+
+    #[tokio::test]
+    async fn the_reply_never_depends_on_whether_the_skip_was_written() {
+        let stored = read_behind_a_withheld_post("board-skip-stored", |_| {}).await;
+        let refused =
+            read_behind_a_withheld_post("board-skip-refused", |b| b.fail(Some(Fail::Every))).await;
+        let timed_out = read_behind_a_withheld_post("board-skip-timed-out", |b| {
+            b.slow(Some(Duration::from_millis(2500)))
+        })
+        .await;
+        let page = page_of(stored);
+        assert!(page.posts.is_empty() && !page.more);
+        for other in [refused, timed_out] {
+            assert_eq!(page_of(other), page);
+        }
+    }
 }

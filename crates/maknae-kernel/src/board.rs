@@ -355,7 +355,9 @@ impl BoardStore {
             let sent = board.sent.get(reader)?.contains(&seq);
             (sent && seq > cursor).then_some(seq)
         });
-        let upper = board.map_or(0, |b| b.next_seq.saturating_sub(1));
+        let upper = board
+            .and_then(|b| b.posts.last_key_value())
+            .map_or(cursor, |(seq, _)| *seq);
         ReadPlan {
             cursor,
             ack_to,
@@ -815,7 +817,11 @@ impl BoardStore {
         view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
         let _w = self.writing();
-        if self.held().owed.len() >= crate::board_store::BOARD_OWED_MAX {
+        let owing = {
+            let held = self.held();
+            held.owed.len().saturating_add(held.notices.len())
+        };
+        if owing >= crate::board_store::BOARD_OWED_MAX {
             return Err(BoardRefusal::Store("removals are owed".into()));
         }
         self.room(key, &author, draft.in_reply_to, view)?;
@@ -966,7 +972,14 @@ impl BoardStore {
     /// first retries every owed removal. Poison is recovered: it guards no state of its own.
     fn writing(&self) -> std::sync::MutexGuard<'_, ()> {
         let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let owed: Vec<(BoardKey, PostId)> = self.held().owed.iter().copied().collect();
+        let owed: Vec<(BoardKey, PostId)> = {
+            let held = self.held();
+            if held.notices.len() < crate::board_store::BOARD_OWED_MAX {
+                held.owed.iter().copied().collect()
+            } else {
+                Vec::new()
+            }
+        };
         for (key, id) in owed {
             if self.blobs.delete(&Name::Post(key, id).text()).is_ok() {
                 let mut held = self.held();
@@ -1431,12 +1444,24 @@ mod tests {
         );
         assert_eq!(b.names().unwrap(), before, "nothing is written");
         b.fail(None);
-        let next = put_with(&store, vec![[0xef; 16]], "settled first").unwrap();
-        assert!(store.held().owed.is_empty());
+        let refused = put_with(&store, vec![[0xef; 16]], "settled, not yet recorded");
+        assert_eq!(
+            refused.unwrap_err(),
+            BoardRefusal::Store("removals are owed".into())
+        );
+        assert!(store.held().owed.is_empty(), "the removals were settled");
+        let unrecorded = store.take_notices();
+        assert_eq!(unrecorded.len(), crate::board_store::BOARD_OWED_MAX);
+        store.return_notices(unrecorded);
+        assert!(
+            put_with(&store, vec![[0xf0; 16]], "trail still down").is_err(),
+            "the settled notices the trail refused count toward the bound"
+        );
         assert_eq!(
             store.take_notices().len(),
             crate::board_store::BOARD_OWED_MAX
         );
+        let next = put_with(&store, vec![[0xf1; 16]], "trail recovered").unwrap();
         assert!(store.get(BOB, next.post.id).is_some());
     }
 
@@ -1683,6 +1708,27 @@ mod tests {
             }
         );
         assert_eq!(store.plan_read(BOB, &r, last).ack_to, None);
+    }
+
+    #[test]
+    fn a_read_admitted_while_a_post_is_written_does_not_reach_it() {
+        let b = MemTaskBlobs::default();
+        let store = Arc::new(open_mem(&b, SMALL));
+        let first = put(&store, BOB, hobi(), "published");
+        let seen = Arc::new(Mutex::new(None));
+        let (planning, out, inner) = (Arc::clone(&store), Arc::clone(&seen), b.clone());
+        b.after_save(move || {
+            inner.after_save(move || {
+                *out.lock().unwrap() = Some(planning.plan_read(BOB, &reader("rm"), None).upper);
+            });
+        });
+        let second = put(&store, BOB, hobi(), "in flight");
+        assert!(second.seq > first.seq);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(first.seq),
+            "the sequence reserved for the post in flight is not in the read's range"
+        );
     }
 
     #[test]
