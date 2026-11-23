@@ -306,7 +306,12 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
         let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Refused)?;
         self.plane
             .tasker()
-            .submit(&agent, prompt, bindings)
+            .submit(
+                &agent,
+                prompt,
+                bindings,
+                maknae_proto::ForgeTokens::default(),
+            )
             .await
             .map_err(fail)
     }
@@ -814,6 +819,46 @@ mod tests {
             text(Zeroizing::new(vec![0xff, 0xfe])).map(|t| t.0.to_string()),
             Err("the persona is not UTF-8".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn an_agent_subtask_sends_no_token() {
+        use crate::plane::fake::{refused, FakeKernel};
+        use maknae_proto::{BindingRequest, GitRef, Verb};
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let lp = LoopPlane::with_dial(
+            FakeKernel::answering(vec![refused()]),
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        let bound = vec![BindingRequest::Git(GitRef {
+            server: "github.com".into(),
+            base: "o/r".into(),
+            change: Some(7),
+        })];
+        let asked = SecretText(Zeroizing::new("review github.com/o/r#7".into()));
+        let _ = plane.submit("jin", asked, bound.clone()).await;
+        let seen = plane.plane.link_for_test().finish().await.requests;
+        assert_eq!(seen.len(), 1);
+        match &seen[0].verb {
+            Verb::TaskSubmit { task, forge_tokens } => {
+                assert_eq!(task.bindings, bound);
+                assert!(forge_tokens.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]

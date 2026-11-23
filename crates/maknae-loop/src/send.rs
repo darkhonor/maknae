@@ -87,10 +87,14 @@ fn reply_wait(
         maknae_proto::Verb::AdminHeldList { .. } | maknae_proto::Verb::AdminHeldRelease { .. } => {
             maknae_config::HELD_REPLY_STAGES
         }
+        maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. } => {
+            return class_wait(maknae_proto::FrameClass::Control, transport)
+                + std::time::Duration::from_millis(maknae_config::task_reach_reply_ms(
+                    maknae_config::REACH_DEADLINE_MS_MAX,
+                ))
+        }
         maknae_proto::Verb::TaskClaim { .. }
         | maknae_proto::Verb::TaskReport { .. }
-        | maknae_proto::Verb::TaskSubmit { .. }
-        | maknae_proto::Verb::TaskAdd { .. }
         | maknae_proto::Verb::TaskStatus { .. }
         | maknae_proto::Verb::TaskList { .. }
         | maknae_proto::Verb::TaskStop { .. }
@@ -112,6 +116,23 @@ fn reply_wait(
             stages * maknae_config::BLOCKING_STAGE_TIMEOUT_MS
                 + maknae_config::ADMIN_REPLY_MARGIN_MS,
         )
+}
+
+fn request_caps(
+    verb: &maknae_proto::Verb,
+    transport: &maknae_config::TransportConfig,
+) -> FrameCaps {
+    let prompt = match verb {
+        maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. } => {
+            maknae_proto::task_request_cap(transport.prompt_max_bytes)
+        }
+        _ => maknae_proto::prompt_request_cap(transport.prompt_max_bytes),
+    };
+    FrameCaps {
+        control: CONTROL_REQUEST_MAX,
+        attempt: ATTEMPT_REQUEST_MAX,
+        prompt,
+    }
 }
 
 fn class_wait(
@@ -418,13 +439,9 @@ async fn exchange<S: Wire>(
             .unwrap_or(request_verb),
     };
     let class = class_of(&request.verb);
-    let request_caps = FrameCaps {
-        control: CONTROL_REQUEST_MAX,
-        attempt: ATTEMPT_REQUEST_MAX,
-        prompt: maknae_proto::prompt_request_cap(transport.prompt_max_bytes),
-    };
-    let body = encode_request_zeroizing(&request, request_caps.cap(class))
-        .map_err(|e| unsent(e.to_string()))?;
+    let body =
+        encode_request_zeroizing(&request, request_caps(&request.verb, transport).cap(class))
+            .map_err(|e| unsent(e.to_string()))?;
     let written = send_request_frame(&mut stream, class, &body, transport)
         .await
         .map_err(before)?;
@@ -701,11 +718,57 @@ mod tests {
         let transport = maknae_config::TransportConfig::default();
         let control = class_wait(maknae_proto::FrameClass::Control, &transport);
         for verb in tasker_verbs() {
-            if matches!(verb, maknae_proto::Verb::AgentList { .. }) {
+            if matches!(
+                verb,
+                maknae_proto::Verb::AgentList { .. }
+                    | maknae_proto::Verb::TaskSubmit { .. }
+                    | maknae_proto::Verb::TaskAdd { .. }
+            ) {
                 assert!(reply_wait(&verb, &transport) > control);
             } else {
                 assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
             }
+        }
+    }
+
+    #[test]
+    fn the_reply_wait_for_submit_covers_the_reach_ceiling() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let control = class_wait(maknae_proto::FrameClass::Control, &transport);
+        let reach = std::time::Duration::from_millis(maknae_config::task_reach_reply_ms(
+            maknae_config::REACH_DEADLINE_MS_MAX,
+        ));
+        assert_eq!(reach, std::time::Duration::from_secs(360));
+        let mut reached = 0;
+        for verb in tasker_verbs() {
+            if matches!(
+                verb,
+                maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. }
+            ) {
+                assert_eq!(reply_wait(&verb, &transport), control + reach, "{verb:?}");
+                reached += 1;
+            }
+        }
+        assert_eq!(reached, 2);
+    }
+
+    #[test]
+    fn a_task_verb_is_encoded_under_the_task_request_cap() {
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: 4096,
+            ..Default::default()
+        };
+        for verb in tasker_verbs() {
+            let want = match verb {
+                maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. } => {
+                    maknae_proto::task_request_cap(4096)
+                }
+                _ => maknae_proto::prompt_request_cap(4096),
+            };
+            assert_eq!(request_caps(&verb, &transport).prompt, want, "{verb:?}");
         }
     }
 

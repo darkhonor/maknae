@@ -2,10 +2,11 @@
 //! session reads their own wrapped key under their login (ADR-0028); an agent
 //! reads its own under its AppRole login. The loop never knows which.
 use maknae_config::{AgentId, AgentProvider};
-use maknae_proto::{ProviderChoice, SealedKey};
-use maknae_seal::{SealAad, SealContext, SealPublicKey};
+use maknae_proto::{ProviderChoice, SealedForgeToken, SealedKey};
+use maknae_seal::{ForgePurpose, ForgeSealContext, SealAad, SealContext, SealPublicKey};
 use maknae_vault::{
-    aad_parts, PlaneClient, VaultError, WrapExpectation, WrappedSecret, USER_KEY_WRAP_TTL,
+    aad_parts, forge_token_subpath, PlaneClient, VaultError, WrapExpectation, WrappedSecret,
+    FORGE_TOKEN_FIELD, USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -78,6 +79,59 @@ where
         key_field: target.key_field.to_string(),
         sealed_key,
     })
+}
+
+/// A tasker's forge login for one server, at `<user_prefix>/<username>/forges/<server>`.
+pub struct ForgeTokenTarget<'a> {
+    pub kv_mount: &'a str,
+    pub user_prefix: &'a str,
+    pub username: &'a str,
+    pub server: &'a str,
+}
+
+/// Reads the tasker's wrapped forge token and seals its wrapping token to the Egress Daemon
+/// for `target.server` alone, under a fresh nonce (ADR-0028).
+pub async fn sealed_forge_token<F, Fut>(
+    target: &ForgeTokenTarget<'_>,
+    seal_key: &SealPublicKey,
+    read: F,
+) -> Result<SealedForgeToken, ChoiceFault>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<WrappedSecret, VaultError>>,
+{
+    let sub = forge_token_subpath(target.server).ok_or(ChoiceFault::Unusable)?;
+    let secret_path =
+        maknae_config::user_key_path(target.user_prefix, target.username, sub.as_str())
+            .map_err(|_| ChoiceFault::Unusable)?;
+    WrapExpectation::new(
+        target.kv_mount,
+        &secret_path,
+        FORGE_TOKEN_FIELD,
+        USER_KEY_WRAP_TTL,
+    )
+    .map_err(|_| ChoiceFault::Unusable)?;
+    let sealing = |e: &dyn std::fmt::Display| ChoiceFault::Seal(e.to_string());
+    let nonce = forge_nonce().map_err(|e| sealing(&e))?;
+    let wrapped = read(secret_path.clone()).await.map_err(ChoiceFault::Read)?;
+    let aad = SealAad::forge(&ForgeSealContext {
+        purpose: ForgePurpose::TaskerReach,
+        nonce: &nonce,
+        server: target.server,
+        expected_path: &secret_path,
+        key_field: FORGE_TOKEN_FIELD,
+    })
+    .map_err(|e| sealing(&e))?;
+    let blob = maknae_seal::seal(seal_key, &aad, wrapped.token.expose().as_bytes())
+        .map_err(|e| sealing(&e))?;
+    let sealed = SealedKey::new(blob.into_bytes()).map_err(|e| sealing(&e))?;
+    SealedForgeToken::new(target.server.to_owned(), nonce, sealed).map_err(|e| sealing(&e))
+}
+
+fn forge_nonce() -> Result<String, String> {
+    let mut bytes = [0u8; maknae_proto::FORGE_NONCE_HEX_LEN / 2];
+    maknae_crypto::random::fill(&mut bytes).map_err(|e| format!("{e:?}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The agent's own key, under `<agent_prefix>/<id>/`, the path the kernel builds
@@ -232,6 +286,77 @@ mod tests {
             ttl: std::time::Duration::from_secs(60),
             creation_path: path.into(),
             creation_time: "2026-11-13T00:00:00Z".into(),
+        }
+    }
+
+    fn forge_aad(nonce: &str, server: &str, path: &str) -> SealAad {
+        SealAad::forge(&maknae_seal::ForgeSealContext {
+            purpose: maknae_seal::ForgePurpose::TaskerReach,
+            nonce,
+            server,
+            expected_path: path,
+            key_field: "token",
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_forge_token_is_read_at_the_users_forge_path_and_sealed_to_that_server() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let target = ForgeTokenTarget {
+            kv_mount: KV,
+            user_prefix: "maknae/users",
+            username: "alice",
+            server: "ghe.example:8443",
+        };
+        let asked = std::sync::Mutex::new(Vec::new());
+        let read = |path: String| {
+            asked.lock().unwrap().push(path);
+            async { Ok(wrapped("hvs.forge-wrap-sentinel-168", "unused")) }
+        };
+        let one = sealed_forge_token(&target, recipient.public_key(), read)
+            .await
+            .unwrap();
+        let two = sealed_forge_token(&target, recipient.public_key(), read)
+            .await
+            .unwrap();
+        let path = "maknae/users/alice/forges/ghe.example_8443";
+        assert_eq!(*asked.lock().unwrap(), [path, path]);
+        assert_eq!(one.server(), "ghe.example:8443");
+        assert_ne!(one.nonce(), two.nonce());
+        let aad = forge_aad(one.nonce(), "ghe.example:8443", path);
+        let opened = maknae_seal::open(&recipient, &aad, one.sealed().as_bytes()).unwrap();
+        assert_eq!(opened.as_slice(), b"hvs.forge-wrap-sentinel-168");
+        for wrong in [
+            forge_aad(two.nonce(), "ghe.example:8443", path),
+            forge_aad(one.nonce(), "ghe.example", path),
+            forge_aad(
+                one.nonce(),
+                "ghe.example:8443",
+                "maknae/users/bob/forges/ghe.example_8443",
+            ),
+        ] {
+            assert!(maknae_seal::open(&recipient, &wrong, one.sealed().as_bytes()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forge_with_no_token_path_is_never_read() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        for (server, username) in [("[::1]:443", "alice"), ("github.com", "../bob")] {
+            let target = ForgeTokenTarget {
+                kv_mount: KV,
+                user_prefix: "maknae/users",
+                username,
+                server,
+            };
+            let got = sealed_forge_token(&target, recipient.public_key(), |_| async {
+                panic!("read for {server}")
+            })
+            .await;
+            assert!(matches!(got, Err(ChoiceFault::Unusable)), "{server}");
         }
     }
 

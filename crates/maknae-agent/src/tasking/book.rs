@@ -5,8 +5,8 @@ use crate::render::display_safe_len;
 use crate::screen::blocks::{Conversation, EntryId, EntryKind};
 use crate::screen::HeaderLine;
 use maknae_proto::{
-    AgentStanding, SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskReportView,
-    TaskState, TaskView,
+    AgentStanding, Binding, SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage,
+    TaskReportView, TaskState, TaskView,
 };
 use std::collections::{BTreeSet, VecDeque};
 use zeroize::Zeroizing;
@@ -58,9 +58,11 @@ pub enum Op {
     Submit {
         text: SecretText,
     },
+    /// `bound` is what the task was last seen bound to.
     Add {
         task: TaskRef,
         text: SecretText,
+        bound: Vec<Binding>,
     },
     Stop {
         task: TaskRef,
@@ -81,6 +83,8 @@ pub enum Answer {
     View(TaskView),
     /// The kernel's view of a submitted task, and the candidates the client did not bind.
     Submitted(TaskView, Vec<Unbound>),
+    /// The kernel's view of a task its add bound, and the candidates the client did not bind.
+    Added(TaskView, Vec<Unbound>),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -95,6 +99,8 @@ pub enum Failure {
     /// No plane leaf could be had, so nothing was sent.
     NoIdentity,
     Clock,
+    /// The client refused before sending, for this reason.
+    NotSent(String),
 }
 
 impl Failure {
@@ -104,7 +110,7 @@ impl Failure {
             Failure::Refused { outcome_unknown } => *outcome_unknown,
             Failure::Unreachable { after_write } => *after_write,
             Failure::Protocol(_) => true,
-            Failure::NoIdentity | Failure::Clock => false,
+            Failure::NoIdentity | Failure::Clock | Failure::NotSent(_) => false,
         }
     }
 }
@@ -540,10 +546,16 @@ impl Book {
             return self.refuse(conv, text::CONVERSATION_FULL);
         }
         let (copy, _) = add_copy(add);
+        let bound = self
+            .index_of(&task)
+            .and_then(|at| self.tasks[at].view.as_ref())
+            .map(|v| v.bindings.clone())
+            .unwrap_or_default();
         self.queue.push_back((
             Op::Add {
                 task,
                 text: SecretText(copy),
+                bound,
             },
             Asked::Add(n),
         ));
@@ -690,6 +702,7 @@ impl Book {
             Err(Failure::Protocol(_)) => self.connection = Connection::Unreadable,
             Err(Failure::NoIdentity) => self.connection = Connection::NoIdentity,
             Err(Failure::Clock) => self.connection = Connection::Clock,
+            Err(Failure::NotSent(_)) => {}
         }
         match (asked, answer) {
             (Asked::Collect { after, away }, Ok(Answer::Reports(page))) => {
@@ -716,6 +729,14 @@ impl Book {
             (Asked::Add(n), Ok(Answer::View(view))) => {
                 self.update(view, now, conv);
                 self.say(conv, &format!("added to #{n}"));
+            }
+            (Asked::Add(n), Ok(Answer::Added(view, unbound))) => {
+                let echo = text::echo_lines(&view.bindings, &view.reach, &unbound);
+                self.update(view, now, conv);
+                self.say(conv, &format!("added to #{n}"));
+                for line in &echo {
+                    self.say(conv, line);
+                }
             }
             (Asked::Stop(n), Ok(Answer::View(view))) => {
                 self.update(view, now, conv);
@@ -779,6 +800,10 @@ impl Book {
             (_, Failure::Unreachable { .. }) => {
                 "the kernel could not be reached; nothing was sent".to_string()
             }
+            (Unknown::Submit, Failure::NotSent(why)) => {
+                format!("{why}; your request was not sent")
+            }
+            (_, Failure::NotSent(why)) => format!("{why}; nothing was sent"),
             _ => "the kernel refused it".to_string(),
         };
         self.say(conv, &line);
@@ -989,7 +1014,7 @@ impl Book {
         now: u64,
         conv: &mut Conversation,
     ) {
-        let echo = text::echo_lines(&view.bindings, unbound);
+        let echo = text::echo_lines(&view.bindings, &view.reach, unbound);
         let others = self.tasks.iter().any(Task::open);
         let n = match self.index_of(&view.task) {
             Some(at) => {
@@ -1194,6 +1219,7 @@ fn read_failure(e: &Failure) -> String {
         Failure::Clock => {
             "the system clock reads before 1970; set the clock, then try again".into()
         }
+        Failure::NotSent(why) => why.clone(),
     }
 }
 
@@ -1416,7 +1442,7 @@ mod tests {
         assert_eq!(run.last_text(), "stopped #2");
         run.enter("/add 1 the logs too");
         match run.op() {
-            Op::Add { task: t, text } => {
+            Op::Add { task: t, text, .. } => {
                 assert_eq!(t, task(1));
                 assert_eq!(text.0.as_str(), "the logs too");
             }
@@ -1427,6 +1453,71 @@ mod tests {
         run.enter("/drop 9");
         run.nothing_queued();
         assert_eq!(run.last_text(), "there is no task #9");
+    }
+
+    fn bound(base: &str) -> maknae_proto::Binding {
+        maknae_proto::Binding::Git(maknae_proto::GitBinding {
+            server: "github.com".into(),
+            base: base.into(),
+            head: None,
+            change: None,
+        })
+    }
+
+    #[test]
+    fn an_add_carries_the_tasks_bindings_and_echoes_what_it_bound() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("review o/r");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        let mut first = view(1, 1, TaskState::Working);
+        first.bindings = vec![bound("o/r")];
+        run.answer(Ok(Answer::Submitted(first.clone(), vec![])));
+        run.enter("/add 1 and o/s");
+        match run.op() {
+            Op::Add {
+                task: t, bound: b, ..
+            } => {
+                assert_eq!(t, task(1));
+                assert_eq!(b, [bound("o/r")]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut added = first;
+        added.bindings.push(bound("o/s"));
+        let none = maknae_proto::ReachSummary::try_from((0, Some(1))).unwrap();
+        added.reach = vec![none, none];
+        let unbound = crate::hints::Unbound {
+            subject: crate::hints::Subject::Host("evil.example".into()),
+            reason: crate::hints::Reason::UnknownServer,
+        };
+        run.answer(Ok(Answer::Added(added, vec![unbound])));
+        let texts = run.texts();
+        assert_eq!(
+            texts[texts.len() - 4..],
+            [
+                "added to #1",
+                "bound: github.com/o/r; reach: none (the agent's credential does not cover it)",
+                "bound: github.com/o/s; reach: none (the agent's credential does not cover it)",
+                "not bound: evil.example: unknown server",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_request_refused_before_sending_says_why_and_that_it_was_not_sent() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.enter("review o/r");
+        assert!(matches!(run.op(), Op::Submit { .. }));
+        let why = "no forge login is stored for github.com: run `maknae forge login github.com`";
+        run.answer(Err(Failure::NotSent(why.into())));
+        assert_eq!(run.last_text(), format!("{why}; your request was not sent"));
+        assert_eq!(run.book.not_taken(), 1);
+        run.submit("again", 1, 1);
+        run.enter("/add 1 more");
+        assert!(matches!(run.op(), Op::Add { .. }));
+        run.answer(Err(Failure::NotSent(why.into())));
+        assert_eq!(run.last_text(), format!("{why}; nothing was sent"));
+        assert_eq!(run.book.not_taken(), 2);
     }
 
     #[test]

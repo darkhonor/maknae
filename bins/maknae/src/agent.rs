@@ -6,9 +6,11 @@ use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
 use maknae_agent::plane::{Plane, PlaneError};
 use maknae_agent::session::{Closed, Ended, Session};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
-use maknae_loop::keys::{sealed_choice, ChoiceFault, KeySupply, KeyTarget};
+use maknae_loop::keys::{
+    sealed_choice, sealed_forge_token, ChoiceFault, ForgeTokenTarget, KeySupply, KeyTarget,
+};
 use maknae_loop::plane::LoopPlane;
-use maknae_proto::ProviderChoice;
+use maknae_proto::{ForgeTokens, ProviderChoice};
 use maknae_seal::SealPublicKey;
 use maknae_vault::{UserToken, VaultApi, VaultError, WrappedSecret};
 use std::future::Future;
@@ -119,10 +121,129 @@ fn seal_key_from(pem: &str) -> Result<SealPublicKey, String> {
     })
 }
 
-fn token_copy(token: &UserToken) -> Result<UserToken, String> {
+pub(crate) fn token_copy(token: &UserToken) -> Result<UserToken, String> {
     let mut copy = zeroize::Zeroizing::new(String::with_capacity(token.expose().len()));
     copy.push_str(token.expose());
     UserToken::new(copy).map_err(|e| e.to_string())
+}
+
+pub fn forge_read_failure(server: &str, e: &VaultError) -> String {
+    match e {
+        VaultError::VaultStatus { status: 403, .. } => format!(
+            "Vault refused to read your forge login for {server} (HTTP 403): it is outside your \
+             Vault policy, or your login was revoked: run `maknae login`"
+        ),
+        VaultError::VaultStatus { status: 404, .. } => format!(
+            "no forge login is stored for {server}: run `maknae forge login {server}`, then retry"
+        ),
+        other => format!("reading your forge login for {server} from Vault failed: {other}"),
+    }
+}
+
+/// Where a person's forge logins are, and the key their tokens are sealed to.
+pub struct ForgeKeyContext<'a> {
+    pub kv_mount: &'a str,
+    pub user_prefix: &'a str,
+    pub username: &'a str,
+    pub seal_key: &'a SealPublicKey,
+    pub expires_at: u64,
+}
+
+/// One wrapped read per server, each sealed to exactly that server; an expired login or
+/// any failed read refuses before anything is sent.
+pub async fn forge_tokens<F, Fut>(
+    key: &ForgeKeyContext<'_>,
+    servers: &[&str],
+    now: u64,
+    mut read: F,
+) -> Result<ForgeTokens, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<WrappedSecret, VaultError>>,
+{
+    if servers.is_empty() {
+        return Ok(ForgeTokens::default());
+    }
+    if login_expired(key.expires_at, now) {
+        return Err(LOGIN_EXPIRED.to_string());
+    }
+    let mut tokens = Vec::with_capacity(servers.len());
+    for server in servers {
+        let target = ForgeTokenTarget {
+            kv_mount: key.kv_mount,
+            user_prefix: key.user_prefix,
+            username: key.username,
+            server,
+        };
+        let token = sealed_forge_token(&target, key.seal_key, &mut read)
+            .await
+            .map_err(|f| match f {
+                ChoiceFault::Unusable => format!(
+                    "{server} has no forge login path: check vault.user_prefix in your maknae.yaml"
+                ),
+                ChoiceFault::Read(e) => forge_read_failure(server, &e),
+                ChoiceFault::Seal(e) => {
+                    format!("sealing your forge login for {server} failed: {e}")
+                }
+            })?;
+        tokens.push(token);
+    }
+    ForgeTokens::new(tokens).map_err(|e| e.to_string())
+}
+
+/// Where the session's forge logins are; an unusable place refuses only a task that needs one.
+pub struct ForgePlace {
+    pub kv_mount: String,
+    pub user_prefix: String,
+    pub username: String,
+    pub seal_key: SealPublicKey,
+}
+
+impl ForgePlace {
+    pub fn of(document: &maknae_config::Document) -> Result<ForgePlace, String> {
+        let vault =
+            maknae_vault::vault_config_from_document(document).map_err(|e| e.to_string())?;
+        let (kv_mount, user_prefix) =
+            key_location(vault.kv_mount.as_deref(), vault.user_prefix.as_deref())?;
+        Ok(ForgePlace {
+            kv_mount: kv_mount.to_string(),
+            user_prefix: user_prefix.to_string(),
+            username: crate::login::local_username()?,
+            seal_key: seal_key_from(
+                &maknae_vault::read_seal_pub_pem().map_err(|e| e.to_string())?,
+            )?,
+        })
+    }
+}
+
+/// The session's forge token supply: the person's own wrapped reads under their login.
+pub struct ForgeLogins {
+    pub api: VaultApi,
+    pub token: UserToken,
+    pub expires_at: u64,
+    pub place: Result<ForgePlace, String>,
+}
+
+impl ForgeLogins {
+    pub async fn tokens(&self, servers: &[&str], now: u64) -> Result<ForgeTokens, String> {
+        if servers.is_empty() {
+            return Ok(ForgeTokens::default());
+        }
+        let place = self.place.as_ref().map_err(Clone::clone)?;
+        let key = ForgeKeyContext {
+            kv_mount: &place.kv_mount,
+            user_prefix: &place.user_prefix,
+            username: &place.username,
+            seal_key: &place.seal_key,
+            expires_at: self.expires_at,
+        };
+        let (api, token, kv_mount) = (&self.api, &self.token, place.kv_mount.as_str());
+        forge_tokens(&key, servers, now, |path| async move {
+            api.read_wrapped(token, kv_mount, &path, maknae_vault::USER_KEY_WRAP_TTL)
+                .await
+        })
+        .await
+    }
 }
 
 pub struct KeyContext<'a> {
@@ -564,8 +685,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     // One snapshot per session: `~` cannot change meaning for this process (#596).
     let home = snapshot_home(HOME_SNAPSHOT_TIMEOUT, maknae_io::session_home).await;
     let sensitive = personal_sensitive(&dir, home.as_deref(), &cwd)?;
-    let (client, trust) =
-        crate::cli::minted_plane(&document, &dir, token_copy(&session.token)?).await?;
+    let (client, trust) = crate::cli::minted_plane(&document, &dir, &session.token).await?;
     let keys = UserLoginKeys {
         api: session.api,
         token: session.token,
@@ -840,6 +960,47 @@ mod tests {
         assert_eq!(loop_prompt_cap(128_000, Some(65_536)), 65_536);
         assert_eq!(loop_prompt_cap(1_537, Some(1_048_576)), 65_536);
     }
+    #[test]
+    fn forge_read_failures_name_the_server_and_the_remedy() {
+        let status = |status| VaultError::VaultStatus {
+            op: "read",
+            status,
+            hint: "",
+        };
+        assert_eq!(
+            forge_read_failure("github.com", &status(404)),
+            "no forge login is stored for github.com: run `maknae forge login github.com`, then retry"
+        );
+        assert!(
+            forge_read_failure("github.com", &status(403)).contains("for github.com (HTTP 403)")
+        );
+        assert!(forge_read_failure("github.com", &status(403)).ends_with("run `maknae login`"));
+        assert!(forge_read_failure("github.com", &status(500))
+            .starts_with("reading your forge login for github.com from Vault failed: "));
+    }
+
+    #[tokio::test]
+    async fn an_expired_login_reads_no_forge_token() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let key = ForgeKeyContext {
+            kv_mount: "maknae-kv",
+            user_prefix: "maknae/users",
+            username: "alice",
+            seal_key: recipient.public_key(),
+            expires_at: 100,
+        };
+        let never = |_: String| async { panic!("an expired login was read") };
+        assert_eq!(
+            forge_tokens(&key, &["github.com"], 100, never).await,
+            Err(LOGIN_EXPIRED.to_string())
+        );
+        assert_eq!(
+            forge_tokens(&key, &[], 100, never).await,
+            Ok(ForgeTokens::default())
+        );
+    }
+
     const FULL_PATH: &str = "maknae-kv/data/maknae/users/alice/openai/personal";
 
     fn entry() -> maknae_config::UserProviderEntry {

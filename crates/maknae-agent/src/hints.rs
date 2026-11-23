@@ -718,6 +718,21 @@ impl<'p> Notes<'p> {
     }
 }
 
+/// The servers a tasker's forge token is sent for: each distinct bound server whose forge
+/// observes reach, in binding order and spelled as the binding spells it.
+pub fn token_servers<'a>(bindings: &'a [BindingRequest], forges: &[Forge]) -> Vec<&'a str> {
+    let mut servers: Vec<&str> = Vec::new();
+    for BindingRequest::Git(g) in bindings {
+        let observed = forges
+            .iter()
+            .any(|f| f.host == g.server && maknae_forge::observes_reach(f.provider));
+        if observed && !servers.contains(&g.server.as_str()) {
+            servers.push(&g.server);
+        }
+    }
+    servers
+}
+
 /// The bindings to submit: `sources`' candidates in order, without duplicates or a
 /// repository a change on it already names, only what `parent` holds when there is
 /// one, cut to what a submission may carry. Everything not bound is in `unbound`,
@@ -863,6 +878,31 @@ mod tests {
             base: base.into(),
             change,
         }
+    }
+
+    #[test]
+    fn token_servers_are_the_distinct_reach_observing_servers_as_spelled() {
+        let ghe = Forge {
+            host: "ghe.example:8443".into(),
+            provider: ForgeProvider::Github,
+        };
+        let forges = [gh(), gl(), ghe];
+        let bound: Vec<BindingRequest> = [
+            git("github.com", "o/r", Some(7)),
+            git("gitlab.lab.local:8443", "g/p", None),
+            git("ghe.example:8443", "o/s", None),
+            git("github.com", "o/t", None),
+            git("unknown.example", "o/u", None),
+        ]
+        .into_iter()
+        .map(BindingRequest::Git)
+        .collect();
+        assert_eq!(
+            token_servers(&bound, &forges),
+            ["github.com", "ghe.example:8443"]
+        );
+        assert!(token_servers(&bound[1..2], &forges).is_empty());
+        assert!(token_servers(&bound, &[]).is_empty());
     }
 
     fn host(h: &str, reason: Reason) -> Unbound {
@@ -1743,7 +1783,7 @@ mod tests {
             }]
         );
         assert!(!format!("{c:?}").contains("o/r0#5"));
-        let lines = crate::tasking::text::echo_lines(&[], &c.unbound);
+        let lines = crate::tasking::text::echo_lines(&[], &[], &c.unbound);
         assert_eq!(lines[0], "not bound: o/r0#5: no forge list");
     }
 

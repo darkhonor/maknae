@@ -622,9 +622,10 @@ pub(crate) fn cli_config() -> Result<(PathBuf, Document, TransportConfig), Strin
 pub(crate) async fn minted_plane(
     document: &Document,
     dir: &Path,
-    token: maknae_vault::UserToken,
+    token: &maknae_vault::UserToken,
 ) -> Result<(PlaneClient, std::sync::Arc<maknae_vault::TrustBundle>), String> {
-    let client = PlaneClient::for_user(document, dir, token).map_err(|e| e.to_string())?;
+    let client = PlaneClient::for_user(document, dir, crate::agent::token_copy(token)?)
+        .map_err(|e| e.to_string())?;
     let ca = load_ca_pin(dir).map_err(|e| e.to_string())?;
     let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
@@ -646,7 +647,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
         &mut std::io::stdin().lock(),
     )?;
 
-    let (client, trust) = minted_plane(&document, &dir, session.token).await?;
+    let (client, trust) = minted_plane(&document, &dir, &session.token).await?;
     let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
     if let Err(e) = client.shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));

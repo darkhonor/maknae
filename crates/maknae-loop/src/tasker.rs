@@ -91,6 +91,7 @@ impl<D: Dial> TaskerClient<D> {
         agent: &AgentId,
         prompt: SecretText,
         bindings: Vec<BindingRequest>,
+        forge_tokens: ForgeTokens,
     ) -> Result<TaskView, TaskerError> {
         let task = TaskSubmission {
             schema: TASK_SCHEMA.into(),
@@ -101,13 +102,7 @@ impl<D: Dial> TaskerClient<D> {
             bindings,
         };
         match self
-            .call(
-                Verb::TaskSubmit {
-                    task,
-                    forge_tokens: ForgeTokens::default(),
-                },
-                true,
-            )
+            .call(Verb::TaskSubmit { task, forge_tokens }, true)
             .await?
         {
             Payload::TaskAccepted(view) => Ok(view),
@@ -125,12 +120,18 @@ impl<D: Dial> TaskerClient<D> {
         }
     }
 
-    pub async fn add(&self, task: &TaskRef, text: SecretText) -> Result<TaskView, TaskerError> {
+    pub async fn add(
+        &self,
+        task: &TaskRef,
+        text: SecretText,
+        bindings: Vec<BindingRequest>,
+        forge_tokens: ForgeTokens,
+    ) -> Result<TaskView, TaskerError> {
         let verb = Verb::TaskAdd {
             task: task.clone(),
             text,
-            bindings: Vec::new(),
-            forge_tokens: ForgeTokens::default(),
+            bindings,
+            forge_tokens,
         };
         self.acknowledged("task.add", verb).await
     }
@@ -316,7 +317,9 @@ mod tests {
             Default::default(),
             vec![RespResult::Ok(Payload::TaskAccepted(view(1)))],
         );
-        c.submit(&agent(), text("p"), given.clone()).await.unwrap();
+        c.submit(&agent(), text("p"), given.clone(), ForgeTokens::default())
+            .await
+            .unwrap();
         let seen = c.link.dial_for_test().finish().await;
         match &seen.requests[0].verb {
             Verb::TaskSubmit { task, .. } => assert_eq!(task.bindings, given),
@@ -463,7 +466,8 @@ mod tests {
     async fn a_refused_submit_is_outcome_unknown() {
         let c = client(Default::default(), vec![refused()]);
         assert_eq!(
-            c.submit(&agent(), text("p"), Vec::new()).await,
+            c.submit(&agent(), text("p"), Vec::new(), ForgeTokens::default())
+                .await,
             Err(TaskerError::Refused {
                 outcome_unknown: true
             })
@@ -514,7 +518,10 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_kernel_is_unreachable_not_refused() {
         let c = TaskerClient::over(Unreachable, Default::default());
-        match c.submit(&agent(), text("p"), Vec::new()).await {
+        match c
+            .submit(&agent(), text("p"), Vec::new(), ForgeTokens::default())
+            .await
+        {
             Err(TaskerError::Unreachable { after_write, why }) => {
                 assert!(!after_write);
                 assert!(why.contains("sentinel-630-unreachable"), "{why}");
@@ -526,7 +533,10 @@ mod tests {
     #[tokio::test]
     async fn a_connection_lost_after_a_submit_is_written_is_outcome_unknown() {
         let c = client(Default::default(), vec![]);
-        match c.submit(&agent(), text("p"), Vec::new()).await {
+        match c
+            .submit(&agent(), text("p"), Vec::new(), ForgeTokens::default())
+            .await
+        {
             Err(TaskerError::Unreachable { after_write, .. }) => assert!(after_write),
             other => panic!("{other:?}"),
         }
@@ -648,8 +658,19 @@ mod tests {
                 agents_page(&[], None, 0, "B"),
             ],
         );
-        assert!(c.submit(&agent(), text("ask"), Vec::new()).await.is_ok());
-        assert!(c.add(&task_ref(), text("more")).await.is_ok());
+        assert!(c
+            .submit(&agent(), text("ask"), Vec::new(), ForgeTokens::default())
+            .await
+            .is_ok());
+        assert!(c
+            .add(
+                &task_ref(),
+                text("more"),
+                Vec::new(),
+                ForgeTokens::default()
+            )
+            .await
+            .is_ok());
         assert!(c.stop(&task_ref()).await.is_ok());
         assert!(c.drop(&other).await.is_ok());
         assert!(c.status(&other).await.is_ok());
@@ -707,12 +728,20 @@ mod tests {
         let t = task_ref();
         let a = agent();
         assert_eq!(
-            refusal(|c| async move { c.submit(&a, text("p"), Vec::new()).await }).await,
+            refusal(|c| async move {
+                c.submit(&a, text("p"), Vec::new(), ForgeTokens::default())
+                    .await
+            })
+            .await,
             want(true)
         );
         let (t1, t2, t3, t4) = (t.clone(), t.clone(), t.clone(), t.clone());
         assert_eq!(
-            refusal(|c| async move { c.add(&t1, text("p")).await }).await,
+            refusal(|c| async move {
+                c.add(&t1, text("p"), Vec::new(), ForgeTokens::default())
+                    .await
+            })
+            .await,
             want(true)
         );
         assert_eq!(
@@ -749,10 +778,11 @@ mod tests {
             prompt_max_bytes: 4096,
             ..Default::default()
         };
-        let over = "p".repeat(maknae_proto::prompt_request_cap(4096));
+        let over = "p".repeat(maknae_proto::task_request_cap(4096));
         let c = client(transport, vec![]);
         assert!(matches!(
-            c.submit(&agent(), text(&over), Vec::new()).await,
+            c.submit(&agent(), text(&over), Vec::new(), ForgeTokens::default())
+                .await,
             Err(TaskerError::Unreachable {
                 after_write: false,
                 ..
