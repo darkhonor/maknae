@@ -4,8 +4,8 @@ mod error;
 mod seal;
 
 pub use aad::{
-    CredentialDirection, CredentialSealContext, SealAad, SealContext, AAD_DOMAIN,
-    CREDENTIAL_AAD_DOMAIN, MAX_AAD_FIELD_BYTES,
+    CredentialDirection, CredentialSealContext, ForgePurpose, ForgeSealContext, SealAad,
+    SealContext, AAD_DOMAIN, CREDENTIAL_AAD_DOMAIN, FORGE_AAD_DOMAIN, MAX_AAD_FIELD_BYTES,
 };
 pub use credential::{open_credential, seal_credential};
 pub use error::SealError;
