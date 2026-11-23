@@ -24,7 +24,7 @@ use maknae_deputy::mint::minter::LiveTokens;
 use maknae_deputy::unseal::OpenFailure;
 use maknae_proto::{
     EgressFrame, EgressFrameReply, EgressSocketReply, MintRefusal, MintReply, MintRequest,
-    RevokeReply, RevokeRequest,
+    ReachRefusal, ReachReply, RevokeReply, RevokeRequest,
 };
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::io::{Read, Write};
@@ -217,6 +217,14 @@ where
         }
         EgressFrame::Revoke(req) => {
             return serve_revoke(&mut stream, &req, minting, io_timeout, committed)
+        }
+        EgressFrame::Reach(_) => {
+            return write_reply(
+                &mut stream,
+                &EgressSocketReply::Reach(ReachReply::Refused(ReachRefusal::Request)),
+                io_timeout,
+                committed,
+            )
         }
     };
     let admitted = match decide(&req, bounds) {

@@ -107,6 +107,11 @@ impl<'de> Deserialize<'de> for SealedCredentialBytes {
 pub const FORGE_TOKENS_MAX: usize = 8;
 pub const FORGE_NONCE_HEX_LEN: usize = 32;
 
+pub(crate) fn forge_nonce_is_acceptable(nonce: &str) -> bool {
+    let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+    nonce.len() == FORGE_NONCE_HEX_LEN && nonce.bytes().all(hex)
+}
+
 /// A tasker's forge token sealed to the Egress Daemon for one bound `server`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "SealedForgeTokenWire")]
@@ -139,8 +144,7 @@ impl SealedForgeToken {
                 crate::SERVER_MAX_BYTES
             )));
         }
-        let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
-        if nonce.len() != FORGE_NONCE_HEX_LEN || !nonce.bytes().all(hex) {
+        if !forge_nonce_is_acceptable(&nonce) {
             return Err(ProtoCodecError::Encode(format!(
                 "forge token `nonce` is not {FORGE_NONCE_HEX_LEN} lowercase hex digits"
             )));

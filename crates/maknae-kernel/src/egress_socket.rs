@@ -350,11 +350,13 @@ impl Egress for SocketEgress {
             }
             EgressSocketReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
             EgressSocketReply::AtCapacity => Err(EgressFailure::DeputyAtCapacity),
-            EgressSocketReply::Mint(_) | EgressSocketReply::Revoke(_) => Err(Self::after_send(
-                Self::transport(maknae_proto::ProtoCodecError::Decode(
+            EgressSocketReply::Mint(_)
+            | EgressSocketReply::Revoke(_)
+            | EgressSocketReply::Reach(_) => Err(Self::after_send(Self::transport(
+                maknae_proto::ProtoCodecError::Decode(
                     "a credential reply to a prompt frame".into(),
-                )),
-            )),
+                ),
+            ))),
         }
     }
 }
