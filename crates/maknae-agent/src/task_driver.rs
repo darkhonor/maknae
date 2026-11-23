@@ -209,6 +209,8 @@ struct Bound {
     all: Vec<Binding>,
     own: usize,
     seq: u32,
+    /// The heartbeat cursor that last handed a refused addendum, so the kernel hands it again.
+    refused_at: Option<u32>,
 }
 
 impl Bound {
@@ -217,7 +219,12 @@ impl Bound {
             own: own.len(),
             all: own,
             seq: 0,
+            refused_at: None,
         }
+    }
+
+    fn cursor(&self, seen: u32) -> u32 {
+        self.refused_at.map_or(seen, |at| seen.min(at))
     }
 
     fn take(&mut self, added: &TaskAddendum) {
@@ -233,21 +240,23 @@ impl Bound {
 #[derive(Default)]
 struct News {
     addendum: Option<Bytes>,
+    from: u32,
     items: Vec<SecretText>,
 }
 
-fn take_addendum<P: TaskPlane>(
-    plane: &mut P,
-    id: TaskId,
-    bound: &mut Bound,
-    signed: Option<Bytes>,
-) {
-    let Some(signed) = signed else {
+fn take_addendum<P: TaskPlane>(plane: &mut P, id: TaskId, bound: &mut Bound, news: &mut News) {
+    let Some(signed) = news.addendum.take() else {
         return;
     };
     match plane.verify_addendum(&id, &signed) {
-        Ok(added) => bound.take(&added.addendum),
-        Err(class) => plane.note(DriverEvent::AddendumRefused { task: id, class }),
+        Ok(added) => {
+            bound.take(&added.addendum);
+            bound.refused_at = None;
+        }
+        Err(class) => {
+            bound.refused_at = Some(bound.cursor(news.from));
+            plane.note(DriverEvent::AddendumRefused { task: id, class });
+        }
     }
 }
 
@@ -305,6 +314,7 @@ fn read_beat(answer: Result<BeatAnswer, String>, seen: &mut u32) -> Beat {
             *seen = (*seen).max(end);
             Beat::More(News {
                 addendum,
+                from,
                 items: items.into_iter().skip(skip).collect(),
             })
         }
@@ -444,7 +454,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> StepHook<Tool<'_, P, C>> for T
         if now.saturating_sub(*self.last_beat) < HEARTBEAT_EVERY {
             return StepControl::Continue;
         }
-        let answer = tool.plane.heartbeat(*self.seen).await;
+        let answer = tool.plane.heartbeat(tool.bindings.cursor(*self.seen)).await;
         match &answer {
             Ok(_) => self.renewal.progressed(),
             Err(_) => {
@@ -452,9 +462,9 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> StepHook<Tool<'_, P, C>> for T
             }
         }
         match read_beat(answer, self.seen) {
-            Beat::More(news) => {
+            Beat::More(mut news) => {
                 *self.last_beat = now;
-                take_addendum(tool.plane, self.id, tool.bindings, news.addendum);
+                take_addendum(tool.plane, self.id, tool.bindings, &mut news);
                 for item in &news.items {
                     transcript.push_user(&item.0);
                 }
@@ -939,12 +949,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
         loop {
             let mut events = vec![];
             if let Then::Resume(news) = &mut then {
-                take_addendum(
-                    &mut self.plane,
-                    held.id,
-                    &mut held.bindings,
-                    news.addendum.take(),
-                );
+                take_addendum(&mut self.plane, held.id, &mut held.bindings, news);
             }
             let mut hook = TaskHook {
                 id: held.id,
@@ -1050,7 +1055,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             if self.stopping() {
                 return Err(Ending::Shutdown);
             }
-            let Ok(beat) = self.heartbeat(held.seen).await else {
+            let Ok(beat) = self.heartbeat(held.bindings.cursor(held.seen)).await else {
                 return Err(Ending::Unsendable);
             };
             match read_beat(beat, &mut held.seen) {
@@ -1076,7 +1081,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             if self.stopping() {
                 return Reconnected::Ended(Ending::Shutdown);
             }
-            let Ok(answer) = self.heartbeat(held.seen).await else {
+            let Ok(answer) = self.heartbeat(held.bindings.cursor(held.seen)).await else {
                 return Reconnected::Ended(Ending::Unsendable);
             };
             match read_beat(answer, &mut held.seen) {
@@ -2245,6 +2250,75 @@ mod tests {
                 .count();
             assert_eq!(noted, refused);
         }
+    }
+
+    #[tokio::test]
+    async fn a_refused_addendum_is_asked_for_again_without_repeating_its_follow_up() {
+        use maknae_proto::{
+            AgentReach, BindingReach, EmptyReason, GitBinding, GitReach, SideReach, TaskerBasis,
+        };
+        let binding = Binding::Git(GitBinding {
+            server: "github.com".into(),
+            base: "o/added".into(),
+            head: None,
+            change: Some(5),
+        });
+        let reach = BindingReach::Git(GitReach {
+            tasker: SideReach::EMPTY,
+            basis: TaskerBasis::Token,
+            agent: AgentReach::NoForgeCredential,
+            why: Some(EmptyReason::NoForgeCredential),
+        });
+        let added = SignedAddendum {
+            addendum: TaskAddendum::new(id(1), 1, vec![binding], vec![reach]).unwrap(),
+            signature: signed(1, "p").signature,
+        };
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.step_cost = HEARTBEAT_EVERY;
+        f.addenda.insert(9, Err(VerifyClass::Task));
+        f.addenda.insert(8, Ok(added));
+        let beat = |byte: u8| {
+            Ok(BeatAnswer::FollowUps {
+                task: id(1),
+                from: 0,
+                items: vec![st("addendum-follow-up-sentinel")],
+                addendum: Some(Bytes::new(Zeroizing::new(vec![byte]))),
+            })
+        };
+        f.beats.extend([beat(9), beat(8)]);
+        f.replies = VecDeque::from([
+            read("c1", "/w/a"),
+            read("c2", "/w/b"),
+            read("c3", "/w/c"),
+            answer("a1"),
+        ]);
+        let (log, events, w) = run_with(f, PersonaMode::Own).await;
+        let beats: Vec<_> = log
+            .iter()
+            .filter(|l| l.starts_with("beat"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            beats[..4],
+            strs(&["beat 0", "beat 0", "beat 0", "beat 1"]),
+            "{log:?}"
+        );
+        let w = w.lock().unwrap();
+        let last = w.sent.last().unwrap();
+        let shown = last
+            .iter()
+            .filter(|t| matches!(t, Turn::User { .. }))
+            .filter(|t| user_text(t) == "addendum-follow-up-sentinel")
+            .count();
+        assert_eq!(shown, 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, DriverEvent::AddendumRefused { .. }))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
