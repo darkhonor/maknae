@@ -2023,6 +2023,29 @@ impl<P> AppendsDuringBatch<P> {
 
 board_double!(AppendsDuringBatch);
 
+/// Sets `clock` to `at` once, inside the first batch of more than one request, as time
+/// passing while a read's posts are decided.
+pub struct AdvancesClockDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub clock: Arc<maknae_kernel::ManualClock>,
+    pub at: i64,
+    pub armed: std::sync::atomic::AtomicBool,
+}
+
+impl<P> AdvancesClockDuringBatch<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() > 1 && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.clock.set(self.at);
+        }
+    }
+}
+
+board_double!(AdvancesClockDuringBatch);
+
 /// Stamps another person's board on a board request before the composition decides it.
 pub struct OtherBoard<P> {
     pub inner: Arc<P>,

@@ -150,9 +150,17 @@ fn post_verdict(verdict: Verdict) -> PostVerdict {
     }
 }
 
+/// A batch's verdicts, and whether it confirmed the verb's own request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Decided {
+    pub confirmed: bool,
+    pub verdicts: Vec<PostVerdict>,
+}
+
 /// One guarded batch, under the decision breaker and timeout, on one view of the policy.
 /// `base`, the verb's own request, is decided again at the head of the batch; unless it is
-/// permitted, every post is undecided. An empty batch decides nothing and permits nothing.
+/// permitted, every post is undecided. An empty batch decides nothing, permits nothing and
+/// confirms nothing.
 pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
     authorizer: &Arc<P>,
     live: &Arc<crate::live::LiveConfig>,
@@ -160,12 +168,15 @@ pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
     timeout: Duration,
     base: &maknae_security::Request,
     requests: Vec<maknae_security::Request>,
-) -> Vec<PostVerdict> {
+) -> Decided {
     let n = requests.len();
     if n == 0 {
-        return Vec::new();
+        return Decided {
+            confirmed: false,
+            verdicts: Vec::new(),
+        };
     }
-    decide_batch(
+    match decide_batch(
         authorizer,
         live,
         admitted_generation,
@@ -174,7 +185,16 @@ pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
         requests,
     )
     .await
-    .unwrap_or_else(|| vec![PostVerdict::Undecided; n])
+    {
+        Some(verdicts) => Decided {
+            confirmed: true,
+            verdicts,
+        },
+        None => Decided {
+            confirmed: false,
+            verdicts: vec![PostVerdict::Undecided; n],
+        },
+    }
 }
 
 /// Whether `base` is still permitted, decided as a batch of no posts.
@@ -260,8 +280,6 @@ struct Walked {
     kept: Vec<Arc<Stored>>,
     withheld: u32,
     skip_to: Option<u64>,
-    /// The leading run of denied posts `skip_to` passes.
-    run: Vec<u64>,
     permitted: bool,
     /// The permitted post the page had no room for: what `more` stands on.
     lookahead: Option<Arc<Stored>>,
@@ -322,7 +340,6 @@ impl Walker {
                 at.withheld = at.withheld.saturating_add(1);
                 if !at.permitted {
                     at.skip_to = Some(stored.seq);
-                    at.run.push(stored.seq);
                 }
             }
             PostVerdict::Permit => {
@@ -352,8 +369,9 @@ impl Walker {
         self.absent.contains(&seq)
     }
 
-    /// Every post whose presence shaped the reply so far: each kept post, the lookahead,
-    /// the undecided stop, and the leading denied run.
+    /// Every post whose presence shaped the page so far: each kept post, the lookahead and
+    /// the undecided stop. The leading denied run is not one: a post denied to the reader
+    /// is passed whether or not it is still live.
     pub(crate) fn influences(&self) -> Vec<u64> {
         let at = &self.at;
         at.kept
@@ -361,14 +379,12 @@ impl Walker {
             .chain(&at.lookahead)
             .chain(&at.stop)
             .map(|s| s.seq)
-            .chain(at.run.iter().copied())
             .collect()
     }
 
     /// Makes absent each kept post, lookahead or stop that `live` does not hold, and walks
     /// again without them; a dead stop also drops the undecided verdicts after it, to be
-    /// decided again. `true` when anything changed. The leading denied run is not consulted:
-    /// a post denied to the reader is withheld either way.
+    /// decided again. `true` when anything changed.
     pub(crate) fn drop_dead(&mut self, live: &BTreeSet<u64>) -> bool {
         let at = &self.at;
         let dead: Vec<u64> = at
@@ -465,18 +481,19 @@ impl<P> Clone for Deciding<'_, P> {
 
 impl<P> Copy for Deciding<'_, P> {}
 
-/// What the read walked: the page, the reply targets still visible, and whether any batch
-/// of posts was decided.
+/// A read's finished walk, built from one liveness check that found every influence live,
+/// and whether the read's own request was confirmed permitted during the read.
 pub(crate) struct Read {
-    pub walker: Walker,
-    pub visible: BTreeSet<PostId>,
-    pub decided_any: bool,
+    pub walk: Walk,
+    pub base_confirmed: bool,
+    pub stalled: bool,
 }
 
-/// One read's walk over the posts in `(cursor, upper]`, decided in batches, with every post
-/// that shaped the reply revalidated together before it is returned. A post found no longer
-/// live is walked as absent and the reply is built again, until a check finds every
-/// influence live. Each pass makes at least one post absent, so it ends.
+/// One read's walk over the posts in `(cursor, upper]`, decided in batches. Each pass walks
+/// to a fixpoint, confirms the read's own request if no batch did, then checks every post
+/// that shaped the reply in one memory-only `still_live`; a dead one is walked as absent and
+/// the pass repeats. That check is the last observation: the walk is finished right after
+/// it, with no await between. An absent post is never decided again, so the passes end.
 pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
     store: &BoardStore,
     key: BoardKey,
@@ -494,7 +511,7 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
     } = *d;
     let mut walker = Walker::new(budget);
     let mut after = cursor;
-    let mut decided_any = false;
+    let mut base_confirmed = false;
     loop {
         while walker.wants_more() {
             let raw: Vec<_> = store
@@ -517,10 +534,9 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
                 .iter()
                 .map(|s| post_request(request, key, s))
                 .collect();
-            let verdicts =
-                decide_posts(authorizer, live, generation, timeout, request, asked).await;
-            decided_any = true;
-            walker.take(&chunk, &verdicts);
+            let decided = decide_posts(authorizer, live, generation, timeout, request, asked).await;
+            base_confirmed |= decided.confirmed;
+            walker.take(&chunk, &decided.verdicts);
         }
         let mut targets = Vec::new();
         if !walker.stalled() {
@@ -533,28 +549,40 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
                 .iter()
                 .map(|t| post_request(request, key, t))
                 .collect();
-            let verdicts =
+            let decided =
                 decide_posts(authorizer, live, generation, timeout, request, requests).await;
+            base_confirmed |= decided.confirmed;
             targets = asked
                 .into_iter()
-                .zip(verdicts)
+                .zip(decided.verdicts)
                 .filter(|(_, v)| *v == PostVerdict::Permit)
                 .map(|(t, _)| t)
                 .collect();
         }
+        if !base_confirmed {
+            base_confirmed = base_holds(authorizer, live, generation, timeout, request).await;
+            if !base_confirmed {
+                return Read {
+                    walk: walker.finish(&BTreeSet::new()),
+                    base_confirmed,
+                    stalled: true,
+                };
+            }
+        }
         let mut influences = walker.influences();
         influences.extend(targets.iter().map(|t| t.seq));
         let still = store.still_live(key, &influences, view);
-        let visible = targets
-            .iter()
-            .filter(|t| still.contains(&t.seq))
-            .map(|t| t.post.id)
-            .collect();
         if !walker.drop_dead(&still) {
+            let visible = targets
+                .iter()
+                .filter(|t| still.contains(&t.seq))
+                .map(|t| t.post.id)
+                .collect();
+            let stalled = walker.stalled();
             return Read {
-                walker,
-                visible,
-                decided_any,
+                walk: walker.finish(&visible),
+                base_confirmed,
+                stalled,
             };
         }
         after = walker.resume_after().unwrap_or(cursor);
@@ -1254,7 +1282,8 @@ mod tests {
                 posts.clone(),
             )
             .await;
-            assert_eq!(got, want, "{verdict:?}");
+            assert_eq!(got.verdicts, want, "{verdict:?}");
+            assert_eq!(got.confirmed, want == [P, P], "{verdict:?}");
         }
         let pdp = Arc::new(Scripted {
             base: Verdict::Permit {
@@ -1271,7 +1300,8 @@ mod tests {
             Vec::new(),
         )
         .await;
-        assert!(none.is_empty(), "an empty batch permits nothing");
+        assert!(none.verdicts.is_empty(), "an empty batch permits nothing");
+        assert!(!none.confirmed, "and confirms nothing");
         assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 

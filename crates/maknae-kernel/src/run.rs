@@ -3754,7 +3754,9 @@ async fn serve_board_verb<S, E, P>(
                 None => false,
                 Some(target) => {
                     let asked = vec![bv::post_request(&request, key, &target)];
-                    bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await
+                    bv::decide_posts(authorizer, live, generation, timeout, &request, asked)
+                        .await
+                        .verdicts
                         == [bv::PostVerdict::Permit]
                 }
             };
@@ -3838,9 +3840,9 @@ async fn serve_board_verb<S, E, P>(
             request: &request,
         };
         let bv::Read {
-            walker,
-            visible,
-            decided_any,
+            walk,
+            base_confirmed,
+            stalled,
         } = bv::read_page(
             store,
             key,
@@ -3850,38 +3852,32 @@ async fn serve_board_verb<S, E, P>(
             budget,
         )
         .await;
-        let base_held =
-            decided_any || bv::base_holds(authorizer, live, generation, timeout, &request).await;
-        let stalled = walker.stalled() || !base_held;
-        let walk = walker.finish(&visible);
-        if let Some(skip_to) = walk.skip_to.filter(|s| *s > cursor) {
-            match advance(skip_to).await {
-                Ok(moved) => cursor = moved,
-                Err(r) => {
-                    let mut failed = trail.outcome(&intent, &r.to_string(), "unavailable");
-                    failed.outcome.result = "deny".into();
-                    trail.record_bounded(&failed).await;
-                }
-            }
-        }
-        if stalled && walk.page.posts.is_empty() {
+        let skip_to = walk.skip_to.filter(|s| base_confirmed && *s > cursor);
+        if !base_confirmed || (stalled && walk.page.posts.is_empty()) {
             let mut outcome = trail.outcome(&intent, bv::UNDECIDED, "unavailable");
             outcome.outcome.result = "deny".into();
             outcome.board = Some(bv::read_audit(&walk, cursor));
             trail
                 .refuse_board(stream, &outcome, BoardDefect::TryAgain)
                 .await;
-            return;
+        } else {
+            let mut outcome = trail.outcome(&intent, "done", "authorized");
+            outcome.board = Some(bv::read_audit(&walk, cursor));
+            let sent = walk.sent.clone();
+            let payload = Payload::BoardPage(walk.page);
+            if trail
+                .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                .await
+            {
+                store.sent(key, agent, &sent);
+            }
         }
-        let mut outcome = trail.outcome(&intent, "done", "authorized");
-        outcome.board = Some(bv::read_audit(&walk, cursor));
-        let sent = walk.sent.clone();
-        let payload = Payload::BoardPage(walk.page);
-        if trail
-            .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
-            .await
-        {
-            store.sent(key, agent, &sent);
+        if let Some(to) = skip_to {
+            if let Err(r) = advance(to).await {
+                let mut failed = trail.outcome(&intent, &r.to_string(), "unavailable");
+                failed.outcome.result = "deny".into();
+                trail.record_bounded(&failed).await;
+            }
         }
         return;
     }

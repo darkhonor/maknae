@@ -5110,11 +5110,12 @@ mod board {
         let page = page_of(answer);
         assert!(page.posts.is_empty());
         assert!(!page.more);
-        assert_eq!(w.cursor("jin"), w.seq(last));
+        assert_eq!(w.cursor("jin"), w.seq(last), "skipped after the reply");
         let b = read_outcome(&records);
         assert_eq!(
             (b.returned, b.withheld, b.cursor),
-            (Some(0), Some(40), Some(w.seq(last)))
+            (Some(0), Some(40), Some(0)),
+            "the outcome names the cursor the reply was built from"
         );
         w.stored("hobi", "p", PostLabels::default());
         assert_eq!(
@@ -5764,12 +5765,13 @@ mod board {
         assert_eq!(w.cursor("jin"), 0);
         let said = said(&records);
         assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!((said[1].0.as_str(), said[1].1.as_str()), ("permit", "done"));
         assert_eq!(
-            (said[1].0.as_str(), said[1].2.as_str()),
-            ("deny", "unavailable")
+            (said[2].0.as_str(), said[2].2.as_str()),
+            ("deny", "unavailable"),
+            "the failed skip is recorded after the reply"
         );
-        assert!(said[1].1.starts_with("store: "), "{said:?}");
-        assert_eq!((said[2].0.as_str(), said[2].1.as_str()), ("permit", "done"));
+        assert!(said[2].1.starts_with("store: "), "{said:?}");
         page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
         assert_eq!(w.cursor("jin"), w.seq(withheld));
     }
@@ -5986,6 +5988,176 @@ mod board {
         assert!(page.posts.is_empty() && !page.more);
         for other in [refused, timed_out] {
             assert_eq!(page_of(other), page);
+        }
+    }
+
+    const UNGRANTED: &str = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\"]\n";
+
+    fn expired_at() -> i64 {
+        T0 + maknae_kernel::BOARD_RETENTION.as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn a_reader_revoked_before_its_batch_whose_candidate_expires_meanwhile_gets_try_again() {
+        let mut answers = Vec::new();
+        for expired_at_admission in [false, true] {
+            let w = board_world(&format!("board-base-observed-{expired_at_admission}"));
+            let j = w.at_work("jin");
+            w.stored("hobi", "sentinel-695-only", PostLabels::default());
+            if expired_at_admission {
+                w.clock.set(expired_at());
+            }
+            let pdp = Arc::new(common::AdvancesClockDuringBatch {
+                inner: Arc::clone(&w.pdp),
+                clock: Arc::clone(&w.clock),
+                at: expired_at(),
+                armed: true.into(),
+            });
+            let (answer, records) = w
+                .board_during_intent_as(&pdp, "jin", read(None), j, w.regrant(UNGRANTED))
+                .await;
+            answers.push((
+                refused(&answer),
+                said(&records)[1..].to_vec(),
+                w.cursor("jin"),
+            ));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(
+            answers[0],
+            (
+                Some(BoardDefect::TryAgain),
+                one(
+                    "deny",
+                    "board: the decision did not complete",
+                    "unavailable"
+                ),
+                0
+            )
+        );
+    }
+
+    impl World {
+        /// `verb` from `agent`, decided by `authorizer`: how long the first frame took, the
+        /// frame, and the board records once the handler has returned.
+        async fn first_frame<P>(
+            &self,
+            authorizer: &Arc<P>,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+        ) -> (Duration, Vec<u8>, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
+            let (session, gate) = self.agent_session(agent);
+            let records = Records::new(0);
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let served = maknae_kernel::handle_with_attempt_caps(
+                server,
+                Some("spiffe://d/plane/cli".into()),
+                Arc::new(session),
+                gate,
+                Arc::clone(&records),
+                self.cfg.clone(),
+                serde_json::json!({}),
+                Arc::clone(authorizer),
+                Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                Arc::new("basic+ceiling".into()),
+                Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
+                Arc::new(None),
+                maknae_kernel::unavailable_egress(),
+                Duration::from_secs(2),
+                maknae_io::DelegatedFds::new(4),
+                common::no_baseline(),
+                maknae_kernel::AttemptCaps::default(),
+                common::conversations(),
+                self.agents.clone(),
+            );
+            let serving = tokio::spawn(served);
+            let body = maknae_proto::encode_request(&maknae_proto::Request {
+                task: Some(task),
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                verb,
+            })
+            .unwrap();
+            let started = std::time::Instant::now();
+            common::write_frame(&mut client, &body).await.unwrap();
+            let frame = common::read_frame(&mut client, 1 << 20).await.unwrap();
+            let took = started.elapsed();
+            tokio::time::timeout(Duration::from_secs(10), serving)
+                .await
+                .unwrap()
+                .unwrap();
+            let records = records
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.action.starts_with("board."))
+                .collect();
+            (took, frame, records)
+        }
+    }
+
+    /// jin's read behind one post denied to it, with the board's disk set by `disk` before it.
+    async fn skip_behind_a_withheld_post(
+        tag: &str,
+        disk: impl FnOnce(&MemTaskBlobs),
+    ) -> (Duration, Vec<u8>, Vec<AuditRecord>) {
+        let w = board_world(tag);
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-withheld", labelled());
+        let pdp = denies(&w, &["jin"]);
+        let _alone = STORE.write().await;
+        disk(&w.board_blobs);
+        let got = w.first_frame(&pdp, "jin", read(None), j).await;
+        w.board_blobs.slow(None);
+        w.board_blobs.fail(None);
+        got
+    }
+
+    #[tokio::test]
+    async fn the_reply_is_built_and_sent_before_the_skip_is_written() {
+        let (_, written, done) = skip_behind_a_withheld_post("board-skip-after-ok", |_| {}).await;
+        let outcome = |records: &[AuditRecord]| {
+            records
+                .iter()
+                .find(|r| r.outcome.reason == "done")
+                .map(|r| {
+                    (
+                        r.outcome.result.clone(),
+                        r.outcome.posture.clone(),
+                        r.board.clone(),
+                    )
+                })
+                .unwrap_or_else(|| panic!("no outcome: {records:?}"))
+        };
+        for (tag, slow) in [
+            ("board-skip-after-stalled", true),
+            ("board-skip-after-refused", false),
+        ] {
+            let (took, frame, records) = skip_behind_a_withheld_post(tag, |b| match slow {
+                true => b.slow(Some(Duration::from_millis(2500))),
+                false => b.fail(Some(Fail::Every)),
+            })
+            .await;
+            assert_eq!(frame, written, "{tag}: the reply, byte for byte");
+            assert_eq!(
+                outcome(&records),
+                outcome(&done),
+                "{tag}: the outcome record"
+            );
+            if slow {
+                assert!(
+                    took < Duration::from_millis(1500),
+                    "the reply arrived while the skip was stalled: {took:?}"
+                );
+            }
         }
     }
 }
