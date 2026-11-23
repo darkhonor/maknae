@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-pub const GITHUB_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+pub const GITHUB_CALL_TIMEOUT: Duration =
+    Duration::from_millis(maknae_config::FORGE_CALL_TIMEOUT_MS);
 pub const GITHUB_REPLY_MAX_BYTES: usize = 1_048_576;
 
 /// From `revoke`, `Transport` means nothing was sent (the token is still live);

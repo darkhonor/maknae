@@ -1774,6 +1774,15 @@ pub trait Baseline: maknae_security::Authorizer + sealed::Sealed + Send + Sync +
         snap.catalog_for(uid, principal_uid, forges, self.digest())
     }
 
+    /// The installed snapshot's [`Snapshot::forge_credentials`].
+    fn forge_credentials(
+        &self,
+        agent_uid: u32,
+        principal_uid: u32,
+    ) -> Vec<maknae_proto::CredentialRef> {
+        self.snapshot().forge_credentials(agent_uid, principal_uid)
+    }
+
     /// The installed snapshot's [`Snapshot::policy_sha256`].
     fn policy_sha256(&self) -> String {
         self.snapshot().policy_sha256(self.digest())

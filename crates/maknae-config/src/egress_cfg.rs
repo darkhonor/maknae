@@ -48,6 +48,8 @@ const DEFAULT_REACH_DEADLINE_MS: u64 = 20_000;
 pub const REACH_DEADLINE_MS_MAX: u64 = 300_000;
 /// How many reach exchanges run at once, on each side of the egress socket.
 pub const REACH_CONCURRENCY_MAX: usize = 4;
+/// The most one forge call made by the Egress Daemon may take, the bound on its exit revokes.
+pub const FORGE_CALL_TIMEOUT_MS: u64 = 20_000;
 const REACH_DEADLINE_MS_RANGE: std::ops::RangeInclusive<i64> = 1_000..=REACH_DEADLINE_MS_MAX as i64;
 
 /// Where the deputy is, and how long one send may take.

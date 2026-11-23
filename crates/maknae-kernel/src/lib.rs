@@ -70,7 +70,10 @@ pub use egress::{
     EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
     EGRESS_MAX_REPLY_FRAME_BYTES, EGRESS_USER,
 };
-pub use egress_socket::SocketEgress;
+pub use egress_socket::{
+    production_reach, production_reach_with, reach_socket_wait, ReachEgress, ReachOutcome,
+    SocketEgress, Unanswered,
+};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use enrollment::{Containing, FixedEnrollment, Unresolving};
 pub use enrollment::{EnrollmentView, Load, SnapshotEnrollment};
