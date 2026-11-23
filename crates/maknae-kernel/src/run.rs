@@ -10066,14 +10066,16 @@ async fn record_board_notices<E: AuditEmit>(
     ctx: &BootCtx<'_>,
 ) -> bool {
     let mut notices = std::collections::VecDeque::from(board.take_notices());
+    let taken = notices.len();
     while let Some(notice) = notices.pop_front() {
         let rec = board_notice_record(ctx, &notice);
         if emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await.is_err() {
             notices.push_front(notice);
-            board.return_notices(notices.into());
+            board.return_notices(notices.into(), taken);
             return false;
         }
     }
+    board.return_notices(Vec::new(), taken);
     true
 }
 

@@ -110,6 +110,8 @@ struct Held {
     expiring: BTreeSet<(BoardKey, u64)>,
     said: BTreeSet<Item>,
     notices: Vec<BoardNotice>,
+    /// Notices taken for the trail and not yet returned.
+    in_flight: usize,
 }
 
 impl Held {
@@ -793,12 +795,17 @@ impl BoardStore {
 
     /// What the kernel has yet to record, oldest first.
     pub fn take_notices(&self) -> Vec<BoardNotice> {
-        std::mem::take(&mut self.held().notices)
+        let mut held = self.held();
+        let taken = std::mem::take(&mut held.notices);
+        held.in_flight = held.in_flight.saturating_add(taken.len());
+        taken
     }
 
-    /// Puts back, ahead of any newer ones, the notices the trail did not take.
-    pub fn return_notices(&self, mut back: Vec<BoardNotice>) {
+    /// Ends `taken` notices' flight: puts back, ahead of any newer ones, those the trail did
+    /// not take (`back`); the rest are recorded.
+    pub fn return_notices(&self, mut back: Vec<BoardNotice>, taken: usize) {
         let mut held = self.held();
+        held.in_flight = held.in_flight.saturating_sub(taken);
         back.extend(std::mem::take(&mut held.notices));
         held.notices = back;
     }
@@ -832,7 +839,10 @@ impl BoardStore {
         let _w = self.writing();
         let owing = {
             let held = self.held();
-            held.owed.len().saturating_add(held.notices.len())
+            held.owed
+                .len()
+                .saturating_add(held.notices.len())
+                .saturating_add(held.in_flight)
         };
         if owing >= crate::board_store::BOARD_OWED_MAX {
             return Err(BoardRefusal::Store("removals are owed".into()));
@@ -985,14 +995,7 @@ impl BoardStore {
     /// first retries every owed removal. Poison is recovered: it guards no state of its own.
     fn writing(&self) -> std::sync::MutexGuard<'_, ()> {
         let w = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let owed: Vec<(BoardKey, PostId)> = {
-            let held = self.held();
-            if held.notices.len() < crate::board_store::BOARD_OWED_MAX {
-                held.owed.iter().copied().collect()
-            } else {
-                Vec::new()
-            }
-        };
+        let owed: Vec<(BoardKey, PostId)> = self.held().owed.iter().copied().collect();
         for (key, id) in owed {
             if self.blobs.delete(&Name::Post(key, id).text()).is_ok() {
                 let mut held = self.held();
@@ -1465,15 +1468,19 @@ mod tests {
         assert!(store.held().owed.is_empty(), "the removals were settled");
         let unrecorded = store.take_notices();
         assert_eq!(unrecorded.len(), crate::board_store::BOARD_OWED_MAX);
-        store.return_notices(unrecorded);
+        assert_eq!(
+            put_with(&store, vec![[0xee; 16]], "notices in flight").unwrap_err(),
+            BoardRefusal::Store("removals are owed".into()),
+            "the notices being recorded still count toward the bound"
+        );
+        store.return_notices(unrecorded, crate::board_store::BOARD_OWED_MAX);
         assert!(
             put_with(&store, vec![[0xf0; 16]], "trail still down").is_err(),
             "the settled notices the trail refused count toward the bound"
         );
-        assert_eq!(
-            store.take_notices().len(),
-            crate::board_store::BOARD_OWED_MAX
-        );
+        let recorded = store.take_notices();
+        assert_eq!(recorded.len(), crate::board_store::BOARD_OWED_MAX);
+        store.return_notices(Vec::new(), recorded.len());
         let next = put_with(&store, vec![[0xf1; 16]], "trail recovered").unwrap();
         assert!(store.get(BOB, next.post.id).is_some());
     }
@@ -2964,7 +2971,7 @@ mod tests {
         let settled = vec![BoardNotice::Settled { key: BOB, id }];
         assert_eq!(store.take_notices(), settled);
         assert!(store.take_notices().is_empty());
-        store.return_notices(settled.clone());
+        store.return_notices(settled.clone(), 1);
         assert_eq!(store.take_notices(), settled);
     }
 
