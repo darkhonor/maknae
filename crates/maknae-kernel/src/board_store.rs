@@ -54,11 +54,6 @@ pub enum LabelValue {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostLabels(pub BTreeMap<String, LabelValue>);
 
-pub fn labels_of(task_labels: &maknae_proto::Labels) -> PostLabels {
-    let maknae_proto::Labels {} = task_labels;
-    PostLabels::default()
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HeldFor {
     Author,

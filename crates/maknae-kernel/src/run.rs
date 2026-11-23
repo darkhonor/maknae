@@ -3779,9 +3779,10 @@ async fn serve_board_verb<S, E, P>(
                 Some(trail.uid),
             ),
         );
+        let maknae_proto::Labels {} = &cited.signed.task.labels;
         let (task, labels, draft) = (
             cited.signed.task.task_id,
-            crate::board_store::labels_of(&cited.signed.task.labels),
+            crate::board_store::PostLabels::default(),
             post.clone(),
         );
         let done = bv::offload(trail.uid, deadline(), move || {

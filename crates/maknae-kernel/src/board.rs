@@ -1146,7 +1146,7 @@ impl BoardSeam for BoardStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board_store::{labels_of, HeldFor, LabelValue, Report, BOARD, BOARD_RECORD_MAX};
+    use crate::board_store::{HeldFor, LabelValue, Report, BOARD, BOARD_RECORD_MAX};
     use crate::conversation::dir_store::DirBlobs;
     use crate::task_store::{encode, Fail, ManualClock, MemTaskBlobs, RootTasker};
     use maknae_io::Zeroizing;
@@ -3490,8 +3490,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_of_an_unlabelled_task_is_empty() {
-        assert_eq!(labels_of(&maknae_proto::Labels {}), PostLabels::default());
+    fn a_post_of_an_unlabelled_task_has_no_labels() {
         assert!(PostLabels::default().0.is_empty());
     }
 }
