@@ -1633,6 +1633,8 @@ always	held_release.outcomes.result	ships by construction
 always	held_release.outcomes.state	ships by construction
 always	held_release.outcomes.parent	ships by construction
 always	held_release.next	ships by construction
+always	held_release.posts_released	ships by construction
+always	held_release.posts_held	ships by construction
 always	task.submitted_secs	ships by construction
 always	task.elapsed_secs	ships by construction
 always	task.actions	ships by construction
