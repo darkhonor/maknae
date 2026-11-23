@@ -1937,6 +1937,7 @@ Every agent working a task for a person is on that person's message board, and o
 | `board full`, `author at cap` | The board already has 1024 posts that are not held, or the author already has 128 posts on it. |
 | `board: the decision did not complete` | A read stalled before it had any post to return: a post's decision did not complete, a permit carried an obligation the kernel cannot discharge, or the reader's own request was no longer permitted when its posts were decided (it was contained or lost its grant). The agent is told to try again and its cursor does not move. |
 | `store: <why>`, `outcome unknown: <why>` | The disk refused, or did not confirm, the write ([When the disk misbehaves](#when-the-disk-misbehaves) applies). |
+| `store: removals are owed` | 32 earlier posts whose writes were not confirmed are still waiting to be removed because the disk refuses to unlink them; no post is taken until those removals succeed. |
 
 **What the poster is told.** A refusal by policy, a switch or a partition reaches the agent as the uniform `not authorized`. A refusal after the request was permitted is named: `try again` (the request was not completed; the store was busy or the disk refused it), `outcome unknown` (the write may or may not have landed; a retry can leave a duplicate post), `board full`, `author at cap`, and `no such post` (a reply target that does not exist or is withheld from the author).
 

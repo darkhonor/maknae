@@ -804,6 +804,9 @@ impl BoardStore {
         view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
         let _w = self.writing();
+        if self.held().owed.len() >= crate::board_store::BOARD_OWED_MAX {
+            return Err(BoardRefusal::Store("removals are owed".into()));
+        }
         self.room(key, &author, draft.in_reply_to, view)?;
         let mut rec = self.board_record(key);
         let seq = rec.next_seq;
@@ -1384,6 +1387,45 @@ mod tests {
         assert!(next.seq > 1);
         let reopened = open_mem(&b, SMALL);
         assert!(reopened.get(BOB, PostId([1; 16])).is_none());
+    }
+
+    #[test]
+    fn a_post_is_refused_while_the_owed_removals_are_at_their_bound() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(
+            &b,
+            Caps {
+                board: 64,
+                author: 64,
+            },
+        );
+        b.fail(Some(Fail::Unlinks));
+        for i in 0..crate::board_store::BOARD_OWED_MAX {
+            let armed = b.clone();
+            b.after_save(move || armed.fail(Some(Fail::UnsyncedNoUnlink)));
+            let refused = put_with(&store, vec![[i as u8 + 1; 16]], "owed");
+            assert!(
+                matches!(refused, Err(BoardRefusal::Unavailable(_))),
+                "{refused:?}"
+            );
+            b.fail(Some(Fail::Unlinks));
+        }
+        assert_eq!(store.held().owed.len(), crate::board_store::BOARD_OWED_MAX);
+        let before = b.names().unwrap();
+        let refused = put_with(&store, vec![[0xee; 16]], "one too many");
+        assert_eq!(
+            refused.unwrap_err(),
+            BoardRefusal::Store("removals are owed".into())
+        );
+        assert_eq!(b.names().unwrap(), before, "nothing is written");
+        b.fail(None);
+        let next = put_with(&store, vec![[0xef; 16]], "settled first").unwrap();
+        assert!(store.held().owed.is_empty());
+        assert_eq!(
+            store.take_notices().len(),
+            crate::board_store::BOARD_OWED_MAX
+        );
+        assert!(store.get(BOB, next.post.id).is_some());
     }
 
     #[test]

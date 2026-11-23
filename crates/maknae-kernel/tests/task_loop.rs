@@ -5449,6 +5449,28 @@ mod board {
             task: TaskId,
             then: impl FnOnce() + Send + 'static,
         ) -> (RespResult, Vec<AuditRecord>) {
+            let pdp = Arc::clone(&self.pdp);
+            self.board_during_intent_as(&pdp, agent, verb, task, then)
+                .await
+        }
+
+        /// [`Self::board_during_intent`], decided by `authorizer`.
+        async fn board_during_intent_as<P>(
+            &self,
+            authorizer: &Arc<P>,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+            then: impl FnOnce() + Send + 'static,
+        ) -> (RespResult, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
             let action = match verb {
                 Verb::BoardPost { .. } => "board.post",
                 _ => "board.read",
@@ -5462,8 +5484,21 @@ mod board {
             let raw = {
                 let _shared = STORE.read().await;
                 let (session, gate) = self.agent_session(agent);
-                self.serve(session, gate, verb, Some(task), &emit, None)
-                    .await
+                self.serve_as(
+                    Arc::clone(authorizer),
+                    session,
+                    gate,
+                    verb,
+                    Some(task),
+                    &emit,
+                    None,
+                    Wiring {
+                        live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                        egress: maknae_kernel::unavailable_egress(),
+                        conversations: common::conversations(),
+                    },
+                )
+                .await
             };
             let mut cursor = &raw[..];
             let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
@@ -5762,5 +5797,41 @@ mod board {
             "a post appended during the read is for the next read"
         );
         assert_eq!(w.cursor("jin"), w.seq(first));
+    }
+
+    #[tokio::test]
+    async fn a_reader_ungranted_mid_read_gets_the_same_answer_from_an_empty_board_and_a_withheld_one(
+    ) {
+        let ungranted = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\"]\n";
+        let mut answers = Vec::new();
+        for withheld in [false, true] {
+            let w = board_world(&format!("board-base-{withheld}"));
+            let j = w.at_work("jin");
+            if withheld {
+                w.stored("hobi", "sentinel-695-withheld", labelled());
+            }
+            let pdp = denies(&w, &["jin"]);
+            let (answer, records) = w
+                .board_during_intent_as(&pdp, "jin", read(None), j, w.regrant(ungranted))
+                .await;
+            answers.push((
+                refused(&answer),
+                said(&records)[1..].to_vec(),
+                w.cursor("jin"),
+            ));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(
+            answers[0],
+            (
+                Some(BoardDefect::TryAgain),
+                one(
+                    "deny",
+                    "board: the decision did not complete",
+                    "unavailable"
+                ),
+                0
+            )
+        );
     }
 }

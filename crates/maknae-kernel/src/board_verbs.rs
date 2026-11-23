@@ -165,6 +165,49 @@ pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
     if n == 0 {
         return Vec::new();
     }
+    decide_batch(
+        authorizer,
+        live,
+        admitted_generation,
+        timeout,
+        base,
+        requests,
+    )
+    .await
+    .unwrap_or_else(|| vec![PostVerdict::Undecided; n])
+}
+
+/// Whether `base` is still permitted, decided as a batch of no posts.
+pub(crate) async fn base_holds<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    admitted_generation: u64,
+    timeout: Duration,
+    base: &maknae_security::Request,
+) -> bool {
+    decide_batch(
+        authorizer,
+        live,
+        admitted_generation,
+        timeout,
+        base,
+        Vec::new(),
+    )
+    .await
+    .is_some()
+}
+
+/// The posts' verdicts, or `None` when `base` is not permitted again or the batch did not
+/// complete.
+async fn decide_batch<P: Authorizer + Send + Sync + 'static>(
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    admitted_generation: u64,
+    timeout: Duration,
+    base: &maknae_security::Request,
+    requests: Vec<maknae_security::Request>,
+) -> Option<Vec<PostVerdict>> {
+    let n = requests.len();
     let mut batch = Vec::with_capacity(n + 1);
     batch.push(base.clone());
     batch.extend(requests);
@@ -180,14 +223,12 @@ pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
         Ok((all, generation)) if generation == admitted_generation && all.len() == n + 1 => {
             let mut all = all.into_iter().map(|d| post_verdict(d.verdict));
             match all.next() {
-                Some(PostVerdict::Permit) => all.collect(),
-                Some(PostVerdict::Deny | PostVerdict::Undecided) | None => {
-                    vec![PostVerdict::Undecided; n]
-                }
+                Some(PostVerdict::Permit) => Some(all.collect()),
+                Some(PostVerdict::Deny | PostVerdict::Undecided) | None => None,
             }
         }
         Ok(_) | Err(Offload::Open | Offload::AtCapacity | Offload::Join | Offload::TimedOut) => {
-            vec![PostVerdict::Undecided; n]
+            None
         }
     }
 }

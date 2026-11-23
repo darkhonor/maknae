@@ -3832,6 +3832,7 @@ async fn serve_board_verb<S, E, P>(
         let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
         let mut walker = bv::Walker::new(budget);
         let mut after = cursor;
+        let mut decided_any = false;
         let visible = loop {
             loop {
                 let chunk: Vec<_> = store
@@ -3849,6 +3850,7 @@ async fn serve_board_verb<S, E, P>(
                     .collect();
                 let verdicts =
                     bv::decide_posts(authorizer, live, generation, timeout, &request, asked).await;
+                decided_any = true;
                 if !walker.take(&chunk, &verdicts) {
                     break;
                 }
@@ -3888,7 +3890,9 @@ async fn serve_board_verb<S, E, P>(
                 }
             }
         };
-        let stalled = walker.stalled();
+        let base_held =
+            decided_any || bv::base_holds(authorizer, live, generation, timeout, &request).await;
+        let stalled = walker.stalled() || !base_held;
         let walk = walker.finish(&visible);
         if let Some(skip_to) = walk.skip_to.filter(|s| *s > cursor) {
             match advance(skip_to).await {
