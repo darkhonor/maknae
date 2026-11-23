@@ -4,9 +4,9 @@ use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::hints::Forge;
 use maknae_config::AgentId;
 use maknae_proto::{
-    AgentEntry, AgentPage, Ask, BannerSpec, BindingRequest, Labels, Payload, SecretText,
-    TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskSubmission, TaskView, Verb, TASK_SCHEMA,
-    TASK_VERSION,
+    AgentEntry, AgentPage, Ask, BannerSpec, BindingRequest, ForgeTokens, Labels, Payload,
+    SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskSubmission, TaskView, Verb,
+    TASK_SCHEMA, TASK_VERSION,
 };
 use maknae_vault::{PlaneClient, TrustBundle};
 use std::sync::Arc;
@@ -100,7 +100,16 @@ impl<D: Dial> TaskerClient<D> {
             labels: Labels {},
             bindings,
         };
-        match self.call(Verb::TaskSubmit { task }, true).await? {
+        match self
+            .call(
+                Verb::TaskSubmit {
+                    task,
+                    forge_tokens: ForgeTokens::default(),
+                },
+                true,
+            )
+            .await?
+        {
             Payload::TaskAccepted(view) => Ok(view),
             other => Err(unexpected("task.submit", &other)),
         }
@@ -120,6 +129,8 @@ impl<D: Dial> TaskerClient<D> {
         let verb = Verb::TaskAdd {
             task: task.clone(),
             text,
+            bindings: Vec::new(),
+            forge_tokens: ForgeTokens::default(),
         };
         self.acknowledged("task.add", verb).await
     }
@@ -308,7 +319,7 @@ mod tests {
         c.submit(&agent(), text("p"), given.clone()).await.unwrap();
         let seen = c.link.dial_for_test().finish().await;
         match &seen.requests[0].verb {
-            Verb::TaskSubmit { task } => assert_eq!(task.bindings, given),
+            Verb::TaskSubmit { task, .. } => assert_eq!(task.bindings, given),
             other => panic!("{other:?}"),
         }
     }
@@ -654,12 +665,12 @@ mod tests {
         let verbs: Vec<_> = seen.requests.iter().map(|r| r.verb.clone()).collect();
         assert!(matches!(
             &verbs[0],
-            Verb::TaskSubmit { task } if task.agent == "hobi"
+            Verb::TaskSubmit { task, .. } if task.agent == "hobi"
                 && matches!(&task.ask, Ask::Prompt { prompt } if prompt.0.as_str() == "ask")
         ));
         assert!(matches!(
             &verbs[1],
-            Verb::TaskAdd { task, text } if *task == task_ref() && text.0.as_str() == "more"
+            Verb::TaskAdd { task, text, .. } if *task == task_ref() && text.0.as_str() == "more"
         ));
         assert!(matches!(&verbs[2], Verb::TaskStop { task } if *task == task_ref()));
         assert!(matches!(&verbs[3], Verb::TaskDrop { task } if *task == other));

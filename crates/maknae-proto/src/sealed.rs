@@ -104,6 +104,128 @@ impl<'de> Deserialize<'de> for SealedCredentialBytes {
     }
 }
 
+pub const FORGE_TOKENS_MAX: usize = 8;
+pub const FORGE_NONCE_HEX_LEN: usize = 32;
+
+/// A tasker's forge token sealed to the Egress Daemon for one bound `server`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "SealedForgeTokenWire")]
+pub struct SealedForgeToken {
+    server: String,
+    nonce: String,
+    sealed: SealedKey,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedForgeTokenWire {
+    server: String,
+    nonce: String,
+    sealed: SealedKey,
+}
+
+impl TryFrom<SealedForgeTokenWire> for SealedForgeToken {
+    type Error = ProtoCodecError;
+    fn try_from(w: SealedForgeTokenWire) -> Result<Self, ProtoCodecError> {
+        SealedForgeToken::new(w.server, w.nonce, w.sealed)
+    }
+}
+
+impl SealedForgeToken {
+    pub fn new(server: String, nonce: String, sealed: SealedKey) -> Result<Self, ProtoCodecError> {
+        if !crate::server_is_acceptable(&server) {
+            return Err(ProtoCodecError::Encode(format!(
+                "forge token `server` is not a lowercase host[:port] of at most {} bytes",
+                crate::SERVER_MAX_BYTES
+            )));
+        }
+        let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+        if nonce.len() != FORGE_NONCE_HEX_LEN || !nonce.bytes().all(hex) {
+            return Err(ProtoCodecError::Encode(format!(
+                "forge token `nonce` is not {FORGE_NONCE_HEX_LEN} lowercase hex digits"
+            )));
+        }
+        Ok(Self {
+            server,
+            nonce,
+            sealed,
+        })
+    }
+
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    pub fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    pub fn sealed(&self) -> &SealedKey {
+        &self.sealed
+    }
+}
+
+impl fmt::Debug for SealedForgeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SealedForgeToken")
+            .field("server", &self.server)
+            .field("sealed", &self.sealed)
+            .finish()
+    }
+}
+
+/// At most one token per server, so at most [`FORGE_TOKENS_MAX`].
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize)]
+#[serde(transparent)]
+pub struct ForgeTokens(Vec<SealedForgeToken>);
+
+impl ForgeTokens {
+    pub fn new(tokens: Vec<SealedForgeToken>) -> Result<Self, ProtoCodecError> {
+        if tokens.len() > FORGE_TOKENS_MAX {
+            return Err(ProtoCodecError::Encode(format!(
+                "more than {FORGE_TOKENS_MAX} forge tokens"
+            )));
+        }
+        if tokens
+            .iter()
+            .enumerate()
+            .any(|(i, t)| tokens[..i].iter().any(|u| u.server == t.server))
+        {
+            return Err(ProtoCodecError::Encode(
+                "two forge tokens for one server".into(),
+            ));
+        }
+        Ok(Self(tokens))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn as_slice(&self) -> &[SealedForgeToken] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ForgeTokens {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        ForgeTokens::new(Vec::deserialize(d)?).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn widest_forge_tokens(count: usize) -> Vec<SealedForgeToken> {
+    (0..count)
+        .map(|i| {
+            let lead = char::from(b'a' + u8::try_from(i).unwrap());
+            let server = format!("{lead}{}:65535", "a".repeat(crate::SERVER_MAX_BYTES - 7));
+            let nonce = format!("{i:0>32x}");
+            let sealed = SealedKey::new(vec![0x53; SEALED_KEY_MAX_BYTES]).unwrap();
+            SealedForgeToken::new(server, nonce, sealed).unwrap()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +312,124 @@ mod tests {
     fn debug_prints_only_the_length() {
         let k = SealedKey::new(vec![0x53; SEALED_KEY_MIN_BYTES]).unwrap();
         assert_eq!(format!("{k:?}"), "SealedKey(<127 bytes>)");
+    }
+
+    #[derive(Serialize, Clone)]
+    struct RawToken<'a> {
+        server: &'a str,
+        nonce: &'a str,
+        sealed: &'a SealedKey,
+    }
+
+    fn raw(t: &SealedForgeToken) -> RawToken<'_> {
+        RawToken {
+            server: t.server(),
+            nonce: t.nonce(),
+            sealed: t.sealed(),
+        }
+    }
+
+    fn decode_tokens(list: &[RawToken<'_>]) -> Result<ForgeTokens, String> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(list, &mut buf).unwrap();
+        ciborium::from_reader::<ForgeTokens, _>(buf.as_slice()).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_ninth_token_or_a_duplicate_server_never_decodes() {
+        let nine = widest_forge_tokens(FORGE_TOKENS_MAX + 1);
+        let eight = &nine[..FORGE_TOKENS_MAX];
+        let raws: Vec<RawToken<'_>> = eight.iter().map(raw).collect();
+        assert_eq!(decode_tokens(&raws).unwrap().as_slice(), eight);
+        assert_eq!(ForgeTokens::new(eight.to_vec()).unwrap().as_slice(), eight);
+
+        let all: Vec<RawToken<'_>> = nine.iter().map(raw).collect();
+        let msg = decode_tokens(&all).expect_err("a ninth token");
+        assert!(msg.contains("more than 8 forge tokens"), "{msg}");
+        assert!(ForgeTokens::new(nine.clone()).is_err());
+
+        let mut twin = raws[..2].to_vec();
+        twin[1].server = twin[0].server;
+        let msg = decode_tokens(&twin).expect_err("a duplicate server");
+        assert!(msg.contains("two forge tokens for one server"), "{msg}");
+        let dup = SealedForgeToken::new(
+            nine[0].server().into(),
+            nine[1].nonce().into(),
+            nine[1].sealed().clone(),
+        )
+        .unwrap();
+        assert!(ForgeTokens::new(vec![nine[0].clone(), dup]).is_err());
+
+        let sealed = nine[0].sealed();
+        let good_nonce = nine[0].nonce();
+        let long_server = format!("a{}", nine[0].server());
+        for server in [
+            "Forge.example",
+            "forge example",
+            "",
+            "-forge",
+            "forge:0",
+            &long_server,
+        ] {
+            let msg = decode_tokens(&[RawToken {
+                server,
+                nonce: good_nonce,
+                sealed,
+            }])
+            .expect_err(server);
+            assert!(msg.contains("forge token `server`"), "{server}: {msg}");
+            assert!(
+                SealedForgeToken::new(server.into(), good_nonce.into(), sealed.clone()).is_err()
+            );
+        }
+        let short = "0".repeat(FORGE_NONCE_HEX_LEN - 1);
+        let long = "0".repeat(FORGE_NONCE_HEX_LEN + 1);
+        let upper = "A".repeat(FORGE_NONCE_HEX_LEN);
+        let not_hex = "g".repeat(FORGE_NONCE_HEX_LEN);
+        for nonce in [short.as_str(), &long, &upper, &not_hex, ""] {
+            let msg = decode_tokens(&[RawToken {
+                server: "forge.example",
+                nonce,
+                sealed,
+            }])
+            .expect_err(nonce);
+            assert!(msg.contains("forge token `nonce`"), "{nonce}: {msg}");
+            assert!(
+                SealedForgeToken::new("forge.example".into(), nonce.into(), sealed.clone())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_forge_token_debug_names_no_bytes() {
+        let tokens = ForgeTokens::new(widest_forge_tokens(2)).unwrap();
+        let nonce = tokens.as_slice()[1].nonce().to_owned();
+        let shown = [
+            format!("{:?}", tokens.as_slice()[1]),
+            format!("{tokens:?}"),
+            format!(
+                "{:?}",
+                crate::Verb::TaskAdd {
+                    task: crate::TaskRef::parse(&"a5".repeat(16)).unwrap(),
+                    text: crate::SecretText(zeroize::Zeroizing::new("more".into())),
+                    bindings: vec![],
+                    forge_tokens: tokens.clone(),
+                }
+            ),
+        ];
+        for s in &shown {
+            assert!(!s.contains(&nonce), "{s}");
+            assert!(!s.contains("83, 83"), "{s}");
+            assert!(s.contains(tokens.as_slice()[1].server()), "{s}");
+            assert!(s.contains("<1150 bytes>"), "{s}");
+        }
+        assert_eq!(
+            format!("{:?}", tokens.as_slice()[0]),
+            format!(
+                "SealedForgeToken {{ server: {:?}, sealed: SealedKey(<1150 bytes>) }}",
+                tokens.as_slice()[0].server()
+            )
+        );
     }
 }

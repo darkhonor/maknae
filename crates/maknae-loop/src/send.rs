@@ -665,10 +665,13 @@ mod tests {
                     labels: Labels {},
                     bindings: vec![],
                 },
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskAdd {
                 task: task.clone(),
                 text: text(),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: task.clone() },
             Verb::TaskList {

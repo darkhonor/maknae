@@ -577,6 +577,7 @@ fn submit(agent: &str, prompt: &str) -> Verb {
             labels: maknae_proto::Labels {},
             bindings: vec![],
         },
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     }
 }
 
@@ -753,7 +754,7 @@ async fn a_bound_task_is_accepted_sealed_and_delivered_verified() {
     ))
     .unwrap();
     let bound_to = |server: &str| {
-        let Verb::TaskSubmit { mut task } = submit("hobi", "sentinel-168a-ask") else {
+        let Verb::TaskSubmit { mut task, .. } = submit("hobi", "sentinel-168a-ask") else {
             unreachable!()
         };
         task.bindings = vec![maknae_proto::BindingRequest::Git(maknae_proto::GitRef {
@@ -761,7 +762,10 @@ async fn a_bound_task_is_accepted_sealed_and_delivered_verified() {
             base: REPO.into(),
             change: Some(5),
         })];
-        Verb::TaskSubmit { task }
+        Verb::TaskSubmit {
+            task,
+            forge_tokens: maknae_proto::ForgeTokens::default(),
+        }
     };
     let records = Records::new(0);
     let refused = w.ask_with(bound_to(STRANGER), &records).await;
@@ -905,6 +909,8 @@ async fn a_foreign_task_id_is_indistinguishable_from_an_unknown_one() {
             |t: TaskRef| Verb::TaskAdd {
                 task: t,
                 text: SecretText(Zeroizing::new("more".into())),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
         ] {
             let (fr, ur) = (Records::new(0), Records::new(0));
@@ -979,6 +985,8 @@ async fn add_appends_a_follow_up_to_the_running_task_only() {
     let add = |id: &TaskId, text: &str| Verb::TaskAdd {
         task: r(id),
         text: secret(text),
+        bindings: vec![],
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     };
     assert!(unauthorized(&w.ask(add(&queued, "more")).await));
     assert!(w.store().record(&queued).unwrap().follow_ups.is_empty());
@@ -1000,6 +1008,8 @@ async fn the_33rd_follow_up_and_one_byte_over_the_total_are_refused() {
     let add = |text: String| Verb::TaskAdd {
         task: r(&id),
         text: SecretText(Zeroizing::new(text)),
+        bindings: vec![],
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     };
     for _ in 0..32 {
         assert!(matches!(
@@ -1016,6 +1026,8 @@ async fn the_33rd_follow_up_and_one_byte_over_the_total_are_refused() {
     let add = |text: String| Verb::TaskAdd {
         task: r(&id),
         text: SecretText(Zeroizing::new(text)),
+        bindings: vec![],
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     };
     assert!(unauthorized(&w.ask(add("y".repeat(max + 1))).await));
     assert!(matches!(
@@ -1221,6 +1233,8 @@ async fn every_task_record_names_its_op_and_its_tasker() {
             Verb::TaskAdd {
                 task: r(&id),
                 text: secret("more"),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             "add",
         ),
@@ -1299,6 +1313,8 @@ async fn a_store_that_does_not_answer_in_time_is_refused_as_unavailable() {
             Verb::TaskAdd {
                 task: r(&id),
                 text: secret("more"),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             &records,
         )
@@ -1407,6 +1423,8 @@ async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_f
         w.ask(Verb::TaskAdd {
             task: r(&id),
             text: secret(text),
+            bindings: vec![],
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         })
         .await;
     }
@@ -1422,6 +1440,8 @@ async fn claim_with_none_redelivers_the_working_task_and_some_returns_only_new_f
     w.ask(Verb::TaskAdd {
         task: r(&id),
         text: secret("f3"),
+        bindings: vec![],
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     })
     .await;
     assert_eq!(
@@ -1496,6 +1516,8 @@ async fn a_report_that_has_not_seen_every_follow_up_is_refused_and_changes_nothi
     w.ask(Verb::TaskAdd {
         task: r(&id),
         text: secret("f1"),
+        bindings: vec![],
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     })
     .await;
     let report = |seen| Verb::TaskReport {
@@ -2115,7 +2137,7 @@ async fn a_caller_collects_agent_gone_notices_after_deenrollment() {
 async fn pending_records_are_invisible_to_claim_list_and_status() {
     let w = world("pending", "user", true);
     let sub = match submit("hobi", "unconfirmed") {
-        Verb::TaskSubmit { task } => task,
+        Verb::TaskSubmit { task, .. } => task,
         _ => unreachable!(),
     };
     let pending = w
@@ -2245,6 +2267,8 @@ async fn the_submitting_agent_can_stop_and_add_to_its_sub_task() {
             Verb::TaskAdd {
                 task: r(&sub),
                 text: secret("sentinel-628-more"),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Some(parent),
         )
@@ -2610,6 +2634,8 @@ async fn a_sub_tasks_records_name_the_sub_task_and_the_submitting_agent() {
         Verb::TaskAdd {
             task: r(&sub),
             text: secret("more"),
+            bindings: vec![],
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         },
         Verb::TaskStop { task: r(&sub) },
     ] {
@@ -2863,6 +2889,8 @@ async fn a_contained_taskers_tasks_are_held_and_stay_held_after_release() {
         Verb::TaskAdd {
             task: r(&working),
             text: secret("more"),
+            bindings: vec![],
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         },
     ] {
         assert!(unauthorized(&w.ask(verb.clone()).await), "{verb:?}");
@@ -3795,6 +3823,8 @@ async fn an_agent_taskers_verbs_reach_only_the_sub_tasks_of_the_task_it_cites() 
             Verb::TaskAdd {
                 task: r(&s1),
                 text: secret("more"),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
         ] {
             let got = w.agent("hobi", verb.clone(), under).await;

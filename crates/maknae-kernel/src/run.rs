@@ -4384,6 +4384,7 @@ async fn submit_authority<P: Authorizer + Send + Sync + 'static>(
             labels: maknae_proto::Labels {},
             bindings: Vec::new(),
         },
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     };
     authority(authorizer, &verb, uid, stamp, target, lane, timeout).await
 }
@@ -11149,10 +11150,13 @@ mod record_widths {
                     labels: maknae_proto::Labels {},
                     bindings: Vec::new(),
                 },
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskAdd {
                 task: task(),
                 text: text(),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: task() },
             Verb::TaskList {

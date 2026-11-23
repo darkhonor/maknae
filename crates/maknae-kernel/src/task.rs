@@ -2796,7 +2796,10 @@ fn task_request(
             },
         ),
     };
-    let verb = maknae_proto::Verb::TaskSubmit { task: sub.clone() };
+    let verb = maknae_proto::Verb::TaskSubmit {
+        task: sub.clone(),
+        forge_tokens: maknae_proto::ForgeTokens::default(),
+    };
     let mut req = build_authz_request(&verb, uid, home.as_deref(), lane, None, None, &stamp);
     req.resource
         .0
@@ -7984,7 +7987,10 @@ mod tests {
         );
         let frame = maknae_proto::Request {
             protocol_version: maknae_proto::PROTOCOL_VERSION,
-            verb: maknae_proto::Verb::TaskSubmit { task: sub("hobi") },
+            verb: maknae_proto::Verb::TaskSubmit {
+                task: sub("hobi"),
+                forge_tokens: maknae_proto::ForgeTokens::default(),
+            },
             task: None,
         };
         let bytes = maknae_proto::encode_request(&frame).unwrap();

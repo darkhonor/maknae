@@ -101,8 +101,8 @@ pub(crate) enum TaskVerb<'a> {
 
 pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
     match verb {
-        Verb::TaskSubmit { task } => Some(TaskVerb::Submit(task)),
-        Verb::TaskAdd { task, text } => Some(TaskVerb::Add {
+        Verb::TaskSubmit { task, .. } => Some(TaskVerb::Submit(task)),
+        Verb::TaskAdd { task, text, .. } => Some(TaskVerb::Add {
             task: task.to_id(),
             text,
         }),
@@ -845,6 +845,8 @@ mod tests {
             Verb::TaskAdd {
                 task: r.clone(),
                 text: SecretText(Zeroizing::new("x".into())),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: r.clone() },
             Verb::TaskStop { task: r.clone() },
@@ -882,6 +884,7 @@ mod tests {
                 labels: maknae_proto::Labels {},
                 bindings: vec![],
             },
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         };
         assert_eq!(task_verb(&sub).unwrap().object(), Some("agent:jin".into()));
         assert!(task_verb(&Verb::Ping).is_none());

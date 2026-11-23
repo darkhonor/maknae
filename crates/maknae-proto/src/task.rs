@@ -278,7 +278,9 @@ where
     Ok(list)
 }
 
-fn bounded_requests<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<BindingRequest>, D::Error> {
+pub(crate) fn bounded_requests<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<BindingRequest>, D::Error> {
     bounded(d, TASK_BINDING_REQUESTS_MAX_BYTES)
 }
 
@@ -449,6 +451,14 @@ pub const TASK_CHAIN_MAX: usize = 2;
 /// The prompt-class request frame cap: a full prompt and its envelope.
 pub fn prompt_request_cap(prompt_max_bytes: usize) -> usize {
     prompt_max_bytes.saturating_add(TASK_ENVELOPE_MARGIN)
+}
+
+/// The most a TaskSubmit or TaskAdd `forge_tokens` field may add to a request, its key included.
+pub const FORGE_TOKENS_MAX_BYTES: usize = 11_734;
+
+/// The request frame cap for TaskSubmit and TaskAdd: a prompt request and the most tokens.
+pub fn task_request_cap(prompt_max_bytes: usize) -> usize {
+    prompt_request_cap(prompt_max_bytes).saturating_add(FORGE_TOKENS_MAX_BYTES)
 }
 
 /// The prompt-class response frame cap: a full prompt delivered as a signed task.
@@ -1430,6 +1440,15 @@ mod tests {
             Verb::TaskAdd {
                 task: task_ref(),
                 text: secret(text),
+                bindings: vec![],
+                forge_tokens: crate::ForgeTokens::default(),
+            },
+            Verb::TaskAdd {
+                task: task_ref(),
+                text: secret(text),
+                bindings: vec![git_ref(FORGE, "o/r", Some(7))],
+                forge_tokens: crate::ForgeTokens::new(crate::sealed::widest_forge_tokens(2))
+                    .unwrap(),
             },
             Verb::TaskStatus { task: task_ref() },
             Verb::TaskList {
@@ -1586,32 +1605,54 @@ mod tests {
         );
     }
 
+    fn request_len(verb: crate::Verb) -> usize {
+        let req = crate::Request {
+            protocol_version: crate::PROTOCOL_VERSION,
+            verb,
+            task: Some(id(0xf0)),
+        };
+        let bytes = crate::encode_request(&req).unwrap();
+        assert_eq!(crate::decode_request(&bytes).unwrap(), req);
+        bytes.len()
+    }
+
     #[test]
-    fn a_max_size_submission_with_max_bindings_fits_the_request_cap() {
+    fn a_max_size_submission_with_max_bindings_and_eight_tokens_fits_the_request_cap() {
         let prompt_max = 1 << 20;
         let mut task = submission();
         task.agent = "a".repeat(32);
         task.ask = prompt(&"p".repeat(prompt_max));
         task.bindings = requests_at(TASK_BINDINGS_MAX, TASK_BINDING_REQUESTS_MAX_BYTES);
-        let req = crate::Request {
-            protocol_version: crate::PROTOCOL_VERSION,
-            verb: crate::Verb::TaskSubmit { task },
-            task: Some(id(0xf0)),
+        let tokens =
+            crate::ForgeTokens::new(crate::sealed::widest_forge_tokens(crate::FORGE_TOKENS_MAX))
+                .unwrap();
+        let submit = |forge_tokens| crate::Verb::TaskSubmit {
+            task: task.clone(),
+            forge_tokens,
         };
-        let bytes = crate::encode_request(&req).unwrap();
-        assert_eq!(crate::decode_request(&bytes).unwrap(), req);
-        assert!(
-            bytes.len() <= prompt_request_cap(prompt_max),
-            "{}",
-            bytes.len()
-        );
+        let bare = request_len(submit(crate::ForgeTokens::default()));
+        let tokened = request_len(submit(tokens.clone()));
+        assert!(bare <= prompt_request_cap(prompt_max), "{bare}");
+        assert_eq!(tokened - bare, FORGE_TOKENS_MAX_BYTES);
+        assert!(tokened <= task_request_cap(prompt_max), "{tokened}");
+
+        let add = request_len(crate::Verb::TaskAdd {
+            task: task_ref(),
+            text: secret(&"p".repeat(prompt_max)),
+            bindings: task.bindings.clone(),
+            forge_tokens: tokens,
+        });
+        assert!(add <= task_request_cap(prompt_max), "{add}");
     }
 
     #[test]
-    fn the_prompt_caps_add_the_envelope_and_then_the_signature() {
+    fn the_prompt_caps_add_the_envelope_the_tokens_and_then_the_signature() {
+        assert_eq!(FORGE_TOKENS_MAX_BYTES, 11_734);
         assert_eq!(prompt_request_cap(65_536), 65_536 + 4096);
+        assert_eq!(task_request_cap(65_536), 65_536 + 4096 + 11_734);
         assert_eq!(prompt_response_cap(65_536), 65_536 + 4096 + 32 * 1024);
         assert_eq!(prompt_request_cap(usize::MAX), usize::MAX);
+        assert_eq!(task_request_cap(usize::MAX - 4096), usize::MAX);
         assert_eq!(prompt_response_cap(usize::MAX - 1), usize::MAX);
     }
 
@@ -2547,12 +2588,35 @@ mod tests {
         assert!(err.contains("head"), "{err}");
     }
 
+    fn add_with(bindings: Vec<BindingRequest>) -> Result<Vec<BindingRequest>, String> {
+        let req = crate::Request {
+            protocol_version: crate::PROTOCOL_VERSION,
+            verb: crate::Verb::TaskAdd {
+                task: task_ref(),
+                text: secret("more"),
+                bindings,
+                forge_tokens: crate::ForgeTokens::default(),
+            },
+            task: None,
+        };
+        let bytes = crate::encode_request(&req).unwrap();
+        match crate::decode_request(&bytes) {
+            Ok(crate::Request {
+                verb: crate::Verb::TaskAdd { bindings, .. },
+                ..
+            }) => Ok(bindings),
+            Ok(other) => Err(format!("{other:?}")),
+            Err(crate::ProtoCodecError::Decode(e)) => Err(e),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     #[test]
     fn a_duplicate_binding_is_refused() {
         let a = git_ref(FORGE, "o/r", Some(1));
         let b = git_ref(FORGE, "o/r", Some(2));
         assert!(submit_with(vec![a.clone(), b.clone()]).is_ok());
-        for twice in [vec![a.clone(), a.clone()], vec![a.clone(), b, a]] {
+        for twice in [vec![a.clone(), a.clone()], vec![a.clone(), b, a.clone()]] {
             let err = submit_with(twice).unwrap_err();
             assert!(err.contains("duplicate binding"), "{err}");
         }
@@ -2563,6 +2627,9 @@ mod tests {
         let err = object_with(vec![s.clone(), s.clone()]).unwrap_err();
         assert!(err.contains("duplicate binding"), "{err}");
         let err = view_with(vec![s.clone(), s]).unwrap_err();
+        assert!(err.contains("duplicate binding"), "{err}");
+        assert!(add_with(vec![a.clone(), git_ref(FORGE, "o/r", Some(2))]).is_ok());
+        let err = add_with(vec![a.clone(), a]).unwrap_err();
         assert!(err.contains("duplicate binding"), "{err}");
     }
 
@@ -2579,6 +2646,12 @@ mod tests {
                 .len(),
             TASK_BINDINGS_MAX
         );
+        assert_eq!(
+            add_with(reqs[..TASK_BINDINGS_MAX].to_vec()).unwrap().len(),
+            TASK_BINDINGS_MAX
+        );
+        let err = add_with(reqs.clone()).unwrap_err();
+        assert!(err.contains("more than 8 bindings"), "{err}");
         let err = submit_with(reqs).unwrap_err();
         assert!(err.contains("more than 8 bindings"), "{err}");
         let sealed: Vec<_> = (0..=TASK_BINDINGS_MAX)

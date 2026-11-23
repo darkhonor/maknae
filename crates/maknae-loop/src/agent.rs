@@ -526,7 +526,7 @@ mod tests {
                     Verb::FsList { .. } => "list",
                     Verb::FsStat { .. } => "stat",
                     Verb::SessionClose { .. } => "close",
-                    Verb::TaskSubmit { task } if task.agent == "jin" => "submit",
+                    Verb::TaskSubmit { task, .. } if task.agent == "jin" => "submit",
                     Verb::TaskStatus { task } if *task == sub => "status",
                     Verb::TaskCollect {
                         agent,

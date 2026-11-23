@@ -2251,10 +2251,13 @@ mod tests {
                     labels: maknae_proto::Labels {},
                     bindings: vec![],
                 },
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskAdd {
                 task: task_ref(),
                 text: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: task_ref() },
             Verb::TaskList {

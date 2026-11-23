@@ -441,6 +441,7 @@ fn submit(agent: &str) -> Verb {
             labels: maknae_proto::Labels {},
             bindings: vec![],
         },
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     }
 }
 

@@ -531,6 +531,7 @@ impl World {
                 labels: maknae_proto::Labels {},
                 bindings: vec![],
             },
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         };
         match self.ask(verb).await {
             RespResult::Ok(Payload::TaskAccepted(v)) => v.task.to_id(),

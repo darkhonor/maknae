@@ -1688,12 +1688,13 @@ mod tests {
                     labels: Labels {},
                     bindings: c.bindings.clone(),
                 },
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             task: None,
         };
         let bytes = encode_request(&request).expect("encodes");
         let back = decode_request(&bytes).expect("decodes");
-        let Verb::TaskSubmit { task } = back.verb else {
+        let Verb::TaskSubmit { task, .. } = back.verb else {
             panic!("not a submission");
         };
         assert_eq!(task.bindings, c.bindings);

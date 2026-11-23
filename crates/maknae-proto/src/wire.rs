@@ -709,10 +709,20 @@ pub enum Verb {
     /// behaviour and delivery are #610's; a prompt frame because it carries the ask.
     TaskSubmit {
         task: crate::TaskSubmission,
+        #[serde(default, skip_serializing_if = "crate::ForgeTokens::is_empty")]
+        forge_tokens: crate::ForgeTokens,
     },
     TaskAdd {
         task: crate::TaskRef,
         text: SecretText,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "crate::task::bounded_requests"
+        )]
+        bindings: Vec<crate::BindingRequest>,
+        #[serde(default, skip_serializing_if = "crate::ForgeTokens::is_empty")]
+        forge_tokens: crate::ForgeTokens,
     },
     TaskStatus {
         task: crate::TaskRef,
@@ -4167,8 +4177,59 @@ mod tests {
                 labels: crate::Labels {},
                 bindings: vec![],
             },
+            forge_tokens: crate::ForgeTokens::default(),
         }
     }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_submit_without_tokens_encodes_as_before() {
+        let submit = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::TaskSubmit {
+                task: crate::TaskSubmission {
+                    schema: crate::TASK_SCHEMA.into(),
+                    version: crate::TASK_VERSION,
+                    agent: "hobi".into(),
+                    ask: crate::Ask::Prompt {
+                        prompt: SecretText(zeroize::Zeroizing::new("hi".into())),
+                    },
+                    labels: crate::Labels {},
+                    bindings: vec![crate::BindingRequest::Git(crate::GitRef {
+                        server: "forge.example".into(),
+                        base: "o/r".into(),
+                        change: Some(7),
+                    })],
+                },
+                forge_tokens: crate::ForgeTokens::default(),
+            },
+            task: None,
+        };
+        let add = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::TaskAdd {
+                task: crate::TaskRef::parse(&"a5".repeat(16)).unwrap(),
+                text: SecretText(zeroize::Zeroizing::new("more".into())),
+                bindings: vec![],
+                forge_tokens: crate::ForgeTokens::default(),
+            },
+            task: None,
+        };
+        for (request, golden) in [(submit, SUBMIT_BEFORE_TOKENS), (add, ADD_BEFORE_TOKENS)] {
+            let golden = unhex(golden);
+            assert_eq!(encode_request(&request).unwrap(), golden);
+            assert_eq!(decode_request(&golden).unwrap(), request);
+        }
+    }
+
+    const SUBMIT_BEFORE_TOKENS: &str = "a27070726f746f636f6c5f76657273696f6e016476657262a16a5461736b5375626d6974a1647461736ba666736368656d616b6d616b6e61652e7461736b6776657273696f6e01656167656e7464686f62696361736ba16650726f6d7074a16670726f6d7074626869666c6162656c73a06862696e64696e677381a163476974a3667365727665726d666f7267652e6578616d706c656462617365636f2f72666368616e676507";
+    const ADD_BEFORE_TOKENS: &str = "a27070726f746f636f6c5f76657273696f6e016476657262a1675461736b416464a2647461736b782061356135613561356135613561356135613561356135613561356135613561356474657874646d6f7265";
 
     #[test]
     fn a_request_without_a_task_still_decodes() {
