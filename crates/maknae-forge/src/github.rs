@@ -1,10 +1,12 @@
+mod agent;
 mod tasker;
 
 use crate::{
-    change_number, without_git, AgentSide, Forge, ForgeKind, ForgeReach, GithubKind, LinkPath,
-    Minting, Observer, Sigil,
+    change_number, without_git, AgentSide, Forge, ForgeKind, ForgeReach, GithubKind, HttpReply,
+    LinkPath, Minting, Observer, Sigil,
 };
 use maknae_proto::{ReachRefusal, RepoAsk};
+use serde_json::Value;
 
 pub(crate) struct Github;
 
@@ -13,6 +15,10 @@ pub(crate) static GITHUB: Github = Github;
 impl ForgeReach for Github {
     fn tasker(&self, asks: &[RepoAsk]) -> Box<dyn Observer> {
         Box::new(tasker::Tasker::new(asks))
+    }
+
+    fn agent(&self, installation: u64, asks: &[RepoAsk]) -> Box<dyn Observer> {
+        Box::new(agent::Agent::new(installation, asks))
     }
 }
 
@@ -26,6 +32,15 @@ pub(crate) fn status_refusal(status: u16) -> Option<ReachRefusal> {
         300..=399 => Some(ReachRefusal::Moved),
         _ => Some(ReachRefusal::Upstream),
     }
+}
+
+/// The JSON body of a 200 reply, or the reply's refusal class.
+pub(crate) fn answer(last: Option<HttpReply>) -> Result<Value, ReachRefusal> {
+    let reply = last.ok_or(ReachRefusal::Unanswered)?;
+    if let Some(refusal) = status_refusal(reply.status) {
+        return Err(refusal);
+    }
+    serde_json::from_slice(&reply.body).map_err(|_| ReachRefusal::Shape)
 }
 
 impl Forge for Github {

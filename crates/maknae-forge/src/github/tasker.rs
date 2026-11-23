@@ -3,7 +3,7 @@ use maknae_proto::{
 };
 use serde_json::Value;
 
-use super::{status_refusal, GITHUB};
+use super::{answer, GITHUB};
 use crate::{Auth, Forge, HttpReply, Observer, Step};
 
 const CALLS_PER_ASK: usize = 3;
@@ -178,14 +178,6 @@ fn asks_are_github(asks: &[RepoAsk]) -> bool {
             .all(|a| GITHUB.names_a_repository(&a.base) && a.head.is_none() && a.change != Some(0))
 }
 
-fn answer(last: Option<HttpReply>) -> Result<Value, ReachRefusal> {
-    let reply = last.ok_or(ReachRefusal::Unanswered)?;
-    if let Some(refusal) = status_refusal(reply.status) {
-        return Err(refusal);
-    }
-    serde_json::from_slice(&reply.body).map_err(|_| ReachRefusal::Shape)
-}
-
 /// `head.repo.full_name`, or `None` when `head.repo` is null: the fork was deleted.
 fn head_repository(pull: &Value) -> Result<Option<String>, ReachRefusal> {
     match pull.get("head").and_then(|h| h.get("repo")) {
@@ -275,6 +267,9 @@ mod tests {
                     asked.push(path);
                 }
                 Step::Done(outcome) => return (outcome, asked),
+                step @ (Step::MintMetadataRead { .. } | Step::Revoke) => {
+                    panic!("the tasker side asked for {step:?}")
+                }
             }
         }
     }
