@@ -53,6 +53,13 @@ impl std::fmt::Display for BoardRefusal {
 
 impl std::error::Error for BoardRefusal {}
 
+/// [`BoardStore::observe`]'s answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Observed {
+    pub live: BTreeSet<u64>,
+    pub in_range: BTreeSet<u64>,
+}
+
 /// What [`BoardStore::release`] did with a hold it lifted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lifted {
@@ -340,27 +347,53 @@ impl BoardStore {
 
     /// Those of `seqs` that are on the board, not withheld, and whose author and person
     /// `view` does not contain, now.
+    #[cfg(test)]
     pub(crate) fn still_live(
         &self,
         key: BoardKey,
         seqs: &[u64],
         view: &dyn EnrollmentView,
     ) -> BTreeSet<u64> {
+        self.observe(key, seqs, (0, 0), view).live
+    }
+
+    /// One observation, in one hold of the memory lock with one time and one answer from
+    /// `view`: which of `seqs` are live, and every live sequence in `(lo, hi]`.
+    pub(crate) fn observe(
+        &self,
+        key: BoardKey,
+        seqs: &[u64],
+        (lo, hi): (u64, u64),
+        view: &dyn EnrollmentView,
+    ) -> Observed {
         let held = self.held();
         let now = self.now();
         let Some(board) = held.boards.get(&key) else {
-            return BTreeSet::new();
+            return Observed::default();
         };
-        let posts: Vec<&Arc<Stored>> = seqs.iter().filter_map(|seq| board.posts.get(seq)).collect();
-        let contained = contained_on(view, key, posts.iter().map(|s| s.author_uid));
-        posts
-            .into_iter()
-            .filter(|s| {
-                !held.withheld(key, s, now)
-                    && contained_for(key, s.author_uid, &contained).is_empty()
-            })
-            .map(|s| s.seq)
-            .collect()
+        let listed: Vec<&Arc<Stored>> =
+            seqs.iter().filter_map(|seq| board.posts.get(seq)).collect();
+        let ranged: Vec<&Arc<Stored>> = if lo < hi {
+            board
+                .posts
+                .range((Bound::Excluded(lo), Bound::Included(hi)))
+                .map(|(_, s)| s)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let contained = contained_on(
+            view,
+            key,
+            listed.iter().chain(&ranged).map(|s| s.author_uid),
+        );
+        let alive = |s: &&Arc<Stored>| {
+            !held.withheld(key, s, now) && contained_for(key, s.author_uid, &contained).is_empty()
+        };
+        Observed {
+            live: listed.into_iter().filter(alive).map(|s| s.seq).collect(),
+            in_range: ranged.into_iter().filter(alive).map(|s| s.seq).collect(),
+        }
     }
 
     /// An acknowledgement moves the cursor to `seen_through` only when that post was sent to

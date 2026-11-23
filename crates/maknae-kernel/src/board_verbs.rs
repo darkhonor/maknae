@@ -407,6 +407,34 @@ impl Walker {
         true
     }
 
+    /// The highest sequence the final check must find no new live post below: the last
+    /// post decided when the walk ended, or `upper` when it ran to the end of the range.
+    pub(crate) fn hi(&self, upper: u64) -> u64 {
+        if self.ended() {
+            self.decided.last().map_or(upper, |(s, _)| s.seq)
+        } else {
+            upper
+        }
+    }
+
+    /// The lowest of `in_range` the walk has neither decided nor made absent: a post that
+    /// came alive since the walk passed its place.
+    pub(crate) fn missing(&self, in_range: &BTreeSet<u64>) -> Option<u64> {
+        let decided: BTreeSet<u64> = self.decided.iter().map(|(s, _)| s.seq).collect();
+        in_range
+            .iter()
+            .copied()
+            .find(|seq| !decided.contains(seq) && !self.absent.contains(seq))
+    }
+
+    /// Forgets every verdict from `seq` on and walks again what is left, so the posts from
+    /// `seq` are fetched and decided again in order.
+    pub(crate) fn rewalk_from(&mut self, seq: u64) {
+        self.decided.retain(|(s, _)| s.seq < seq);
+        self.at = Walked::default();
+        self.walk_from(0);
+    }
+
     /// The sequence to fetch candidates after: the last post decided and still walked.
     pub(crate) fn resume_after(&self) -> Option<u64> {
         self.decided.last().map(|(s, _)| s.seq)
@@ -561,11 +589,16 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
         }
         let mut influences = walker.influences();
         influences.extend(targets.iter().map(|t| t.seq));
-        let still = store.still_live(key, &influences, view);
-        if !walker.drop_dead(&still) {
+        let seen = store.observe(key, &influences, (cursor, walker.hi(upper)), view);
+        let dropped = walker.drop_dead(&seen.live);
+        let missing = walker.missing(&seen.in_range);
+        if let Some(seq) = missing {
+            walker.rewalk_from(seq);
+        }
+        if !dropped && missing.is_none() {
             let visible = targets
                 .iter()
-                .filter(|t| still.contains(&t.seq))
+                .filter(|t| seen.live.contains(&t.seq))
                 .map(|t| t.post.id)
                 .collect();
             let stalled = walker.stalled();

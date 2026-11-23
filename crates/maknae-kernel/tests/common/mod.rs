@@ -2046,6 +2046,42 @@ impl<P> AdvancesClockDuringBatch<P> {
 
 board_double!(AdvancesClockDuringBatch);
 
+/// Lifts `lifted` from post `id` on `key`'s board once, inside the first batch that holds a
+/// request carrying `label`, as a release landing while a read's posts are decided.
+pub struct ReleasesDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub board: Arc<maknae_kernel::BoardStore>,
+    pub key: maknae_kernel::BoardKey,
+    pub id: maknae_proto::PostId,
+    pub lifted: maknae_kernel::HeldFor,
+    pub label: &'static str,
+    pub armed: std::sync::atomic::AtomicBool,
+}
+
+impl<P> ReleasesDuringBatch<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        use maknae_kernel::BoardSeam;
+        if reqs.iter().any(|r| holds(r, self.label))
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.board
+                .release(
+                    self.key,
+                    self.id,
+                    self.lifted,
+                    &maknae_kernel::FixedEnrollment(Default::default()),
+                )
+                .unwrap();
+        }
+    }
+}
+
+board_double!(ReleasesDuringBatch);
+
 /// Stamps another person's board on a board request before the composition decides it.
 pub struct OtherBoard<P> {
     pub inner: Arc<P>,

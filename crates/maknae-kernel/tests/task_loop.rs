@@ -6169,4 +6169,35 @@ mod board {
             }
         }
     }
+
+    #[tokio::test]
+    async fn a_post_released_while_a_later_post_is_decided_is_delivered_before_it() {
+        let w = board_world("board-released-mid-read");
+        let j = w.at_work("jin");
+        let p = w.stored("suga", "sentinel-695-held-p", PostLabels::default());
+        w.stored("hobi", "sentinel-695-q", labelled());
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let board = &w.agents.board;
+        board.mark(&maknae_kernel::Containing(
+            everyone.clone(),
+            [SUGA_UID].into_iter().collect(),
+        ));
+        assert_eq!(board.perform(&board.due(10), &everyone), 1);
+        board.mark(&everyone);
+        let pdp = Arc::new(common::ReleasesDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(board),
+            key: w.key(),
+            id: p,
+            lifted: maknae_kernel::HeldFor::Author,
+            label: LABEL,
+            armed: true.into(),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(
+            bodies(&page),
+            ["sentinel-695-held-p", "sentinel-695-q"],
+            "never the later post without the one released below it"
+        );
+    }
 }
