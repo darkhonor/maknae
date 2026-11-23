@@ -113,16 +113,22 @@ struct Held {
 }
 
 impl Held {
-    fn withheld(&self, key: BoardKey, s: &Stored) -> bool {
+    /// Held, marked for a hold, or in its expiry's delete.
+    fn held_back(&self, key: BoardKey, s: &Stored) -> bool {
         !s.held.is_empty()
             || self.marked.contains_key(&(key, s.seq))
             || self.expiring.contains(&(key, s.seq))
     }
 
-    fn live(&self, key: BoardKey, id: PostId) -> Option<&Arc<Stored>> {
+    /// Kept from every reader: held back, or past retention at `now`, swept or not.
+    fn withheld(&self, key: BoardKey, s: &Stored, now: i64) -> bool {
+        self.held_back(key, s) || expired(s, now)
+    }
+
+    fn live(&self, key: BoardKey, id: PostId, now: i64) -> Option<&Arc<Stored>> {
         let board = self.boards.get(&key)?;
         let seq = board.ids.get(&id)?;
-        board.posts.get(seq).filter(|s| !self.withheld(key, s))
+        board.posts.get(seq).filter(|s| !self.withheld(key, s, now))
     }
 
     fn holds_of(&self, uid: u32) -> impl Iterator<Item = (BoardKey, PostId, u64, HeldFor)> + '_ {
@@ -303,7 +309,8 @@ impl BoardStore {
     }
 
     pub fn get(&self, key: BoardKey, id: PostId) -> Option<Arc<Stored>> {
-        self.held().live(key, id).cloned()
+        let now = self.clock.now_secs();
+        self.held().live(key, id, now).cloned()
     }
 
     /// Those of `seqs` that are on the board, not withheld, and whose author and person
@@ -314,13 +321,16 @@ impl BoardStore {
         seqs: &[u64],
         view: &dyn EnrollmentView,
     ) -> BTreeSet<u64> {
+        let now = self.clock.now_secs();
         let held = self.held();
         let Some(board) = held.boards.get(&key) else {
             return BTreeSet::new();
         };
         seqs.iter()
             .filter_map(|seq| board.posts.get(seq))
-            .filter(|s| !held.withheld(key, s) && contained_for(key, s.author_uid, view).is_empty())
+            .filter(|s| {
+                !held.withheld(key, s, now) && contained_for(key, s.author_uid, view).is_empty()
+            })
             .map(|s| s.seq)
             .collect()
     }
@@ -395,6 +405,7 @@ impl BoardStore {
     }
 
     pub fn candidates(&self, key: BoardKey, after: u64, limit: usize) -> Vec<Arc<Stored>> {
+        let now = self.clock.now_secs();
         let held = self.held();
         let Some(board) = held.boards.get(&key) else {
             return Vec::new();
@@ -403,7 +414,7 @@ impl BoardStore {
             .posts
             .range((Bound::Excluded(after), Bound::Unbounded))
             .map(|(_, s)| s)
-            .filter(|s| !held.withheld(key, s))
+            .filter(|s| !held.withheld(key, s, now))
             .take(limit)
             .cloned()
             .collect()
@@ -502,7 +513,7 @@ impl BoardStore {
         let expiries = held.boards.iter().flat_map(|(key, b)| {
             b.posts
                 .values()
-                .filter(|s| !held.withheld(*key, s) && expired(s, now))
+                .filter(|s| !held.held_back(*key, s) && expired(s, now))
                 .map(|s| BoardDue {
                     key: *key,
                     post: Some(s.post.id),
@@ -560,7 +571,7 @@ impl BoardStore {
             let mut held = self.held();
             let found = held
                 .at(key, seq, id)
-                .filter(|s| !held.withheld(key, s) && expired(s, now))
+                .filter(|s| !held.held_back(key, s) && expired(s, now))
                 .map(|s| (Name::Post(key, s.post.id).text(), s.author_uid));
             let Some((name, author_uid)) = found else {
                 held.said.remove(&item);
@@ -871,12 +882,13 @@ impl BoardStore {
         in_reply_to: Option<PostId>,
         view: &dyn EnrollmentView,
     ) -> Result<(), BoardRefusal> {
+        let now = self.clock.now_secs();
         let held = self.held();
         if let Some(board) = held.boards.get(&key) {
             let live = board
                 .posts
                 .values()
-                .filter(|s| !held.withheld(key, s))
+                .filter(|s| !held.withheld(key, s, now))
                 .count();
             if live >= self.caps.board {
                 return Err(BoardRefusal::Full);
@@ -891,7 +903,7 @@ impl BoardStore {
             }
         }
         let gone = |target| {
-            held.live(key, target)
+            held.live(key, target, now)
                 .is_none_or(|s| !contained_for(key, s.author_uid, view).is_empty())
         };
         match in_reply_to {
@@ -2083,6 +2095,15 @@ mod tests {
         assert!(replied(free_post.post.id).is_ok());
     }
 
+    /// Whether the post is still in the store, readable or not.
+    fn in_store(store: &BoardStore, key: BoardKey, id: PostId) -> bool {
+        store
+            .held()
+            .boards
+            .get(&key)
+            .is_some_and(|b| b.ids.contains_key(&id))
+    }
+
     fn sent_set(store: &BoardStore, key: BoardKey, r: &AgentId) -> Option<BTreeSet<u64>> {
         store.held().boards.get(&key)?.sent.get(r).cloned()
     }
@@ -2184,6 +2205,54 @@ mod tests {
     }
 
     #[test]
+    fn a_post_past_retention_is_never_readable_whether_or_not_it_was_swept() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let a = by(&store, BOB, hobi(), Some(2001), "sentinel-695-a");
+        clock.set(T0 + 1);
+        let others: Vec<_> = (0..3)
+            .map(|_| by(&store, BOB, jin(), Some(2002), "live"))
+            .collect();
+        clock.set(T0 + RETAIN);
+        assert!(store.get(BOB, a.post.id).is_none(), "no sweep has run");
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), ids(&others));
+        assert!(store.still_live(BOB, &[a.seq], &free()).is_empty());
+        let reply = store.post(
+            BOB,
+            (Author::Tasker(1000), None),
+            None,
+            PostLabels::default(),
+            reply("r", a.post.id),
+            &free(),
+        );
+        assert_eq!(reply.unwrap_err(), BoardRefusal::NoSuchPost);
+        let fourth = by(
+            &store,
+            BOB,
+            hobi(),
+            Some(2001),
+            "the cap no longer counts it",
+        );
+        b.fail(Some(Fail::Unlinks));
+        assert_eq!(store.perform(&store.due(10), &free()), 0);
+        b.fail(None);
+        assert!(b.has(&post_name(BOB, a.post.id)), "the delete failed");
+        assert!(store.get(BOB, a.post.id).is_none(), "and nothing reappears");
+        assert!(!ids(&store.candidates(BOB, 0, 10)).contains(&a.post.id));
+        let r = reader("rm");
+        store.sent(BOB, &r, &[fourth.seq]);
+        let to = store
+            .plan_read(BOB, &r, Some(fourth.post.id))
+            .ack_to
+            .unwrap();
+        store.advance(BOB, &r, to).unwrap();
+        assert!(
+            a.seq < to,
+            "the acknowledgement passed a post that was never deliverable"
+        );
+    }
+
+    #[test]
     fn a_held_post_never_expires_and_is_never_a_candidate() {
         let b = MemTaskBlobs::default();
         let (store, _) = clocked(&b);
@@ -2206,7 +2275,10 @@ mod tests {
             whys(&store.due(10)),
             vec![(Some(live.post.id), None, BoardDueFor::Expire)]
         );
-        assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![live.post.id]);
+        assert!(
+            store.candidates(BOB, 0, 10).is_empty(),
+            "neither the expired post nor the held one"
+        );
         assert!(store.get(BOB, held.post.id).is_none());
         let forged = BoardDue {
             key: BOB,
@@ -2588,9 +2660,10 @@ mod tests {
         assert_eq!(store.perform(&due[2..], &free()), 0);
         assert!(!b.has(&post_name(BOB, old.post.id)) && !b.has("cursor.1000.rm"));
         assert!(
-            store.get(BOB, old.post.id).is_some(),
+            in_store(&store, BOB, old.post.id),
             "an unsynced delete leaves the post"
         );
+        assert!(store.get(BOB, old.post.id).is_none(), "past retention");
         assert_eq!(store.plan_read(BOB, &reader("rm"), None).cursor, old.seq);
         assert!(store.get(BOB, young.post.id).is_none(), "still marked");
         let again = store.due(10);
@@ -2679,11 +2752,9 @@ mod tests {
             b.slow(None);
             b.fail(None);
             assert_eq!(done, usize::from(!refused));
-            assert_eq!(store.get(BOB, post.post.id).is_some(), refused);
-            assert_eq!(
-                ids(&store.candidates(BOB, 0, 10)).contains(&post.post.id),
-                refused
-            );
+            assert_eq!(in_store(&store, BOB, post.post.id), refused);
+            assert!(store.get(BOB, post.post.id).is_none(), "refused: {refused}");
+            assert!(!ids(&store.candidates(BOB, 0, 10)).contains(&post.post.id));
         }
     }
 
@@ -2700,8 +2771,9 @@ mod tests {
         }));
         b.fail(None);
         assert!(panicked.is_err());
-        assert!(store.get(BOB, post.post.id).is_some());
-        assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![post.post.id]);
+        assert!(store.held().expiring.is_empty());
+        assert!(in_store(&store, BOB, post.post.id));
+        assert!(store.get(BOB, post.post.id).is_none(), "past retention");
         assert_eq!(
             whys(&store.due(10)),
             vec![(Some(post.post.id), None, BoardDueFor::Expire)]
@@ -2907,7 +2979,7 @@ mod tests {
             store.release(BOB, post.post.id, HeldFor::Author, &free()),
             Ok(Lifted::Done)
         );
-        assert!(store.get(BOB, post.post.id).is_some());
+        assert!(store.get(BOB, post.post.id).is_none(), "past retention");
         let due = store.due(10);
         assert_eq!(
             whys(&due),

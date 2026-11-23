@@ -30013,8 +30013,8 @@ mod task_sweep_tests {
         .await;
         assert!(refusing.recs().is_empty());
         assert!(
-            board.get(key, post.post.id).is_some(),
-            "a refused record leaves the post live"
+            board.due(10).iter().any(|d| d.post == Some(post.post.id)),
+            "a refused record leaves the post in the store, due"
         );
         assert!(blobs.has(&format!("post.1000.{}", post.post.id)));
         let trail = Trail::new(0);
@@ -30213,9 +30213,10 @@ mod task_sweep_tests {
         assert_eq!(recs[2].action, "board.manage");
         assert_eq!(recs[2].outcome.posture, "unavailable");
         assert_eq!(tasks.record(&id).unwrap().close, Some(TaskClose::AgentGone));
-        assert!(board
-            .get(crate::board_store::BoardKey(1000), post.post.id)
-            .is_some());
+        assert!(
+            board.due(10).iter().any(|d| d.post == Some(post.post.id)),
+            "the post is still in the store, due again"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -30255,9 +30256,8 @@ mod task_sweep_tests {
             "the task steps' records are unchanged"
         );
         assert!(late.iter().all(|r| r.event == "task"), "{:?}", shape(&late));
-        let key = crate::board_store::BoardKey(1000);
         assert!(
-            board.get(key, post.post.id).is_some(),
+            board.due(10).iter().any(|d| d.post == Some(post.post.id)),
             "due again next pass"
         );
         assert_eq!(board.due(10).len(), 1);
