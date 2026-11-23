@@ -24,3 +24,6 @@ pub use sealed::{
 };
 pub use task::*;
 pub use wire::*;
+
+#[cfg(test)]
+mod testutil;

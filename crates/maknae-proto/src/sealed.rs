@@ -227,19 +227,6 @@ impl<'de> Deserialize<'de> for ForgeTokens {
 }
 
 #[cfg(test)]
-pub(crate) fn widest_forge_tokens(count: usize) -> Vec<SealedForgeToken> {
-    (0..count)
-        .map(|i| {
-            let lead = char::from(b'a' + u8::try_from(i).unwrap());
-            let server = format!("{lead}{}:65535", "a".repeat(crate::SERVER_MAX_BYTES - 7));
-            let nonce = format!("{i:0>32x}");
-            let sealed = SealedKey::new(vec![0x53; SEALED_KEY_MAX_BYTES]).unwrap();
-            SealedForgeToken::new(server, nonce, sealed).unwrap()
-        })
-        .collect()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -350,7 +337,7 @@ mod tests {
 
     #[test]
     fn a_ninth_token_or_a_duplicate_server_never_decodes() {
-        let nine = widest_forge_tokens(FORGE_TOKENS_MAX + 1);
+        let nine = crate::testutil::widest_forge_tokens(FORGE_TOKENS_MAX + 1);
         let eight = &nine[..FORGE_TOKENS_MAX];
         let raws: Vec<RawToken<'_>> = eight.iter().map(raw).collect();
         assert_eq!(decode_tokens(&raws).unwrap().as_slice(), eight);
@@ -416,7 +403,7 @@ mod tests {
 
     #[test]
     fn a_forge_token_debug_names_no_bytes() {
-        let tokens = ForgeTokens::new(widest_forge_tokens(2)).unwrap();
+        let tokens = ForgeTokens::new(crate::testutil::widest_forge_tokens(2)).unwrap();
         let nonce = tokens.as_slice()[1].nonce().to_owned();
         let shown = [
             format!("{:?}", tokens.as_slice()[1]),

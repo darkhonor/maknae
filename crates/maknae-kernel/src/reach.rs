@@ -813,4 +813,630 @@ mod tests {
             assert_eq!(refusal_class(class), spelled);
         }
     }
+
+    mod observing {
+        use super::*;
+        use crate::egress_socket::{ReachEgress, ReachOutcome, Unanswered};
+        use maknae_audit_append::{AuditEmit, AuditError, AuditRecord};
+        use maknae_proto::{
+            ForgeOp, ForgeOps, GitBinding, RepoObservation, SealedKey, TaskerBasis,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        const GH: &str = "git.sentinel-168r.example";
+        const LAB: &str = "lab.sentinel-168r.example";
+        const SUBMITTER: u32 = 1;
+        const TARGET: u32 = 2;
+
+        type Reply = Box<dyn Fn(&ReachRequest) -> ReachOutcome + Send + Sync>;
+
+        struct Fake {
+            reply: Reply,
+            asked: Mutex<Vec<String>>,
+        }
+
+        impl ReachEgress for Fake {
+            fn has_socket(&self) -> bool {
+                true
+            }
+
+            fn reach(&self, req: ReachRequest) -> ReachOutcome {
+                let who = match req.side() {
+                    ReachSide::Tasker { .. } => "tasker".to_owned(),
+                    ReachSide::Agent { agent, .. } => agent.clone(),
+                };
+                self.asked.lock().unwrap().push(who);
+                (self.reply)(&req)
+            }
+        }
+
+        struct Emit {
+            ok_for: usize,
+            n: AtomicUsize,
+        }
+
+        impl AuditEmit for Emit {
+            fn emit(
+                &self,
+                _: &AuditRecord,
+            ) -> impl std::future::Future<Output = Result<(), AuditError>> + Send {
+                let ok = self.n.fetch_add(1, Ordering::SeqCst) < self.ok_for;
+                async move {
+                    match ok {
+                        true => Ok(()),
+                        false => Err(AuditError::WritePrimary("full".into())),
+                    }
+                }
+            }
+        }
+
+        fn record() -> AuditRecord {
+            serde_json::from_value(serde_json::json!({
+                "ts":"test", "event":"request", "where":{"host":"test","component":"kernel","socket":"test"},
+                "source":{"uid":0},"subject":{},"action":"session.task",
+                "outcome":{"result":"deny","reason":"pending","posture":"unauthorized"},
+                "session_id":1,"seq":1,"au3_1":{},"integrity":{}
+            }))
+            .unwrap()
+        }
+
+        fn settings(user_prefix: Option<&str>, deadline_ms: u64) -> ReachSettings {
+            let yaml = format!(
+                "- {{ name: a, kind: git, host: \"{GH}\", provider: github }}\n- {{ name: b, kind: git, host: \"{LAB}\", provider: gitlab }}\n"
+            );
+            let forges =
+                maknae_config::forges_from_section(Some(&maknae_config::load_str(&yaml).unwrap()))
+                    .unwrap();
+            ReachSettings::of(&forges, user_prefix.map(str::to_owned), deadline_ms)
+        }
+
+        fn ops(list: &[ForgeOp]) -> ForgeOps {
+            list.iter().fold(ForgeOps::EMPTY, |o, op| o.with(*op))
+        }
+
+        fn seen(head: Option<&str>, head_ops: &[ForgeOp], gone: bool) -> RepoObservation {
+            RepoObservation::new(
+                ops(&[ForgeOp::Read]),
+                head.map(str::to_owned),
+                ops(head_ops),
+                gone,
+                true,
+            )
+            .unwrap()
+        }
+
+        fn observed(list: Vec<RepoObservation>) -> ReachOutcome {
+            ReachOutcome::Reply(ReachReply::Observed(Observations::new(list).unwrap()))
+        }
+
+        fn each(f: fn() -> RepoObservation) -> Reply {
+            Box::new(move |req| observed(req.asks().iter().map(|_| f()).collect()))
+        }
+
+        fn git(server: &str, base: &str, change: Option<u64>) -> Binding {
+            Binding::Git(GitBinding {
+                server: server.into(),
+                base: base.into(),
+                head: None,
+                change,
+            })
+        }
+
+        fn app(name: &str) -> CredentialRef {
+            CredentialRef {
+                kind: "github-app-installation".into(),
+                name: name.into(),
+            }
+        }
+
+        fn token(server: &str) -> ForgeTokens {
+            let sealed = SealedKey::new(vec![7; 200]).unwrap();
+            ForgeTokens::new(vec![SealedForgeToken::new(
+                server.into(),
+                "0123456789abcdef0123456789abcdef".into(),
+                sealed,
+            )
+            .unwrap()])
+            .unwrap()
+        }
+
+        struct World {
+            settings: ReachSettings,
+            reply: Reply,
+            submitter: Vec<CredentialRef>,
+            target: Vec<CredentialRef>,
+            ok_for: usize,
+        }
+
+        impl World {
+            fn new(reply: Reply) -> Self {
+                Self {
+                    settings: settings(Some("maknae/users"), 20_000),
+                    reply,
+                    submitter: Vec::new(),
+                    target: vec![app("deploy")],
+                    ok_for: usize::MAX,
+                }
+            }
+        }
+
+        struct Seen {
+            out: Result<Vec<BindingReach>, TaskRefusal>,
+            asked: Vec<String>,
+            said: Vec<(String, String, String)>,
+            emitted: usize,
+        }
+
+        async fn run(
+            w: World,
+            asker: Asker<'_>,
+            tokens: ForgeTokens,
+            bindings: &mut [Binding],
+        ) -> Seen {
+            let fake = Arc::new(Fake {
+                reply: w.reply,
+                asked: Mutex::default(),
+            });
+            let egress: Arc<dyn ReachEgress> = fake.clone();
+            let permits = tokio::sync::Semaphore::new(1);
+            let (submitter, target) = (w.submitter, w.target);
+            let credentials = move |uid| match uid {
+                SUBMITTER => submitter.clone(),
+                _ => target.clone(),
+            };
+            let ctx = ReachCtx {
+                egress: &egress,
+                settings: &w.settings,
+                permits: &permits,
+                credentials: &credentials,
+            };
+            let said = Mutex::new(Vec::new());
+            let rec = |result: &str, reason: &str, posture: &str| {
+                said.lock().unwrap().push((
+                    result.to_owned(),
+                    reason.to_owned(),
+                    posture.to_owned(),
+                ));
+                record()
+            };
+            let emit = Emit {
+                ok_for: w.ok_for,
+                n: AtomicUsize::new(0),
+            };
+            let trail = FrameTrail {
+                emit: &emit,
+                record: &rec,
+            };
+            let coder = AgentId::parse("coder").unwrap();
+            let target = Target {
+                agent: &coder,
+                uid: TARGET,
+            };
+            let out = observe(&ctx, &trail, asker, tokens, target, bindings).await;
+            let asked = fake.asked.lock().unwrap().clone();
+            Seen {
+                out,
+                asked,
+                said: said.into_inner().unwrap(),
+                emitted: emit.n.load(Ordering::SeqCst),
+            }
+        }
+
+        fn person() -> Asker<'static> {
+            Asker::Person {
+                username: Some("alice"),
+            }
+        }
+
+        fn unreached_why(s: &Seen) -> &str {
+            match &s.out {
+                Err(TaskRefusal::Unreached(why)) => why,
+                other => panic!("expected an unreached refusal, got {other:?}"),
+            }
+        }
+
+        fn agent_reach(s: &Seen) -> Vec<(AgentReach, Option<EmptyReason>)> {
+            s.out
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|BindingReach::Git(g)| (g.agent, g.why))
+                .collect()
+        }
+
+        #[test]
+        fn a_tasker_side_needs_a_username_a_prefix_and_a_token_path() {
+            let egress: Arc<dyn ReachEgress> = Arc::new(Fake {
+                reply: each(|| seen(None, &[], false)),
+                asked: Mutex::default(),
+            });
+            let permits = tokio::sync::Semaphore::new(1);
+            let none = |_| Vec::new();
+            let with = settings(Some("maknae/users"), 1_000);
+            let without = settings(None, 1_000);
+            let side = |s: &ReachSettings, user: Option<&str>, server: &str| {
+                let ctx = ReachCtx {
+                    egress: &egress,
+                    settings: s,
+                    permits: &permits,
+                    credentials: &none,
+                };
+                let t = token(GH).into_vec().pop().unwrap();
+                match tasker_side(&ctx, user, server, t) {
+                    Ok(ReachSide::Tasker {
+                        tasker,
+                        expected_path,
+                        key_field,
+                        ..
+                    }) => Ok((tasker, expected_path, key_field)),
+                    Ok(ReachSide::Agent { .. }) => panic!("a tasker side"),
+                    Err(TaskRefusal::Unreached(why)) => Err(why),
+                    Err(other) => panic!("{other:?}"),
+                }
+            };
+            let (tasker, path, field) = side(&with, Some("alice"), GH).unwrap();
+            assert_eq!(tasker, "alice");
+            assert!(path.starts_with("maknae/users/alice/"), "{path}");
+            assert_eq!(field, maknae_vault::FORGE_TOKEN_FIELD);
+            assert_eq!(
+                side(&with, None, GH).unwrap_err(),
+                "the tasker has no username"
+            );
+            assert_eq!(
+                side(&without, Some("alice"), GH).unwrap_err(),
+                "no user key prefix is configured"
+            );
+            assert_eq!(
+                side(&with, Some("alice"), "[::1]:443").unwrap_err(),
+                "server [::1]:443 has no forge token path"
+            );
+            assert!(side(&with, Some("data"), GH)
+                .unwrap_err()
+                .starts_with("no forge token path: "));
+        }
+
+        #[tokio::test]
+        async fn a_person_without_a_username_is_refused_before_any_frame() {
+            let mut b = [git(GH, "o/r", None)];
+            let s = run(
+                World::new(each(|| seen(None, &[], false))),
+                Asker::Person { username: None },
+                token(GH),
+                &mut b,
+            )
+            .await;
+            assert_eq!(unreached_why(&s), "the tasker has no username");
+            assert!(s.asked.is_empty());
+            assert_eq!(s.emitted, 0);
+        }
+
+        #[tokio::test]
+        async fn a_server_that_is_no_git_forge_is_refused_before_any_frame() {
+            let mut b = [git("elsewhere.example", "o/r", None)];
+            let s = run(
+                World::new(each(|| seen(None, &[], false))),
+                person(),
+                ForgeTokens::default(),
+                &mut b,
+            )
+            .await;
+            assert_eq!(
+                unreached_why(&s),
+                "server elsewhere.example is not the host of a git forge"
+            );
+            assert!(s.asked.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_frame_the_proto_refuses_is_refused_unsent() {
+            let mut b = [git(GH, "o/r", None), git(GH, "o/r", None)];
+            let s = run(
+                World::new(each(|| seen(None, &[], false))),
+                person(),
+                token(GH),
+                &mut b,
+            )
+            .await;
+            assert!(
+                unreached_why(&s).starts_with(&format!("reach refused: request (tasker {GH}): ")),
+                "{}",
+                unreached_why(&s)
+            );
+            assert!(s.asked.is_empty());
+            assert!(s.said.is_empty());
+        }
+
+        async fn tasker_answered(reply: Reply) -> Seen {
+            let mut b = [git(GH, "o/r", None)];
+            run(World::new(reply), person(), token(GH), &mut b).await
+        }
+
+        fn denied(s: &Seen, reason: &str, posture: &str) {
+            assert_eq!(unreached_why(s), reason);
+            assert_eq!(s.asked, ["tasker"], "the agent side is never asked");
+            assert_eq!(
+                s.said,
+                [
+                    (
+                        "permit".to_owned(),
+                        format!("reach intent recorded (tasker {GH})"),
+                        "authorized".to_owned()
+                    ),
+                    ("deny".to_owned(), reason.to_owned(), posture.to_owned()),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_tasker_with_no_forge_credential_is_refused_login() {
+            let s = tasker_answered(Box::new(|_| {
+                ReachOutcome::Reply(ReachReply::NoForgeCredential)
+            }))
+            .await;
+            denied(
+                &s,
+                &format!("reach refused: login: no forge credential (tasker {GH})"),
+                "unauthorized",
+            );
+        }
+
+        #[tokio::test]
+        async fn a_reply_that_does_not_match_its_asks_is_refused_shape() {
+            let s = tasker_answered(Box::new(|_| {
+                observed(vec![seen(None, &[], false), seen(None, &[], false)])
+            }))
+            .await;
+            denied(
+                &s,
+                &format!("reach refused: shape: the reply does not match its asks (tasker {GH})"),
+                "unauthorized",
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unanswered_frame_is_refused_unavailable() {
+            let s = tasker_answered(Box::new(|_| {
+                ReachOutcome::Unanswered(Unanswered::NotSent("no deputy".into()))
+            }))
+            .await;
+            denied(
+                &s,
+                &format!("reach not sent: no deputy (tasker {GH})"),
+                "unavailable",
+            );
+        }
+
+        #[tokio::test]
+        async fn an_exchange_that_does_not_finish_is_refused_unavailable() {
+            let s = tasker_answered(Box::new(|_| panic!("the exchange broke"))).await;
+            let why = unreached_why(&s);
+            assert!(
+                why.starts_with("reach outcome unknown: the exchange did not finish: "),
+                "{why}"
+            );
+            assert_eq!(s.said.last().unwrap().0, "deny");
+            assert_eq!(s.said.last().unwrap().2, "unavailable");
+        }
+
+        #[tokio::test]
+        async fn an_outcome_record_that_cannot_be_written_refuses_the_task() {
+            for reply in [
+                each(|| seen(None, &[], false)),
+                Box::new(|_: &ReachRequest| {
+                    ReachOutcome::Reply(ReachReply::Refused(ReachRefusal::Forbidden))
+                }) as Reply,
+            ] {
+                let mut w = World::new(reply);
+                w.ok_for = 1;
+                let mut b = [git(GH, "o/r", None)];
+                let s = run(w, person(), token(GH), &mut b).await;
+                assert!(matches!(s.out, Err(TaskRefusal::Audit(_))), "{:?}", s.out);
+                assert_eq!(s.asked, ["tasker"]);
+                assert_eq!(s.emitted, 2);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_tasker_head_for_a_binding_without_a_change_is_refused_shape() {
+            let s =
+                tasker_answered(each(|| seen(Some("fork/r"), &[ForgeOp::PushHead], false))).await;
+            assert_eq!(
+                unreached_why(&s),
+                "reach refused: shape: a head for a binding without a change"
+            );
+            assert_eq!(s.asked, ["tasker"]);
+        }
+
+        #[tokio::test]
+        async fn a_gone_head_empties_the_bindings_reach_as_head_gone() {
+            let mut b = [git(GH, "o/r", Some(7))];
+            let reply: Reply = Box::new(|req| match req.side() {
+                ReachSide::Tasker { .. } => observed(vec![seen(None, &[], true)]),
+                ReachSide::Agent { .. } => observed(vec![seen(None, &[], false)]),
+            });
+            let s = run(World::new(reply), person(), token(GH), &mut b).await;
+            let Binding::Git(g) = &b[0];
+            assert_eq!(g.head, None);
+            assert_eq!(s.asked, ["tasker", "coder"]);
+            assert_eq!(
+                agent_reach(&s),
+                [(
+                    AgentReach::Observed(
+                        SideReach::new(ops(&[ForgeOp::Read]), ForgeOps::EMPTY).unwrap()
+                    ),
+                    Some(EmptyReason::HeadGone)
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_parent_must_hold_each_binding_and_its_reach() {
+            let mine = git(GH, "o/r", None);
+            let other = git(GH, "o/other", None);
+            let r = BindingReach::Git(GitReach {
+                tasker: SideReach::EMPTY,
+                basis: TaskerBasis::Token,
+                agent: AgentReach::NoForgeCredential,
+                why: Some(EmptyReason::NoForgeCredential),
+            });
+            let mut b = [git(GH, "o/elsewhere", None)];
+            let s = run(
+                World::new(each(|| seen(None, &[], false))),
+                Asker::Parent(TaskBound {
+                    bindings: vec![&mine],
+                    reach: vec![&r],
+                }),
+                ForgeTokens::default(),
+                &mut b,
+            )
+            .await;
+            assert_eq!(unreached_why(&s), "a binding is not the parent task's");
+            assert!(s.asked.is_empty());
+            let mut b = [other.clone()];
+            let s = run(
+                World::new(each(|| seen(None, &[], false))),
+                Asker::Parent(TaskBound {
+                    bindings: vec![&mine, &other],
+                    reach: vec![&r],
+                }),
+                ForgeTokens::default(),
+                &mut b,
+            )
+            .await;
+            assert_eq!(unreached_why(&s), "parent task has no reach");
+            assert!(s.asked.is_empty());
+        }
+
+        fn agent_asker(agent: &AgentId) -> Asker<'_> {
+            Asker::Agent {
+                agent,
+                uid: SUBMITTER,
+            }
+        }
+
+        #[tokio::test]
+        async fn too_many_observable_credentials_on_either_agent_refuse_the_task() {
+            let lead = AgentId::parse("lead").unwrap();
+            let nine: Vec<CredentialRef> = (0..=REACH_CREDENTIALS_MAX)
+                .map(|i| app(&format!("app-{i}")))
+                .collect();
+            let mut w = World::new(each(|| seen(None, &[], false)));
+            w.submitter = nine.clone();
+            let mut b = [git(GH, "o/r", None)];
+            let s = run(w, agent_asker(&lead), ForgeTokens::default(), &mut b).await;
+            assert!(unreached_why(&s).starts_with("reach refused: ambiguous_credential"));
+            assert!(s.asked.is_empty());
+            let mut w = World::new(each(|| seen(None, &[], false)));
+            w.target = nine;
+            let s = run(w, agent_asker(&lead), ForgeTokens::default(), &mut b).await;
+            assert!(unreached_why(&s).starts_with("reach refused: ambiguous_credential"));
+            assert!(s.asked.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_submitting_agents_refused_frame_refuses_the_task() {
+            let lead = AgentId::parse("lead").unwrap();
+            let mut w = World::new(Box::new(|_| {
+                ReachOutcome::Reply(ReachReply::Refused(ReachRefusal::Suspended))
+            }));
+            w.submitter = vec![app("lead-app")];
+            let mut b = [git(GH, "o/r", None)];
+            let s = run(w, agent_asker(&lead), ForgeTokens::default(), &mut b).await;
+            assert_eq!(
+                unreached_why(&s),
+                format!("reach refused: suspended (agent lead {GH})")
+            );
+            assert_eq!(s.asked, ["lead"], "the target is never asked");
+        }
+
+        #[tokio::test]
+        async fn an_unseen_submitter_empties_an_observed_targets_reach() {
+            let lead = AgentId::parse("lead").unwrap();
+            let mut b = [git(GH, "o/r", None)];
+            let s = run(
+                World::new(each(|| seen(None, &[], false))),
+                agent_asker(&lead),
+                ForgeTokens::default(),
+                &mut b,
+            )
+            .await;
+            assert_eq!(s.asked, ["coder"]);
+            assert_eq!(
+                agent_reach(&s),
+                [(
+                    AgentReach::Observed(
+                        SideReach::new(ops(&[ForgeOp::Read]), ForgeOps::EMPTY).unwrap()
+                    ),
+                    Some(EmptyReason::NoForgeCredential)
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn target_head_ops_for_a_binding_without_a_head_are_refused_shape() {
+            let lead = AgentId::parse("lead").unwrap();
+            let mut b = [git(GH, "o/r", Some(3))];
+            let s = run(
+                World::new(each(|| seen(Some("fork/r"), &[ForgeOp::PushHead], false))),
+                agent_asker(&lead),
+                ForgeTokens::default(),
+                &mut b,
+            )
+            .await;
+            assert_eq!(
+                unreached_why(&s),
+                "reach refused: shape: head ops for a binding without a head"
+            );
+            assert_eq!(s.asked, ["coder"]);
+        }
+
+        #[tokio::test]
+        async fn a_target_with_no_forge_credential_is_sealed_as_such() {
+            let lead = AgentId::parse("lead").unwrap();
+            let answered: Reply = Box::new(|_| ReachOutcome::Reply(ReachReply::NoForgeCredential));
+            let mut b = [git(GH, "o/r", None)];
+            let s = run(
+                World::new(answered),
+                agent_asker(&lead),
+                ForgeTokens::default(),
+                &mut b,
+            )
+            .await;
+            assert_eq!(s.asked, ["coder"]);
+            assert_eq!(
+                agent_reach(&s),
+                [(
+                    AgentReach::NoForgeCredential,
+                    Some(EmptyReason::NoForgeCredential)
+                )]
+            );
+            let mut w = World::new(each(|| seen(None, &[], false)));
+            w.target = Vec::new();
+            let s = run(w, agent_asker(&lead), ForgeTokens::default(), &mut b).await;
+            assert!(s.asked.is_empty());
+            assert_eq!(
+                agent_reach(&s),
+                [(
+                    AgentReach::NoForgeCredential,
+                    Some(EmptyReason::NoForgeCredential)
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_last_frame_that_outlives_the_deadline_refuses_the_task() {
+            let lead = AgentId::parse("lead").unwrap();
+            let mut w = World::new(Box::new(|req| {
+                std::thread::sleep(Duration::from_millis(req.deadline_ms() + 100));
+                observed(req.asks().iter().map(|_| seen(None, &[], false)).collect())
+            }));
+            w.settings = settings(Some("maknae/users"), 50);
+            let mut b = [git(GH, "o/r", None)];
+            let s = run(w, agent_asker(&lead), ForgeTokens::default(), &mut b).await;
+            assert_eq!(unreached_why(&s), "the reach deadline passed");
+            assert_eq!(s.asked, ["coder"]);
+            assert_eq!(s.said.last().unwrap().0, "permit");
+        }
+    }
 }

@@ -919,6 +919,20 @@ mod tests {
         TrustBundle::from_pins(&[&maknae_vault::load_ca_pin(dir).unwrap()]).unwrap()
     }
 
+    #[tokio::test]
+    async fn an_unminted_agent_client_reads_no_provider_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut keys = agent_keys(agent_client(dir.path(), "hobi"), "hobi");
+        let got = keys
+            .choice("sentinel-168-conversation", 0)
+            .await
+            .unwrap_err();
+        assert!(
+            got.starts_with("reading the agent's provider key failed: "),
+            "{got}"
+        );
+    }
+
     #[test]
     fn the_agent_loop_dials_the_agent_socket_with_its_keys_own_client() {
         let dir = tempfile::TempDir::new().unwrap();

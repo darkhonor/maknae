@@ -49,13 +49,6 @@ impl LiveConfig {
         Self::with_forges(view, providers, forges)
     }
 
-    #[cfg(any(test, feature = "hermetic-test-seam"))]
-    pub fn with_reach_for_test(mut self, user_prefix: &str, deadline_ms: u64) -> Self {
-        self.reach =
-            crate::reach::ReachSettings::of(&self.forges, Some(user_prefix.into()), deadline_ms);
-        self
-    }
-
     fn with_forges(
         view: ConfigView,
         providers: Option<ProviderAuthority>,

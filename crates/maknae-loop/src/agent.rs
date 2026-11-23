@@ -704,6 +704,97 @@ mod tests {
         }
     }
 
+    fn addendum(id: TaskId) -> maknae_proto::TaskAddendum {
+        use maknae_proto::{
+            AgentReach, Binding, BindingReach, EmptyReason, GitBinding, GitReach, SideReach,
+            TaskerBasis,
+        };
+        maknae_proto::TaskAddendum::new(
+            id,
+            1,
+            vec![Binding::Git(GitBinding {
+                server: "git.sentinel-168l.example".into(),
+                base: "o/r".into(),
+                head: None,
+                change: None,
+            })],
+            vec![BindingReach::Git(GitReach {
+                tasker: SideReach::EMPTY,
+                basis: TaskerBasis::Parent,
+                agent: AgentReach::NoForgeCredential,
+                why: Some(EmptyReason::NoForgeCredential),
+            })],
+        )
+        .unwrap()
+    }
+
+    fn wire_added(signed: &SignedAddendum) -> Bytes {
+        let mut out = Vec::new();
+        ciborium::into_writer(signed, &mut out).unwrap();
+        Bytes::new(Zeroizing::new(out))
+    }
+
+    #[test]
+    fn a_kernel_signed_addendum_for_this_task_verifies_and_anything_else_names_its_class() {
+        maknae_crypto::init().unwrap();
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let kernel = ca.kernel(PlaneKey::MlDsa87, None);
+        let trust = TaskTrust {
+            trust: ca.trust(),
+            trust_domain: TRUST_DOMAIN.into(),
+            agent: hobi(),
+        };
+        let id = TaskId([0x62; 16]);
+        let now = || maknae_io::now_since_epoch();
+        let signed = maknae_vault::task_sig::sign_addendum(&kernel, addendum(id)).unwrap();
+        assert_eq!(
+            trust.verify_addendum(&id, &wire_added(&signed), now()),
+            Ok(signed.clone())
+        );
+        assert_eq!(
+            trust.verify_addendum(&TaskId([0x63; 16]), &wire_added(&signed), now()),
+            Err(VerifyClass::Task)
+        );
+        let mut forged = signed.clone();
+        let mut sig = forged.signature.sig.0.to_vec();
+        sig[0] ^= 1;
+        forged.signature.sig = Bytes::new(Zeroizing::new(sig));
+        assert_eq!(
+            trust.verify_addendum(&id, &wire_added(&forged), now()),
+            Err(VerifyClass::Signature)
+        );
+        let other = TestCa::new(PlaneKey::MlDsa87);
+        let foreign = maknae_vault::task_sig::sign_addendum(
+            &other.kernel(PlaneKey::MlDsa87, None),
+            addendum(id),
+        )
+        .unwrap();
+        assert_eq!(
+            trust.verify_addendum(&id, &wire_added(&foreign), now()),
+            Err(VerifyClass::NotKernel)
+        );
+        assert_eq!(
+            trust.verify_addendum(
+                &id,
+                &wire_added(&signed),
+                Err("the system clock reads before 1970".into())
+            ),
+            Err(VerifyClass::NotKernel)
+        );
+        for junk in [
+            vec![],
+            vec![0xff; 9],
+            wire(&maknae_vault::task_sig::sign_task(&kernel, task("hobi")).unwrap())
+                .0
+                .to_vec(),
+        ] {
+            assert_eq!(
+                trust.verify_addendum(&id, &Bytes::new(Zeroizing::new(junk)), now()),
+                Err(VerifyClass::Encoding)
+            );
+        }
+    }
+
     struct Home(PathBuf);
     impl Drop for Home {
         fn drop(&mut self) {

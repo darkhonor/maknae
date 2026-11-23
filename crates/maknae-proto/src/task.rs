@@ -1576,7 +1576,7 @@ mod tests {
                 task: task_ref(),
                 text: secret(text),
                 bindings: vec![git_ref(FORGE, "o/r", Some(7))],
-                forge_tokens: crate::ForgeTokens::new(crate::sealed::widest_forge_tokens(2))
+                forge_tokens: crate::ForgeTokens::new(crate::testutil::widest_forge_tokens(2))
                     .unwrap(),
             },
             Verb::TaskStatus { task: task_ref() },
@@ -1766,9 +1766,10 @@ mod tests {
         task.agent = "a".repeat(32);
         task.ask = prompt(&"p".repeat(prompt_max));
         task.bindings = requests_at(TASK_BINDINGS_MAX, TASK_BINDING_REQUESTS_MAX_BYTES);
-        let tokens =
-            crate::ForgeTokens::new(crate::sealed::widest_forge_tokens(crate::FORGE_TOKENS_MAX))
-                .unwrap();
+        let tokens = crate::ForgeTokens::new(crate::testutil::widest_forge_tokens(
+            crate::FORGE_TOKENS_MAX,
+        ))
+        .unwrap();
         let submit = |forge_tokens| crate::Verb::TaskSubmit {
             task: task.clone(),
             forge_tokens,

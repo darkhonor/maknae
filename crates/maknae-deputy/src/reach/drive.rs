@@ -326,9 +326,9 @@ fn refusal_name(r: ReachRefusal) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::admit::tests::{app_frame, bounds, file, tasker_frame, MINTING};
     use super::*;
     use crate::mint::signer::FakeSigner;
+    use crate::reach::testutil::{app_frame, bounds, file, tasker_frame, MINTING};
     use crate::unseal::{ForgeOpenRequest, OpenFailure};
     use maknae_config::{EgressBounds, MintingFile};
     use maknae_proto::ForgeOp;

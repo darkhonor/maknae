@@ -433,6 +433,9 @@ files = [
   "crates/maknae-forge/src/lib.rs",
   "crates/maknae-forge/src/github.rs",
   "crates/maknae-forge/src/gitlab.rs",
+  # #168: GitHub's reach observers. A wrong arm reports a repository, a head or an operation the credential does not reach, or reads a suspended or foreign installation as live.
+  "crates/maknae-forge/src/github/tasker.rs",
+  "crates/maknae-forge/src/github/agent.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
@@ -770,6 +773,18 @@ why = "#168: module declarations only; the GitHub client is mint/github.rs (T2),
 [[t3]]
 path = "crates/maknae-deputy/src/reach/mod.rs"
 why = "#168: module declarations only; reach admission is reach/admit.rs and reach/open.rs (T1), the driver reach/drive.rs (T2)"
+
+[[t3]]
+path = "crates/maknae-deputy/src/reach/testutil.rs"
+why = "#168: test-only fixtures (the minting.yaml text, reach frames and egress bounds) shared by admit.rs's and drive.rs's test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in reach/mod.rs, so it has no production regions"
+
+[[t3]]
+path = "crates/maknae-forge/src/observe.rs"
+why = "#168: the observer seam's types and traits only (HttpReply, Auth, Step, Observer, ForgeReach); no executable region, so it cannot be T1-measured. The observers that implement it are github/tasker.rs and github/agent.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-proto/src/testutil.rs"
+why = "#168: test-only fixture (the widest forge-token list) shared by sealed.rs's and task.rs's test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in lib.rs, so it has no production regions"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"

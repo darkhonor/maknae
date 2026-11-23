@@ -69,9 +69,7 @@ where
         key_field: parts.key_field,
     })
     .map_err(|e| sealing(&e))?;
-    let blob = maknae_seal::seal(seal_key, &aad, wrapped.token.expose().as_bytes())
-        .map_err(|e| sealing(&e))?;
-    let sealed_key = SealedKey::new(blob.into_bytes()).map_err(|e| sealing(&e))?;
+    let sealed_key = seal_wrapped(seal_key, &aad, &wrapped)?;
     Ok(ProviderChoice {
         provider: target.provider.to_string(),
         model: target.model.to_string(),
@@ -122,10 +120,19 @@ where
         key_field: FORGE_TOKEN_FIELD,
     })
     .map_err(|e| sealing(&e))?;
-    let blob = maknae_seal::seal(seal_key, &aad, wrapped.token.expose().as_bytes())
-        .map_err(|e| sealing(&e))?;
-    let sealed = SealedKey::new(blob.into_bytes()).map_err(|e| sealing(&e))?;
+    let sealed = seal_wrapped(seal_key, &aad, &wrapped)?;
     SealedForgeToken::new(target.server.to_owned(), nonce, sealed).map_err(|e| sealing(&e))
+}
+
+fn seal_wrapped(
+    seal_key: &SealPublicKey,
+    aad: &SealAad,
+    wrapped: &WrappedSecret,
+) -> Result<SealedKey, ChoiceFault> {
+    let sealing = |e: &dyn std::fmt::Display| ChoiceFault::Seal(e.to_string());
+    let blob = maknae_seal::seal(seal_key, aad, wrapped.token.expose().as_bytes())
+        .map_err(|e| sealing(&e))?;
+    SealedKey::new(blob.into_bytes()).map_err(|e| sealing(&e))
 }
 
 fn forge_nonce() -> Result<String, String> {
@@ -358,6 +365,53 @@ mod tests {
             .await;
             assert!(matches!(got, Err(ChoiceFault::Unusable)), "{server}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_vault_failure_reading_a_forge_token_is_a_read_fault() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let target = ForgeTokenTarget {
+            kv_mount: KV,
+            user_prefix: "maknae/users",
+            username: "alice",
+            server: "github.com",
+        };
+        let got = sealed_forge_token(&target, recipient.public_key(), |_| async {
+            Err(VaultError::VaultStatus {
+                op: "read",
+                status: 403,
+                hint: "",
+            })
+        })
+        .await;
+        assert!(
+            matches!(
+                got,
+                Err(ChoiceFault::Read(VaultError::VaultStatus {
+                    status: 403,
+                    ..
+                }))
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forge_token_under_an_unusable_kv_mount_is_never_read() {
+        maknae_crypto::init().unwrap();
+        let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
+        let target = ForgeTokenTarget {
+            kv_mount: "",
+            user_prefix: "maknae/users",
+            username: "alice",
+            server: "github.com",
+        };
+        let got = sealed_forge_token(&target, recipient.public_key(), |_| async {
+            panic!("read under an empty mount")
+        })
+        .await;
+        assert!(matches!(got, Err(ChoiceFault::Unusable)), "{got:?}");
     }
 
     #[tokio::test]
