@@ -380,8 +380,43 @@ impl BoardStore {
         }
     }
 
+    /// Moves `reader`'s cursor to `to` for an acknowledgement, checked again under the
+    /// writer as `plan_read` checked it: `to` is a post on the board, sent to `reader`, above
+    /// its cursor and not past retention. Otherwise nothing moves and the cursor is returned.
+    pub fn acknowledge(
+        &self,
+        key: BoardKey,
+        reader: &AgentId,
+        to: u64,
+    ) -> Result<u64, BoardRefusal> {
+        let _w = self.writing();
+        let (cursor, still) = {
+            let held = self.held();
+            let now = self.now();
+            let board = held.boards.get(&key);
+            let cursor = board
+                .and_then(|b| b.cursors.get(reader))
+                .copied()
+                .unwrap_or(0);
+            let still = board.is_some_and(|b| {
+                b.posts.get(&to).is_some_and(|s| !expired(s, now))
+                    && b.sent.get(reader).is_some_and(|sent| sent.contains(&to))
+            });
+            (cursor, still && to > cursor)
+        };
+        if !still {
+            return Ok(cursor);
+        }
+        self.move_cursor(key, reader, to)
+    }
+
     pub fn advance(&self, key: BoardKey, reader: &AgentId, to: u64) -> Result<u64, BoardRefusal> {
         let _w = self.writing();
+        self.move_cursor(key, reader, to)
+    }
+
+    /// Writes `reader`'s cursor `to`, never backwards; the caller holds the writer.
+    fn move_cursor(&self, key: BoardKey, reader: &AgentId, to: u64) -> Result<u64, BoardRefusal> {
         let (cursor, next_seq) = {
             let held = self.held();
             let board = held.boards.get(&key);
@@ -2369,6 +2404,41 @@ mod tests {
             young.post.at_secs,
             T0 + RETAIN,
             "a post is stamped with the store's now"
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_is_checked_again_when_it_is_written() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = clocked(&b);
+        let p = by(&store, BOB, hobi(), Some(2001), "sentinel-695-p");
+        let r = reader("rm");
+        store.sent(BOB, &r, &[p.seq]);
+        let to = store.plan_read(BOB, &r, Some(p.post.id)).ack_to.unwrap();
+        clock.set(T0 + RETAIN);
+        assert_eq!(
+            store.acknowledge(BOB, &r, to),
+            Ok(0),
+            "expired since it was planned"
+        );
+        assert!(!b.has("cursor.1000.rm"));
+        let (store, _) = clocked(&b);
+        let q = by(&store, BOB, hobi(), Some(2001), "sentinel-695-q");
+        store.sent(BOB, &r, &[q.seq]);
+        let to = store.plan_read(BOB, &r, Some(q.post.id)).ack_to.unwrap();
+        store.mark(&enrolled(&[]));
+        assert_eq!(store.acknowledge(BOB, &r, to), Ok(0), "no longer sent");
+        store.sent(BOB, &r, &[q.seq]);
+        assert_eq!(
+            store.acknowledge(BOB, &r, q.seq + 1),
+            Ok(0),
+            "not a post on the board"
+        );
+        assert_eq!(store.acknowledge(BOB, &r, q.seq), Ok(q.seq));
+        assert_eq!(
+            store.acknowledge(BOB, &r, q.seq),
+            Ok(q.seq),
+            "not above the cursor"
         );
     }
 

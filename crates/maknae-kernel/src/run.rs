@@ -3814,13 +3814,13 @@ async fn serve_board_verb<S, E, P>(
         if !trail.record_bounded(&intent).await {
             return;
         }
-        let advance = |to: u64| {
+        let acknowledge = |to: u64| {
             let (s, a) = (Arc::clone(store), agent.clone());
-            bv::offload(trail.uid, deadline(), move || s.advance(key, &a, to))
+            bv::offload(trail.uid, deadline(), move || s.acknowledge(key, &a, to))
         };
         let mut cursor = plan.cursor;
         if let Some(to) = plan.ack_to {
-            match advance(to).await {
+            match acknowledge(to).await {
                 Ok(moved) => cursor = moved,
                 Err(r) => {
                     let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
