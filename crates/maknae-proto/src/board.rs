@@ -252,12 +252,6 @@ impl PostDraft {
                 return Err("board post addresses an agent more than once".into());
             }
         }
-        if self.attachments.len() > BOARD_ATTACHMENTS_MAX {
-            return Err(format!(
-                "board post has {} attachments, over {BOARD_ATTACHMENTS_MAX}",
-                self.attachments.len()
-            ));
-        }
         for a in &self.attachments {
             if a.label.is_empty() || a.label.len() > BOARD_LABEL_MAX_BYTES {
                 return Err(format!(
@@ -389,7 +383,6 @@ impl std::io::Write for Counter {
 pub fn post_content_bytes(
     draft: &PostDraft,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtoCodecError> {
-    use std::io::Write;
     let content = (&draft.body, &draft.attachments);
     let mut counter = Counter(0);
     ciborium::into_writer(&content, &mut counter)
@@ -397,9 +390,6 @@ pub fn post_content_bytes(
     let mut buf = zeroize::Zeroizing::new(vec![0; counter.0]);
     let mut writer = std::io::Cursor::new(buf.as_mut_slice());
     ciborium::into_writer(&content, &mut writer)
-        .map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
-    writer
-        .flush()
         .map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
     Ok(buf)
 }
@@ -577,6 +567,78 @@ mod tests {
         assert_eq!(bounded_agents(unsized_seq(8)).unwrap(), names[..8]);
         let err = bounded_agents(unsized_seq(10)).unwrap_err().to_string();
         assert!(err.contains("addresses 10 agents"), "{err}");
+    }
+
+    #[test]
+    fn a_post_id_text_error_and_each_kind_name_themselves() {
+        assert_eq!(
+            PostIdTextError.to_string(),
+            "a post id is 32 lowercase hex digits"
+        );
+        for (kind, name) in [
+            (PostKind::Note, "note"),
+            (PostKind::Question, "question"),
+            (PostKind::Answer, "answer"),
+            (PostKind::Intent, "intent"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn a_bounded_sequence_refuses_what_is_not_one_and_any_entry_it_cannot_decode() {
+        let mut d = draft();
+        d.to = Addressee::Agents(vec!["a".into()]);
+        let mut v = ciborium::Value::serialized(&d).unwrap();
+        let ciborium::Value::Map(entries) = &mut v else {
+            panic!("not a map");
+        };
+        let to = entries
+            .iter_mut()
+            .find(|(k, _)| k.as_text() == Some("to"))
+            .map(|(_, v)| v)
+            .unwrap();
+        *to = ciborium::Value::Map(vec![(
+            ciborium::Value::Text("Agents".into()),
+            ciborium::Value::Integer(7.into()),
+        )]);
+        let err = dec::<PostDraft>(&enc(&v)).unwrap_err();
+        assert!(
+            err.contains("invalid type: integer `7`, expected array"),
+            "{err}"
+        );
+        use serde::de::IntoDeserializer;
+        let err =
+            bounded_agents(IntoDeserializer::<serde::de::value::Error>::into_deserializer(7u32))
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            err,
+            "invalid type: integer `7`, expected a sequence of at most 8 entries"
+        );
+        let err = dec::<PostDraft>(&with_extra(
+            &PostDraft {
+                attachments: Vec::new(),
+                ..draft()
+            },
+            &["attachments"],
+            ciborium::Value::Integer(7.into()),
+        ))
+        .unwrap_err();
+        assert!(err.contains("invalid type: integer `7`"), "{err}");
+        let mut indefinite = vec![0x9f];
+        for i in 0..8u8 {
+            indefinite.extend([0x62, b'a', b'0' + i]);
+        }
+        indefinite.extend([0x63, b'z']);
+        #[derive(Debug, Deserialize)]
+        #[serde(transparent)]
+        struct Agents(#[serde(deserialize_with = "bounded_agents")] Vec<String>);
+        let err = dec::<Agents>(&indefinite).map(|a| a.0).unwrap_err();
+        assert!(
+            !err.contains("agents"),
+            "a truncated ninth entry fails to read: {err}"
+        );
     }
 
     #[test]
