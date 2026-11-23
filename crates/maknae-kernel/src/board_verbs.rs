@@ -1083,6 +1083,15 @@ mod tests {
     }
 
     #[test]
+    fn a_posts_size_is_its_encoded_length() {
+        let post = stored(1, None, PostLabels::default());
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&post.post, &mut encoded).unwrap();
+        assert!(encoded.len() > 1);
+        assert_eq!(post_size(&post), encoded.len());
+    }
+
+    #[test]
     fn more_is_set_only_by_a_permitted_post_left_out() {
         let page = BOARD_READ_PAGE_POSTS as u64;
         let mut full = Walker::new(BIG);
