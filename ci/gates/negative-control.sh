@@ -1249,6 +1249,8 @@ pub struct ReleaseOutcome {
 pub struct ReleasePage {
     pub outcomes: Vec<ReleaseOutcome>,
     pub next: Option<TaskCursor>,
+    pub posts_released: u32,
+    pub posts_held: u32,
 }
 
 pub enum AgentStanding {
