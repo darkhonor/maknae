@@ -1016,8 +1016,24 @@ mod tests {
                 AttrValue::List(vec!["test".into(), "a b".into(), String::new()]),
             );
             resource.insert("binding.kinds", AttrValue::Set(Default::default()));
+            resource.insert("tool.mode", s("positional"));
             assert_eq!(got.resource.0, resource);
         }
+        let shaped = ToolCall {
+            shape: Some("pr.view".into()),
+            ..call
+        };
+        let got = build_tool_request(
+            &Stamp::Client,
+            2001,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &shaped,
+            None,
+        );
+        assert_eq!(got.resource.0.str("tool.mode"), Some("shape"));
+        assert_eq!(got.resource.0.str("tool.shape"), Some("pr.view"));
     }
 
     fn git(
@@ -1095,6 +1111,7 @@ mod tests {
         want.insert("tool.program", AttrValue::Str("gh".into()));
         want.insert("tool.argv", AttrValue::List(vec!["pr".into()]));
         want.insert("binding.kinds", AttrValue::Set(Default::default()));
+        want.insert("tool.mode", AttrValue::Str("positional".into()));
         for cited in [None, Some(&unbound)] {
             let got = build_tool_request(
                 &Stamp::Client,

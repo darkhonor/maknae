@@ -477,6 +477,22 @@ pub(crate) fn build_tool_request(
         maknae_security::RESOURCE_BINDING_KINDS,
         AttrValue::Set(Default::default()),
     );
+    match &call.shape {
+        Some(shape) => {
+            resource.insert(
+                maknae_security::RESOURCE_TOOL_MODE,
+                AttrValue::Str(maknae_security::TOOL_MODE_SHAPE.into()),
+            );
+            resource.insert(
+                maknae_security::RESOURCE_TOOL_SHAPE,
+                AttrValue::Str(shape.clone()),
+            );
+        }
+        None => resource.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_POSITIONAL.into()),
+        ),
+    }
     if let Some(cited) = cited {
         crate::handler::stamp_task_bindings(&mut resource, cited);
     }

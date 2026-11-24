@@ -153,6 +153,20 @@ pub const RESOURCE_CLASSIFICATION: &str = "classification";
 pub const RESOURCE_TOOL_ENTRY: &str = "tool.entry";
 pub const RESOURCE_TOOL_PROGRAM: &str = "tool.program";
 pub const RESOURCE_TOOL_ARGV: &str = "tool.argv";
+pub const RESOURCE_TOOL_MODE: &str = "tool.mode";
+pub const TOOL_MODE_SHAPE: &str = "shape";
+pub const TOOL_MODE_OPEN: &str = "open";
+pub const TOOL_MODE_POSITIONAL: &str = "positional";
+pub const RESOURCE_TOOL_SHAPE: &str = "tool.shape";
+pub const RESOURCE_TOOL_CLASS: &str = "tool.class";
+pub const RESOURCE_TOOL_STDIN_SHA256: &str = "tool.stdin.sha256";
+pub const RESOURCE_TOOL_FILES_SHA256: &str = "tool.files.sha256";
+pub const RESOURCE_TOOL_FORGE_BASE: &str = "tool.forge.base";
+pub const RESOURCE_TOOL_FORGE_HEAD: &str = "tool.forge.head";
+pub const RESOURCE_TOOL_BINDING: &str = "tool.binding";
+pub const RESOURCE_TOOL_LABELS: &str = "tool.labels";
+pub const RESOURCE_REACH_GIT_BASE: &str = "reach.git.base";
+pub const RESOURCE_REACH_GIT_HEAD: &str = "reach.git.head";
 pub const RESOURCE_BINDING_KINDS: &str = "binding.kinds";
 pub const ENTRY_LABEL_PREFIX: &str = "entry.";
 
@@ -323,6 +337,50 @@ mod tests {
         assert_eq!(SUBJECT_TASK, "task");
         assert_eq!(SUBJECT_TASKER, "tasker");
         assert_eq!(RESOURCE_AGENT, "agent");
+    }
+
+    #[test]
+    fn the_tool_fact_spellings_are_pinned() {
+        assert_eq!(
+            [
+                RESOURCE_TOOL_ENTRY,
+                RESOURCE_TOOL_PROGRAM,
+                RESOURCE_TOOL_ARGV,
+                RESOURCE_TOOL_MODE,
+                RESOURCE_TOOL_SHAPE,
+                RESOURCE_TOOL_CLASS,
+                RESOURCE_TOOL_STDIN_SHA256,
+                RESOURCE_TOOL_FILES_SHA256,
+                RESOURCE_TOOL_FORGE_BASE,
+                RESOURCE_TOOL_FORGE_HEAD,
+                RESOURCE_TOOL_BINDING,
+                RESOURCE_TOOL_LABELS,
+                RESOURCE_REACH_GIT_BASE,
+                RESOURCE_REACH_GIT_HEAD,
+                RESOURCE_BINDING_KINDS,
+            ],
+            [
+                "tool.entry",
+                "tool.program",
+                "tool.argv",
+                "tool.mode",
+                "tool.shape",
+                "tool.class",
+                "tool.stdin.sha256",
+                "tool.files.sha256",
+                "tool.forge.base",
+                "tool.forge.head",
+                "tool.binding",
+                "tool.labels",
+                "reach.git.base",
+                "reach.git.head",
+                "binding.kinds",
+            ]
+        );
+        assert_eq!(
+            [TOOL_MODE_SHAPE, TOOL_MODE_OPEN, TOOL_MODE_POSITIONAL],
+            ["shape", "open", "positional"]
+        );
     }
 
     use crate::value::{AttrValue, Attributes};

@@ -3164,6 +3164,10 @@ mod tests {
             maknae_security::RESOURCE_BINDING_KINDS,
             AttrValue::Set(Default::default()),
         );
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_POSITIONAL.into()),
+        );
         maknae_security::Request {
             subject: Subject(subject),
             resource: Resource(resource),

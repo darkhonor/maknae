@@ -1622,22 +1622,49 @@ fn tool_ceiling_refusal(lp: &LoadedPolicy, req: &SecRequest, uid: u32) -> Option
     tool_ceiling(lp, req, uid).err()
 }
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Shape,
+    Open,
+    Positional,
+}
+
+impl Mode {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            maknae_security::TOOL_MODE_SHAPE => Some(Mode::Shape),
+            maknae_security::TOOL_MODE_OPEN => Some(Mode::Open),
+            maknae_security::TOOL_MODE_POSITIONAL => Some(Mode::Positional),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Shape => maknae_security::TOOL_MODE_SHAPE,
+            Mode::Open => maknae_security::TOOL_MODE_OPEN,
+            Mode::Positional => maknae_security::TOOL_MODE_POSITIONAL,
+        }
+    }
+}
+
 fn tool_ceiling(
     lp: &LoadedPolicy,
     req: &SecRequest,
     uid: u32,
 ) -> Result<maknae_config::ToolCall, Decision> {
     use maknae_security::{
-        RESOURCE_BINDING_KINDS, RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY, RESOURCE_TOOL_PROGRAM,
-        SUBJECT_TASK,
+        RESOURCE_BINDING_KINDS, RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY, RESOURCE_TOOL_MODE,
+        RESOURCE_TOOL_PROGRAM, RESOURCE_TOOL_SHAPE, SUBJECT_TASK,
     };
     let undecidable = || Err((Verdict::Indeterminate, None));
     let deny = |reason: &str| Err(refused(reason));
     let attrs = &req.resource.0;
-    let (Some(name), Some(program), Some(argv)) = (
+    let (Some(name), Some(program), Some(argv), Some(mode)) = (
         attrs.str(RESOURCE_TOOL_ENTRY),
         attrs.str(RESOURCE_TOOL_PROGRAM),
         attrs.list(RESOURCE_TOOL_ARGV),
+        attrs.str(RESOURCE_TOOL_MODE).and_then(Mode::parse),
     ) else {
         return undecidable();
     };
@@ -1689,18 +1716,53 @@ fn tool_ceiling(
     let Some(command) = entry.commands.get(program) else {
         return deny(&format!("tool: program not in entry {name}"));
     };
-    let positional = match &command.form {
-        maknae_config::CommandForm::Positional(patterns) => patterns,
-        maknae_config::CommandForm::Grammar { .. } | maknae_config::CommandForm::Open => {
+    use maknae_config::CommandForm;
+    let mut shape = None;
+    match (mode, &command.form) {
+        (Mode::Positional, CommandForm::Positional(patterns)) => {
+            if !patterns.iter().any(|p| p.matches_any(argv, &bound)) {
+                return deny(&format!(
+                    "tool: arguments outside entry {name}'s subcommands"
+                ));
+            }
+        }
+        (Mode::Shape, CommandForm::Grammar { shapes, .. }) => {
+            let Some(requested) = attrs.str(RESOURCE_TOOL_SHAPE) else {
+                return undecidable();
+            };
+            let Some(template) = shapes.get(requested) else {
+                return deny(&format!(
+                    "tool: shape {requested} is not enabled for {name}/{program}"
+                ));
+            };
+            let empty = maknae_config::Bound::empty();
+            let selected = match bound.as_slice() {
+                [] => &empty,
+                [one] => one,
+                [_, _, ..] => return deny("tool: a shape call carries more than one binding"),
+            };
+            if !template.matches_argv(argv, selected) {
+                return deny(&format!(
+                    "tool: arguments are not shape {requested}'s template"
+                ));
+            }
+            shape = Some(requested.to_string());
+        }
+        (Mode::Open, CommandForm::Open) => {
+            if maknae_config::check_open_argv(argv).is_err() {
+                return deny(&format!(
+                    "tool: open arguments refused for {name}/{program}"
+                ));
+            }
+        }
+        (Mode::Positional | Mode::Open, CommandForm::Grammar { .. })
+        | (Mode::Shape | Mode::Open, CommandForm::Positional(_))
+        | (Mode::Shape | Mode::Positional, CommandForm::Open) => {
             return deny(&format!(
-                "tool: {name}/{program} is not a positional command"
+                "tool: {name}/{program} is not a {} command",
+                mode.as_str()
             ))
         }
-    };
-    if !positional.iter().any(|p| p.matches_any(argv, &bound)) {
-        return deny(&format!(
-            "tool: arguments outside entry {name}'s subcommands"
-        ));
     }
     if let Some(n) = maknae_config::first_denied(&command.deny_args, argv) {
         return deny(&format!("tool: denied argument {n} for {name}/{program}"));
@@ -1724,7 +1786,7 @@ fn tool_ceiling(
         program: program.to_string(),
         argv: argv.to_vec(),
         bound,
-        shape: None,
+        shape,
     })
 }
 
@@ -6292,6 +6354,10 @@ mod tests {
             maknae_security::RESOURCE_BINDING_KINDS,
             AttrValue::Set(Default::default()),
         );
+        res.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_POSITIONAL.into()),
+        );
         r
     }
 
@@ -6482,34 +6548,391 @@ mod tests {
         }
     }
 
-    #[test]
-    fn grammar_and_open_commands_are_never_matched_positionally() {
+    const GH_V1: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view, \"{git.change}\", -R, \"{git.base}\"]\n  issue.view:\n    description: View.\n    class: read\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"[1-9][0-9]{0,9}\", description: n }\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n";
+    const GH_V2: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view, \"{git.change}\", --repo, \"{git.base}\"]\n  issue.view:\n    description: View.\n    class: read\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"[1-9][0-9]{0,9}\", description: n }\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n";
+    const FORMS_TOOLS: &str = "schema_version: 1\ntools:\n  sentinel-674-open:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      sh: { open: true, deny_args: [\"--exec*\"] }\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    binds: { git: { resolver: git } }\n    commands:\n      gh: { grammar: gh, shapes: [pr.view, issue.view], deny_args: [\"--web*\"] }\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo:\n        subcommands: [\"build *\"]\n        deny_args: [\"--config*\"]\n";
+    const FORMS_ALLOW: &str = "permissions:\n  allow: [\"Tool(sentinel-674-open sh -c *)\", \"Tool(sentinel-674-shape gh:*)\", \"Tool(sentinel-674-build cargo build *)\"]\n";
+
+    fn forms_catalog(grammar: &str) -> std::sync::Arc<maknae_config::ToolsCatalog> {
         let mut grammars = maknae_config::GrammarSet::empty();
         grammars.grammars.insert(
             "gh".into(),
-            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+            maknae_config::Grammar::parse("gh", grammar).unwrap(),
         );
-        let tools = "schema_version: 1\ntools:\n  sentinel-674-open:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      sh: { open: true }\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n";
-        let mut lp = lp_tool(
-            "permissions:\n  allow: [\"Tool(sentinel-674-open sh -c *)\", \"Tool(sentinel-674-shape gh pr *)\"]\n",
-            &["user"],
-            &[],
+        let tools = maknae_config::ToolsCatalog::parse_with(FORMS_TOOLS, &grammars).unwrap();
+        assert!(tools.disabled().is_empty(), "{:?}", tools.disabled());
+        std::sync::Arc::new(tools)
+    }
+
+    fn lp_forms(allow: &str) -> LoadedPolicy {
+        let mut lp = lp_tool(allow, &["user"], &[]);
+        lp.tools = forms_catalog(GH_V1);
+        lp
+    }
+
+    fn with_mode(mut r: SecRequest, mode: &str) -> SecRequest {
+        r.resource.0.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(mode.into()),
         );
-        lp.tools =
-            std::sync::Arc::new(maknae_config::ToolsCatalog::parse_with(tools, &grammars).unwrap());
-        assert!(lp.tools.disabled().is_empty(), "{:?}", lp.tools.disabled());
-        for (entry, program, argv) in [
-            ("sentinel-674-open", "sh", &["-c", "x"][..]),
-            ("sentinel-674-shape", "gh", &["pr", "view"]),
+        r
+    }
+
+    fn shape_call(shape: &str, argv: &[&str], bindings: &[(&str, Option<u64>)]) -> SecRequest {
+        let mut r = with_mode(
+            tool_req(TOOL_USER, "sentinel-674-shape", "gh", argv),
+            maknae_security::TOOL_MODE_SHAPE,
+        );
+        r.resource.0.insert(
+            maknae_security::RESOURCE_TOOL_SHAPE,
+            AttrValue::Str(shape.into()),
+        );
+        stamp_bound(&mut r, bindings);
+        r
+    }
+
+    fn open_call(argv: &[&str]) -> SecRequest {
+        with_mode(
+            tool_req(TOOL_USER, "sentinel-674-open", "sh", argv),
+            maknae_security::TOOL_MODE_OPEN,
+        )
+    }
+
+    const ONE: [(&str, Option<u64>); 1] = [("o/a", Some(7))];
+
+    fn drop_fact(r: &mut SecRequest, key: &str) {
+        let mut kept = Attributes::new();
+        let bound = maknae_security::GIT_BOUND_FIELDS.map(|f| maknae_security::bound_key("git", f));
+        for k in [
+            maknae_security::RESOURCE_TOOL_ENTRY,
+            maknae_security::RESOURCE_TOOL_PROGRAM,
+            maknae_security::RESOURCE_TOOL_ARGV,
+            maknae_security::RESOURCE_TOOL_MODE,
+            maknae_security::RESOURCE_TOOL_SHAPE,
+            maknae_security::RESOURCE_BINDING_KINDS,
+        ]
+        .into_iter()
+        .chain(bound.iter().map(String::as_str))
+        {
+            if let (true, Some(v)) = (k != key, r.resource.0.get(k)) {
+                kept.insert(k, v.clone());
+            }
+        }
+        r.resource.0 = kept;
+    }
+
+    #[test]
+    fn ceiling_denies_mode_form_mismatch() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let shape_on_open = with_mode(
+            tool_req(TOOL_USER, "sentinel-674-open", "sh", &["-c", "x"]),
+            maknae_security::TOOL_MODE_SHAPE,
+        );
+        let mut open_on_shape = shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE);
+        open_on_shape.resource.0.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_OPEN.into()),
+        );
+        let open_on_positional = with_mode(
+            build(TOOL_USER, &["build"]),
+            maknae_security::TOOL_MODE_OPEN,
+        );
+        let positional_on_grammar = with_mode(
+            shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE),
+            maknae_security::TOOL_MODE_POSITIONAL,
+        );
+        let positional_on_open = tool_req(TOOL_USER, "sentinel-674-open", "sh", &["-c", "x"]);
+        let shape_on_positional = with_mode(
+            build(TOOL_USER, &["build"]),
+            maknae_security::TOOL_MODE_SHAPE,
+        );
+        for (r, entry, program, mode) in [
+            (shape_on_open, "sentinel-674-open", "sh", "shape"),
+            (open_on_shape, "sentinel-674-shape", "gh", "open"),
+            (open_on_positional, "sentinel-674-build", "cargo", "open"),
+            (
+                positional_on_grammar,
+                "sentinel-674-shape",
+                "gh",
+                "positional",
+            ),
+            (positional_on_open, "sentinel-674-open", "sh", "positional"),
+            (shape_on_positional, "sentinel-674-build", "cargo", "shape"),
         ] {
+            let d = tool_decided(&lp, &r);
             assert_eq!(
-                tool_decided(&lp, &tool_req(TOOL_USER, entry, program, argv)).verdict,
-                deny(&format!(
-                    "tool: {entry}/{program} is not a positional command"
-                )),
-                "{entry}"
+                (d.verdict, d.cited),
+                (
+                    deny(&format!("tool: {entry}/{program} is not a {mode} command")),
+                    None
+                ),
+                "{entry} {mode}"
             );
         }
+    }
+
+    #[test]
+    fn ceiling_denies_shape_not_enabled() {
+        let lp = lp_forms(FORMS_ALLOW);
+        for shape in ["issue.list", "pr.close", "pr"] {
+            assert_eq!(
+                tool_decided(&lp, &shape_call(shape, &["issue", "list"], &ONE)).verdict,
+                deny(&format!(
+                    "tool: shape {shape} is not enabled for sentinel-674-shape/gh"
+                )),
+                "{shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_permits_open_call_on_open_command() {
+        let lp = lp_forms(FORMS_ALLOW);
+        for argv in [
+            &["-c", "echo hi; rm -rf x"][..],
+            &["-c"],
+            &["-c", "--", "a\tb"],
+        ] {
+            let d = tool_decided(&lp, &open_call(argv));
+            assert_eq!(
+                (d.verdict, d.cited),
+                (
+                    permit_with_audit(),
+                    site_cite(Effect::Allow, "Tool(sentinel-674-open sh -c *)")
+                ),
+                "{argv:?}"
+            );
+        }
+        let edge: Vec<String> = ["-c".to_string()]
+            .into_iter()
+            .chain((0..62).map(|i| i.to_string()))
+            .chain(["a".repeat(4096)])
+            .collect();
+        let edge: Vec<&str> = edge.iter().map(String::as_str).collect();
+        assert_eq!(
+            tool_decided(&lp, &open_call(&edge)).verdict,
+            permit_with_audit()
+        );
+        let none = lp_forms("permissions:\n  allow: [\"Tool(sentinel-674-open sh -e *)\"]\n");
+        assert_eq!(
+            tool_decided(&none, &open_call(&["-x"])).verdict,
+            no_tool_entry("user")
+        );
+    }
+
+    #[test]
+    fn ceiling_refuses_open_argv_failing_lexical_checks() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let refused = deny("tool: open arguments refused for sentinel-674-open/sh");
+        let long = "a".repeat(4097);
+        let many: Vec<String> = (0..65).map(|i| i.to_string()).collect();
+        for argv in [
+            vec!["-c".to_string(), "a\0b".to_string()],
+            vec!["x\u{7}".to_string()],
+            vec!["line\nbreak".to_string()],
+            vec![long],
+            many,
+        ] {
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            assert_eq!(
+                tool_decided(&lp, &open_call(&refs)).verdict,
+                refused,
+                "{}",
+                argv.len()
+            );
+        }
+    }
+
+    #[test]
+    fn deny_args_apply_to_rendered_argv_in_every_mode() {
+        let lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &open_call(&["-c", "--exec=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-open/sh")
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build", "--config=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-build/cargo")
+        );
+        let mut web = maknae_config::GrammarSet::empty();
+        web.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse(
+                "gh",
+                &GH_V1.replace(
+                    "argv: [pr, view, \"{git.change}\", -R, \"{git.base}\"]",
+                    "argv: [pr, view, \"{git.change}\", -R, \"{git.base}\", --web]",
+                ),
+            )
+            .unwrap(),
+        );
+        let mut lp = lp_forms(FORMS_ALLOW);
+        lp.tools = std::sync::Arc::new(
+            maknae_config::ToolsCatalog::parse_with(FORMS_TOOLS, &web).unwrap(),
+        );
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("pr.view", &["pr", "view", "7", "-R", "o/a", "--web"], &ONE)
+            )
+            .verdict,
+            deny("tool: denied argument 5 for sentinel-674-shape/gh")
+        );
+    }
+
+    #[test]
+    fn missing_mode_is_indeterminate() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let shape = shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE);
+        assert_eq!(tool_decided(&lp, &shape).verdict, permit_with_audit());
+        for value in [
+            None,
+            Some(AttrValue::Int(1)),
+            Some(AttrValue::Set(["shape".to_string()].into())),
+            Some(AttrValue::Str("Shape".into())),
+            Some(AttrValue::Str(String::new())),
+        ] {
+            for base in [
+                shape.clone(),
+                open_call(&["-c"]),
+                build(TOOL_USER, &["build"]),
+            ] {
+                let mut r = base;
+                match &value {
+                    None => drop_fact(&mut r, maknae_security::RESOURCE_TOOL_MODE),
+                    Some(v) => r
+                        .resource
+                        .0
+                        .insert(maknae_security::RESOURCE_TOOL_MODE, v.clone()),
+                };
+                undecidable(tool_decided(&lp, &r));
+            }
+        }
+        for value in [
+            None,
+            Some(AttrValue::Int(1)),
+            Some(AttrValue::List(vec!["pr.view".into()])),
+        ] {
+            let mut r = shape.clone();
+            match value {
+                None => drop_fact(&mut r, maknae_security::RESOURCE_TOOL_SHAPE),
+                Some(v) => r.resource.0.insert(maknae_security::RESOURCE_TOOL_SHAPE, v),
+            };
+            undecidable(tool_decided(&lp, &r));
+        }
+    }
+
+    #[test]
+    fn grant_matches_shape_call() {
+        let lp = lp_forms("permissions:\n  allow: [\"Tool(sentinel-674-shape gh:pr.*)\", \"Tool(sentinel-674-shape gh issue *)\"]\n  deny: [\"Tool(sentinel-674-shape gh:pr.diff)\"]\n");
+        let d = tool_decided(
+            &lp,
+            &shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE),
+        );
+        assert_eq!(
+            (d.verdict, d.cited),
+            (
+                permit_with_audit(),
+                site_cite(Effect::Allow, "Tool(sentinel-674-shape gh:pr.*)")
+            )
+        );
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("issue.view", &["issue", "view", "3"], &ONE)
+            )
+            .verdict,
+            no_tool_entry("user"),
+            "a positional pattern never grants a shape call"
+        );
+    }
+
+    #[test]
+    fn ceiling_denies_argv_not_from_the_shape_template() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let refused =
+            |shape: &str| deny(&format!("tool: arguments are not shape {shape}'s template"));
+        for (shape, argv) in [
+            ("pr.view", &["pr", "view", "8", "-R", "o/a"][..]),
+            ("pr.view", &["pr", "view", "7", "-R", "o/b"]),
+            ("pr.view", &["pr", "view", "7", "-R", "o/a", "--json"]),
+            ("pr.view", &["pr", "close", "7", "-R", "o/a"]),
+            ("pr.view", &["issue", "view", "3"]),
+            ("issue.view", &["issue", "view", "0"]),
+            ("issue.view", &["issue", "view", "3", "x"]),
+            ("issue.view", &["pr", "view", "7", "-R", "o/a"]),
+        ] {
+            assert_eq!(
+                tool_decided(&lp, &shape_call(shape, argv, &ONE)).verdict,
+                refused(shape),
+                "{shape} {argv:?}"
+            );
+        }
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("issue.view", &["issue", "view", "3"], &ONE)
+            )
+            .verdict,
+            permit_with_audit()
+        );
+        let mut unbound = shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &[]);
+        unbound.resource.0.insert(
+            maknae_security::RESOURCE_BINDING_KINDS,
+            AttrValue::Set(Default::default()),
+        );
+        assert_eq!(tool_decided(&lp, &unbound).verdict, refused("pr.view"));
+    }
+
+    #[test]
+    fn ceiling_denies_argv_rendered_from_an_older_template() {
+        let argv = ["pr", "view", "7", "-R", "o/a"];
+        let mut lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            permit_with_audit()
+        );
+        lp.tools = forms_catalog(GH_V2);
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            deny("tool: arguments are not shape pr.view's template")
+        );
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("pr.view", &["pr", "view", "7", "--repo", "o/a"], &ONE)
+            )
+            .verdict,
+            permit_with_audit()
+        );
+    }
+
+    #[test]
+    fn ceiling_denies_a_shape_call_with_two_bindings() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let two = [("o/a", Some(7)), ("o/b", Some(8))];
+        for argv in [
+            &["pr", "view", "7", "-R", "o/a"][..],
+            &["pr", "view", "8", "-R", "o/b"],
+        ] {
+            let d = tool_decided(&lp, &shape_call("pr.view", argv, &two));
+            assert_eq!(
+                (d.verdict, d.cited),
+                (
+                    deny("tool: a shape call carries more than one binding"),
+                    None
+                ),
+                "{argv:?}"
+            );
+        }
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("pr.view", &["pr", "view", "8", "-R", "o/b"], &two[1..])
+            )
+            .verdict,
+            permit_with_audit()
+        );
     }
 
     #[test]
@@ -6666,6 +7089,7 @@ mod tests {
             maknae_security::RESOURCE_TOOL_ENTRY,
             maknae_security::RESOURCE_TOOL_PROGRAM,
             maknae_security::RESOURCE_TOOL_ARGV,
+            maknae_security::RESOURCE_TOOL_MODE,
         ] {
             kept.insert(k, r.resource.0.get(k).unwrap().clone());
         }
@@ -6978,6 +7402,11 @@ mod tests {
                 maknae_security::RESOURCE_BINDING_KINDS,
                 AttrValue::List(vec![]),
             ),
+            (maknae_security::RESOURCE_TOOL_MODE, AttrValue::Int(0)),
+            (
+                maknae_security::RESOURCE_TOOL_MODE,
+                AttrValue::List(vec!["positional".into()]),
+            ),
         ] {
             let mut r = build(TOOL_USER, &["build"]);
             r.resource.0.insert(key, value.clone());
@@ -6995,6 +7424,7 @@ mod tests {
                 maknae_security::RESOURCE_TOOL_ENTRY,
                 maknae_security::RESOURCE_TOOL_PROGRAM,
                 maknae_security::RESOURCE_TOOL_ARGV,
+                maknae_security::RESOURCE_TOOL_MODE,
                 maknae_security::RESOURCE_BINDING_KINDS,
             ] {
                 if let (true, Some(v)) = (k != key, r.resource.0.get(k)) {
@@ -7008,6 +7438,7 @@ mod tests {
             maknae_security::RESOURCE_TOOL_ENTRY,
             maknae_security::RESOURCE_TOOL_PROGRAM,
             maknae_security::RESOURCE_TOOL_ARGV,
+            maknae_security::RESOURCE_TOOL_MODE,
         ] {
             assert_eq!(without(key), Verdict::Indeterminate, "{key}");
         }
