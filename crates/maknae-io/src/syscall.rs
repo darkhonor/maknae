@@ -307,6 +307,19 @@ pub(crate) fn fstatat_nofollow<F: AsFd, P: ?Sized + nix::NixPath>(
     nix::sys::stat::fstatat(dirfd, name, AtFlags::AT_SYMLINK_NOFOLLOW)
 }
 
+/// `readlinkat` on a single component of a pinned dirfd. The target is refused
+/// when it fills `PATH_MAX`, since the kernel may have truncated it.
+pub(crate) fn readlinkat_bounded<F: AsFd, P: ?Sized + nix::NixPath>(
+    dirfd: &F,
+    name: &P,
+) -> nix::Result<std::ffi::OsString> {
+    let target = nix::fcntl::readlinkat(dirfd, name)?;
+    if target.len() >= nix::libc::PATH_MAX as usize {
+        return Err(nix::errno::Errno::ENAMETOOLONG);
+    }
+    Ok(target)
+}
+
 /// Errno -> IoError for a *path-based* open (§4 row 0): no dirfd and no single
 /// component, so the ENOTDIR disambiguation cannot apply here.
 ///

@@ -138,6 +138,13 @@ pub struct Anchor {
     probed: Strategy,
 }
 
+/// A member of an enabled directory, by where its bytes came from.
+#[derive(Debug)]
+pub enum EnabledMember {
+    Local(Zeroizing<Vec<u8>>),
+    Vendor(Zeroizing<Vec<u8>>),
+}
+
 /// An [`Anchor::try_lock_exclusive`] lock; dropping it releases the lock.
 #[derive(Debug)]
 pub struct AnchorLock {
@@ -609,6 +616,57 @@ impl Anchor {
         })?;
 
         self.finish_read(fd, &full, lane, &target)
+    }
+
+    /// Read a member of an enabled directory: a regular file here, or a symlink whose
+    /// target text is exactly `vendor_path/name`, read through `vendor`.
+    ///
+    /// The link is never followed to be checked, and its target is compared as bytes
+    /// with no normalisation.
+    pub fn read_enabled_member(
+        &self,
+        name: &str,
+        vendor: &Anchor,
+        vendor_path: &Path,
+        target: TargetRequired,
+    ) -> Result<EnabledMember, IoError> {
+        let mut parts = Path::new(name).components();
+        match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(only)), None) if only == name => {}
+            _ => {
+                return Err(IoError::NotAMemberName {
+                    name: name.to_owned(),
+                })
+            }
+        }
+        let full = self.path.join(name);
+        let st = syscall::fstatat_nofollow(&self.fd, name)
+            .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+        match crate::dir::kind_of_mode(syscall::mode_bits(st.st_mode)) {
+            Kind::File => Ok(EnabledMember::Local(
+                self.read(Path::new(name), None, target)?.value,
+            )),
+            Kind::Symlink => {
+                use std::os::unix::ffi::OsStrExt;
+                let link = syscall::readlinkat_bounded(&self.fd, name)
+                    .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+                if link.as_bytes() != vendor_path.join(name).as_os_str().as_bytes() {
+                    return Err(IoError::LinkTargetMismatch {
+                        path: full,
+                        target: PathBuf::from(link),
+                    });
+                }
+                let vendor_target = TargetRequired {
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    ..target
+                };
+                Ok(EnabledMember::Vendor(
+                    vendor.read(Path::new(name), None, vendor_target)?.value,
+                ))
+            }
+            Kind::Dir | Kind::Other => Err(IoError::NotRegularOrLink { path: full }),
+        }
     }
 
     /// Enumerate a directory relative to the anchor, RAW.
@@ -3813,5 +3871,255 @@ mod tests {
         assert_eq!(std::fs::symlink_metadata(&status).unwrap().len(), 0);
         let got = read_kernel_attribute(&status, t_req(), 64 * 1024).unwrap();
         assert!(got.starts_with(b"Name:"));
+    }
+
+    struct Enabled {
+        _root: tempfile::TempDir,
+        etc: Anchor,
+        vendor: Anchor,
+        etc_path: PathBuf,
+        vendor_path: PathBuf,
+    }
+
+    fn enabled(pref: StrategyPref) -> Enabled {
+        let root = dir(0o750);
+        let etc_path = root.path().join("etc");
+        let vendor_path = root.path().join("vendor");
+        for p in [&etc_path, &vendor_path] {
+            std::fs::create_dir(p).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        let etc = open_anchor(&etc_path, none_req(), pref).unwrap();
+        let vendor = open_anchor(&vendor_path, none_req(), pref).unwrap();
+        Enabled {
+            _root: root,
+            etc,
+            vendor,
+            etc_path,
+            vendor_path,
+        }
+    }
+
+    fn member_req() -> TargetRequired {
+        TargetRequired {
+            owner: None,
+            mode_mask: Some(0o027),
+            nlink_exactly_one: true,
+            regular_file: true,
+            max_bytes: None,
+        }
+    }
+
+    fn put(dir: &Path, name: &str, body: &[u8], mode: u32) {
+        let f = dir.join(name);
+        std::fs::write(&f, body).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn read_member(e: &Enabled, name: &str) -> Result<EnabledMember, IoError> {
+        e.etc
+            .read_enabled_member(name, &e.vendor, &e.vendor_path, member_req())
+    }
+
+    const LANES: [StrategyPref; 2] = [StrategyPref::Auto, StrategyPref::ForcePortable];
+
+    #[test]
+    fn enabled_member_regular_file_is_local() {
+        for pref in LANES {
+            let e = enabled(pref);
+            put(&e.etc_path, "gh.yaml", b"local", 0o640);
+            match read_member(&e, "gh.yaml").unwrap() {
+                EnabledMember::Local(b) => assert_eq!(b.as_slice(), b"local"),
+                other => panic!("expected Local, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_member_exact_vendor_link_is_vendor() {
+        for pref in LANES {
+            let e = enabled(pref);
+            put(&e.vendor_path, "gh.yaml", b"vendor", 0o644);
+            symlink(e.vendor_path.join("gh.yaml"), e.etc_path.join("gh.yaml")).unwrap();
+            match read_member(&e, "gh.yaml").unwrap() {
+                EnabledMember::Vendor(b) => assert_eq!(b.as_slice(), b"vendor"),
+                other => panic!("expected Vendor, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_member_vendor_file_may_be_hard_linked() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.vendor_path, "gh.yaml", b"vendor", 0o644);
+        std::fs::hard_link(
+            e.vendor_path.join("gh.yaml"),
+            e.vendor_path.join("other.yaml"),
+        )
+        .unwrap();
+        symlink(e.vendor_path.join("gh.yaml"), e.etc_path.join("gh.yaml")).unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Ok(EnabledMember::Vendor(_))
+        ));
+    }
+
+    #[test]
+    fn enabled_member_relative_link_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.vendor_path, "gh.yaml", b"vendor", 0o644);
+        symlink("../vendor/gh.yaml", e.etc_path.join("gh.yaml")).unwrap();
+        match read_member(&e, "gh.yaml").unwrap_err() {
+            IoError::LinkTargetMismatch { path, target } => {
+                assert_eq!(path, e.etc_path.join("gh.yaml"));
+                assert_eq!(target, PathBuf::from("../vendor/gh.yaml"));
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_member_link_elsewhere_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.etc_path, "real.yaml", b"x", 0o640);
+        symlink(e.etc_path.join("real.yaml"), e.etc_path.join("gh.yaml")).unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::LinkTargetMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_link_to_another_vendor_name_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.vendor_path, "kubectl.yaml", b"x", 0o644);
+        symlink(
+            e.vendor_path.join("kubectl.yaml"),
+            e.etc_path.join("gh.yaml"),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::LinkTargetMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_link_with_dotdot_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.vendor_path, "gh.yaml", b"vendor", 0o644);
+        let sneaky = e.vendor_path.join("sub/../gh.yaml");
+        symlink(&sneaky, e.etc_path.join("gh.yaml")).unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::LinkTargetMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_dangling_link_is_not_found() {
+        for pref in LANES {
+            let e = enabled(pref);
+            symlink(e.vendor_path.join("gh.yaml"), e.etc_path.join("gh.yaml")).unwrap();
+            match read_member(&e, "gh.yaml").unwrap_err() {
+                IoError::Io {
+                    kind: crate::error::IoKind::NotFound,
+                    ..
+                } => {}
+                other => panic!("got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_member_absent_is_not_found() {
+        let e = enabled(StrategyPref::Auto);
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::Io {
+                kind: crate::error::IoKind::NotFound,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_directory_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        std::fs::create_dir(e.etc_path.join("gh.yaml")).unwrap();
+        match read_member(&e, "gh.yaml").unwrap_err() {
+            IoError::NotRegularOrLink { path } => assert_eq!(path, e.etc_path.join("gh.yaml")),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_member_fifo_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        nix::unistd::mkfifo(&e.etc_path.join("gh.yaml"), nix::sys::stat::Mode::S_IRUSR).unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::NotRegularOrLink { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_vendor_file_group_writable_is_refused() {
+        for pref in LANES {
+            let e = enabled(pref);
+            put(&e.vendor_path, "gh.yaml", b"vendor", 0o664);
+            symlink(e.vendor_path.join("gh.yaml"), e.etc_path.join("gh.yaml")).unwrap();
+            assert!(
+                matches!(
+                    read_member(&e, "gh.yaml"),
+                    Err(IoError::InsecurePermissions { .. })
+                ),
+                "{pref:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_member_vendor_file_that_is_itself_a_link_is_refused() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.vendor_path, "real.yaml", b"x", 0o644);
+        symlink("real.yaml", e.vendor_path.join("gh.yaml")).unwrap();
+        symlink(e.vendor_path.join("gh.yaml"), e.etc_path.join("gh.yaml")).unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::Symlink { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_local_file_keeps_the_nlink_requirement() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.etc_path, "gh.yaml", b"local", 0o640);
+        std::fs::hard_link(e.etc_path.join("gh.yaml"), e.etc_path.join("two.yaml")).unwrap();
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::MultiplyLinked { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_local_file_keeps_the_mode_requirement() {
+        let e = enabled(StrategyPref::Auto);
+        put(&e.etc_path, "gh.yaml", b"local", 0o660);
+        assert!(matches!(
+            read_member(&e, "gh.yaml"),
+            Err(IoError::InsecurePermissions { .. })
+        ));
+    }
+
+    #[test]
+    fn enabled_member_name_must_be_one_plain_component() {
+        let e = enabled(StrategyPref::Auto);
+        for name in ["", ".", "..", "a/b", "a/", "/gh.yaml", "./gh.yaml"] {
+            match read_member(&e, name).unwrap_err() {
+                IoError::NotAMemberName { name: n } => assert_eq!(n, name),
+                other => panic!("{name:?}: got {other:?}"),
+            }
+        }
     }
 }
