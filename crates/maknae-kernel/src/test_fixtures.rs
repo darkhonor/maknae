@@ -458,6 +458,24 @@ pub(crate) fn build_tool_request(
     call: &maknae_config::ToolCall,
     cited: Option<&crate::task::CitedTask>,
 ) -> maknae_security::Request {
+    let mode = match call.shape {
+        Some(_) => maknae_security::TOOL_MODE_SHAPE,
+        None => maknae_security::TOOL_MODE_POSITIONAL,
+    };
+    build_tool_request_in_mode(mode, stamp, peer_uid, home, lane, conversation, call, cited)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_tool_request_in_mode(
+    mode: &str,
+    stamp: &crate::handler::Stamp<'_>,
+    peer_uid: u32,
+    home: Option<&std::path::Path>,
+    lane: maknae_security::Lane,
+    conversation: Option<&crate::conversation::facts::ConversationFacts>,
+    call: &maknae_config::ToolCall,
+    cited: Option<&crate::task::CitedTask>,
+) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource};
     let mut resource = Attributes::new();
     crate::handler::stamp_conversation(&mut resource, conversation);
@@ -477,21 +495,15 @@ pub(crate) fn build_tool_request(
         maknae_security::RESOURCE_BINDING_KINDS,
         AttrValue::Set(Default::default()),
     );
-    match &call.shape {
-        Some(shape) => {
-            resource.insert(
-                maknae_security::RESOURCE_TOOL_MODE,
-                AttrValue::Str(maknae_security::TOOL_MODE_SHAPE.into()),
-            );
-            resource.insert(
-                maknae_security::RESOURCE_TOOL_SHAPE,
-                AttrValue::Str(shape.clone()),
-            );
-        }
-        None => resource.insert(
-            maknae_security::RESOURCE_TOOL_MODE,
-            AttrValue::Str(maknae_security::TOOL_MODE_POSITIONAL.into()),
-        ),
+    resource.insert(
+        maknae_security::RESOURCE_TOOL_MODE,
+        AttrValue::Str(mode.into()),
+    );
+    if let Some(shape) = &call.shape {
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_SHAPE,
+            AttrValue::Str(shape.clone()),
+        );
     }
     if let Some(cited) = cited {
         crate::handler::stamp_task_bindings(&mut resource, cited);

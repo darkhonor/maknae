@@ -1668,6 +1668,13 @@ fn tool_ceiling(
     ) else {
         return undecidable();
     };
+    let stray_shape = match mode {
+        Mode::Shape => false,
+        Mode::Open | Mode::Positional => attrs.get(RESOURCE_TOOL_SHAPE).is_some(),
+    };
+    if stray_shape {
+        return undecidable();
+    }
     let none = std::collections::BTreeSet::new();
     let kinds = match (
         attrs.get(RESOURCE_BINDING_KINDS),
@@ -6633,13 +6640,18 @@ mod tests {
             maknae_security::RESOURCE_TOOL_MODE,
             AttrValue::Str(maknae_security::TOOL_MODE_OPEN.into()),
         );
+        drop_fact(&mut open_on_shape, maknae_security::RESOURCE_TOOL_SHAPE);
         let open_on_positional = with_mode(
             build(TOOL_USER, &["build"]),
             maknae_security::TOOL_MODE_OPEN,
         );
-        let positional_on_grammar = with_mode(
+        let mut positional_on_grammar = with_mode(
             shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE),
             maknae_security::TOOL_MODE_POSITIONAL,
+        );
+        drop_fact(
+            &mut positional_on_grammar,
+            maknae_security::RESOURCE_TOOL_SHAPE,
         );
         let positional_on_open = tool_req(TOOL_USER, "sentinel-674-open", "sh", &["-c", "x"]);
         let shape_on_positional = with_mode(
@@ -6905,6 +6917,60 @@ mod tests {
             .verdict,
             permit_with_audit()
         );
+    }
+
+    fn with_stray_shape(mut r: SecRequest, value: AttrValue) -> SecRequest {
+        r.resource
+            .0
+            .insert(maknae_security::RESOURCE_TOOL_SHAPE, value);
+        r
+    }
+
+    #[test]
+    fn stray_shape_on_open_call_is_indeterminate() {
+        let lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &open_call(&["-c", "x"])).verdict,
+            permit_with_audit()
+        );
+        for value in [AttrValue::Str("pr.view".into()), AttrValue::Int(1)] {
+            undecidable(tool_decided(
+                &lp,
+                &with_stray_shape(open_call(&["-c", "x"]), value),
+            ));
+        }
+        undecidable(tool_decided(
+            &lp,
+            &with_stray_shape(
+                with_mode(
+                    tool_req(TOOL_USER, "sentinel-674-shape", "gh", &["pr"]),
+                    maknae_security::TOOL_MODE_OPEN,
+                ),
+                AttrValue::Str("pr.view".into()),
+            ),
+        ));
+    }
+
+    #[test]
+    fn stray_shape_on_positional_call_is_indeterminate() {
+        let lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build"])).verdict,
+            permit_with_audit()
+        );
+        for value in [AttrValue::Str("pr.view".into()), AttrValue::Int(1)] {
+            undecidable(tool_decided(
+                &lp,
+                &with_stray_shape(build(TOOL_USER, &["build"]), value),
+            ));
+        }
+        undecidable(tool_decided(
+            &lp,
+            &with_stray_shape(
+                tool_req(TOOL_USER, "sentinel-674-shape", "gh", &["pr"]),
+                AttrValue::Str("pr.view".into()),
+            ),
+        ));
     }
 
     #[test]

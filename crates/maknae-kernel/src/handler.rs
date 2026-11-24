@@ -1021,7 +1021,7 @@ mod tests {
         }
         let shaped = ToolCall {
             shape: Some("pr.view".into()),
-            ..call
+            ..call.clone()
         };
         let got = build_tool_request(
             &Stamp::Client,
@@ -1034,6 +1034,18 @@ mod tests {
         );
         assert_eq!(got.resource.0.str("tool.mode"), Some("shape"));
         assert_eq!(got.resource.0.str("tool.shape"), Some("pr.view"));
+        let open = crate::test_fixtures::build_tool_request_in_mode(
+            maknae_security::TOOL_MODE_OPEN,
+            &Stamp::Client,
+            2001,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &call,
+            None,
+        );
+        assert_eq!(open.resource.0.str("tool.mode"), Some("open"));
+        assert_eq!(open.resource.0.get("tool.shape"), None);
     }
 
     fn git(
