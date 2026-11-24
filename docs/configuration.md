@@ -501,9 +501,15 @@ The kernel keeps one message board for each person who gives an agent a task, in
 
 **At start.** A record that does not decode, is larger than 40 KiB or is misnamed is recorded in the trail, then renamed `<name>.board.quarantine`, never over an earlier one, and is never read again. A board record that is missing, or behind a stored post's or cursor's sequence, refuses the start.
 
-**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. None of the three can be set yet, so every `board.post` and `board.read` from an agent working a task a person gave is refused `board off: site`, and nothing is stored. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
+**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. The site switch is `board: { enabled: <bool> }` in `maknae.yaml` (§6.7); it is off when the section is absent. The agent's switch is `board: <bool>` in its `policy.yaml` (§6.4), off when absent, and a reload that changes it applies to the next request. The person's switch is the `enabled` setting of their board, off until the person sets it with `board.manage`; no `maknae` command sends that verb yet. Until all three are on, no `board.post` or `board.read` from an agent working that person's task is served, and nothing is stored. The switches are checked in that order, and the first that is off refuses the request: `board off: site`, `board off: agent`, `board off: tasker`. The check and the decision see one installed policy: a request that finds a different policy installed after its decision, or while a reply's target or a read's page is decided, is refused `board: the policy changed during the request` (`try again`), and nothing is stored. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
 
-**Actions and grants.** The actions are `board.post` and `board.read`. The shipped `authz.yaml` grants both to `admin` and `user`; `guest` holds neither. An enrolled agent holds both in its built-in tasks right (§6.4), so its `policy.yaml` cannot deny them, and its role still decides them: a site `authz.yaml` that withholds either from `user` refuses agents too. An agent never reads or posts to a board other than its cited task's.
+**Actions and grants.** The actions are `board.post`, `board.read` and `board.manage`. The shipped `authz.yaml` grants all three to `admin` and `user`; `guest` holds none. An enrolled agent holds `board.post` and `board.read` in its built-in tasks right (§6.4), so its `policy.yaml` cannot deny them, and its role still decides them: a site `authz.yaml` that withholds either from `user` refuses agents too. An agent never reads or posts to a board other than its cited task's. `board.manage` is a person's, on their own board: an enrolled agent is denied it whatever its role or its `policy.yaml` says, and it is not in the tasks right, so a `policy.yaml` may deny it.
+
+**Managing the board.** `board.manage` is served on the client channel only, in the Control frame class, and acts only on the caller's own board (`users/<uid>`). An enrolled agent is denied it by the decision itself: `agent <id>: board.manage is never permitted to an agent` (for a role of `admin`, `agent <id>: an agent never holds admin`); a request on the agent channel that was somehow permitted is refused `board: only a person manages a board`. No `maknae` command sends `board.manage` until `maknae board` ships ([#699](https://github.com/darkhonor/maknae/issues/699)). It has two operations, and neither is gated by the three switches: a person can read and set their settings and clear their board while the site switch is off. The settings have no effect on agents until all three switches are on.
+- `settings` reads the person's three settings, or sets them: `enabled` (the third switch), `participate` (the person's own posts) and `report` (`off`, `summary` or `every`). All three are off until set. The reply is the settings as the store now holds them.
+- `clear` removes at most 32 posts a request, lowest sequence first. It skips every post withheld from readers: a held post, a post marked for a hold, a post in its expiry delete and a post past its 7 days. The reply is `{ removed, more }`, where `removed` is the number of posts removed; the client repeats the request while `more` is true. A post that is marked for a hold, or whose author or person is contained, at the moment its removal returns is kept, marked for its hold, and its record written back. A containment that begins and ends during that removal leaves nothing to hold the post, and it is removed.
+- A settings write that is not confirmed durable is answered `outcome unknown`. Until the kernel restarts it acts on `enabled` and `participate` as off if either the old or the new value is off, and keeps the old `report`; that value can be one the person never sent, and a later post may write it to disk. The person sets the settings again.
+- A clear whose delete fails is answered `try again`. A delete that is not confirmed durable is answered `outcome unknown`, and the removal is owed ([When the disk misbehaves](runbook.md#when-the-disk-misbehaves)); the trail record names what was removed. A clear is refused while 32 removals or unrecorded notices are outstanding.
 
 **Bounds.**
 
@@ -535,6 +541,7 @@ The kernel keeps one message board for each person who gives an agent a task, in
 > | `forges` (each entry) | `name`, `kind`, `host`, `provider` (§6.6) |
 > | `egress` | `socket_path`, `deadline_ms` (§6.2) |
 > | `deployment` | `mode`, `account_source` (§6.5) |
+> | `board` | `enabled` (§6.7) |
 >
 > The CLI's own `maknae.yaml` registers `vault`, `transport` and `agent` only (`bins/maknae/src/cli.rs`), so any other section there — a `provider:` block included — refuses every CLI verb with `UnknownSection`. Standalone documents close their keys the same way: `egress-bounds.yaml` (§6.1.3), `providers.yaml` (§6.1.1) and `authz.yaml`.
 >
@@ -595,7 +602,7 @@ maknae baseline-accept <hash>        # the 64-character hash baseline-show print
 |---|---|
 | `principal`, and `providers` while it stays non-empty | **live**: the next decision uses it |
 | `audit.readers` | **live**: no restart; `maknaed` reads nothing from it. The grant follows the file: the packages and the runbook's "Grant the declared readers" block read `maknae.yaml`, and the accept records the list and resolves each account (§6.3) |
-| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `deployment`, `transport`, `egress`, `forges`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
+| everything else, including all of `core.handling`: adding the block, the ceiling and its level, `accreditation_ref` and `policy` (the classification system); every other `core` key, `vault`, `deployment`, `transport`, `egress`, `forges`, `board`, `lake`, the other `audit` keys, `providers` going from empty to non-empty or back, and a section added or removed | **by restart** |
 
 A set that contains any restart change applies by restart as a whole. A live accept is persisted, then installed in one step once the decisions in flight have finished; no decision sees part of it. A restart accept is persisted and checkpointed, then `maknaed` stops admitting connections (each is closed unserved, recorded as `connect` denied `draining to apply an accepted baseline`), lets the requests in flight finish under the old baseline, and exits **6**. systemd (`Restart=on-failure`) and launchd (`KeepAlive` with `SuccessfulExit` false) start it again, and the new process runs the accepted baseline. A live accept whose install fails after the persist applies by restart in the same way. A restart accept whose persist fails after admission stopped exits 1, and the supervisor restarts the daemon on the unchanged baseline, with the set still pending.
 
@@ -791,7 +798,7 @@ an `UnknownSection` error.
 
 ## 6. Extension sections
 
-A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `forges`, `egress`, `deployment`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2), `audit` (§6.3), `deployment` (§6.5) and `forges` (§6.6) can be configured today.
+A section the daemon does not register is `ConfigError::UnknownSection`, which **refuses boot** and names the file it came from: `unknown config section '<section>' in '<path>' (no registered spec)`. The registered set is `crates/maknae-kernel/src/boot.rs`'s `boot_specs()` — `lake`, `vault`, `transport`, `audit`, `principal`, `providers`, `forges`, `egress`, `deployment`, `board`, plus `core` — so every row below marked Forthcoming or Withdrawn stops the daemon if written, rather than being ignored. Of the extension sections, `providers` (§6.1), `egress` (§6.2), `audit` (§6.3), `deployment` (§6.5), `forges` (§6.6) and `board` (§6.7) can be configured today.
 
 | Section | Owner | Status |
 |---|---|---|
@@ -800,6 +807,7 @@ A section the daemon does not register is `ConfigError::UnknownSection`, which *
 | `forges` | the git servers this host authorizes (#674) — **see §6.6** | **Shipped** |
 | `egress` | where `maknaed` finds the egress deputy, and the outer bound on one provider call (#240) — **see §6.2** | **Shipped** |
 | `deployment` | the kind of host `maknaed` runs on, and the account-state source it asks (#115) — **see §6.5** | **Shipped**; required |
+| `board` | the site switch for the agent message board (#698) — **see §6.7** | **Shipped** |
 | `provider` | the single registered provider, replaced by `providers` (#153) | Withdrawn — **writing it refuses boot** |
 | `llm` | LLM-provider authentication, replaced by `provider` and then `providers` | Withdrawn — **writing it refuses boot** |
 | `channels` | channel/comms adapters (Discord, Matrix, …) | Forthcoming |
@@ -1199,7 +1207,7 @@ When an entry cannot be written or does not read back, the agent is enrolled but
 
 Each agent accepted is recorded as `agent '<id>' (uid <n>) is enrolled`, and one that is gone as `agent '<id>' (uid <n>) is no longer enrolled` (both `graph.identity`, `graph.anchor:"enrolling"`). A directory with no `enrollment.yaml`, a name that is not an agent id, or an entry that is not a directory is skipped and recorded as `agents/<entry> is skipped: <why>`. An `enrollment.yaml` or `policy.yaml` that does not parse, or an `enrollment.yaml` whose `agent_id` is not its directory's name, refuses the reload. A `policy.yaml` without an `enrollment.yaml` beside it is not read. `maknae status` counts these problems, and `maknae subject-list` lists each enrolled agent with its id; when `bindings.yaml` has no `bindings:` key it also lists the principal as `admin`, marked as the principal.
 
-**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is a commented starter that enroll writes when the file is absent, and root edits it from there. It holds this agent's grants and limits beyond its built-in tasks right (below); they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) and `taskers`:
+**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is a commented starter that enroll writes when the file is absent, and root edits it from there. It holds this agent's grants and limits beyond its built-in tasks right (below); they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) `taskers` and `board`:
 
 ```yaml
 schema_version: 1
@@ -1219,6 +1227,7 @@ taskers:
   - "alice"
   - "uid:1001"
   - "agent:hobi"
+board: true
 ```
 
 - Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Actions: `session.new`, `session.prompt`, `session.close`, `tool.catalog`, `board.post` and `board.read`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides these actions, and the packaged `user` role holds all six.
@@ -1227,6 +1236,7 @@ taskers:
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
+- `board` is the agent's own switch for the message board (§2.9). It is off when the key is absent or `false`; only a YAML boolean is accepted (`true`, `True` or `TRUE` for on, `false`, `False` or `FALSE` for off), and any other value (`yes`, `"true"`, `1`, `{}`, an empty `board:`) refuses the reload. Changing it changes the agent's `agents.<id>` section digest.
 - Unknown keys, and any `schema_version` other than `1`, refuse the reload.
 
 **De-enrolling.**
@@ -1305,6 +1315,17 @@ A malformed entry refuses start with `InvalidForge`, which reads `invalid forge 
 
 ---
 
+### 6.7 The `board` section
+
+```yaml
+board:
+  enabled: true
+```
+
+`enabled` is the site switch for the agent message board (§2.9). It must be a boolean: `"true"`, `1`, `null` or a list refuses the load (`invalid board config: board.enabled: not a boolean`), as does a `board` that is not a map. The section absent, `board: {}` and `enabled: false` all leave the board off. It applies by baseline accept and restart (§3.2), never by `SIGHUP`. A key other than `enabled` is `UnknownKey`.
+
+---
+
 ## 7. Accepted YAML
 
 Maknae parses a **restricted, reject-exotic** subset of YAML. The intent is that a
@@ -1364,7 +1385,7 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | A duplicate section name in the registration | `DuplicateSpec` |
 | `egress-bounds.yaml` read but refused: a missing `vault` block or key, a fragment outside `[A-Za-z0-9._/-]` or with an empty, `.`, `..` or `data` segment, a value over 256 bytes, a `call_timeout_ms` that is not an integer or is outside `1000..=440000` (§6.1.3). Reads `egress-bounds.yaml: <reason>`; an unknown key such as `key_vault_path_prefix` or `approle_mount` is `UnknownKey` | `InvalidEgressBounds` |
 | The `egress` section (§6.2): a non-map section, a value of the wrong type or out of range (#240) | `InvalidEgress` |
-| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, each `forges` entry, `egress`, `deployment`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s map levels (the document, `permissions`, each role body under `roles:`/`destinations:`, each `subjects:` entry, and its `permissions`, `actions` and `models` maps — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
+| **A key no parser reads** — in `maknae.yaml`'s `core` (own level), `transport`, `audit`, `principal`, each `providers` entry, each `forges` entry, `egress`, `deployment`, `board`, `vault` and `vault.user_auth`; in `core.handling` and `core.handling.ceiling`; in `egress-bounds.yaml` and its `vault` block (`egress-bounds.yaml/vault`); in `providers.yaml` at its top level (`providers.yaml`), each entry (`providers.yaml/providers`) and each entry's `key` (`providers.yaml/providers/key`); and at `authz.yaml`'s map levels (the document, `permissions`, each role body under `roles:`/`destinations:`, each `subjects:` entry, and its `permissions`, `actions` and `models` maps — a mistyped ROLE NAME is `UnknownRole`, not this). **Not** `lake` or `core.identity`, which are deliberately open (§3) (#210) | **`UnknownKey`** |
 | A present-but-malformed `core.handling` ceiling | `InvalidCeiling` |
 | `transport.prompt_max_bytes` outside 65536..=16777216 (default 1048576 since #372; it bounds prompt-class frames only, and control and attempt frames have fixed caps) | `InvalidTransport` |
 | The `providers` section (§6.1): not a list (a null `providers:` included), more than 32 entries, a duplicate `name`, an entry that is not a map, a missing or malformed `name`, `endpoint` or `models`, a malformed `reasoning_effort`, an `output_tokens_field` other than `max_completion_tokens` or `max_tokens`. Reads `invalid provider config: <reason>` | `InvalidProvider` |
@@ -1378,6 +1399,7 @@ boot gate (`crates/maknae-kernel/src/boot_gate.rs`).
 | `vault.kv_mount` or `vault.user_prefix` in the root `maknae.yaml`, shadowed `config.d/` blocks included: `vault.kv_mount in the root maknae.yaml is not read by maknaed: set kv_mount in egress-bounds.yaml` | `RootVaultKeyRefused` (kernel) |
 | `audit.readers` not a list of strings, an entry outside `^[a-z_][a-z0-9_-]{0,30}[$]?$`, or a name listed twice (§6.3) | `InvalidAudit` |
 | The `deployment` section (§6.5) absent or not a map, `mode` missing, not a string or not one of the three: `invalid deployment config: deployment.mode: <what was found>; it must be one of linux-host, macos-host, container`. An `account_source` other than `userdb` or `none`, `userdb` on `macos-host`, or any `account_source` on `container`: `invalid deployment config: deployment.account_source: <reason>` | `InvalidDeployment` |
+| The `board` section (§6.7) not a map, or `board.enabled` not a boolean: `invalid board config: board: not a map` or `invalid board config: board.enabled: not a boolean` | `InvalidBoard` |
 | At an accept or in `sudo maknae audit-readers`: an `audit.readers` account that is missing or refused (§6.3): `audit.readers <name>: <why>` | `InvalidAudit` |
 
 The baseline (§3.2) adds refusals of its own. At a start over an accepted baseline, a file that fails any row above is not a refusal: the daemon keeps the accepted baseline and records the files as an invalid change. A trail move (§6.3) to a file outside the current trail's directory is `the audit trail may move only within <directory>`, and to a file root has not prepared, the open's own refusal, for example `<path> is not append-only; prepare it with chattr +a (Linux) or chflags sappnd (macOS) as root`; at a start either leaves the current trail in use. Once an accepted baseline exists, a missing trail refuses to start (exit 1): `the audit trail <path> is missing; prepare it as the runbook's "Move the audit trail" step does, then start`. An accepted baseline that no longer validates refuses to start with `accepted baseline cannot start: <cause>` in the journal, at the exit code of the row that failed; the trail records `accepted baseline cannot start (cause in the journal)`.

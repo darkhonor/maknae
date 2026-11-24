@@ -232,7 +232,7 @@ fn world_bound(tag: &str, agents: &[Agent], bindings: &str) -> World {
         banner: Default::default(),
         reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(maknae_kernel::BoardStore::new()),
-        switches: Arc::new(maknae_kernel::SwitchesOff),
+        switches: Arc::new(maknae_kernel::FixedSwitches::default()),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -474,6 +474,14 @@ fn entry(agent: &str, standing: AgentStanding, waiting: u32) -> AgentEntry {
         agent: agent.into(),
         standing,
         waiting,
+        board: false,
+    }
+}
+
+fn boarded(agent: &str, standing: AgentStanding, waiting: u32) -> AgentEntry {
+    AgentEntry {
+        board: true,
+        ..entry(agent, standing, waiting)
     }
 }
 
@@ -549,6 +557,128 @@ async fn a_contained_agent_is_listed_only_for_a_caller_with_tasks_there() {
     assert!(
         theirs.entries.iter().all(|e| e.agent != "hobi"),
         "{theirs:?}"
+    );
+}
+
+const BOARDING: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nboard: true\n";
+
+#[tokio::test]
+async fn an_agent_whose_board_switch_is_on_is_listed_with_it() {
+    let w = world(
+        "board-on",
+        &[
+            agent("hobi", HOBI_UID, BOARDING),
+            agent("jin", JIN_UID, PLAIN),
+        ],
+    );
+    assert_eq!(
+        w.list(None).await.entries,
+        [
+            boarded("hobi", AgentStanding::Enrolled, 0),
+            entry("jin", AgentStanding::Enrolled, 0)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_listed_board_switch_is_the_agents_own_whatever_the_site_and_the_person_say() {
+    use maknae_kernel::{BoardKey, BoardSeam, FixedSwitches, Settings};
+    for site in [true, false] {
+        for enabled in [true, false] {
+            let mut w = world(
+                &format!("board-own-{site}-{enabled}"),
+                &[
+                    agent("hobi", HOBI_UID, BOARDING),
+                    agent("jin", JIN_UID, PLAIN),
+                ],
+            );
+            w.agents.switches = Arc::new(FixedSwitches {
+                site,
+                agents: Default::default(),
+            });
+            w.agents
+                .board
+                .set_settings(
+                    BoardKey(w.me),
+                    Settings {
+                        enabled,
+                        ..Settings::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                w.list(None).await.entries,
+                [
+                    boarded("hobi", AgentStanding::Enrolled, 0),
+                    entry("jin", AgentStanding::Enrolled, 0)
+                ],
+                "site {site}, person {enabled}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_contained_agent_keeps_its_board_switch_in_the_list() {
+    let user = common::euid_name();
+    let w = world_bound(
+        "board-contained",
+        &[
+            agent("hobi", nobody(), BOARDING),
+            agent("jin", JIN_UID, PLAIN),
+        ],
+        &format!("schema_version: 1\nbindings:\n  user: [\"{user}\"]\n  adversary: [\"nobody\"]\n"),
+    );
+    w.mine("hobi", nobody());
+    assert_eq!(
+        w.list(None).await.entries,
+        [
+            boarded("hobi", AgentStanding::Contained, 0),
+            entry("jin", AgentStanding::Enrolled, 0)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_withdrawn_agent_is_listed_without_its_board_switch() {
+    let w = world("board-withdrawn", &[agent("hobi", HOBI_UID, BOARDING)]);
+    w.submit("hobi").await;
+    w.agent_policy("hobi", "schema_version: 1\ntaskers: []\nboard: true\n");
+    assert_eq!(
+        w.list(None).await.entries,
+        [entry("hobi", AgentStanding::Withdrawn, 0)]
+    );
+}
+
+#[tokio::test]
+async fn the_lists_record_says_which_entries_carried_the_board_marker() {
+    let w = world(
+        "board-record",
+        &[
+            agent("hobi", HOBI_UID, BOARDING),
+            agent("ivy", MANY_UID + 1, NOT_PEOPLE),
+            agent("jin", JIN_UID, PLAIN),
+            agent("suga", MANY_UID, BOARDING),
+        ],
+    );
+    w.submit("suga").await;
+    w.agent_policy("suga", "schema_version: 1\ntaskers: []\nboard: true\n");
+    let records = Records::new(0);
+    let page = match w.ask_with(list(None), &records).await {
+        RespResult::Ok(Payload::Agents(page)) => page,
+        other => panic!("{other:?}: {:?}", reasons(&records)),
+    };
+    assert_eq!(
+        page.entries,
+        [
+            boarded("hobi", AgentStanding::Enrolled, 0),
+            entry("jin", AgentStanding::Enrolled, 0),
+            entry("suga", AgentStanding::Withdrawn, 0)
+        ]
+    );
+    assert_eq!(
+        reasons(&records),
+        ["permit listed 3 agents, 0 undecided: hobi:enrolled:board,ivy:refused,jin:enrolled,suga:withdrawn"]
     );
 }
 

@@ -314,6 +314,8 @@ files = [
   "crates/maknae-config/src/deployment.rs",
   # #674: the `forges` section; a wrong arm authorizes a forge host the site never named.
   "crates/maknae-config/src/forges.rs",
+  # #698: the `board` site switch; a wrong arm turns the message board on for the site.
+  "crates/maknae-config/src/board.rs",
   # PR-J1 Task 6: the authz policy schema v1 (spec §7; RBAC-decided per ADR-0020) — the
   # Claude-Code/Codex-style permission grammar (Read patterns) a future
   # per-request PDP evaluates, plus the secure fail-closed load (symlink

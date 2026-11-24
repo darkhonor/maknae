@@ -56,6 +56,7 @@ disclose	transport.handshake_timeout_ms	transport shape
 disclose	transport.read_timeout_ms	transport shape
 disclose	deployment.mode	which kind of host the daemon runs on (#115); boot verifies it against the host
 disclose	deployment.account_source	whether this host checks account state (#115); a declared gap the operator must be able to see
+disclose	board.enabled	whether the agent message board is on for this site (#698); a boolean, off by default
 omit	vault.insecure_plaintext_secret_path	PRESENCE says this host keeps an AppRole SecretID in plaintext on disk
 omit	core.handling	PRESENCE says this deployment configured an above-baseline classification ceiling (prefix)
 omit	audit.au3_1	deployer-authored sub-key NAMES with no schema; a path allowlist cannot classify what it cannot enumerate (prefix)
@@ -166,6 +167,7 @@ always	task_follow_ups.addendum	task.claim (#168): the kernel-signed addendum of
 always	agent_list.entries.agent	agent.list (#630): an agent the caller may task, or one with which it holds tasks or reports: its id
 always	agent_list.entries.standing	agent.list (#630): one agent: one fixed token: enrolled, contained, withdrawn, removed or undecided
 always	agent_list.entries.waiting	agent.list (#630): one agent: how many of the caller's own tasks wait on it; a count, never content
+always	agent_list.entries.board	agent.list (#698): one agent: whether its own message-board switch is on; one boolean, sent only when on
 always	agent_list.next	agent.list (#630): the cursor for the next page, the id of the last agent returned
 always	agent_list.undecided	agent.list (#630): how many agents on this page the kernel could not decide and with which the caller holds nothing; a count, never an id
 always	agent_list.banner.text	agent.list (#630): the operator's banner text, bounded and free of control and format characters
@@ -197,3 +199,8 @@ always	held_release.outcomes.parent	admin.release (#632): one release attempt: t
 always	held_release.next	admin.release (#632): the cursor to resume after: the store sequence of a task this page attempted, or the request's own cursor
 always	held_release.posts_released	admin.release (#695): how many holds on the subject's board posts this page lifted; a count, never a post's id or content, absent when zero
 always	held_release.posts_held	admin.release (#695): how many holds on board posts are still written for the subject after this page; a count, never a post's id or content, absent when zero
+always	board_settings.enabled	board.manage (#698): whether the caller's own board is on for the tasks the caller gives; the caller's own setting
+always	board_settings.participate	board.manage (#698): whether the caller may post to the caller's own board; the caller's own setting
+always	board_settings.report	board.manage (#698): one fixed token, off, summary or every: what the caller's own board reports to the caller
+always	board_cleared.removed	board.manage (#698): how many posts the caller's own clear removed from the caller's own board; a count, never a post's id or content
+always	board_cleared.more	board.manage (#698): whether posts that are not held remain on the caller's own board after the clear

@@ -48,6 +48,8 @@ SURFACE=(
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|2|config"
   "crates/maknae-config/src/deployment.rs|Deployment|deployment|2|config"
+  # The `board` section (#698): the site switch for the agent message board.
+  "crates/maknae-config/src/board.rs|BoardSite|board|1|config"
   # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
   "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"
   # The `forges` section (#674): the git servers the site authorizes; link hosts, never a credential.
@@ -109,7 +111,7 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|3|wire"
   "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|4|wire"
   "crates/maknae-proto/src/task.rs|AgentPage|agent_list|4|wire"
-  "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|3|wire"
+  "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|4|wire"
   "crates/maknae-proto/src/task.rs|BannerSpec|agent_list.banner|2|wire"
   "crates/maknae-proto/src/task.rs|HeldPage|held_list|2|wire"
   "crates/maknae-proto/src/task.rs|HeldView|held_list.entries|5|wire"
@@ -118,6 +120,9 @@ SURFACE=(
   "crates/maknae-proto/src/reach.rs|ReachSummary|held_list.entries.view.reach|2|wire"
   "crates/maknae-proto/src/task.rs|ReleasePage|held_release|4|wire"
   "crates/maknae-proto/src/task.rs|ReleaseOutcome|held_release.outcomes|4|wire"
+  # board.manage (#698): a person's own board settings, and what one clear removed.
+  "crates/maknae-proto/src/board.rs|BoardSettings|board_settings|3|wire"
+  "crates/maknae-proto/src/board.rs|BoardCleared|board_cleared|2|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
 )
@@ -153,6 +158,7 @@ LEAF_ENUMS=(
   "held_list.entries.view.close|crates/maknae-proto/src/task.rs|TaskClose"
   "held_list.entries.held_for|crates/maknae-proto/src/task.rs|HeldCause"
   "held_release.outcomes.result|crates/maknae-proto/src/task.rs|ReleaseResult"
+  "board_settings.report|crates/maknae-proto/src/board.rs|BoardReport"
 )
 
 # Fields whose type is an enum of unit variants and tuple variants of fixed-width integers only: a fixed
@@ -436,6 +442,8 @@ PAYLOAD_DISPOSITIONS=(
   "ToolCatalog|bytes"   # #674: the subject's own catalog, released only on the tool.catalog Permit
   "BoardPosted|bytes"   # #695: the id of the caller's own post, 16 opaque random bytes, released only on its board.post Permit
   "BoardPage|bytes"   # #695: posts released only on the board.read Permit of each post
+  "BoardSettings|struct:BoardSettings"   # #698: the caller's own board settings, on its board.manage Permit
+  "BoardCleared|struct:BoardCleared"   # #698: what the caller's own clear removed, on its board.manage Permit
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

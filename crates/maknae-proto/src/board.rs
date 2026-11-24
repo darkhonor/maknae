@@ -354,6 +354,41 @@ impl BoardDefect {
     ];
 }
 
+/// What the board reports to its tasker.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardReport {
+    #[default]
+    Off,
+    Summary,
+    Every,
+}
+
+/// A tasker's three board settings, each off by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardSettings {
+    pub enabled: bool,
+    pub participate: bool,
+    pub report: BoardReport,
+}
+
+/// A `board.manage` operation on the caller's own board; `set: None` reads the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BoardOp {
+    Settings { set: Option<BoardSettings> },
+    Clear,
+}
+
+/// What one `board.manage` clear removed, and whether posts that are not held remain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardCleared {
+    pub removed: u32,
+    pub more: bool,
+}
+
 pub fn board_refused_message(d: BoardDefect) -> &'static str {
     match d {
         BoardDefect::TryAgain => "try again",
@@ -427,6 +462,151 @@ mod tests {
                 content: text(ATT),
             }],
         }
+    }
+
+    #[test]
+    fn board_settings_and_ops_have_their_wire_spellings() {
+        use ciborium::Value;
+        let settings = BoardSettings {
+            enabled: true,
+            participate: false,
+            report: BoardReport::Summary,
+        };
+        let as_value = |b: &[u8]| ciborium::from_reader::<Value, _>(b).unwrap();
+        let text = |s: &str| Value::Text(s.into());
+        let settings_value = Value::Map(vec![
+            (text("enabled"), Value::Bool(true)),
+            (text("participate"), Value::Bool(false)),
+            (text("report"), text("summary")),
+        ]);
+        assert_eq!(as_value(&enc(&settings)), settings_value);
+        for (report, spelled) in [
+            (BoardReport::Off, "off"),
+            (BoardReport::Summary, "summary"),
+            (BoardReport::Every, "every"),
+        ] {
+            assert_eq!(as_value(&enc(&report)), text(spelled));
+            assert_eq!(dec::<BoardReport>(&enc(&report)), Ok(report));
+        }
+        assert_eq!(BoardReport::default(), BoardReport::Off);
+        assert_eq!(
+            BoardSettings::default(),
+            BoardSettings {
+                enabled: false,
+                participate: false,
+                report: BoardReport::Off
+            }
+        );
+        assert_eq!(as_value(&enc(&BoardOp::Clear)), text("clear"));
+        assert_eq!(
+            as_value(&enc(&BoardOp::Settings { set: None })),
+            Value::Map(vec![(
+                text("settings"),
+                Value::Map(vec![(text("set"), Value::Null)])
+            )])
+        );
+        assert_eq!(
+            as_value(&enc(&BoardOp::Settings {
+                set: Some(settings)
+            })),
+            Value::Map(vec![(
+                text("settings"),
+                Value::Map(vec![(text("set"), settings_value)])
+            )])
+        );
+        for op in [
+            BoardOp::Clear,
+            BoardOp::Settings { set: None },
+            BoardOp::Settings {
+                set: Some(settings),
+            },
+        ] {
+            assert_eq!(dec::<BoardOp>(&enc(&op)), Ok(op));
+        }
+    }
+
+    #[test]
+    fn board_cleared_has_its_wire_spelling_and_refuses_an_unknown_key() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let cleared = BoardCleared {
+            removed: 32,
+            more: true,
+        };
+        let fields = vec![
+            (text("removed"), Value::Integer(32.into())),
+            (text("more"), Value::Bool(true)),
+        ];
+        assert_eq!(
+            ciborium::from_reader::<Value, _>(enc(&cleared).as_slice()).unwrap(),
+            Value::Map(fields.clone())
+        );
+        assert_eq!(dec::<BoardCleared>(&enc(&cleared)), Ok(cleared));
+        let mut extra = fields;
+        extra.push((text("ids"), Value::Array(vec![])));
+        let refused = dec::<BoardCleared>(&enc(&Value::Map(extra))).unwrap_err();
+        assert!(refused.contains("unknown field `ids`"), "{refused}");
+    }
+
+    #[test]
+    fn a_board_op_refuses_an_unknown_key_inside_its_settings() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let op = |inner: Vec<(Value, Value)>| {
+            dec::<BoardOp>(&enc(&Value::Map(vec![(
+                text("settings"),
+                Value::Map(inner),
+            )])))
+        };
+        assert_eq!(
+            op(vec![(text("set"), Value::Null)]),
+            Ok(BoardOp::Settings { set: None })
+        );
+        let extra = op(vec![
+            (text("set"), Value::Null),
+            (text("x"), Value::Integer(1.into())),
+        ])
+        .unwrap_err();
+        assert!(extra.contains("unknown field `x`"), "{extra}");
+    }
+
+    #[test]
+    fn board_settings_refuse_an_unknown_or_missing_key() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let mut fields = vec![
+            (text("enabled"), Value::Bool(true)),
+            (text("participate"), Value::Bool(true)),
+            (text("report"), text("every")),
+        ];
+        let decoded = |f: &[(Value, Value)]| dec::<BoardSettings>(&enc(&Value::Map(f.to_vec())));
+        assert_eq!(
+            decoded(&fields),
+            Ok(BoardSettings {
+                enabled: true,
+                participate: true,
+                report: BoardReport::Every
+            })
+        );
+        fields.push((text("hidden"), Value::Bool(true)));
+        let extra = decoded(&fields).unwrap_err();
+        assert!(extra.contains("unknown field `hidden`"), "{extra}");
+        fields.truncate(2);
+        let missing = decoded(&fields).unwrap_err();
+        assert!(missing.contains("missing field `report`"), "{missing}");
+        let loud = decoded(&[
+            (text("enabled"), Value::Bool(true)),
+            (text("participate"), Value::Bool(true)),
+            (text("report"), text("Every")),
+        ])
+        .unwrap_err();
+        assert!(loud.contains("unknown variant `Every`"), "{loud}");
+        let truthy = decoded(&[
+            (text("enabled"), Value::Integer(1.into())),
+            (text("participate"), Value::Bool(true)),
+            (text("report"), text("off")),
+        ]);
+        assert!(truthy.is_err(), "{truthy:?}");
     }
 
     #[test]

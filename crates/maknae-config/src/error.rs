@@ -112,6 +112,8 @@ pub enum ConfigError {
     /// The `deployment` section is absent, names no valid `mode`, or carries an
     /// `account_source` the mode does not admit.
     InvalidDeployment(String),
+    /// The `board` section is not a map, or `board.enabled` is not a boolean.
+    InvalidBoard(String),
     /// `~/.maknae/providers.yaml` was refused, or names no entry that can be selected.
     UserProviders(String),
     /// A persisted baseline section is not the canonical JSON this crate writes (#490).
@@ -220,6 +222,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidDeployment(reason) => {
                 write!(f, "invalid deployment config: {reason}")
+            }
+            ConfigError::InvalidBoard(reason) => {
+                write!(f, "invalid board config: {reason}")
             }
             ConfigError::UserProviders(reason) => {
                 write!(f, "providers.yaml: {reason}")
@@ -436,6 +441,14 @@ mod tests {
         assert_eq!(
             ConfigError::InvalidDeployment("deployment.mode: missing".into()).to_string(),
             "invalid deployment config: deployment.mode: missing"
+        );
+    }
+
+    #[test]
+    fn display_covers_invalid_board() {
+        assert_eq!(
+            ConfigError::InvalidBoard("board.enabled: not a boolean".into()).to_string(),
+            "invalid board config: board.enabled: not a boolean"
         );
     }
 

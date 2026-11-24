@@ -763,6 +763,10 @@ pub enum Verb {
     BoardRead {
         seen_through: Option<crate::PostId>,
     },
+    /// Read or set the caller's own board settings, or clear the caller's own board.
+    BoardManage {
+        op: crate::BoardOp,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -830,6 +834,10 @@ pub enum Payload {
     ToolCatalog(ToolCatalogReply),
     BoardPosted(crate::PostId),
     BoardPage(crate::BoardPage),
+    /// A person's own board settings, after a permitted `board.manage` read or write.
+    BoardSettings(crate::BoardSettings),
+    /// What a permitted `board.manage` clear removed.
+    BoardCleared(crate::BoardCleared),
 }
 
 pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
@@ -1393,7 +1401,8 @@ pub fn takes_task_request_cap(verb: &Verb) -> bool {
         | Verb::TaskReport { .. }
         | Verb::AgentList { .. }
         | Verb::BoardPost { .. }
-        | Verb::BoardRead { .. } => false,
+        | Verb::BoardRead { .. }
+        | Verb::BoardManage { .. } => false,
     }
 }
 
@@ -1471,7 +1480,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::TaskList { .. }
         | Verb::TaskStop { .. }
         | Verb::TaskDrop { .. }
-        | Verb::AgentList { .. } => FrameClass::Control,
+        | Verb::AgentList { .. }
+        | Verb::BoardManage { .. } => FrameClass::Control,
     }
 }
 
@@ -4129,6 +4139,30 @@ mod tests {
                     },
                     FrameClass::Prompt,
                 ),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Settings { set: None },
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Settings {
+                            set: Some(crate::BoardSettings {
+                                enabled: true,
+                                participate: false,
+                                report: crate::BoardReport::Every,
+                            }),
+                        },
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Clear,
+                    },
+                    FrameClass::Control,
+                ),
             ]
         }
 
@@ -4142,7 +4176,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 63);
+            assert_eq!(all.len(), 66);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
@@ -4551,6 +4585,35 @@ mod tests {
             bytes.len()
         );
         assert_eq!(decode_response(&bytes).unwrap(), response);
+    }
+
+    #[test]
+    fn the_board_manage_replies_round_trip_under_the_control_response_cap() {
+        for payload in [
+            Payload::BoardSettings(crate::BoardSettings {
+                enabled: true,
+                participate: true,
+                report: crate::BoardReport::Summary,
+            }),
+            Payload::BoardSettings(crate::BoardSettings::default()),
+            Payload::BoardCleared(crate::BoardCleared {
+                removed: u32::MAX,
+                more: true,
+            }),
+            Payload::BoardCleared(crate::BoardCleared {
+                removed: 0,
+                more: false,
+            }),
+        ] {
+            let response = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(payload),
+                catalog_digest: None,
+            };
+            let bytes = encode_response(&response).unwrap();
+            assert!(bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX);
+            assert_eq!(decode_response(&bytes).unwrap(), response);
+        }
     }
 
     #[test]

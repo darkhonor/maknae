@@ -919,6 +919,10 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 pub fn epoch_to_rfc3339(secs: u64, millis: u32) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -953,6 +957,8 @@ pub struct AgentEntry {
     pub agent: String,
     pub standing: AgentStanding,
     pub waiting: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub board: bool,
 }
 
 /// `next` is the last returned entry's id; `undecided` counts the page's unnamed undecided agents.
@@ -1673,6 +1679,7 @@ mod tests {
                     agent: "hobi".into(),
                     standing: AgentStanding::Contained,
                     waiting: 2,
+                    board: false,
                 }],
                 next: Some("hobi".into()),
                 undecided: 1,
@@ -2101,6 +2108,7 @@ mod tests {
                 agent: "hobi".into(),
                 standing: AgentStanding::Contained,
                 waiting: 2,
+                board: false,
             }],
             next: Some("hobi".into()),
             undecided: 1,
@@ -2210,6 +2218,47 @@ mod tests {
         }
     }
 
+    fn cbor<T: serde::Serialize>(v: &T) -> Vec<u8> {
+        let mut out = Vec::new();
+        ciborium::into_writer(v, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn an_entry_without_a_board_encodes_as_it_did_before_the_switch() {
+        let entry = AgentEntry {
+            agent: "hobi".into(),
+            standing: AgentStanding::Contained,
+            waiting: 2,
+            board: false,
+        };
+        let before: &[u8] = &[
+            0xa3, 0x65, b'a', b'g', b'e', b'n', b't', 0x64, b'h', b'o', b'b', b'i', 0x68, b's',
+            b't', b'a', b'n', b'd', b'i', b'n', b'g', 0x69, b'C', b'o', b'n', b't', b'a', b'i',
+            b'n', b'e', b'd', 0x67, b'w', b'a', b'i', b't', b'i', b'n', b'g', 0x02,
+        ];
+        assert_eq!(cbor(&entry), before);
+        let back: AgentEntry = ciborium::from_reader(before).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn an_entry_with_a_board_carries_the_key() {
+        let entry = AgentEntry {
+            agent: "hobi".into(),
+            standing: AgentStanding::Enrolled,
+            waiting: 0,
+            board: true,
+        };
+        let bytes = cbor(&entry);
+        assert_eq!(bytes[0], 0xa4);
+        assert!(bytes.ends_with(&[0x65, b'b', b'o', b'a', b'r', b'd', 0xf5]));
+        assert_eq!(
+            ciborium::from_reader::<AgentEntry, _>(&bytes[..]).unwrap(),
+            entry
+        );
+    }
+
     #[test]
     fn agent_list_is_a_control_frame() {
         let verb = crate::Verb::AgentList { after: None };
@@ -2224,6 +2273,7 @@ mod tests {
                     agent: "a".repeat(32),
                     standing: AgentStanding::Undecided,
                     waiting: u32::MAX,
+                    board: true,
                 })
                 .collect(),
             next: Some("a".repeat(32)),

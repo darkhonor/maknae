@@ -253,6 +253,14 @@ pub struct BoardAudit {
     pub withheld: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<u64>,
+    /// `enabled=<bool> participate=<bool> report=<off|summary|every>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_after: Option<String>,
+    /// Post ids, 32 lowercase hex each, at most 32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<Vec<String>>,
 }
 
 /// A tool call the Egress Daemon refused for its argument bound (#426).
@@ -627,6 +635,9 @@ mod tests {
             returned: Some(5),
             withheld: Some(4),
             cursor: Some(10),
+            settings_before: Some("enabled=false participate=false report=off".into()),
+            settings_after: Some("enabled=true participate=true report=summary".into()),
+            removed: Some(vec!["ab".repeat(16)]),
         };
         let mut rec = sample();
         rec.board = Some(full.clone());
@@ -666,6 +677,49 @@ mod tests {
         let back: AuditRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.board, rec.board);
         assert_eq!(back.subject.board_op.as_deref(), Some("hold"));
+    }
+
+    #[test]
+    fn a_board_manage_block_carries_the_settings_and_the_removed_ids() {
+        let mut rec = sample();
+        rec.subject.board_op = Some("settings".into());
+        rec.board = Some(BoardAudit {
+            settings_before: Some("enabled=false participate=false report=off".into()),
+            settings_after: Some("enabled=true participate=false report=every".into()),
+            ..BoardAudit::default()
+        });
+        let json = canonical_json(&rec).unwrap();
+        assert!(
+            json.contains(r#""board":{"settings_after":"enabled=true participate=false report=every","settings_before":"enabled=false participate=false report=off"}"#),
+            "{json}"
+        );
+        assert!(!json.contains("\"removed\""), "{json}");
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.board, rec.board);
+        rec.subject.board_op = Some("clear".into());
+        rec.board = Some(BoardAudit {
+            removed: Some(vec!["ab".repeat(16), "cd".repeat(16)]),
+            ..BoardAudit::default()
+        });
+        let json = canonical_json(&rec).unwrap();
+        assert!(
+            json.contains(&format!(
+                r#""board":{{"removed":["{}","{}"]}}"#,
+                "ab".repeat(16),
+                "cd".repeat(16)
+            )),
+            "{json}"
+        );
+        assert!(!json.contains("settings_"), "{json}");
+        rec.board = Some(BoardAudit {
+            removed: Some(Vec::new()),
+            ..BoardAudit::default()
+        });
+        assert!(canonical_json(&rec)
+            .unwrap()
+            .contains(r#""board":{"removed":[]}"#));
+        let back: AuditRecord = serde_json::from_str(&canonical_json(&rec).unwrap()).unwrap();
+        assert_eq!(back.board, rec.board);
     }
 
     #[test]

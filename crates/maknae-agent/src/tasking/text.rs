@@ -146,6 +146,9 @@ pub fn agent_list_lines(entries: &[AgentEntry], undecided: u32) -> Vec<String> {
         .iter()
         .map(|e| {
             let mut line = safe(&e.agent);
+            if e.board {
+                line.push_str("  board on");
+            }
             let standing = match e.standing {
                 AgentStanding::Enrolled => None,
                 AgentStanding::Removed => Some("removed"),
@@ -365,7 +368,34 @@ mod tests {
             agent: agent.into(),
             standing,
             waiting,
+            board: false,
         }
+    }
+
+    fn boarded(agent: &str, standing: AgentStanding, waiting: u32) -> AgentEntry {
+        AgentEntry {
+            board: true,
+            ..entry(agent, standing, waiting)
+        }
+    }
+
+    #[test]
+    fn agent_list_lines_mark_a_board_that_is_on() {
+        assert_eq!(
+            agent_list_lines(
+                &[
+                    boarded("hobi", AgentStanding::Enrolled, 0),
+                    entry("jin", AgentStanding::Enrolled, 0),
+                    boarded("suga", AgentStanding::Contained, 2),
+                ],
+                0,
+            ),
+            [
+                "hobi  board on",
+                "jin",
+                "suga  board on  (on hold: contained)  2 reports waiting",
+            ]
+        );
     }
 
     #[test]

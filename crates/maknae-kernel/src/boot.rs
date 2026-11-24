@@ -5,11 +5,12 @@
 //! Maknae reads only its own config; nothing external is read at boot.
 
 use maknae_config::{
-    ceiling_from_core, deployment_from_section, forges_from_section, load_config_root_owned,
-    policy_name_from_core, providers_from_section, refuse_plaintext_keys, Ceiling,
-    ClassificationPolicy, ConfigError, Deployment, Document, ForgeSet, IngestPosture, ProviderSet,
-    SectionSpec, Value, AUDIT_SECTION, DEPLOYMENT_SECTION, EGRESS_SECTION, FORGES_SECTION,
-    PRINCIPAL_SECTION, PROVIDERS_SECTION, TRANSPORT_SECTION,
+    board_from_section, ceiling_from_core, deployment_from_section, forges_from_section,
+    load_config_root_owned, policy_name_from_core, providers_from_section, refuse_plaintext_keys,
+    BoardSite, Ceiling, ClassificationPolicy, ConfigError, Deployment, Document, ForgeSet,
+    IngestPosture, ProviderSet, SectionSpec, Value, AUDIT_SECTION, BOARD_SECTION,
+    DEPLOYMENT_SECTION, EGRESS_SECTION, FORGES_SECTION, PRINCIPAL_SECTION, PROVIDERS_SECTION,
+    TRANSPORT_SECTION,
 };
 use maknae_vault::VAULT_SECTION;
 use std::path::Path;
@@ -28,6 +29,7 @@ pub struct BootConfig {
     providers: ProviderSet,
     forges: ForgeSet,
     deployment: Deployment,
+    board: BoardSite,
 }
 
 /// What a document declares about classification and providers, without the
@@ -37,6 +39,7 @@ pub(crate) struct Declared {
     pub(crate) policy: &'static dyn ClassificationPolicy,
     pub(crate) providers: ProviderSet,
     pub(crate) forges: ForgeSet,
+    pub(crate) board: BoardSite,
 }
 
 impl std::fmt::Debug for BootConfig {
@@ -47,6 +50,7 @@ impl std::fmt::Debug for BootConfig {
             .field("providers", &self.providers)
             .field("forges", &self.forges)
             .field("deployment", &self.deployment)
+            .field("board", &self.board)
             .finish_non_exhaustive()
     }
 }
@@ -84,6 +88,10 @@ impl BootConfig {
 
     pub fn deployment(&self) -> Deployment {
         self.deployment
+    }
+
+    pub fn board(&self) -> BoardSite {
+        self.board
     }
 
     pub fn shadowed_sections<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Value> + 'a {
@@ -137,7 +145,7 @@ pub fn read_files_as_owner(config_dir: &Path) -> Result<Document, ConfigError> {
 /// The sections the daemon registers, as literal blocks: the disclosure drift
 /// gate reads each registration's `name:` operand from this file, so the list
 /// is never built by a loop (and this comment never spells the block's opener).
-fn boot_specs() -> [SectionSpec; 9] {
+fn boot_specs() -> [SectionSpec; 10] {
     [
         SectionSpec {
             name: LAKE_SECTION.to_string(),
@@ -175,6 +183,10 @@ fn boot_specs() -> [SectionSpec; 9] {
             name: DEPLOYMENT_SECTION.to_string(),
             required: false,
         },
+        SectionSpec {
+            name: BOARD_SECTION.to_string(),
+            required: false,
+        },
     ]
 }
 
@@ -192,6 +204,7 @@ pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
         policy,
         providers,
         forges,
+        board,
     } = declared(&document)?;
     let deployment = deployment_from_section(document.section(DEPLOYMENT_SECTION))?;
     Ok(BootConfig {
@@ -201,6 +214,7 @@ pub(crate) fn assemble(document: Document) -> Result<BootConfig, ConfigError> {
         providers,
         forges,
         deployment,
+        board,
     })
 }
 
@@ -242,11 +256,13 @@ pub(crate) fn declared(document: &Document) -> Result<Declared, ConfigError> {
     }
     let providers = providers_from_section(document.section(PROVIDERS_SECTION))?;
     let forges = forges_from_section(document.section(FORGES_SECTION))?;
+    let board = board_from_section(document.section(BOARD_SECTION))?;
     Ok(Declared {
         ceiling,
         policy,
         providers,
         forges,
+        board,
     })
 }
 
@@ -451,6 +467,36 @@ mod tests {
             }
         );
         assert!(format!("{cfg:?}").contains("Container"), "{cfg:?}");
+    }
+
+    #[test]
+    fn the_board_site_switch_is_carried_and_absent_is_off() {
+        let off = new_dir("board-absent");
+        put(
+            &off.0,
+            "maknae.yaml",
+            "deployment:\n  mode: container\n",
+            0o640,
+        );
+        assert!(!owned(&off.0).expect("boots").board().enabled);
+        let on = new_dir("board-on");
+        put(
+            &on.0,
+            "maknae.yaml",
+            "deployment:\n  mode: container\nboard:\n  enabled: true\n",
+            0o640,
+        );
+        let cfg = owned(&on.0).expect("boots");
+        assert!(cfg.board().enabled);
+        assert!(format!("{cfg:?}").contains("enabled: true"), "{cfg:?}");
+        let bad = new_dir("board-bad");
+        put(
+            &bad.0,
+            "maknae.yaml",
+            "deployment:\n  mode: container\nboard:\n  enabled: \"true\"\n",
+            0o640,
+        );
+        assert!(matches!(owned(&bad.0), Err(ConfigError::InvalidBoard(_))));
     }
 
     #[cfg(unix)]

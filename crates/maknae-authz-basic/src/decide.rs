@@ -45,6 +45,7 @@ pub(crate) struct LoadedPolicy {
     pub(crate) subjects: SubjectGrants,
     pub(crate) agents: AgentUids,
     pub(crate) taskers: AgentTaskers,
+    pub(crate) boards: AgentBoards,
     pub(crate) sensitive: std::sync::Arc<maknae_config::SensitiveList>,
     pub(crate) tools: std::sync::Arc<maknae_config::ToolsCatalog>,
     pub(crate) fold: maknae_config::Fold,
@@ -64,6 +65,10 @@ impl AgentUids {
 pub(crate) struct AgentTaskers(
     pub(crate) std::collections::BTreeMap<String, Option<std::collections::BTreeSet<u32>>>,
 );
+
+/// The enrolled agents whose `board:` switch is on.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentBoards(pub(crate) std::collections::BTreeSet<String>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SubjectOrigin {
@@ -197,11 +202,11 @@ impl DestinationGrants {
 /// [`crate::USER_GRANTABLE`] may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 16] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 17] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read", "board.manage"];
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 20] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+pub(crate) const ACTION_VOCABULARY: [&str; 21] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read", "board.manage", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
 
 /// Decided as `fs.read` wherever an action is limited, and never named by a list (#161 M15).
 pub(crate) const DECIDED_AS_READ: [&str; 2] = ["fs.stat", "fs.list"];
@@ -276,7 +281,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -294,6 +299,7 @@ const _: () = {
     assert!(!str_eq(n, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(o, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(p, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(q, "admin.whoami"), "{}", WHY);
 };
 
 /// One expanded grant: the term and the entry it was written as.
@@ -954,7 +960,10 @@ pub(crate) fn decide_loaded_cited(
             }
         }
         Role::Admin | Role::User
-            if matches!(req.action.0.as_str(), "board.post" | "board.read") =>
+            if matches!(
+                req.action.0.as_str(),
+                "board.post" | "board.read" | "board.manage"
+            ) =>
         {
             match granted(lp, role.key(), &req.action.0) {
                 Ok(source) => grant_permit(role.key(), source),
@@ -1157,6 +1166,9 @@ fn agent_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Opti
     match class_of(action) {
         Some(Class::Admin) if action == "admin.whoami" => None,
         Some(Class::Admin) => deny(format!(
+            "agent {id}: {action} is never permitted to an agent"
+        )),
+        Some(Class::Board) if action == "board.manage" => deny(format!(
             "agent {id}: {action} is never permitted to an agent"
         )),
         Some(
@@ -1870,6 +1882,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
             fold: maknae_config::Fold::None,
@@ -3307,6 +3320,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -4092,6 +4106,7 @@ mod tests {
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -4645,6 +4660,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: AgentUids::default(),
             taskers: AgentTaskers::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -5186,6 +5202,7 @@ mod tests {
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
             agents: AgentUids::default(),
             taskers: AgentTaskers::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -5245,6 +5262,7 @@ mod tests {
                 .into(),
                 problems: Vec::new(),
                 taskers: Default::default(),
+                boards: Default::default(),
             };
             crate::agent_subjects(&outcome, &mut subjects).unwrap();
             agents.0.insert(HOBI_UID, "hobi".into());
@@ -5256,6 +5274,7 @@ mod tests {
             subjects,
             agents,
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -5358,6 +5377,67 @@ mod tests {
             let human = decide_loaded_cited(&lp, &principal(), &any_action(OPERATOR_UID, term));
             assert_eq!(human.verdict, permit_with_audit(), "{term}");
         }
+    }
+
+    #[test]
+    fn an_agent_is_denied_board_manage_whatever_its_role_or_actions_say() {
+        let granting = AGENT_SITE
+            .replace(
+                "allow: [\"admin.*\", \"session.prompt\", \"session.new\"]",
+                "allow: [\"admin.*\", \"session.prompt\", \"session.new\", \"board.manage\"]",
+            )
+            .replace(
+                "allow: [\"session.prompt\", \"session.new\"]\ndestinations",
+                "allow: [\"session.prompt\", \"session.new\", \"board.manage\"]\ndestinations",
+            );
+        let allowing =
+            Some("schema_version: 1\nactions:\n  allow: [\"board.manage\", \"board.*\"]\n");
+        for (role, reason) in [
+            (
+                "user",
+                "agent hobi: board.manage is never permitted to an agent",
+            ),
+            (
+                "guest",
+                "agent hobi: board.manage is never permitted to an agent",
+            ),
+            ("admin", "agent hobi: an agent never holds admin"),
+            ("adversary", "subject contained: role=adversary"),
+        ] {
+            let mut lp = lp_agent(role, allowing);
+            lp.policy = maknae_config::parse_authz(&granting).unwrap();
+            lp.action_grants = crate::validate_grants(&lp.policy.action_grants).unwrap();
+            let d = decide_loaded_cited(&lp, &principal(), &as_hobi("board.manage"));
+            assert_eq!(d.verdict, deny(reason), "{role}");
+            assert_eq!(d.role, Some(role), "{role}");
+            assert!(d.cited.is_none(), "{role}");
+            let off_channel =
+                decide_loaded_cited(&lp, &principal(), &any_action(HOBI_UID, "board.manage"));
+            assert!(
+                matches!(off_channel.verdict, Verdict::Deny { .. }),
+                "{role}: {off_channel:?}"
+            );
+        }
+        let lp = {
+            let mut lp = lp_agent("user", allowing);
+            lp.policy = maknae_config::parse_authz(&granting).unwrap();
+            lp.action_grants = crate::validate_grants(&lp.policy.action_grants).unwrap();
+            lp
+        };
+        for uid in [OPERATOR_UID, HUMAN_UID] {
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &any_action(uid, "board.manage")).verdict,
+                permit_with_audit(),
+                "{uid}"
+            );
+        }
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &as_hobi("board.read")).verdict,
+            Verdict::NotApplicable {
+                note: Some("role user: no rule for board.read".into())
+            },
+            "the agent's actions list admits board.*; only the arm refuses board.manage"
+        );
     }
 
     #[test]
@@ -5739,6 +5819,7 @@ mod tests {
                 .collect(),
             problems: Vec::new(),
             taskers: Default::default(),
+            boards: Default::default(),
         };
         crate::agent_subjects(&outcome, &mut subjects).unwrap();
         let mut agents = AgentUids::default();
@@ -5758,6 +5839,7 @@ mod tests {
             subjects,
             agents,
             taskers,
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -6335,6 +6417,7 @@ mod tests {
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap()),

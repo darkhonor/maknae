@@ -399,6 +399,11 @@
 1002 board.read None -> NotApplicable { note: Some("role guest: no rule for board.read") } Some("guest") None
 666 board.read None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 board.read None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 board.manage None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:14 in /etc/maknae/authz.yaml#roles.admin")
+1001 board.manage None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:9 in /etc/maknae/authz.yaml#roles.user")
+1002 board.manage None -> NotApplicable { note: Some("role guest: no rule for board.manage") } Some("guest") None
+666 board.manage None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 board.manage None -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
 1001 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
 1002 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None

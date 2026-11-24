@@ -12,7 +12,9 @@ use maknae_security::{AttrValue, Attributes, Authorizer, Decision, Verdict};
 
 use crate::blocking_guard::{admit_blocking, Offload};
 use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore};
-use crate::board_store::{BoardKey, HeldFor, LabelValue, Stored};
+use crate::board_store::{BoardKey, HeldFor, LabelValue, Report, Settings, Stored};
+use crate::boot::BootConfig;
+use crate::enrollment::{EnrollmentView, Load};
 use crate::task::CitedTask;
 
 pub trait BoardSwitches: Send + Sync {
@@ -20,16 +22,28 @@ pub trait BoardSwitches: Send + Sync {
     fn agent(&self, agent: &AgentId) -> bool;
 }
 
-/// The production switches until #698: the board is served nowhere.
-pub struct SwitchesOff;
+/// The site switch from `maknae.yaml`, and each agent's from the installed snapshot.
+pub struct ConfiguredSwitches {
+    site: bool,
+    view: Arc<dyn EnrollmentView>,
+}
 
-impl BoardSwitches for SwitchesOff {
+impl ConfiguredSwitches {
+    pub fn from_boot(boot: &BootConfig, view: Arc<dyn EnrollmentView>) -> Self {
+        ConfiguredSwitches {
+            site: boot.board().enabled,
+            view,
+        }
+    }
+}
+
+impl BoardSwitches for ConfiguredSwitches {
     fn site(&self) -> bool {
-        false
+        self.site
     }
 
-    fn agent(&self, _: &AgentId) -> bool {
-        false
+    fn agent(&self, agent: &AgentId) -> bool {
+        self.view.board(agent)
     }
 }
 
@@ -75,13 +89,15 @@ impl std::fmt::Display for Off {
     }
 }
 
-/// `Ok(None)` for an agent citing no task: the decision refuses it.
+/// `Ok(None)` for an agent citing no task: the decision refuses it. Otherwise the board
+/// and the policy load the switches were read from, in the same hold.
 pub(crate) fn gate(
     channel_agent: Option<&AgentId>,
     cited: Option<&CitedTask>,
     switches: &dyn BoardSwitches,
     board: &BoardStore,
-) -> Result<Option<BoardKey>, Off> {
+    view: &dyn EnrollmentView,
+) -> Result<Option<(BoardKey, Load)>, Off> {
     let agent = channel_agent.ok_or(Off::ClientChannel)?;
     let Some(cited) = cited else {
         return Ok(None);
@@ -90,13 +106,71 @@ pub(crate) fn gate(
     if !switches.site() {
         return Err(Off::Site);
     }
-    if !switches.agent(agent) {
+    let ((agent_on, load), tasker_on) =
+        board.enabled_with(key, || (switches.agent(agent), view.load()));
+    if !agent_on {
         return Err(Off::Agent);
     }
-    if !board.settings(key).enabled {
+    if !tasker_on {
         return Err(Off::Tasker);
     }
-    Ok(Some(key))
+    Ok(Some((key, load)))
+}
+
+pub(crate) const POLICY_CHANGED: &str = "board: the policy changed during the request";
+
+pub(crate) const ONLY_A_PERSON: &str = "board: only a person manages a board";
+
+/// The board a `board.manage` acts on: the caller's own, and only a person's.
+pub(crate) fn manage_key(channel_agent: Option<&AgentId>, uid: u32) -> Option<BoardKey> {
+    match channel_agent {
+        None => Some(BoardKey(uid)),
+        Some(_) => None,
+    }
+}
+
+pub(crate) fn wire_settings(s: Settings) -> maknae_proto::BoardSettings {
+    maknae_proto::BoardSettings {
+        enabled: s.enabled,
+        participate: s.participate,
+        report: match s.report {
+            Report::Off => maknae_proto::BoardReport::Off,
+            Report::Summary => maknae_proto::BoardReport::Summary,
+            Report::Every => maknae_proto::BoardReport::Every,
+        },
+    }
+}
+
+pub(crate) fn stored_settings(s: maknae_proto::BoardSettings) -> Settings {
+    Settings {
+        enabled: s.enabled,
+        participate: s.participate,
+        report: match s.report {
+            maknae_proto::BoardReport::Off => Report::Off,
+            maknae_proto::BoardReport::Summary => Report::Summary,
+            maknae_proto::BoardReport::Every => Report::Every,
+        },
+    }
+}
+
+/// `enabled=<bool> participate=<bool> report=<off|summary|every>`.
+pub(crate) fn settings_text(s: Settings) -> String {
+    let report = match s.report {
+        Report::Off => "off",
+        Report::Summary => "summary",
+        Report::Every => "every",
+    };
+    format!(
+        "enabled={} participate={} report={report}",
+        s.enabled, s.participate
+    )
+}
+
+pub(crate) fn removed_audit(ids: &[PostId]) -> BoardAudit {
+    BoardAudit {
+        removed: Some(ids.iter().map(PostId::to_string).collect()),
+        ..BoardAudit::default()
+    }
 }
 
 /// The read request `base` asked again of one post: its board and its labels.
@@ -775,13 +849,132 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    const BOB: BoardKey = BoardKey(1000);
+    #[test]
+    fn board_manage_keys_the_callers_own_board_and_only_a_persons() {
+        assert_eq!(manage_key(None, 1000), Some(BoardKey(1000)));
+        assert_eq!(manage_key(None, 0), Some(BoardKey(0)));
+        let hobi = AgentId::parse("hobi").unwrap();
+        assert_eq!(manage_key(Some(&hobi), 1000), None);
+        assert_eq!(manage_key(Some(&hobi), 2001), None);
+        assert_eq!(ONLY_A_PERSON, "board: only a person manages a board");
+    }
 
     #[test]
-    fn the_production_switches_are_off() {
-        let hobi = AgentId::parse("sentinel-695-hobi").unwrap();
-        assert!(!SwitchesOff.site());
-        assert!(!SwitchesOff.agent(&hobi));
+    fn the_settings_convert_both_ways_and_read_as_pinned() {
+        use maknae_proto::{BoardReport as W, BoardSettings};
+        let mut seen = BTreeSet::new();
+        for (enabled, participate, stored, wire, said) in [
+            (
+                false,
+                false,
+                Report::Off,
+                W::Off,
+                "enabled=false participate=false report=off",
+            ),
+            (
+                true,
+                false,
+                Report::Summary,
+                W::Summary,
+                "enabled=true participate=false report=summary",
+            ),
+            (
+                false,
+                true,
+                Report::Every,
+                W::Every,
+                "enabled=false participate=true report=every",
+            ),
+            (
+                true,
+                true,
+                Report::Off,
+                W::Off,
+                "enabled=true participate=true report=off",
+            ),
+        ] {
+            let kernel = Settings {
+                enabled,
+                participate,
+                report: stored,
+            };
+            let on_wire = BoardSettings {
+                enabled,
+                participate,
+                report: wire,
+            };
+            assert_eq!(wire_settings(kernel), on_wire);
+            assert_eq!(stored_settings(on_wire), kernel);
+            assert_eq!(settings_text(kernel), said);
+            seen.insert(said);
+        }
+        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn a_clear_names_its_removed_posts_in_lowercase_hex() {
+        let ids = [PostId([0xab; 16]), PostId([0x01; 16])];
+        assert_eq!(
+            removed_audit(&ids),
+            BoardAudit {
+                removed: Some(vec!["ab".repeat(16), "01".repeat(16)]),
+                ..BoardAudit::default()
+            }
+        );
+        assert_eq!(
+            removed_audit(&[]),
+            BoardAudit {
+                removed: Some(Vec::new()),
+                ..BoardAudit::default()
+            }
+        );
+    }
+
+    const BOB: BoardKey = BoardKey(1000);
+
+    fn boot_with(board: Option<bool>) -> crate::BootConfig {
+        use maknae_config::Value;
+        let mut sections = vec![(
+            "deployment".to_string(),
+            Value::Map(vec![("mode".into(), Value::Str("container".into()))]),
+        )];
+        if let Some(on) = board {
+            sections.push((
+                "board".to_string(),
+                Value::Map(vec![("enabled".into(), Value::Bool(on))]),
+            ));
+        }
+        crate::boot::assemble(maknae_config::Document::from_sections_for_test(sections))
+            .expect("assembles")
+    }
+
+    #[test]
+    fn the_configured_switches_read_the_site_from_boot_and_the_agent_from_the_view() {
+        use crate::enrollment::{Boarding, FixedEnrollment};
+        let jin = AgentId::parse("sentinel-698-jin").unwrap();
+        let unknown = AgentId::parse("sentinel-698-nobody").unwrap();
+        let enrolled = FixedEnrollment([(hobi(), 12_101), (jin.clone(), 12_103)].into());
+        let views: [(&str, Arc<dyn crate::EnrollmentView>, bool); 2] = [
+            (
+                "agent on",
+                Arc::new(Boarding(enrolled.clone(), [hobi()].into())),
+                true,
+            ),
+            (
+                "agent off",
+                Arc::new(Boarding(enrolled.clone(), BTreeSet::new())),
+                false,
+            ),
+        ];
+        for (board, site) in [(None, false), (Some(false), false), (Some(true), true)] {
+            for (name, view, agent) in &views {
+                let s = ConfiguredSwitches::from_boot(&boot_with(board), Arc::clone(view));
+                assert_eq!(s.site(), site, "{board:?} {name}");
+                assert_eq!(s.agent(&hobi()), *agent, "{board:?} {name}");
+                assert!(!s.agent(&jin), "{board:?} {name}");
+                assert!(!s.agent(&unknown), "{board:?} {name}");
+            }
+        }
     }
 
     fn hobi() -> AgentId {
@@ -828,6 +1021,184 @@ mod tests {
             )
             .unwrap();
         board
+    }
+
+    /// The agent's switch, read first; reading it starts an install that turns it off and
+    /// a write that turns the tasker on, and gives both 300 ms before it answers.
+    struct FlipWhileRead {
+        agent_on: Arc<std::sync::atomic::AtomicBool>,
+        board: Arc<BoardStore>,
+        flipper: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl BoardSwitches for FlipWhileRead {
+        fn site(&self) -> bool {
+            true
+        }
+
+        fn agent(&self, _: &AgentId) -> bool {
+            use std::sync::atomic::Ordering::SeqCst;
+            let on = self.agent_on.load(SeqCst);
+            let (agent_on, board) = (Arc::clone(&self.agent_on), Arc::clone(&self.board));
+            let (done, wait) = std::sync::mpsc::channel();
+            *self.flipper.lock().unwrap() = Some(std::thread::spawn(move || {
+                board.install_and_mark(
+                    || agent_on.store(false, SeqCst),
+                    &crate::enrollment::FixedEnrollment(Default::default()),
+                );
+                board
+                    .set_settings(
+                        BOB,
+                        Settings {
+                            enabled: true,
+                            ..Settings::default()
+                        },
+                    )
+                    .unwrap();
+                let _ = done.send(());
+            }));
+            let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
+            on
+        }
+    }
+
+    /// A view whose installed load is `current`. Reading the agent's switch starts an
+    /// install that replaces the load; reading the load first waits up to 300 ms for that
+    /// install to land, which it can only do while the board's memory lock is free.
+    struct SwapWhileRead {
+        current: Arc<std::sync::Mutex<Arc<dyn std::any::Any + Send + Sync>>>,
+        board: Arc<BoardStore>,
+        landed: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        swapper: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl BoardSwitches for SwapWhileRead {
+        fn site(&self) -> bool {
+            true
+        }
+
+        fn agent(&self, _: &AgentId) -> bool {
+            let (current, board) = (Arc::clone(&self.current), Arc::clone(&self.board));
+            let (done, landed) = std::sync::mpsc::channel();
+            *self.landed.lock().unwrap() = Some(landed);
+            *self.swapper.lock().unwrap() = Some(std::thread::spawn(move || {
+                board.install_and_mark(
+                    || *current.lock().unwrap() = Arc::new(2_u8),
+                    &crate::enrollment::FixedEnrollment(Default::default()),
+                );
+                let _ = done.send(());
+            }));
+            true
+        }
+    }
+
+    impl EnrollmentView for SwapWhileRead {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+        fn contained(&self, _: u32) -> bool {
+            false
+        }
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+        fn board(&self, _: &AgentId) -> bool {
+            true
+        }
+        fn load(&self) -> Load {
+            if let Some(landed) = self.landed.lock().unwrap().take() {
+                let _ = landed.recv_timeout(std::time::Duration::from_millis(300));
+            }
+            Load::installed(Arc::clone(&self.current.lock().unwrap()))
+        }
+    }
+
+    #[test]
+    fn the_gate_reads_the_policy_load_with_the_switches_and_sees_a_later_install() {
+        let first: Arc<dyn std::any::Any + Send + Sync> = Arc::new(1_u8);
+        let swap = SwapWhileRead {
+            current: Arc::new(std::sync::Mutex::new(Arc::clone(&first))),
+            board: Arc::new(enabled(true)),
+            landed: std::sync::Mutex::new(None),
+            swapper: std::sync::Mutex::new(None),
+        };
+        let person = cited(RootTasker::Person { uid: BOB.0 });
+        let got = gate(Some(&hobi()), Some(&person), &swap, &swap.board, &swap);
+        swap.swapper
+            .lock()
+            .unwrap()
+            .take()
+            .expect("reading the switch started the install")
+            .join()
+            .unwrap();
+        let (key, load) = got.expect("on").expect("a board");
+        assert_eq!(key, BOB);
+        assert_eq!(
+            load,
+            Load::installed(first),
+            "the load the switch was read on"
+        );
+        assert!(!swap.board.still_installed(&load, &swap));
+        assert!(swap.board.still_installed(&swap.load(), &swap));
+        assert_ne!(load, swap.load());
+    }
+
+    #[test]
+    fn the_gate_reads_the_agent_and_the_tasker_at_one_instant() {
+        let switches = FlipWhileRead {
+            agent_on: Arc::new(true.into()),
+            board: Arc::new(enabled(false)),
+            flipper: std::sync::Mutex::new(None),
+        };
+        let person = cited(RootTasker::Person { uid: BOB.0 });
+        let got = gate(
+            Some(&hobi()),
+            Some(&person),
+            &switches,
+            &switches.board,
+            &crate::enrollment::FixedEnrollment(Default::default()),
+        );
+        switches
+            .flipper
+            .lock()
+            .unwrap()
+            .take()
+            .expect("reading the switch started the flip")
+            .join()
+            .unwrap();
+        assert_eq!(
+            got,
+            Err(Off::Tasker),
+            "agent on and tasker off, read together"
+        );
+        assert!(
+            switches.board.settings(BOB).enabled,
+            "the write landed after"
+        );
+        assert_eq!(
+            gate(
+                Some(&hobi()),
+                Some(&person),
+                &switches,
+                &switches.board,
+                &crate::enrollment::FixedEnrollment(Default::default()),
+            ),
+            Err(Off::Agent)
+        );
+        switches
+            .flipper
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -928,7 +1299,14 @@ mod tests {
             ),
         ];
         for (at, channel, task, sw, on, want) in table {
-            assert_eq!(gate(channel, task, &sw, &enabled(on)), want, "{at}");
+            let got = gate(
+                channel,
+                task,
+                &sw,
+                &enabled(on),
+                &crate::enrollment::FixedEnrollment(Default::default()),
+            );
+            assert_eq!(got.map(|g| g.map(|(key, _)| key)), want, "{at}");
         }
         assert_eq!(
             [

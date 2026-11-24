@@ -99,7 +99,7 @@ pub enum Dispatch {
     TaskRequested,
     /// The peer asked for its own tool catalog. No datum: the catalog is the installed snapshot's.
     ToolCatalogRequested,
-    /// A `board.post` or `board.read`.
+    /// A `board.post`, `board.read` or `board.manage`.
     BoardRequested,
 }
 
@@ -173,7 +173,9 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpPromptGet
         | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
         Verb::ToolCatalog {} => Dispatch::ToolCatalogRequested,
-        Verb::BoardPost { .. } | Verb::BoardRead { .. } => Dispatch::BoardRequested,
+        Verb::BoardPost { .. } | Verb::BoardRead { .. } | Verb::BoardManage { .. } => {
+            Dispatch::BoardRequested
+        }
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
@@ -184,6 +186,91 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::TaskClaim { .. }
         | Verb::TaskReport { .. }
         | Verb::AgentList { .. } => Dispatch::TaskRequested,
+    }
+}
+
+/// The `board.manage` operation a verb is, the value of `CONTEXT_BOARD_OP`.
+pub fn board_op(verb: &Verb) -> Option<&'static str> {
+    match verb {
+        Verb::BoardManage {
+            op: maknae_proto::BoardOp::Settings { .. },
+        } => Some("settings"),
+        Verb::BoardManage {
+            op: maknae_proto::BoardOp::Clear,
+        } => Some("clear"),
+        Verb::TaskSubmit { .. }
+        | Verb::TaskAdd { .. }
+        | Verb::TaskStatus { .. }
+        | Verb::TaskList { .. }
+        | Verb::TaskStop { .. }
+        | Verb::TaskDrop { .. }
+        | Verb::TaskCollect { .. }
+        | Verb::TaskClaim { .. }
+        | Verb::TaskReport { .. }
+        | Verb::AgentList { .. }
+        | Verb::Ping
+        | Verb::Whoami
+        | Verb::ToolCatalog {}
+        | Verb::BoardPost { .. }
+        | Verb::BoardRead { .. }
+        | Verb::AdminStatus
+        | Verb::AdminConfigShow
+        | Verb::AdminAuditTail
+        | Verb::AdminPolicyReload
+        | Verb::AdminSubjectList
+        | Verb::AdminBaselineShow
+        | Verb::AdminBaselineAccept { .. }
+        | Verb::AdminSubjectBind
+        | Verb::AdminSubjectUnbind
+        | Verb::AdminContain { .. }
+        | Verb::AdminRelease { .. }
+        | Verb::AdminHeldList { .. }
+        | Verb::AdminHeldRelease { .. }
+        | Verb::AdminCredentialRotate
+        | Verb::AdminProviderList
+        | Verb::AdminProviderSet
+        | Verb::AdminProviderDisable
+        | Verb::AdminSessionList
+        | Verb::AdminSessionTerminate
+        | Verb::SessionNew { .. }
+        | Verb::SessionResume
+        | Verb::SessionClose { .. }
+        | Verb::SessionDelete { .. }
+        | Verb::SessionList { .. }
+        | Verb::SessionFork
+        | Verb::SessionPrompt { .. }
+        | Verb::SessionCancel
+        | Verb::SessionSetconfigoption
+        | Verb::SessionSetmode
+        | Verb::SessionLoad
+        | Verb::SessionUpdate
+        | Verb::SessionRequestpermission
+        | Verb::SessionElicitCreate
+        | Verb::SessionElicitComplete
+        | Verb::SessionCompact
+        | Verb::Read { .. }
+        | Verb::FsWrite { .. }
+        | Verb::FsDelete { .. }
+        | Verb::FsMove
+        | Verb::FsList { .. }
+        | Verb::FsStat { .. }
+        | Verb::FsMkdir { .. }
+        | Verb::FsLink
+        | Verb::FsChmod
+        | Verb::FsChown
+        | Verb::TerminalCreate
+        | Verb::TerminalOutput
+        | Verb::TerminalWaitforexit
+        | Verb::TerminalKill
+        | Verb::TerminalRelease
+        | Verb::TerminalInput
+        | Verb::McpConnect
+        | Verb::McpDisconnect
+        | Verb::McpMessage
+        | Verb::McpToolCall
+        | Verb::McpResourceRead
+        | Verb::McpPromptGet
+        | Verb::McpSamplingCreate => None,
     }
 }
 
@@ -205,6 +292,7 @@ pub fn task_op(verb: &Verb) -> Option<&'static str> {
         | Verb::ToolCatalog {}
         | Verb::BoardPost { .. }
         | Verb::BoardRead { .. }
+        | Verb::BoardManage { .. }
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -450,6 +538,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::AgentList { .. } => "session.task",
         Verb::BoardPost { .. } => "board.post",
         Verb::BoardRead { .. } => "board.read",
+        Verb::BoardManage { .. } => "board.manage",
     }
 }
 
@@ -577,9 +666,18 @@ pub fn build_authz_request(
             AttrValue::Str(format!("{}/{}", a.provider.name, a.model)),
         );
     }
+    if let (Verb::BoardManage { .. }, Stamp::Client) = (verb, stamp) {
+        resource.insert(
+            maknae_security::RESOURCE_BOARD,
+            AttrValue::Str(format!("users/{peer_uid}")),
+        );
+    }
     let mut context = lane_context(lane);
     if let Some(op) = task_op(verb) {
         context.insert(maknae_security::CONTEXT_TASK_OP, AttrValue::Str(op.into()));
+    }
+    if let Some(op) = board_op(verb) {
+        context.insert(maknae_security::CONTEXT_BOARD_OP, AttrValue::Str(op.into()));
     }
     maknae_security::Request {
         subject,
@@ -965,12 +1063,100 @@ mod tests {
             );
             assert_eq!(client.resource.0.get(RESOURCE_BOARD), None);
         }
-        for verb in verbs
+        let manage: Vec<&Verb> = verbs
             .iter()
-            .filter(|v| !matches!(v, Verb::BoardPost { .. } | Verb::BoardRead { .. }))
-        {
-            assert_eq!(board(verb, Some(&person)), None, "{}", verb_to_action(verb));
+            .filter(|v| matches!(v, Verb::BoardManage { .. }))
+            .collect();
+        assert_eq!(manage.len(), 3);
+        for verb in &manage {
+            for task in [Some(&person), Some(&agent_rooted), None] {
+                assert_eq!(board(verb, task), None, "{verb:?}");
+            }
+            for uid in [1000, 1002] {
+                let client = build_authz_request(
+                    verb,
+                    uid,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                    None,
+                    &Stamp::Client,
+                );
+                assert_eq!(
+                    client.resource.0.get(RESOURCE_BOARD),
+                    Some(&AttrValue::Str(format!("users/{uid}"))),
+                    "{verb:?}"
+                );
+            }
         }
+        for verb in verbs.iter().filter(|v| {
+            !matches!(
+                v,
+                Verb::BoardPost { .. } | Verb::BoardRead { .. } | Verb::BoardManage { .. }
+            )
+        }) {
+            assert_eq!(board(verb, Some(&person)), None, "{}", verb_to_action(verb));
+            let client = build_authz_request(
+                verb,
+                1000,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Client,
+            );
+            assert_eq!(
+                client.resource.0.get(RESOURCE_BOARD),
+                None,
+                "{}",
+                verb_to_action(verb)
+            );
+        }
+    }
+
+    #[test]
+    fn only_board_manage_carries_its_board_op_on_every_channel() {
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let mut ops = Vec::new();
+        for v in all_verbs() {
+            for stamp in [
+                Stamp::Client,
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: None,
+                },
+            ] {
+                let req = build_authz_request(
+                    &v,
+                    1000,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                    None,
+                    &stamp,
+                );
+                let stamped = req.context.0.str(maknae_security::CONTEXT_BOARD_OP);
+                assert_eq!(stamped, board_op(&v), "{v:?}");
+                assert_eq!(
+                    stamped.is_some(),
+                    matches!(v, Verb::BoardManage { .. }),
+                    "{v:?}"
+                );
+                assert!(
+                    !(req
+                        .context
+                        .0
+                        .str(maknae_security::CONTEXT_TASK_OP)
+                        .is_some()
+                        && stamped.is_some())
+                );
+                if let (Some(op), Stamp::Client) = (stamped, &stamp) {
+                    ops.push(op.to_owned());
+                }
+            }
+        }
+        assert_eq!(ops, ["settings", "settings", "clear"]);
+        assert_eq!(maknae_security::CONTEXT_BOARD_OP, "board_op");
     }
 
     #[test]
@@ -1583,7 +1769,8 @@ mod tests {
                 "session.task",
                 "tool.catalog",
                 "board.post",
-                "board.read"
+                "board.read",
+                "board.manage"
             ],
             "the hand-copied list in the class test above must match the constant"
         );
@@ -2505,6 +2692,17 @@ mod tests {
                 },
             },
             Verb::BoardRead { seen_through: None },
+            Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None },
+            },
+            Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings {
+                    set: Some(maknae_proto::BoardSettings::default()),
+                },
+            },
+            Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear,
+            },
         ]
     }
 
@@ -2670,11 +2868,11 @@ mod tests {
 
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_sixty_two_client_reachable_terms() {
+    fn the_vocabulary_is_sixty_three_client_reachable_terms() {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
-        assert_eq!(terms.len(), 62);
-        assert_eq!(all_verbs().len(), 73);
+        assert_eq!(terms.len(), 63);
+        assert_eq!(all_verbs().len(), 76);
     }
 
     /// Two terms sharing an action string would be decided as one another —
@@ -2699,6 +2897,14 @@ mod tests {
         let (release, rest): (Vec<Verb>, Vec<Verb>) = rest
             .into_iter()
             .partition(|v| verb_to_action(v) == "admin.release");
+        let (manage, rest): (Vec<Verb>, Vec<Verb>) = rest
+            .into_iter()
+            .partition(|v| verb_to_action(v) == "board.manage");
+        assert_eq!(
+            names(&manage),
+            ["BoardManage", "BoardManage", "BoardManage"],
+            "only the board.manage operations share board.manage"
+        );
         assert_eq!(
             names(&release),
             ["AdminRelease", "AdminHeldList", "AdminHeldRelease"],

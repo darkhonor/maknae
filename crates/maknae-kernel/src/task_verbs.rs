@@ -151,6 +151,7 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
         | Verb::ToolCatalog {}
         | Verb::BoardPost { .. }
         | Verb::BoardRead { .. }
+        | Verb::BoardManage { .. }
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -338,12 +339,14 @@ pub(crate) fn label(standing: Option<AgentStanding>) -> &'static str {
 }
 
 /// Adds the agent to `page`; an undecided agent the caller holds nothing with is only
-/// counted.
+/// counted. `board` is the agent's own switch, carried only for a standing the kernel
+/// describes the agent's configuration under.
 pub(crate) fn place(
     page: &mut AgentPage,
     agent: &AgentId,
     standing: Option<AgentStanding>,
     held: Option<Holding>,
+    board: bool,
 ) {
     match (standing, held) {
         (None, _) => {}
@@ -352,6 +355,12 @@ pub(crate) fn place(
             agent: agent.as_str().to_owned(),
             standing,
             waiting: held.map_or(0, |h| h.waiting),
+            board: match standing {
+                AgentStanding::Enrolled | AgentStanding::Contained => board,
+                AgentStanding::Withdrawn | AgentStanding::Removed | AgentStanding::Undecided => {
+                    false
+                }
+            },
         }),
     }
 }
@@ -757,8 +766,14 @@ mod tests {
             banner: None,
         };
         let a = |s: &str| AgentId::parse(s).unwrap();
-        place(&mut page, &a("jin"), Some(AgentStanding::Undecided), None);
-        place(&mut page, &a("suga"), None, holding(1, 1));
+        place(
+            &mut page,
+            &a("jin"),
+            Some(AgentStanding::Undecided),
+            None,
+            false,
+        );
+        place(&mut page, &a("suga"), None, holding(1, 1), true);
         assert!(page.entries.is_empty());
         assert_eq!(page.undecided, 1);
         place(
@@ -766,13 +781,21 @@ mod tests {
             &a("hobi"),
             Some(AgentStanding::Undecided),
             holding(0, 0),
+            true,
         );
-        place(&mut page, &a("rm"), Some(AgentStanding::Enrolled), None);
+        place(
+            &mut page,
+            &a("rm"),
+            Some(AgentStanding::Enrolled),
+            None,
+            false,
+        );
         place(
             &mut page,
             &a("v"),
             Some(AgentStanding::Withdrawn),
             holding(1, 3),
+            true,
         );
         assert_eq!(page.undecided, 1);
         let got: Vec<(&str, AgentStanding, u32)> = page
@@ -786,6 +809,41 @@ mod tests {
                 ("hobi", AgentStanding::Undecided, 0),
                 ("rm", AgentStanding::Enrolled, 0),
                 ("v", AgentStanding::Withdrawn, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn only_an_enrolled_or_contained_agent_carries_its_board_switch() {
+        let mut page = AgentPage {
+            entries: Vec::new(),
+            next: None,
+            undecided: 0,
+            banner: None,
+        };
+        let a = |s: &str| AgentId::parse(s).unwrap();
+        for (name, standing) in [
+            ("a", AgentStanding::Enrolled),
+            ("b", AgentStanding::Contained),
+            ("c", AgentStanding::Withdrawn),
+            ("d", AgentStanding::Removed),
+            ("e", AgentStanding::Undecided),
+        ] {
+            place(&mut page, &a(name), Some(standing), holding(0, 0), true);
+        }
+        let got: Vec<(&str, bool)> = page
+            .entries
+            .iter()
+            .map(|e| (e.agent.as_str(), e.board))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a", true),
+                ("b", true),
+                ("c", false),
+                ("d", false),
+                ("e", false)
             ]
         );
     }

@@ -6707,6 +6707,9 @@ mod tests {
         fn unresolved(&self, uid: u32) -> bool {
             self.base.unresolved(uid)
         }
+        fn board(&self, agent: &AgentId) -> bool {
+            self.base.board(agent)
+        }
     }
 
     #[test]

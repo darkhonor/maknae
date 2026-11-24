@@ -39,6 +39,7 @@ mod banner;
 mod baseline_doc;
 mod bindings;
 pub mod bindings_sync;
+mod board;
 mod bounds;
 mod bounds_io;
 mod builder;
@@ -111,6 +112,7 @@ pub use authz::{
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
+pub use board::{board_from_section, BoardSite, BOARD_SECTION};
 pub use bounds::{
     bounds_from_document, key_prefix_is_acceptable, kv_fragment_is_acceptable,
     mount_path_is_acceptable, path_is_within_prefix, prefixes_overlap, vault_path_is_safe,
@@ -199,7 +201,7 @@ pub use value::{canonical_json, Value};
 use builder::Builder;
 
 /// The sections `maknaed` reads from `maknae.yaml` and `config.d`.
-pub const DAEMON_SECTIONS: [&str; 9] = [
+pub const DAEMON_SECTIONS: [&str; 10] = [
     "lake",
     "vault",
     "transport",
@@ -209,6 +211,7 @@ pub const DAEMON_SECTIONS: [&str; 9] = [
     "forges",
     "egress",
     "deployment",
+    "board",
 ];
 
 /// Refuse a key the section's parser does not read (#210).
@@ -352,6 +355,7 @@ mod tests {
             FORGES_SECTION,
             EGRESS_SECTION,
             DEPLOYMENT_SECTION,
+            BOARD_SECTION,
         ] {
             assert!(DAEMON_SECTIONS.contains(&name), "{name}");
         }
