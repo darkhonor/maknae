@@ -111,7 +111,7 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|3|wire"
   "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|4|wire"
   "crates/maknae-proto/src/task.rs|AgentPage|agent_list|4|wire"
-  "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|3|wire"
+  "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|4|wire"
   "crates/maknae-proto/src/task.rs|BannerSpec|agent_list.banner|2|wire"
   "crates/maknae-proto/src/task.rs|HeldPage|held_list|2|wire"
   "crates/maknae-proto/src/task.rs|HeldView|held_list.entries|5|wire"

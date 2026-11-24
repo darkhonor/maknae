@@ -1803,7 +1803,7 @@ A person tasks an enrolled agent from the `maknae` CLI. The person needs `sessio
 maknae agent list
 ```
 
-It prints one line per agent: the name, then by standing `  (removed)`, `  (on hold: contained)`, `  (you can no longer task this agent)` or `  (could not be checked right now)`, then `  1 report waiting` or `  <n> reports waiting` when the agent holds reports for you. An empty list prints `no agents can be tasked by you`. When the kernel could not decide every agent, a last line says `the list may be incomplete; try again`; the exit status is still `0`. A refusal prints `maknae: the kernel refused the agent list` and an unreachable kernel `maknae: the kernel could not be reached: <why>`, on stderr.
+It prints one line per agent: the name, then `  board on` when the agent's own message-board switch is on, then by standing `  (removed)`, `  (on hold: contained)`, `  (you can no longer task this agent)` or `  (could not be checked right now)`, then `  1 report waiting` or `  <n> reports waiting` when the agent holds reports for you. An empty list prints `no agents can be tasked by you`. When the kernel could not decide every agent, a last line says `the list may be incomplete; try again`; the exit status is still `0`. A refusal prints `maknae: the kernel refused the agent list` and an unreachable kernel `maknae: the kernel could not be reached: <why>`, on stderr.
 
 **Open a session.**
 

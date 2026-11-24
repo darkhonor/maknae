@@ -5139,7 +5139,7 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
             }
         };
         said.push(format!("{}:{}", agent.as_str(), tv::label(standing)));
-        tv::place(&mut page, agent, standing, held);
+        tv::place(&mut page, agent, standing, held, view.board(agent));
         if page.entries.len() == maknae_proto::AGENT_PAGE_MAX {
             if at + 1 < rest.len() {
                 page.next = page.entries.last().map(|e| e.agent.clone());
@@ -30044,6 +30044,7 @@ mod task_sweep_tests {
                 agent: "hobi".into(),
                 standing: maknae_proto::AgentStanding::Undecided,
                 waiting: 0,
+                board: false,
             }]
         );
         assert_eq!((page.undecided, page.next), (1, None));

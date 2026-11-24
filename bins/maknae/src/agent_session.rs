@@ -911,6 +911,7 @@ mod tests {
                             agent: (*agent).into(),
                             standing: *standing,
                             waiting: 0,
+                            board: false,
                         })
                         .collect(),
                     undecided,
@@ -1741,6 +1742,7 @@ mod tests {
             agent: "v".into(),
             standing: AgentStanding::Undecided,
             waiting: 0,
+            board: false,
         });
         assert_eq!(
             admit(&fake.roster, "v"),

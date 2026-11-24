@@ -474,6 +474,14 @@ fn entry(agent: &str, standing: AgentStanding, waiting: u32) -> AgentEntry {
         agent: agent.into(),
         standing,
         waiting,
+        board: false,
+    }
+}
+
+fn boarded(agent: &str, standing: AgentStanding, waiting: u32) -> AgentEntry {
+    AgentEntry {
+        board: true,
+        ..entry(agent, standing, waiting)
     }
 }
 
@@ -549,6 +557,58 @@ async fn a_contained_agent_is_listed_only_for_a_caller_with_tasks_there() {
     assert!(
         theirs.entries.iter().all(|e| e.agent != "hobi"),
         "{theirs:?}"
+    );
+}
+
+const BOARDING: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nboard: true\n";
+
+#[tokio::test]
+async fn an_agent_whose_board_switch_is_on_is_listed_with_it() {
+    let w = world(
+        "board-on",
+        &[
+            agent("hobi", HOBI_UID, BOARDING),
+            agent("jin", JIN_UID, PLAIN),
+        ],
+    );
+    assert_eq!(
+        w.list(None).await.entries,
+        [
+            boarded("hobi", AgentStanding::Enrolled, 0),
+            entry("jin", AgentStanding::Enrolled, 0)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_contained_agent_keeps_its_board_switch_in_the_list() {
+    let user = common::euid_name();
+    let w = world_bound(
+        "board-contained",
+        &[
+            agent("hobi", nobody(), BOARDING),
+            agent("jin", JIN_UID, PLAIN),
+        ],
+        &format!("schema_version: 1\nbindings:\n  user: [\"{user}\"]\n  adversary: [\"nobody\"]\n"),
+    );
+    w.mine("hobi", nobody());
+    assert_eq!(
+        w.list(None).await.entries,
+        [
+            boarded("hobi", AgentStanding::Contained, 0),
+            entry("jin", AgentStanding::Enrolled, 0)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_withdrawn_agent_is_listed_without_its_board_switch() {
+    let w = world("board-withdrawn", &[agent("hobi", HOBI_UID, BOARDING)]);
+    w.submit("hobi").await;
+    w.agent_policy("hobi", "schema_version: 1\ntaskers: []\nboard: true\n");
+    assert_eq!(
+        w.list(None).await.entries,
+        [entry("hobi", AgentStanding::Withdrawn, 0)]
     );
 }
 

@@ -550,6 +550,7 @@ mod tests {
                     agent: (*n).into(),
                     standing: maknae_proto::AgentStanding::Enrolled,
                     waiting: 0,
+                    board: false,
                 })
                 .collect(),
             next: next.map(Into::into),
