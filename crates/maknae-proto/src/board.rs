@@ -375,7 +375,7 @@ pub struct BoardSettings {
 
 /// A `board.manage` operation on the caller's own board; `set: None` reads the settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum BoardOp {
     Settings { set: Option<BoardSettings> },
     Clear,
@@ -546,6 +546,28 @@ mod tests {
         extra.push((text("ids"), Value::Array(vec![])));
         let refused = dec::<BoardCleared>(&enc(&Value::Map(extra))).unwrap_err();
         assert!(refused.contains("unknown field `ids`"), "{refused}");
+    }
+
+    #[test]
+    fn a_board_op_refuses_an_unknown_key_inside_its_settings() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let op = |inner: Vec<(Value, Value)>| {
+            dec::<BoardOp>(&enc(&Value::Map(vec![(
+                text("settings"),
+                Value::Map(inner),
+            )])))
+        };
+        assert_eq!(
+            op(vec![(text("set"), Value::Null)]),
+            Ok(BoardOp::Settings { set: None })
+        );
+        let extra = op(vec![
+            (text("set"), Value::Null),
+            (text("x"), Value::Integer(1.into())),
+        ])
+        .unwrap_err();
+        assert!(extra.contains("unknown field `x`"), "{extra}");
     }
 
     #[test]
