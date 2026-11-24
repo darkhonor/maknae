@@ -27,7 +27,9 @@ pub use compose::{
     guarded_subjects, undecided, ConjunctionAuthorizer, CONFLICTING_OBLIGATIONS,
     INDETERMINATE_BLOCKS,
 };
-pub use obligation::{merge_obligations, Obligation, ObligationConflict};
+pub use obligation::{
+    merge_obligations, tool_launch, workspace_mask, Obligation, ObligationConflict,
+};
 pub use request::{
     bound_key, decode_git_bound, encode_git_bound, Action, BoundEncodingError, Context,
     FsOperation, GitBoundValues, Lane, Request, Resource, Subject, CHANNEL_AGENT, CHANNEL_CLIENT,

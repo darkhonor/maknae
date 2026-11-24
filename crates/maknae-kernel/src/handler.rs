@@ -814,11 +814,31 @@ pub fn discharge_plan(
     Ok(())
 }
 
+/// The obligations a tool call forwards to its front end, each at most once.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
 )]
-pub(crate) const FORWARDED: [&str; 2] = ["tool.launch", "workspace.mask"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Forwarded {
+    ToolLaunch,
+    WorkspaceMask,
+}
+
+impl Forwarded {
+    const ALL: [Forwarded; 2] = [Forwarded::ToolLaunch, Forwarded::WorkspaceMask];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Forwarded::ToolLaunch => maknae_security::tool_launch::ID,
+            Forwarded::WorkspaceMask => maknae_security::workspace_mask::ID,
+        }
+    }
+
+    fn of(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == id)
+    }
+}
 
 #[cfg_attr(
     not(test),
@@ -826,6 +846,7 @@ pub(crate) const FORWARDED: [&str; 2] = ["tool.launch", "workspace.mask"];
 )]
 pub(crate) struct ToolCallDischarge {
     pub(crate) forward: Vec<maknae_security::Obligation>,
+    pub(crate) audited: bool,
 }
 
 #[cfg_attr(
@@ -835,18 +856,24 @@ pub(crate) struct ToolCallDischarge {
 pub(crate) fn discharge_for_tool_call(
     obligations: &[maknae_security::Obligation],
 ) -> Result<ToolCallDischarge, UnhonorableObligation> {
-    let mut forward: Vec<maknae_security::Obligation> = Vec::new();
+    let mut forward: Vec<(Forwarded, maknae_security::Obligation)> = Vec::new();
+    let mut audited = false;
     for ob in obligations {
-        if ob.id == FORWARDED[0] && forward.iter().any(|f| f.id == ob.id) {
-            return Err(UnhonorableObligation(ob.id.clone()));
-        }
-        if FORWARDED.contains(&ob.id.as_str()) {
-            forward.push(ob.clone());
-        } else {
-            discharge_plan(std::slice::from_ref(ob))?;
+        match Forwarded::of(&ob.id) {
+            Some(kind) if forward.iter().any(|(seen, _)| *seen == kind) => {
+                return Err(UnhonorableObligation(ob.id.clone()))
+            }
+            Some(kind) => forward.push((kind, ob.clone())),
+            None => {
+                discharge_plan(std::slice::from_ref(ob))?;
+                audited = true;
+            }
         }
     }
-    Ok(ToolCallDischarge { forward })
+    Ok(ToolCallDischarge {
+        forward: forward.into_iter().map(|(_, ob)| ob).collect(),
+        audited,
+    })
 }
 
 /// The lexical canonical-form pre-gate over a client-supplied read path
@@ -2436,22 +2463,47 @@ mod tests {
         assert_eq!(discharged.forward, [mask, launch]);
         assert_eq!(discharge_for_tool_call(&[audit_ob()]).unwrap().forward, []);
         assert_eq!(discharge_for_tool_call(&[]).unwrap().forward, []);
-        assert_eq!(FORWARDED, ["tool.launch", "workspace.mask"]);
+        assert_eq!(
+            Forwarded::ALL.map(Forwarded::as_str),
+            ["tool.launch", "workspace.mask"]
+        );
     }
 
     #[test]
-    fn tool_call_discharge_refuses_two_launches() {
+    fn tool_call_discharge_reports_whether_audit_was_honoured() {
+        let launch = ob_with("tool.launch", "argv");
+        assert!(
+            discharge_for_tool_call(&[audit_ob(), launch.clone()])
+                .unwrap()
+                .audited
+        );
+        assert!(
+            discharge_for_tool_call(&[launch.clone(), audit_ob()])
+                .unwrap()
+                .audited
+        );
+        assert!(!discharge_for_tool_call(&[launch]).unwrap().audited);
+        assert!(!discharge_for_tool_call(&[]).unwrap().audited);
+    }
+
+    #[test]
+    fn tool_call_discharge_refuses_a_second_launch_or_mask() {
         let launch = ob_with("tool.launch", "argv");
         let other = ob_with("tool.launch", "files.path");
         let mask = ob_with("workspace.mask", "patterns");
+        let other_mask = ob_with("workspace.mask", "other");
         for second in [other, launch.clone()] {
             assert_eq!(
                 discharge_for_tool_call(&[launch.clone(), mask.clone(), second]).map(|d| d.forward),
                 Err(UnhonorableObligation("tool.launch".into()))
             );
         }
-        let masks = discharge_for_tool_call(&[mask.clone(), launch, mask]).unwrap();
-        assert_eq!(masks.forward.len(), 3);
+        for second in [other_mask, mask.clone()] {
+            assert_eq!(
+                discharge_for_tool_call(&[mask.clone(), launch.clone(), second]).map(|d| d.forward),
+                Err(UnhonorableObligation("workspace.mask".into()))
+            );
+        }
     }
 
     #[test]

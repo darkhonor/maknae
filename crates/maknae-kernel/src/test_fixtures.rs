@@ -600,14 +600,14 @@ pub(crate) fn cited_task_of(
 pub(crate) const LAUNCH_SITE_POLICY: &str = concat!(
     "schema_version: 1\n",
     "permissions:\n",
-    "  allow: [\"Read(/srv/**)\", \"Write(/srv/**)\", \"Tool(github-post gh:pr.review.comment)\", \"Tool(github-read gh:pr.*)\", \"Tool(github-issues-read gh:issue.*)\", \"Tool(github-issues-write gh:issue.edit.title)\", \"Tool(rust-scratch cargo *)\", \"Tool(rust-build cargo build *)\", \"Tool(open-credential cargo *)\"]\n",
+    "  allow: [\"Read(/srv/**)\", \"Write(/srv/**)\", \"Tool(github-post gh:pr.review.comment)\", \"Tool(github-read gh:pr.*)\", \"Tool(github-issues-read gh:issue.*)\", \"Tool(github-issues-write gh:issue.edit.title)\", \"Tool(rust-scratch cargo build *)\", \"Tool(rust-build cargo build *)\", \"Tool(open-credential cargo *)\"]\n",
     "  deny: [\"Read(/**/.env)\"]\n",
     "roles:\n",
     "  admin:\n",
     "    allow: [\"session.new\"]\n",
     "    permissions:\n",
-    "      allow: [\"Tool(github-post gh:pr.comment)\"]\n",
-    "      deny: [\"Tool(github-post gh:pr.review.comment)\"]\n",
+    "      allow: [\"Tool(github-post gh:pr.comment)\", \"Tool(rust-scratch cargo test *)\"]\n",
+    "      deny: [\"Tool(github-post gh:pr.review.comment)\", \"Tool(rust-scratch cargo build --offline*)\"]\n",
     "  user:\n",
     "    allow: [\"session.new\"]\n",
     "    permissions:\n",
@@ -617,7 +617,7 @@ pub(crate) const LAUNCH_SITE_POLICY: &str = concat!(
 pub(crate) const LAUNCH_HOBI_POLICY: &str = concat!(
     "schema_version: 1\n",
     "permissions:\n",
-    "  allow: [\"Read(~/**)\", \"Write(~/**)\", \"Tool(github-post gh:pr.comment)\", \"Tool(rust-scratch cargo *)\"]\n",
+    "  allow: [\"Read(~/**)\", \"Write(~/**)\", \"Tool(github-post gh:pr.comment)\", \"Tool(github-issues-write gh:issue.edit.title)\", \"Tool(rust-scratch cargo *)\"]\n",
 );
 
 pub(crate) const LAUNCH_JIN_POLICY: &str = concat!(

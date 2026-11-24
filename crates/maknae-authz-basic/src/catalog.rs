@@ -9,7 +9,8 @@ use maknae_config::{
     ShapePattern, Slot, SlotAt, Stage, ToolEntry, ToolTarget, ToolsCatalog,
 };
 use maknae_graph::catalog::{
-    CatalogEntry, CatalogForge, CatalogInput, CatalogOutput, CatalogShape, CatalogSlot,
+    CatalogAccess, CatalogEntry, CatalogForge, CatalogInput, CatalogOutput, CatalogShape,
+    CatalogSlot, CatalogSlotAt,
 };
 use maknae_proto::{CatalogDigest, CredentialRef, TOOL_CATALOG_MAX_BYTES};
 use std::collections::BTreeSet;
@@ -118,7 +119,8 @@ fn effective_lists<'a>(
     lp.policy.effective_lists(
         subject.and_then(SubjectEntry::agent_right).map(|(_, r)| r),
         subject.and_then(|s| s.permissions.as_ref()),
-        role.and_then(|r| role_stage(subject, r)),
+        role.and_then(|r| role_stage(lp, uid, subject, r))
+            .map(|(_, p)| p),
     )
 }
 
@@ -140,7 +142,9 @@ fn graph_text(entry: &CatalogEntry) -> usize {
         shapes.iter().map(move |shape| {
             let slots = shape.slots.iter().fold(0usize, |n, slot| {
                 let members = slot.members.iter().map(String::len).sum::<usize>();
-                n.saturating_add(slot.name.len() + slot.at.len() + slot.description.len() + members)
+                n.saturating_add(
+                    slot.name.len() + slot.at.as_str().len() + slot.description.len() + members,
+                )
             });
             key.saturating_add(shape.name.len() * 2 + shape.description.len() + slots)
         })
@@ -243,10 +247,9 @@ fn catalog_shape(name: &str, shape: &Shape) -> CatalogShape {
         name: name.to_owned(),
         description: shape.description.clone(),
         access: match shape.class {
-            ShapeClass::Read => "read",
-            ShapeClass::Write => "write",
-        }
-        .into(),
+            ShapeClass::Read => CatalogAccess::Read,
+            ShapeClass::Write => CatalogAccess::Write,
+        },
         slots: shape
             .slots
             .iter()
@@ -259,12 +262,11 @@ fn catalog_slot(name: &str, slot: &Slot) -> CatalogSlot {
     CatalogSlot {
         name: name.to_owned(),
         at: match slot.at {
-            SlotAt::Token => "token",
-            SlotAt::Option => "option",
-            SlotAt::Stdin => "stdin",
-            SlotAt::File => "file",
-        }
-        .into(),
+            SlotAt::Token => CatalogSlotAt::Token,
+            SlotAt::Option => CatalogSlotAt::Option,
+            SlotAt::Stdin => CatalogSlotAt::Stdin,
+            SlotAt::File => CatalogSlotAt::File,
+        },
         members: match &slot.constraint {
             Some(Constraint::Enum(members)) => members.iter().cloned().collect(),
             Some(Constraint::Pattern(_)) | None => Vec::new(),
@@ -958,6 +960,102 @@ mod tests {
     }
 
     #[test]
+    fn graph_text_counts_open_programs_shapes_slots_and_members() {
+        let entry = CatalogEntry {
+            name: "e".into(),
+            description: Some("not counted".into()),
+            executes_workspace: false,
+            output: CatalogOutput::Redacted,
+            binds: vec![],
+            programs: vec![],
+            open: vec!["sh".into(), "bash".into()],
+            shapes: vec![(
+                "gh".into(),
+                vec![
+                    CatalogShape {
+                        name: "a.b".into(),
+                        description: "dd".into(),
+                        access: CatalogAccess::Read,
+                        slots: vec![
+                            CatalogSlot {
+                                name: "s".into(),
+                                at: CatalogSlotAt::Token,
+                                members: vec!["m1".into(), "m22".into()],
+                                description: "x".into(),
+                            },
+                            CatalogSlot {
+                                name: "tt".into(),
+                                at: CatalogSlotAt::File,
+                                members: vec![],
+                                description: "yyy".into(),
+                            },
+                        ],
+                    },
+                    CatalogShape {
+                        name: "c".into(),
+                        description: String::new(),
+                        access: CatalogAccess::Write,
+                        slots: vec![],
+                    },
+                ],
+            )],
+        };
+        let open = (1 + 1 + 2) + (1 + 1 + 4);
+        let key = 1 + 1 + 2 + 1;
+        let slots = (1 + 5 + 1 + 2 + 3) + (2 + 4 + 3);
+        let shapes = (key + 3 * 2 + 2 + slots) + (key + 2);
+        assert_eq!(graph_text(&entry), open + shapes);
+    }
+
+    #[test]
+    fn the_budget_admits_exactly_the_open_and_shape_text() {
+        let tools = format!(
+            "schema_version: 1\ncredential_classes:\n{APP_CLASS}tools:\n{OPEN_ENTRY}{}",
+            gh_entry("sentinel-674-gh")
+        );
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", GH_GRAMMAR).unwrap(),
+        );
+        let catalog = ToolsCatalog::parse_with(&tools, &grammars).unwrap();
+        assert!(catalog.disabled().is_empty(), "{:?}", catalog.disabled());
+        let src = try_source(
+            &site(
+                &[
+                    "Tool(sentinel-674-open sh -c *)",
+                    "Tool(sentinel-674-gh gh:*)",
+                ],
+                &[],
+            ),
+            Some(BINDINGS),
+            &UIDS,
+            AgentsLoad::default(),
+        )
+        .unwrap()
+        .with_tools(catalog);
+        let s = compiled(&src);
+        let all = input(s.loaded(), ALICE, PRINCIPAL, &forges(), usize::MAX).unwrap();
+        assert_eq!(all.entries.len(), 2);
+        assert!(all.entries.iter().any(|e| !e.open.is_empty()));
+        assert!(all
+            .entries
+            .iter()
+            .flat_map(|e| &e.shapes)
+            .flat_map(|(_, shapes)| shapes)
+            .any(|shape| shape.slots.iter().any(|slot| !slot.members.is_empty())));
+        let need: usize = all.entries.iter().map(graph_text).sum();
+        assert_eq!(
+            input(s.loaded(), ALICE, PRINCIPAL, &forges(), need).map(|i| i.entries.len()),
+            Ok(2)
+        );
+        assert_eq!(
+            input(s.loaded(), ALICE, PRINCIPAL, &forges(), need - 1),
+            Err(CatalogError::TooLarge)
+        );
+    }
+
+    #[test]
     fn a_no_role_subject_gets_empty() {
         let s = snap(&site(&["Tool(rust-build cargo build *)"], &[]), HOMELAB);
         assert!(s.no_role(4242, PRINCIPAL));
@@ -1047,11 +1145,11 @@ mod tests {
             .into_iter()
             .find(|s| s.name == "issue.list")
             .unwrap();
-        assert_eq!(list.access, "read");
+        assert_eq!(list.access, CatalogAccess::Read);
         assert_eq!(list.description, "List issues.");
         assert_eq!(list.slots.len(), 1);
         assert_eq!(list.slots[0].name, "state");
-        assert_eq!(list.slots[0].at, "option");
+        assert_eq!(list.slots[0].at, CatalogSlotAt::Option);
         assert_eq!(list.slots[0].members, ["all", "closed", "open"]);
     }
 
@@ -1355,7 +1453,7 @@ mod tests {
             .keys()
             .map(|n| n.to_string())
             .collect();
-        assert_eq!(every.len(), 25);
+        assert_eq!(every.len(), 22);
         let tools = format!(
             "schema_version: 1\ntools:\n  all-gh:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    binds: {{ git: {{ resolver: git }} }}\n    commands:\n      gh: {{ grammar: gh, shapes: [{}] }}\n",
             every.join(", ")
@@ -1379,7 +1477,7 @@ mod tests {
         assert!(c.bytes.len() < TOOL_CATALOG_MAX_BYTES, "{}", c.bytes.len());
         assert_eq!(
             cat::shapes(&cat::decode(&c.bytes).unwrap(), "all-gh", "gh").len(),
-            25
+            22
         );
     }
 

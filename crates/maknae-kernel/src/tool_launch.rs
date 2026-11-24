@@ -2,19 +2,42 @@
 
 use crate::run::lower_hex;
 use maknae_config::{
-    canonical_json, ArgvToken, CommandForm, OutputToModel, Rendered, Shape, ToolCommand, ToolEntry,
-    ToolIsolation, ToolNetwork, ToolVolumeAccess, ToolVolumeScope, ToolWorkspaceAccess, Value,
+    canonical_json, ArgvToken, Rendered, Shape, ToolCommand, ToolEntry, ToolNetwork,
+    ToolVolumeScope, ToolWorkspaceAccess, Value,
 };
 use maknae_proto::{ForgeOp, ForgeOps, WireAttr, WireObligation};
-use maknae_security::{AttrValue, Attributes, Obligation};
+use maknae_security::{
+    tool_launch as key, AttrValue, Attributes, Obligation, TOOL_MODE_OPEN, TOOL_MODE_SHAPE,
+};
+
+/// A call resolved against one snapshot: the command and shape are the ones it was
+/// rendered from.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) struct Launch<'a> {
+    pub(crate) entry: &'a ToolEntry,
+    pub(crate) program: &'a str,
+    pub(crate) command: &'a ToolCommand,
+    pub(crate) call: LaunchCall<'a>,
+}
 
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
 )]
-pub(crate) enum LaunchCall {
-    Shape { shape: String, rendered: Rendered },
-    Open { argv: Vec<String> },
+#[derive(Clone)]
+pub(crate) enum LaunchCall<'a> {
+    Shape {
+        name: &'a str,
+        shape: &'a Shape,
+        grammar_canonical: &'a str,
+        rendered: Rendered,
+    },
+    Open {
+        argv: &'a [String],
+    },
 }
 
 #[cfg_attr(
@@ -27,60 +50,8 @@ pub(crate) struct PerCall {
     pub(crate) subject_uid: u32,
 }
 
-enum Form<'a> {
-    Shape {
-        name: &'a str,
-        shape: &'a Shape,
-        grammar_canonical: &'a str,
-        rendered: &'a Rendered,
-    },
-    Open {
-        argv: &'a [String],
-    },
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by the tool-invocation verb, #479")
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LaunchRefusal {
-    NoProgram,
-    FormMismatch,
-    UnknownShape,
-    NoImage,
-}
-
-fn resolve<'a>(
-    entry: &'a ToolEntry,
-    program: &str,
-    call: &'a LaunchCall,
-) -> Result<(&'a ToolCommand, Form<'a>), LaunchRefusal> {
-    let command = entry
-        .commands
-        .get(program)
-        .ok_or(LaunchRefusal::NoProgram)?;
-    let form = match (&command.form, call) {
-        (
-            CommandForm::Grammar {
-                grammar_canonical,
-                shapes,
-                ..
-            },
-            LaunchCall::Shape { shape, rendered },
-        ) => Form::Shape {
-            name: shape,
-            shape: shapes.get(shape).ok_or(LaunchRefusal::UnknownShape)?,
-            grammar_canonical,
-            rendered,
-        },
-        (CommandForm::Open, LaunchCall::Open { argv }) => Form::Open { argv },
-        (CommandForm::Positional(_), LaunchCall::Shape { .. } | LaunchCall::Open { .. })
-        | (CommandForm::Grammar { .. }, LaunchCall::Open { .. })
-        | (CommandForm::Open, LaunchCall::Shape { .. }) => return Err(LaunchRefusal::FormMismatch),
-    };
-    Ok((command, form))
-}
+pub(crate) struct NoImage;
 
 fn text(v: impl Into<String>) -> AttrValue {
     AttrValue::Str(v.into())
@@ -104,95 +75,63 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     lower_hex(&maknae_crypto::sha256(bytes))
 }
 
-fn fixed(
-    entry: &ToolEntry,
-    program: &str,
-    command: &ToolCommand,
-    form: &Form,
-) -> Result<Attributes, LaunchRefusal> {
+fn fixed(launch: &Launch) -> Result<Attributes, NoImage> {
+    let entry = launch.entry;
     let mut p = Attributes::new();
-    p.insert("entry", text(&entry.name));
-    p.insert("program", text(program));
-    match form {
-        Form::Shape { name, .. } => {
-            p.insert("mode", text("shape"));
-            p.insert("shape", text(*name));
+    p.insert(key::ENTRY, text(&entry.name));
+    p.insert(key::PROGRAM, text(launch.program));
+    match &launch.call {
+        LaunchCall::Shape { name, .. } => {
+            p.insert(key::MODE, text(TOOL_MODE_SHAPE));
+            p.insert(key::SHAPE, text(*name));
         }
-        Form::Open { .. } => p.insert("mode", text("open")),
+        LaunchCall::Open { .. } => p.insert(key::MODE, text(TOOL_MODE_OPEN)),
     }
     p.insert(
-        "image.ref",
-        text(
-            &entry
-                .image
-                .as_ref()
-                .ok_or(LaunchRefusal::NoImage)?
-                .reference,
-        ),
+        key::IMAGE_REF,
+        text(&entry.image.as_ref().ok_or(NoImage)?.reference),
     );
-    p.insert(
-        "isolation",
-        text(match entry.isolation {
-            ToolIsolation::Container => "container",
-            ToolIsolation::Vm => "vm",
-        }),
-    );
+    p.insert(key::ISOLATION, text(entry.isolation.as_str()));
     let (via, sites) = match &entry.network {
         ToolNetwork::None => ("none", Default::default()),
         ToolNetwork::Proxy { sites } => ("maknae-proxy", sites.iter().cloned().collect()),
     };
-    p.insert("network.via", text(via));
-    p.insert("network.sites", AttrValue::Set(sites));
+    p.insert(key::NETWORK_VIA, text(via));
+    p.insert(key::NETWORK_SITES, AttrValue::Set(sites));
     if let Some(class) = &entry.credential {
-        p.insert("credential", text(class));
+        p.insert(key::CREDENTIAL, text(class));
     }
-    p.insert(
-        "workspace.mode",
-        text(match entry.workspace {
-            ToolWorkspaceAccess::Rw => "rw",
-            ToolWorkspaceAccess::Ro => "ro",
-            ToolWorkspaceAccess::None => "none",
-        }),
-    );
+    p.insert(key::WORKSPACE_MODE, text(entry.workspace.as_str()));
     let resources = entry.resources.as_ref();
     let optional = [
-        ("resources.cpus", resources.and_then(|r| r.cpus.as_ref())),
+        (key::RESOURCES_CPUS, resources.and_then(|r| r.cpus.as_ref())),
         (
-            "resources.memory",
+            key::RESOURCES_MEMORY,
             resources.and_then(|r| r.memory.as_ref()),
         ),
-        ("lifetime.max", entry.lifetime_max.as_ref()),
-        ("timeout", command.timeout.as_ref()),
-        ("output", command.output.as_ref()),
+        (key::LIFETIME_MAX, entry.lifetime_max.as_ref()),
+        (key::TIMEOUT, launch.command.timeout.as_ref()),
+        (key::OUTPUT, launch.command.output.as_ref()),
     ];
     for (key, value) in optional {
         if let Some(value) = value {
             p.insert(key, text(value));
         }
     }
-    p.insert(
-        "output_to_model",
-        text(match entry.output_to_model {
-            OutputToModel::Redacted => "redacted",
-            OutputToModel::StatusOnly => "status_only",
-        }),
-    );
+    p.insert(key::OUTPUT_TO_MODEL, text(entry.output_to_model.as_str()));
     let volumes = &entry.volumes;
-    p.insert("volumes.name", list(volumes.keys().map(String::as_str)));
+    p.insert(key::VOLUMES_NAME, list(volumes.keys().map(String::as_str)));
     p.insert(
-        "volumes.access",
-        list(volumes.values().map(|v| match v.access {
-            ToolVolumeAccess::Ro => "ro",
-            ToolVolumeAccess::Rw => "rw",
-        })),
+        key::VOLUMES_ACCESS,
+        list(volumes.values().map(|v| v.access.as_str())),
     );
     p.insert(
-        "volumes.scope",
-        list(volumes.values().map(|v| match v.scope {
-            None => "",
-            Some(ToolVolumeScope::Task) => "task",
-            Some(ToolVolumeScope::Tasker) => "tasker",
-        })),
+        key::VOLUMES_SCOPE,
+        list(
+            volumes
+                .values()
+                .map(|v| v.scope.map_or("", ToolVolumeScope::as_str)),
+        ),
     );
     Ok(p)
 }
@@ -222,17 +161,17 @@ fn template_value(token: &ArgvToken) -> Value {
     })
 }
 
-fn digest(fixed: &Attributes, form: &Form) -> String {
+fn digest(fixed: &Attributes, call: &LaunchCall) -> String {
     let mut doc: Vec<(String, Value)> = fixed
         .iter()
         .map(|(k, v)| (k.to_string(), json_value(v)))
         .collect();
-    match form {
-        Form::Shape { shape, .. } => doc.push((
+    match call {
+        LaunchCall::Shape { shape, .. } => doc.push((
             "argv.template".to_string(),
             Value::Seq(shape.argv.iter().map(template_value).collect()),
         )),
-        Form::Open { .. } => {}
+        LaunchCall::Open { .. } => {}
     }
     sha256_hex(canonical_json(&Value::Map(doc)).as_bytes())
 }
@@ -242,36 +181,33 @@ fn digest(fixed: &Attributes, form: &Form) -> String {
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
 )]
 pub(crate) fn launch_obligation(
-    entry: &ToolEntry,
-    program: &str,
-    call: &LaunchCall,
+    launch: &Launch,
     per_call: &PerCall,
-) -> Result<Obligation, LaunchRefusal> {
-    let (command, form) = resolve(entry, program, call)?;
-    let mut p = fixed(entry, program, command, &form)?;
-    p.insert("shape.sha256", text(digest(&p, &form)));
-    match form {
-        Form::Shape {
+) -> Result<Obligation, NoImage> {
+    let mut p = fixed(launch)?;
+    p.insert(key::SHAPE_SHA256, text(digest(&p, &launch.call)));
+    match &launch.call {
+        LaunchCall::Shape {
             shape,
             grammar_canonical,
             rendered,
             ..
         } => {
             p.insert(
-                "grammar.sha256",
+                key::GRAMMAR_SHA256,
                 text(sha256_hex(grammar_canonical.as_bytes())),
             );
-            p.insert("argv", AttrValue::List(rendered.argv.clone()));
+            p.insert(key::ARGV, AttrValue::List(rendered.argv.clone()));
             if let Some(stdin) = &rendered.stdin {
-                p.insert("stdin.sha256", text(sha256_hex(stdin)));
+                p.insert(key::STDIN_SHA256, text(sha256_hex(stdin)));
             }
             if !rendered.files.is_empty() {
                 p.insert(
-                    "files.path",
+                    key::FILES_PATH,
                     list(rendered.files.iter().map(|f| f.path.as_str())),
                 );
                 p.insert(
-                    "files.sha256",
+                    key::FILES_SHA256,
                     AttrValue::List(
                         rendered
                             .files
@@ -281,30 +217,30 @@ pub(crate) fn launch_obligation(
                     ),
                 );
             }
-            p.insert("forge.base", ops(shape.forge.base));
-            p.insert("forge.head", ops(shape.forge.head));
+            p.insert(key::FORGE_BASE, ops(shape.forge.base));
+            p.insert(key::FORGE_HEAD, ops(shape.forge.head));
         }
-        Form::Open { argv } => {
-            p.insert("argv", AttrValue::List(argv.to_vec()));
-            p.insert("forge.base", ops(ForgeOps::EMPTY));
-            p.insert("forge.head", ops(ForgeOps::EMPTY));
+        LaunchCall::Open { argv } => {
+            p.insert(key::ARGV, AttrValue::List(argv.to_vec()));
+            p.insert(key::FORGE_BASE, ops(ForgeOps::EMPTY));
+            p.insert(key::FORGE_HEAD, ops(ForgeOps::EMPTY));
         }
     }
-    match entry.workspace {
+    match launch.entry.workspace {
         ToolWorkspaceAccess::Rw | ToolWorkspaceAccess::Ro => {
-            p.insert("workspace.root", text(&per_call.workspace_root));
+            p.insert(key::WORKSPACE_ROOT, text(&per_call.workspace_root));
         }
         ToolWorkspaceAccess::None => {}
     }
     if let Some(task) = &per_call.task {
-        p.insert("task", text(task));
+        p.insert(key::TASK, text(task));
     }
     p.insert(
-        "subject.uid",
+        key::SUBJECT_UID,
         AttrValue::Int(i64::from(per_call.subject_uid)),
     );
     Ok(Obligation {
-        id: "tool.launch".to_string(),
+        id: key::ID.to_string(),
         params: p,
     })
 }
@@ -313,13 +249,8 @@ pub(crate) fn launch_obligation(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
 )]
-pub(crate) fn shape_sha256(
-    entry: &ToolEntry,
-    program: &str,
-    call: &LaunchCall,
-) -> Result<String, LaunchRefusal> {
-    let (command, form) = resolve(entry, program, call)?;
-    Ok(digest(&fixed(entry, program, command, &form)?, &form))
+pub(crate) fn shape_sha256(launch: &Launch) -> Result<String, NoImage> {
+    Ok(digest(&fixed(launch)?, &launch.call))
 }
 
 #[cfg_attr(
@@ -444,26 +375,53 @@ tools:
             .collect()
     }
 
-    fn shape_call(
-        c: &ToolsCatalog,
-        shape: &str,
-        values: &[(&str, &str)],
-        change: &str,
-    ) -> LaunchCall {
-        let maknae_config::CommandForm::Grammar { shapes, .. } =
-            &c.entry("gh-post").unwrap().commands["gh"].form
-        else {
-            panic!("gh is a grammar command");
-        };
-        LaunchCall::Shape {
-            shape: shape.to_string(),
-            rendered: shapes[shape]
-                .render(&slots(values), &bound(change))
-                .unwrap(),
+    fn launch_of<'a>(entry: &'a ToolEntry, program: &'a str, call: LaunchCall<'a>) -> Launch<'a> {
+        Launch {
+            entry,
+            program,
+            command: &entry.commands[program],
+            call,
         }
     }
 
-    fn comment(c: &ToolsCatalog, body: &str, change: &str) -> LaunchCall {
+    fn on<'a>(launch: &Launch<'a>, entry: &'a ToolEntry) -> Launch<'a> {
+        launch_of(entry, launch.program, launch.call.clone())
+    }
+
+    fn open_call<'a>(entry: &'a ToolEntry, program: &'a str, argv: &'a [String]) -> Launch<'a> {
+        launch_of(entry, program, LaunchCall::Open { argv })
+    }
+
+    fn shape_call<'a>(
+        c: &'a ToolsCatalog,
+        shape: &'a str,
+        values: &[(&str, &str)],
+        change: &str,
+    ) -> Launch<'a> {
+        let entry = c.entry("gh-post").unwrap();
+        let maknae_config::CommandForm::Grammar {
+            shapes,
+            grammar_canonical,
+            ..
+        } = &entry.commands["gh"].form
+        else {
+            panic!("gh is a grammar command");
+        };
+        launch_of(
+            entry,
+            "gh",
+            LaunchCall::Shape {
+                name: shape,
+                shape: &shapes[shape],
+                grammar_canonical,
+                rendered: shapes[shape]
+                    .render(&slots(values), &bound(change))
+                    .unwrap(),
+            },
+        )
+    }
+
+    fn comment<'a>(c: &'a ToolsCatalog, body: &str, change: &str) -> Launch<'a> {
         shape_call(c, "pr.comment", &[("body", body)], change)
     }
 
@@ -501,11 +459,8 @@ tools:
     #[test]
     fn launch_obligation_carries_every_spec_field() {
         let c = catalog();
-        let entry = c.entry("gh-post").unwrap();
         let call = comment(&c, "LGTM", "42");
         let ob = launch_obligation(
-            entry,
-            "gh",
             &call,
             &per_call("/home/alice/projects/x", Some("t-7"), 1000),
         )
@@ -537,10 +492,7 @@ tools:
             ("resources.cpus", str_("2")),
             ("resources.memory", str_("1Gi")),
             ("shape", str_("pr.comment")),
-            (
-                "shape.sha256",
-                str_(&shape_sha256(entry, "gh", &call).unwrap()),
-            ),
+            ("shape.sha256", str_(&shape_sha256(&call).unwrap())),
             ("stdin.sha256", str_(&hex(b"LGTM"))),
             ("subject.uid", AttrValue::Int(1000)),
             ("task", str_("t-7")),
@@ -564,10 +516,9 @@ tools:
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
 
         let scratch = c.entry("scratch").unwrap();
-        let open = LaunchCall::Open {
-            argv: vec!["build".into(), "--release".into()],
-        };
-        let ob = launch_obligation(scratch, "cargo", &open, &per_call("/w", None, 1001)).unwrap();
+        let argv = ["build".to_string(), "--release".to_string()];
+        let open = open_call(scratch, "cargo", &argv);
+        let ob = launch_obligation(&open, &per_call("/w", None, 1001)).unwrap();
         assert_eq!(ob.id, "tool.launch");
         let p = &ob.params;
         let mut expected = Attributes::new();
@@ -583,10 +534,7 @@ tools:
             ("network.via", str_("none")),
             ("output_to_model", str_("status_only")),
             ("program", str_("cargo")),
-            (
-                "shape.sha256",
-                str_(&shape_sha256(scratch, "cargo", &open).unwrap()),
-            ),
+            ("shape.sha256", str_(&shape_sha256(&open).unwrap())),
             ("subject.uid", AttrValue::Int(1001)),
             ("volumes.access", s(&[])),
             ("volumes.name", s(&[])),
@@ -609,64 +557,37 @@ tools:
     }
 
     #[test]
-    fn a_call_the_entry_cannot_launch_has_no_obligation() {
+    fn an_entry_without_an_image_has_no_obligation() {
         let c = catalog();
-        let post = c.entry("gh-post").unwrap();
-        let scratch = c.entry("scratch").unwrap();
-        let shaped = comment(&c, "b", "1");
-        let open = LaunchCall::Open { argv: vec![] };
-        let pc = per_call("/w", None, 1);
-        let unknown_shape = LaunchCall::Shape {
-            shape: "pr.view".into(),
-            rendered: match &shaped {
-                LaunchCall::Shape { rendered, .. } => rendered.clone(),
-                LaunchCall::Open { .. } => unreachable!(),
-            },
-        };
-        let mut imageless = scratch.clone();
+        let mut imageless = c.entry("scratch").unwrap().clone();
         imageless.image = None;
-        for (entry, program, call, why) in [
-            (post, "gh", &open, LaunchRefusal::FormMismatch),
-            (post, "gh", &unknown_shape, LaunchRefusal::UnknownShape),
-            (post, "git", &shaped, LaunchRefusal::FormMismatch),
-            (post, "git", &open, LaunchRefusal::FormMismatch),
-            (post, "absent", &shaped, LaunchRefusal::NoProgram),
-            (scratch, "cargo", &shaped, LaunchRefusal::FormMismatch),
-            (&imageless, "cargo", &open, LaunchRefusal::NoImage),
-        ] {
-            assert_eq!(
-                launch_obligation(entry, program, call, &pc).map(|o| o.id),
-                Err(why),
-                "{program}"
-            );
-            assert_eq!(shape_sha256(entry, program, call), Err(why), "{program}");
-        }
+        let open = open_call(&imageless, "cargo", &[]);
+        assert_eq!(
+            launch_obligation(&open, &per_call("/w", None, 1)).map(|o| o.id),
+            Err(NoImage)
+        );
+        assert_eq!(shape_sha256(&open), Err(NoImage));
     }
 
     #[test]
     fn shape_digest_is_stable_across_per_call_values() {
         let c = catalog();
-        let entry = c.entry("gh-post").unwrap();
         let a = comment(&c, "first body", "1");
         let b = comment(&c, "a different body", "999");
-        let digest = shape_sha256(entry, "gh", &a).unwrap();
-        assert_eq!(shape_sha256(entry, "gh", &b).unwrap(), digest);
-        let one = launch_obligation(entry, "gh", &a, &per_call("/w/a", Some("t-1"), 1000)).unwrap();
-        let two = launch_obligation(entry, "gh", &b, &per_call("/w/b", None, 2000)).unwrap();
+        let digest = shape_sha256(&a).unwrap();
+        assert_eq!(shape_sha256(&b).unwrap(), digest);
+        let one = launch_obligation(&a, &per_call("/w/a", Some("t-1"), 1000)).unwrap();
+        let two = launch_obligation(&b, &per_call("/w/b", None, 2000)).unwrap();
         assert_eq!(one.params.str("shape.sha256"), Some(digest.as_str()));
         assert_eq!(two.params.str("shape.sha256"), Some(digest.as_str()));
         assert_ne!(one.params, two.params);
 
         let scratch = c.entry("scratch").unwrap();
-        let x = LaunchCall::Open {
-            argv: vec!["build".into()],
-        };
-        let y = LaunchCall::Open {
-            argv: vec!["test".into(), "--all".into()],
-        };
+        let x = ["build".to_string()];
+        let y = ["test".to_string(), "--all".to_string()];
         assert_eq!(
-            shape_sha256(scratch, "cargo", &x),
-            shape_sha256(scratch, "cargo", &y)
+            shape_sha256(&open_call(scratch, "cargo", &x)),
+            shape_sha256(&open_call(scratch, "cargo", &y))
         );
     }
 
@@ -675,22 +596,16 @@ tools:
         let c = catalog();
         let entry = c.entry("gh-post").unwrap();
         let call = comment(&c, "b", "1");
-        let base = shape_sha256(entry, "gh", &call).unwrap();
+        let base = shape_sha256(&call).unwrap();
 
         let moved = catalog_with(OTHER_IMAGE, GRAMMAR);
         let other = comment(&moved, "b", "1");
-        assert_ne!(
-            shape_sha256(moved.entry("gh-post").unwrap(), "gh", &other).unwrap(),
-            base
-        );
+        assert_ne!(shape_sha256(&other).unwrap(), base);
 
         let edited = GRAMMAR.replace("--body-file, \"-\"]", "--body-file, \"-\", --edit-last]");
         let retemplated = catalog_with(IMAGE, &edited);
         let call2 = comment(&retemplated, "b", "1");
-        assert_ne!(
-            shape_sha256(retemplated.entry("gh-post").unwrap(), "gh", &call2).unwrap(),
-            base
-        );
+        assert_ne!(shape_sha256(&call2).unwrap(), base);
 
         let created = shape_call(
             &c,
@@ -698,20 +613,22 @@ tools:
             &[("title", "t"), ("body", "b"), ("notes", "n")],
             "1",
         );
-        let created_digest = shape_sha256(entry, "gh", &created).unwrap();
+        let created_digest = shape_sha256(&created).unwrap();
         assert_ne!(created_digest, base);
 
         let scratch = c.entry("scratch").unwrap();
-        let open = LaunchCall::Open { argv: vec![] };
-        let open_digest = shape_sha256(scratch, "cargo", &open).unwrap();
+        let open_digest = shape_sha256(&open_call(scratch, "cargo", &[])).unwrap();
         let mut renamed = scratch.clone();
         renamed.name = "scratch-2".into();
-        assert_ne!(shape_sha256(&renamed, "cargo", &open).unwrap(), open_digest);
+        assert_ne!(
+            shape_sha256(&open_call(&renamed, "cargo", &[])).unwrap(),
+            open_digest
+        );
         let mut reprogrammed = scratch.clone();
         let cmd = reprogrammed.commands.remove("cargo").unwrap();
         reprogrammed.commands.insert("rustc".into(), cmd);
         assert_ne!(
-            shape_sha256(&reprogrammed, "rustc", &open).unwrap(),
+            shape_sha256(&open_call(&reprogrammed, "rustc", &[])).unwrap(),
             open_digest
         );
 
@@ -719,7 +636,7 @@ tools:
         let mut variant = |f: &dyn Fn(&mut ToolEntry)| {
             let mut e = entry.clone();
             f(&mut e);
-            each.push(shape_sha256(&e, "gh", &call).unwrap());
+            each.push(shape_sha256(&on(&call, &e)).unwrap());
         };
         variant(&|e| e.isolation = maknae_config::ToolIsolation::Container);
         variant(&|e| e.network = maknae_config::ToolNetwork::None);
@@ -751,7 +668,6 @@ tools:
     #[test]
     fn stdin_and_file_hashes_match_content() {
         let c = catalog();
-        let entry = c.entry("gh-post").unwrap();
         let call = shape_call(
             &c,
             "issue.create",
@@ -762,7 +678,7 @@ tools:
             ],
             "1",
         );
-        let ob = launch_obligation(entry, "gh", &call, &per_call("/w", None, 1)).unwrap();
+        let ob = launch_obligation(&call, &per_call("/w", None, 1)).unwrap();
         let p = &ob.params;
         assert_eq!(p.get("stdin.sha256"), None);
         assert_eq!(
@@ -788,13 +704,7 @@ tools:
         assert_eq!(p.get("forge.base"), Some(&set(&["issue-write"])));
         assert_eq!(p.get("forge.head"), Some(&set(&[])));
 
-        let ob = launch_obligation(
-            entry,
-            "gh",
-            &comment(&c, "héllo\n", "1"),
-            &per_call("/w", None, 1),
-        )
-        .unwrap();
+        let ob = launch_obligation(&comment(&c, "héllo\n", "1"), &per_call("/w", None, 1)).unwrap();
         assert_eq!(
             ob.params.str("stdin.sha256"),
             Some(hex("héllo\n".as_bytes()).as_str())
@@ -806,14 +716,7 @@ tools:
     #[test]
     fn the_hash_spelling_is_lowercase_hex_of_sha256() {
         let c = catalog();
-        let entry = c.entry("gh-post").unwrap();
-        let ob = launch_obligation(
-            entry,
-            "gh",
-            &comment(&c, "abc", "1"),
-            &per_call("/w", None, 1),
-        )
-        .unwrap();
+        let ob = launch_obligation(&comment(&c, "abc", "1"), &per_call("/w", None, 1)).unwrap();
         assert_eq!(
             ob.params.str("stdin.sha256"),
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -1130,16 +1033,16 @@ tools:
         match pattern {
             "/**/.env" => vec![
                 Masked {
-                    path: "/srv/work/x/.env".into(),
+                    path: "/var/lib/maknae-agents/hobi/tasks/users/1000/.env".into(),
                     dir: false,
                 },
                 Masked {
-                    path: "/srv/work/x/app/.env".into(),
+                    path: "/var/lib/maknae-agents/hobi/tasks/users/1000/app/.env".into(),
                     dir: false,
                 },
             ],
-            "/srv/work/x/secrets/**" => vec![Masked {
-                path: "/srv/work/x/secrets".into(),
+            "/var/lib/maknae-agents/hobi/tasks/users/1000/secrets/**" => vec![Masked {
+                path: "/var/lib/maknae-agents/hobi/tasks/users/1000/secrets".into(),
                 dir: true,
             }],
             other => panic!("no staged match for {other}"),
@@ -1154,7 +1057,7 @@ tools:
     };
 
     fn homelab_decided(req: crate::tool_call::ToolCallRequest) -> Vec<Obligation> {
-        use crate::handler::Stamp;
+        use crate::handler::{Stamp, TaskStamp};
         use crate::tool_call::{decide_tool_call, ToolCallDecision};
         use crate::workspace::SubjectFacts;
         let (_g, c) = crate::test_fixtures::homelab_launch_composition("podman-render");
@@ -1166,16 +1069,27 @@ tools:
                 change: Some(42),
             },
         )]);
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let stamp = TaskStamp::of(&task);
         let subject = SubjectFacts {
             lane: maknae_security::Lane::Local,
-            uid: nix::unistd::geteuid().as_raw(),
-            home: Some(std::path::Path::new("/home/operator")),
+            uid: 2001,
+            home: Some(std::path::Path::new("/var/lib/maknae-agents/hobi")),
             conversation: None,
             personal: None,
-            stamp: &Stamp::Client,
+            stamp: &Stamp::Agent {
+                agent: &hobi,
+                task: Some(&stamp),
+            },
         };
-        match decide_tool_call(&c, &subject, Some(&task), req, "/srv/work/x") {
-            ToolCallDecision::Permitted { obligations } => obligations,
+        match decide_tool_call(
+            &c,
+            &subject,
+            Some(&task),
+            req,
+            "/var/lib/maknae-agents/hobi/tasks/users/1000",
+        ) {
+            ToolCallDecision::Permitted { obligations, .. } => obligations,
             ToolCallDecision::Refused { audit, .. } => panic!("refused: {audit}"),
         }
     }
@@ -1198,7 +1112,7 @@ tools:
         );
         assert_parity(&comment, &STAGED);
         let rendered = podman_render(&comment, &STAGED).unwrap();
-        let user = format!("--user={}", nix::unistd::geteuid().as_raw());
+        let user = "--user=2001";
         assert_eq!(
             rendered,
             [
@@ -1206,11 +1120,11 @@ tools:
                 "--rm",
                 "--network=none",
                 "--userns=keep-id",
-                user.as_str(),
+                user,
                 "--interactive",
-                "--volume=/srv/work/x:/srv/work/x:ro",
-                "--volume=/run/user/1000/maknae/empty:/srv/work/x/.env:ro",
-                "--volume=/run/user/1000/maknae/empty:/srv/work/x/app/.env:ro",
+                "--volume=/var/lib/maknae-agents/hobi/tasks/users/1000:/var/lib/maknae-agents/hobi/tasks/users/1000:ro",
+                "--volume=/run/user/1000/maknae/empty:/var/lib/maknae-agents/hobi/tasks/users/1000/.env:ro",
+                "--volume=/run/user/1000/maknae/empty:/var/lib/maknae-agents/hobi/tasks/users/1000/app/.env:ro",
                 "--cpus=1",
                 "--memory=512m",
                 "ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -1235,7 +1149,7 @@ tools:
         });
         assert_parity(&scratch, &STAGED);
         let rendered = podman_render(&scratch, &STAGED).unwrap();
-        assert!(rendered.contains(&"--volume=/srv/work/x:/srv/work/x:rw".to_string()));
+        assert!(rendered.contains(&"--volume=/var/lib/maknae-agents/hobi/tasks/users/1000:/var/lib/maknae-agents/hobi/tasks/users/1000:rw".to_string()));
         assert!(!rendered.contains(&"--interactive".to_string()));
         assert_eq!(
             rendered[rendered.len() - 3..],
@@ -1251,10 +1165,14 @@ tools:
         );
         let mut container = c.entry("gh-post").unwrap().clone();
         container.isolation = maknae_config::ToolIsolation::Container;
+        let created = on(&created, &container);
         let mut mask = Attributes::new();
         mask.insert(
             crate::workspace::PATTERNS,
-            s(&["/**/.env", "/srv/work/x/secrets/**"]),
+            s(&[
+                "/**/.env",
+                "/var/lib/maknae-agents/hobi/tasks/users/1000/secrets/**",
+            ]),
         );
         let obligations = [
             Obligation {
@@ -1262,17 +1180,15 @@ tools:
                 params: mask,
             },
             launch_obligation(
-                &container,
-                "gh",
                 &created,
-                &per_call("/srv/work/x", None, 7),
+                &per_call("/var/lib/maknae-agents/hobi/tasks/users/1000", None, 7),
             )
             .unwrap(),
         ];
         assert_parity(&obligations, &STAGED);
         let rendered = podman_render(&obligations, &STAGED).unwrap();
         for bind in [
-            "--volume=/run/user/1000/maknae/empty.d:/srv/work/x/secrets:ro".to_string(),
+            "--volume=/run/user/1000/maknae/empty.d:/var/lib/maknae-agents/hobi/tasks/users/1000/secrets:ro".to_string(),
             format!(
                 "--volume=/run/user/1000/maknae/slots/{}:/run/maknae/slots/body:ro",
                 hex(b"the body")
@@ -1291,14 +1207,14 @@ tools:
         let c = catalog();
         let entry = c.entry("gh-post").unwrap();
         let call = comment(&c, "b", "1");
-        let vm = launch_obligation(entry, "gh", &call, &per_call("/w", None, 1)).unwrap();
+        let vm = launch_obligation(&call, &per_call("/w", None, 1)).unwrap();
         assert_eq!(
             podman_render(std::slice::from_ref(&vm), &STAGED),
             Err("isolation vm".to_string())
         );
         let mut container = entry.clone();
         container.isolation = maknae_config::ToolIsolation::Container;
-        let ok = launch_obligation(&container, "gh", &call, &per_call("/w", None, 1)).unwrap();
+        let ok = launch_obligation(&on(&call, &container), &per_call("/w", None, 1)).unwrap();
         let mut tagged = ok.clone();
         tagged
             .params

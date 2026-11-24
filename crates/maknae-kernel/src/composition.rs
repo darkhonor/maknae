@@ -1478,15 +1478,15 @@ mod tests {
             (
                 "role grant",
                 &principal,
-                Some(&hobi_task),
-                shape("github-post", "pr.comment", &body),
+                None,
+                open("rust-scratch", "cargo", &["test", "--all"]),
                 SRV,
             ),
             (
                 "not granted",
                 &principal,
-                Some(&hobi_task),
-                shape("github-post", "pr.review.approve", &body),
+                None,
+                open("rust-scratch", "cargo", &["doc"]),
                 SRV,
             ),
             (
@@ -1506,8 +1506,8 @@ mod tests {
             (
                 "role deny over site allow",
                 &principal,
-                Some(&hobi_task),
-                shape("github-post", "pr.review.comment", &body),
+                None,
+                open("rust-scratch", "cargo", &["build", "--offline"]),
                 SRV,
             ),
             (
@@ -1520,37 +1520,37 @@ mod tests {
             (
                 "shape not enabled in the ceiling",
                 &principal,
-                Some(&hobi_task),
+                None,
                 shape("github-read", "pr.comment", &body),
                 SRV,
             ),
             (
                 "shape not in the grammar",
                 &principal,
-                Some(&hobi_task),
+                None,
                 shape("github-issues-write", "issue.transfer", &[]),
                 SRV,
             ),
             (
                 "position invariant",
-                &principal,
+                &hobi_who,
                 Some(&hobi_task),
                 shape("github-issues-read", "issue.view", &[("number", "-1")]),
-                SRV,
+                HOBI_ROOT,
             ),
             (
                 "enum",
-                &principal,
+                &hobi_who,
                 Some(&hobi_task),
                 shape("github-issues-read", "issue.list", &[("state", "merged")]),
-                SRV,
+                HOBI_ROOT,
             ),
             (
                 "pattern",
-                &principal,
+                &hobi_who,
                 Some(&hobi_task),
                 shape("github-issues-read", "issue.view", &[("number", "1e3")]),
-                SRV,
+                HOBI_ROOT,
             ),
             (
                 "missing bound value",
@@ -1583,7 +1583,7 @@ mod tests {
             (
                 "open call to a grammar command",
                 &principal,
-                Some(&hobi_task),
+                None,
                 open("github-post", "gh", &["pr", "comment", "42"]),
                 SRV,
             ),
@@ -1603,14 +1603,14 @@ mod tests {
             ),
             (
                 "option slot with a leading dash",
-                &principal,
+                &hobi_who,
                 Some(&hobi_task),
                 shape(
                     "github-issues-write",
                     "issue.edit.title",
                     &[("number", "7"), ("title", "-x")],
                 ),
-                SRV,
+                HOBI_ROOT,
             ),
             (
                 "open call in the task",
@@ -1626,11 +1626,32 @@ mod tests {
                 open("rust-scratch", "cargo", &["build"]),
                 "/var/lib/maknae-agents/hobi/tasks/users/1001",
             ),
+            (
+                "a person citing a task",
+                &principal,
+                Some(&hobi_task),
+                shape("github-post", "pr.comment", &body),
+                SRV,
+            ),
+            (
+                "an agent citing another agent's task",
+                &hobi_who,
+                Some(&jin_task),
+                shape("github-post", "pr.comment", &body),
+                HOBI_ROOT,
+            ),
         ];
         let mut out = String::from(
-            "# tool.launch: decide_tool_call through the Composition, with the shipped gh grammar and tools-homelab.yaml, a site policy granting Tool(...) per site, role and agent, and role tool.invoke injected (grantable with #479). A Permit shows the mask, the launch's digest and its call fields.\n",
+            "# tool.launch: decide_tool_call through the Composition, with the shipped gh grammar and tools-homelab.yaml, a site policy granting Tool(...) per site, role and agent, and role tool.invoke injected (grantable with #479). The stamp's task is the cited task: a person cites none. A Permit shows the permitting and mount rules, whether audit was honoured, the mask, the launch's digest and its call fields.\n",
         );
+        let rule_of = |cited: &crate::workspace::Citation| {
+            cited.rule.as_ref().map(|c| {
+                let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                format!("{} in #{section}", c.key)
+            })
+        };
         for (case, who, cited, req, root) in rows {
+            let task_id = cited.map(|c| c.signed.task.task_id.to_string());
             let call = match &req.call {
                 CallInput::Shape { shape, slots } => format!("shape {shape} {slots:?}"),
                 CallInput::Open { argv } => format!("open {argv:?}"),
@@ -1649,31 +1670,57 @@ mod tests {
             };
             let outcome = match decide_tool_call(&c, &subject, cited, req, root) {
                 ToolCallDecision::Refused { audit, wire, cited } => {
-                    let rule = cited.rule.map(|c| {
-                        let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
-                        format!("{} in #{section}", c.key)
-                    });
-                    format!("Refused {audit:?} wire={wire:?} {:?} {rule:?}", cited.role)
+                    format!(
+                        "Refused {audit:?} wire={wire:?} {:?} {:?}",
+                        cited.role,
+                        rule_of(&cited)
+                    )
                 }
-                ToolCallDecision::Permitted { obligations } => {
-                    let mut shown = Vec::new();
+                ToolCallDecision::Permitted {
+                    obligations,
+                    cited,
+                    mount_cited,
+                    audited,
+                } => {
+                    use maknae_security::tool_launch as key;
+                    let mut shown = vec![
+                        format!("{:?} {:?}", cited.role, rule_of(&cited)),
+                        format!("mount={:?}", mount_cited.as_deref().map(rule_of)),
+                        format!("audited={audited}"),
+                    ];
                     for ob in &obligations {
                         let fields: &[&str] = if ob.id == crate::workspace::MASK {
                             &[crate::workspace::PATTERNS]
                         } else {
                             &[
-                                "mode",
-                                "shape",
-                                "argv",
-                                "stdin.sha256",
-                                "credential",
-                                "workspace.mode",
-                                "shape.sha256",
+                                key::MODE,
+                                key::SHAPE,
+                                key::ARGV,
+                                key::STDIN_SHA256,
+                                key::CREDENTIAL,
+                                key::WORKSPACE_MODE,
+                                key::WORKSPACE_ROOT,
+                                key::TASK,
+                                key::FORGE_BASE,
+                                key::FORGE_HEAD,
+                                key::GRAMMAR_SHA256,
+                                key::SHAPE_SHA256,
                             ]
                         };
                         let params: Vec<String> = fields
                             .iter()
-                            .filter_map(|k| ob.params.get(k).map(|v| format!("{k}={v:?}")))
+                            .filter_map(|k| {
+                                let v = ob.params.get(k)?;
+                                Some(match v {
+                                    maknae_security::AttrValue::Str(t)
+                                        if *k == key::TASK
+                                            && Some(t.as_str()) == task_id.as_deref() =>
+                                    {
+                                        format!("{k}=<cited task>")
+                                    }
+                                    _ => format!("{k}={v:?}"),
+                                })
+                            })
                             .collect();
                         shown.push(format!("{} {{{}}}", ob.id, params.join(", ")));
                     }

@@ -29,8 +29,7 @@ const SYSTEM_PATHS: [&str; 12] = [
     "/var/log/maknae",
 ];
 
-pub(crate) const MASK: &str = "workspace.mask";
-pub(crate) const PATTERNS: &str = "patterns";
+pub(crate) use maknae_security::workspace_mask::{ID as MASK, PATTERNS};
 
 #[cfg_attr(
     not(test),

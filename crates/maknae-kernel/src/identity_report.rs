@@ -24,7 +24,8 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
         | IdentityProblem::ToolEntryDisabled { .. }
         | IdentityProblem::ToolGrantUnknownEntry { .. }
         | IdentityProblem::ToolGrantUnknownProgram { .. }
-        | IdentityProblem::ToolGrantUnknownShape { .. } => ("deny", p.to_string(), "unavailable"),
+        | IdentityProblem::ToolGrantUnknownShape { .. }
+        | IdentityProblem::ToolGrantFormMismatch { .. } => ("deny", p.to_string(), "unavailable"),
         IdentityProblem::Unresolved { .. }
         | IdentityProblem::Contained { .. }
         | IdentityProblem::Unbound { .. }
@@ -384,11 +385,15 @@ mod tests {
             IdentityProblem::ToolGrantUnknownShape {
                 source: "authz.yaml".into(),
             },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "authz.yaml".into(),
+            },
         ];
         assert_eq!(
             counts(&p),
             [
                 "tool_entry_disabled=1",
+                "tool_grant_form_mismatch=1",
                 "tool_grant_unknown_entry=1",
                 "tool_grant_unknown_program=1",
                 "tool_grant_unknown_shape=1"

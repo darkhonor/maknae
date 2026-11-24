@@ -46,14 +46,14 @@ fn lines(g: &Graph) -> Vec<String> {
                     "  {}:{}  {}  {}",
                     terminal_safe(name),
                     terminal_safe(&shape.name),
-                    terminal_safe(&shape.access),
+                    shape.access.as_str(),
                     terminal_safe(&shape.description)
                 ));
                 for slot in &shape.slots {
                     out.push(format!(
                         "    {}  {}  {}  {}",
                         terminal_safe(&slot.name),
-                        terminal_safe(&slot.at),
+                        slot.at.as_str(),
                         terminal_safe(&members(&slot.members)),
                         terminal_safe(&slot.description)
                     ));
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn it_prints_open_programs_and_shapes_with_their_slots() {
-        use maknae_graph::catalog::{CatalogShape, CatalogSlot};
+        use maknae_graph::catalog::{CatalogAccess, CatalogShape, CatalogSlot, CatalogSlotAt};
         let bytes = catalog::encode(&CatalogInput {
             entries: vec![CatalogEntry {
                 name: "gh".into(),
@@ -151,10 +151,10 @@ mod tests {
                     vec![CatalogShape {
                         name: "issue.list".into(),
                         description: "List issues.".into(),
-                        access: "read".into(),
+                        access: CatalogAccess::Read,
                         slots: vec![CatalogSlot {
                             name: "state".into(),
-                            at: "option".into(),
+                            at: CatalogSlotAt::Option,
                             members: vec!["all".into(), "a|b,c".into()],
                             description: "Which.".into(),
                         }],

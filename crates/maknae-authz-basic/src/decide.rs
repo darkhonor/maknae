@@ -1336,20 +1336,14 @@ fn evaluate_floored(
     home: Option<&std::path::Path>,
 ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound> {
     match scope {
-        FsScope::Read => lp.policy.evaluate3_floored(
-            set,
-            None,
-            &maknae_config::Request::Read(path),
-            home,
-            lp.fold,
-        ),
-        FsScope::Write => lp.policy.evaluate3_floored(
-            set,
-            None,
-            &maknae_config::Request::Write(path),
-            home,
-            lp.fold,
-        ),
+        FsScope::Read => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Read(path), home, lp.fold)
+        }
+        FsScope::Write => {
+            lp.policy
+                .evaluate3_floored(set, &maknae_config::Request::Write(path), home, lp.fold)
+        }
         FsScope::ReadSubtree => lp
             .policy
             .evaluate_read_subtree_floored(set, path, home, lp.fold),
@@ -1482,22 +1476,32 @@ fn decide_fs(
 
 fn mask_obligation(patterns: Vec<String>) -> Obligation {
     let mut params = Attributes::new();
-    params.insert("patterns", AttrValue::List(patterns));
+    params.insert(
+        maknae_security::workspace_mask::PATTERNS,
+        AttrValue::List(patterns),
+    );
     Obligation {
-        id: "workspace.mask".into(),
+        id: maknae_security::workspace_mask::ID.into(),
         params,
     }
 }
 
-/// A person's role whose `roles.<role>.permissions` join the floored lists; an agent
-/// inherits none.
-pub(crate) fn role_stage(
+/// A person's role and its `roles.<role>.permissions`, which join the floored lists; an
+/// agent, by its entry or by `lp.agents`, inherits none.
+pub(crate) fn role_stage<'a>(
+    lp: &'a LoadedPolicy,
+    uid: u32,
     entry: Option<&SubjectEntry>,
     role_key: &'static str,
-) -> Option<&'static str> {
+) -> Option<(&'static str, &'a maknae_config::ToolPermissions)> {
+    if lp.agents.get(uid).is_some() {
+        return None;
+    }
     match entry.map(|e| &e.origin) {
         Some(SubjectOrigin::Agent(_)) => None,
-        Some(SubjectOrigin::Authz) | None => Some(role_key),
+        Some(SubjectOrigin::Authz) | None => {
+            Some((role_key, lp.policy.role_permissions(role_key)?))
+        }
     }
 }
 
@@ -1523,23 +1527,22 @@ fn origin_of<'e, const N: usize>(
 
 /// Deny-first over the site, the subject's or agent's own lists and the role's `Tool(...)`
 /// grants, citing the entry that decided; `absent` is the note when no entry matches.
-fn decide_grants(
+fn decide_grants<'p>(
     lp: &LoadedPolicy,
     entry: Option<&SubjectEntry>,
-    role: Option<&'static str>,
+    role_permissions: Option<(&'static str, &'p maknae_config::ToolPermissions)>,
     agent: impl FnOnce(
         &maknae_config::SubjectPermissions,
         Option<&maknae_config::SubjectPermissions>,
     ) -> Result<AgentMatch, maknae_config::HomeUnbound>,
     floored: impl FnOnce(
         Option<&maknae_config::SubjectPermissions>,
-        Option<&'static str>,
+        Option<&'p maknae_config::ToolPermissions>,
     ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound>,
     absent: String,
 ) -> Decision {
     let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e, p)));
     let set = subject.map(|(_, p)| p);
-    let role = role.and_then(|r| role_stage(entry, r));
     let matched = match entry.and_then(SubjectEntry::agent_right) {
         Some((id, right)) => match agent(right, set) {
             Ok(AgentMatch::Right { source }) => {
@@ -1554,12 +1557,11 @@ fn decide_grants(
             Ok(AgentMatch::Floored(m)) => Ok(m),
             Err(unbound) => Err(unbound),
         },
-        None => floored(set, role),
+        None => floored(set, role_permissions.map(|(_, p)| p)),
     };
     let Ok(matched) = matched else {
         return (Verdict::Indeterminate, None);
     };
-    let role_permissions = role.and_then(|r| Some((r, lp.policy.role_permissions(r)?)));
     match matched {
         maknae_config::Match3::DenyMatch { source } => {
             let origin = origin_of(
@@ -1751,7 +1753,7 @@ fn tool_ceiling(
             };
             let Some(template) = shapes.get(requested) else {
                 return deny(&format!(
-                    "tool: shape {requested} is not enabled for {name}/{program}"
+                    "tool: the shape is not enabled for {name}/{program}"
                 ));
             };
             let empty = maknae_config::Bound::empty();
@@ -1819,19 +1821,21 @@ fn decide_tool(
     if let Err(decision) = granted(lp, role_key, "tool.invoke") {
         return decision;
     }
-    let request = maknae_config::Request::Tool(call);
+    let entry = lp.subjects.get(uid);
     decide_grants(
         lp,
-        lp.subjects.get(uid),
-        Some(role_key),
+        entry,
+        role_stage(lp, uid, entry, role_key),
         |right, set| {
-            lp.policy
-                .evaluate3_agent(right, set, &request, None, lp.fold)
+            lp.policy.evaluate3_agent(
+                right,
+                set,
+                &maknae_config::Request::Tool(call),
+                None,
+                lp.fold,
+            )
         },
-        |set, role| {
-            lp.policy
-                .evaluate3_floored(set, role, &request, None, lp.fold)
-        },
+        |set, role| lp.policy.evaluate_tool_floored(set, role, call, lp.fold),
         format!("role {role_key}: no capability entry for tool.invoke"),
     )
 }
@@ -6799,9 +6803,7 @@ mod tests {
         for shape in ["issue.list", "pr.close", "pr"] {
             assert_eq!(
                 tool_decided(&lp, &shape_call(shape, &["issue", "list"], &ONE)).verdict,
-                deny(&format!(
-                    "tool: shape {shape} is not enabled for sentinel-674-shape/gh"
-                )),
+                deny("tool: the shape is not enabled for sentinel-674-shape/gh"),
                 "{shape}"
             );
         }
@@ -7004,6 +7006,30 @@ mod tests {
             AttrValue::Set(Default::default()),
         );
         assert_eq!(tool_decided(&lp, &unbound).verdict, refused("pr.view"));
+    }
+
+    #[test]
+    fn a_positional_deny_refuses_a_shape_call_whose_rendered_argv_it_matches() {
+        let argv = ["pr", "view", "7", "-R", "o/a"];
+        let lp = lp_forms(&format!(
+            "{FORMS_ALLOW}  deny: [\"Tool(sentinel-674-shape gh pr view *)\"]\n"
+        ));
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            deny("denied by policy entry Tool(sentinel-674-shape gh pr view *)")
+        );
+        let lp = lp_forms(&format!(
+            "{FORMS_ALLOW}  deny: [\"Tool(sentinel-674-shape gh issue *)\"]\n"
+        ));
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            permit_with_audit()
+        );
+        let lp = lp_forms("permissions:\n  allow: [\"Tool(sentinel-674-shape gh pr view *)\"]\n");
+        assert_ne!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            permit_with_audit()
+        );
     }
 
     #[test]
@@ -7821,6 +7847,19 @@ mod tests {
             own.verdict,
             deny("denied by subjects.tuser.permissions entry Tool(sentinel-674-build cargo build --release-x*)")
         );
+    }
+
+    #[test]
+    fn a_uid_lp_agents_knows_has_no_role_stage_whatever_its_entry() {
+        let mut lp = lp_tool(ROLE_USER_TOOLS, &["user"], &[]);
+        let user = lp.policy.role_permissions("user").unwrap().clone();
+        assert_eq!(
+            role_stage(&lp, TOOL_USER, None, "user"),
+            Some(("user", &user))
+        );
+        assert_eq!(role_stage(&lp, TOOL_USER, None, "admin"), None);
+        lp.agents.0.insert(TOOL_USER, "hobi".into());
+        assert_eq!(role_stage(&lp, TOOL_USER, None, "user"), None);
     }
 
     #[test]

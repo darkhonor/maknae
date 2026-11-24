@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use maknae_config::{
-    check_open_argv, Bound, CallRefusal, CommandForm, ForgeKind, Rendered, Shape, ShapeClass,
-    ToolEntry, ToolWorkspaceAccess, ToolsCatalog,
+    check_open_argv, Bound, CallRefusal, CommandForm, ForgeKind, Rendered, Shape,
+    ToolWorkspaceAccess, ToolsCatalog,
 };
 use maknae_proto::{effective_reach, Binding, BindingReach, GitBinding, SideReach};
 use maknae_security::{
@@ -19,11 +19,13 @@ use maknae_security::{
 
 use crate::handler::{
     discharge_for_tool_call, discharge_plan, lane_context, stamp_conversation, stamp_subject,
-    stamp_task_bindings, UnhonorableObligation,
+    stamp_task_bindings, Stamp, TaskStamp, UnhonorableObligation,
 };
 use crate::reach::TaskBound;
 use crate::task::CitedTask;
-use crate::tool_launch::{launch_obligation, ops, sha256_hex, LaunchCall, LaunchRefusal, PerCall};
+use crate::tool_launch::{
+    launch_obligation, ops, sha256_hex, Launch, LaunchCall, NoImage, PerCall,
+};
 use crate::workspace::{
     Citation, DecidesPinned, MountDecision, MountMode, PinnedPolicy, SubjectFacts, MASK, PATTERNS,
 };
@@ -67,8 +69,13 @@ pub(crate) enum ToolCallDecision {
         wire: String,
         cited: Citation,
     },
+    /// `cited` is the rule that permitted `tool.invoke`, `mount_cited` the workspace mount's,
+    /// and `audited` whether the permit's `audit` obligation was honoured.
     Permitted {
         obligations: Vec<Obligation>,
+        cited: Citation,
+        mount_cited: Option<Box<Citation>>,
+        audited: bool,
     },
 }
 
@@ -106,24 +113,32 @@ fn call_refusal(refusal: &CallRefusal) -> ToolCallDecision {
 }
 
 fn assemble_launch(
-    entry: &ToolEntry,
-    program: &str,
-    call: &LaunchCall,
+    launch: &Launch,
     per_call: &PerCall,
     cited: &Citation,
 ) -> Result<Obligation, ToolCallDecision> {
-    launch_obligation(entry, program, call, per_call).map_err(|refusal| {
-        let why = match refusal {
-            LaunchRefusal::NoProgram => "the program is not in the entry",
-            LaunchRefusal::FormMismatch => "the command's form does not take the call",
-            LaunchRefusal::UnknownShape => "the shape is not in the command",
-            LaunchRefusal::NoImage => "the entry has no image",
-        };
+    launch_obligation(launch, per_call).map_err(|NoImage| {
         denied(
-            format!("tool: the call cannot be launched: {why}"),
+            "tool: the call cannot be launched: the entry has no image",
             cited.clone(),
         )
     })
+}
+
+/// The stamp's task must be the cited task; a person cites none on this path.
+fn task_agrees(stamp: &Stamp<'_>, cited: Option<&CitedTask>) -> bool {
+    match (stamp, cited) {
+        (Stamp::Client, None) | (Stamp::Agent { task: None, .. }, None) => true,
+        (
+            Stamp::Agent {
+                task: Some(task), ..
+            },
+            Some(cited),
+        ) => **task == TaskStamp::of(cited),
+        (Stamp::Client, Some(_))
+        | (Stamp::Agent { task: None, .. }, Some(_))
+        | (Stamp::Agent { task: Some(_), .. }, None) => false,
+    }
 }
 
 struct Selected<'a> {
@@ -194,11 +209,10 @@ fn stamp_selected(
 fn stamp_shape(resource: &mut Attributes, name: &str, shape: &Shape, rendered: &Rendered) {
     resource.insert(RESOURCE_TOOL_MODE, AttrValue::Str(TOOL_MODE_SHAPE.into()));
     resource.insert(RESOURCE_TOOL_SHAPE, AttrValue::Str(name.into()));
-    let class = match shape.class {
-        ShapeClass::Read => "read",
-        ShapeClass::Write => "write",
-    };
-    resource.insert(RESOURCE_TOOL_CLASS, AttrValue::Str(class.into()));
+    resource.insert(
+        RESOURCE_TOOL_CLASS,
+        AttrValue::Str(shape.class.as_str().into()),
+    );
     resource.insert(RESOURCE_TOOL_ARGV, AttrValue::List(rendered.argv.clone()));
     if let Some(stdin) = &rendered.stdin {
         resource.insert(
@@ -241,12 +255,12 @@ fn stamp_open(
 }
 
 /// Renders or checks the call against the pinned catalog and stamps its resource facts.
-fn resolve<'t>(
-    tools: &'t ToolsCatalog,
+fn resolve<'a>(
+    tools: &'a ToolsCatalog,
     cited: Option<&CitedTask>,
-    req: &ToolCallRequest,
+    req: &'a ToolCallRequest,
     resource: &mut Attributes,
-) -> Result<(&'t ToolEntry, LaunchCall), ToolCallDecision> {
+) -> Result<Launch<'a>, ToolCallDecision> {
     let (name, program) = (&req.entry, &req.program);
     let entry = tools
         .entry(name)
@@ -269,7 +283,14 @@ fn resolve<'t>(
         )
     };
     let call = match (&command.form, &req.call) {
-        (CommandForm::Grammar { shapes, .. }, CallInput::Shape { shape, slots }) => {
+        (
+            CommandForm::Grammar {
+                shapes,
+                grammar_canonical,
+                ..
+            },
+            CallInput::Shape { shape, slots },
+        ) => {
             let template = shapes.get(shape).ok_or_else(|| {
                 denied(
                     format!("tool: shape not enabled for {name}/{program}"),
@@ -283,7 +304,9 @@ fn resolve<'t>(
                 .map_err(|r| call_refusal(&r))?;
             stamp_shape(resource, shape, template, &rendered);
             LaunchCall::Shape {
-                shape: shape.clone(),
+                name: shape,
+                shape: template,
+                grammar_canonical,
                 rendered,
             }
         }
@@ -293,7 +316,7 @@ fn resolve<'t>(
             }
             check_open_argv(argv).map_err(|r| call_refusal(&r))?;
             stamp_open(resource, argv, cited, &bound);
-            LaunchCall::Open { argv: argv.clone() }
+            LaunchCall::Open { argv }
         }
         (CommandForm::Grammar { .. } | CommandForm::Positional(_), CallInput::Open { .. }) => {
             return Err(wrong("an open call"))
@@ -302,7 +325,12 @@ fn resolve<'t>(
             return Err(wrong("a shape call"))
         }
     };
-    Ok((entry, call))
+    Ok(Launch {
+        entry,
+        program,
+        command,
+        call,
+    })
 }
 
 fn decide_pinned(
@@ -311,13 +339,13 @@ fn decide_pinned(
     cited: Option<&CitedTask>,
     req: &ToolCallRequest,
     workspace_root: &str,
-) -> Result<Vec<Obligation>, ToolCallDecision> {
+) -> Result<ToolCallDecision, ToolCallDecision> {
     let mut resource = Attributes::new();
     stamp_conversation(&mut resource, subject.conversation);
     resource.insert(RESOURCE_TOOL_ENTRY, AttrValue::Str(req.entry.clone()));
     resource.insert(RESOURCE_TOOL_PROGRAM, AttrValue::Str(req.program.clone()));
     resource.insert(RESOURCE_TOOL_LABELS, AttrValue::Set(BTreeSet::new()));
-    let (entry, call) = resolve(pinned.tools(), cited, req, &mut resource)?;
+    let launch = resolve(pinned.tools(), cited, req, &mut resource)?;
     let request = Request {
         subject: stamp_subject(subject.uid, subject.home, subject.stamp),
         resource: Resource(resource),
@@ -331,10 +359,12 @@ fn decide_pinned(
     };
     let permit = match decided.verdict {
         Verdict::Indeterminate => return Err(denied(UNEVALUATED, cited_rule)),
-        v => match finalize(combine(vec![v])) {
-            Decision::Permit { obligations } => obligations,
-            Decision::Deny { reason } => return Err(denied(reason, cited_rule)),
-        },
+        v @ (Verdict::Permit { .. } | Verdict::Deny { .. } | Verdict::NotApplicable { .. }) => {
+            match finalize(combine(vec![v])) {
+                Decision::Permit { obligations } => obligations,
+                Decision::Deny { reason } => return Err(denied(reason, cited_rule)),
+            }
+        }
     };
     discharge_plan(&permit).map_err(|UnhonorableObligation(id)| {
         denied(
@@ -342,23 +372,26 @@ fn decide_pinned(
             cited_rule.clone(),
         )
     })?;
-    let mode = match entry.workspace {
+    let mode = match launch.entry.workspace {
         ToolWorkspaceAccess::Rw => Some(MountMode::ReadWrite),
         ToolWorkspaceAccess::Ro => Some(MountMode::ReadOnly),
         ToolWorkspaceAccess::None => None,
     };
-    let mask = match mode.map(|mode| pinned.mount(subject, workspace_root, mode)) {
-        None => None,
+    let (mask, mount_cited) = match mode.map(|mode| pinned.mount(subject, workspace_root, mode)) {
+        None => (None, None),
         Some(MountDecision::Refused { audit, wire, cited }) => {
             return Err(ToolCallDecision::Refused { audit, wire, cited })
         }
-        Some(MountDecision::Permitted { masks, .. }) => {
+        Some(MountDecision::Permitted { masks, cited }) => {
             let mut params = Attributes::new();
             params.insert(PATTERNS, AttrValue::List(masks));
-            Some(Obligation {
-                id: MASK.into(),
-                params,
-            })
+            (
+                Some(Obligation {
+                    id: MASK.into(),
+                    params,
+                }),
+                Some(Box::new(cited)),
+            )
         }
     };
     let per_call = PerCall {
@@ -366,19 +399,25 @@ fn decide_pinned(
         task: cited.map(|c| c.signed.task.task_id.to_string()),
         subject_uid: subject.uid,
     };
-    let launch = assemble_launch(entry, &req.program, &call, &per_call, &cited_rule)?;
+    let launch = assemble_launch(&launch, &per_call, &cited_rule)?;
     let all: Vec<Obligation> = permit.into_iter().chain(mask).chain([launch]).collect();
     let discharged = discharge_for_tool_call(&all).map_err(|UnhonorableObligation(id)| {
         denied(
             format!("tool: an obligation the call cannot honor: {id}"),
-            cited_rule,
+            cited_rule.clone(),
         )
     })?;
-    Ok(discharged.forward)
+    Ok(ToolCallDecision::Permitted {
+        obligations: discharged.forward,
+        cited: cited_rule,
+        mount_cited,
+        audited: discharged.audited,
+    })
 }
 
 /// Lookup, rendering, the `tool.invoke` decision, the mount and `tool.launch`, all on one
-/// pinned snapshot; a slot or argv refusal never reaches the PDP.
+/// pinned snapshot; a slot or argv refusal never reaches the PDP. `subject.stamp`'s task
+/// must be `cited`, or the call is refused as malformed.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
@@ -390,10 +429,12 @@ pub(crate) fn decide_tool_call<P: DecidesPinned>(
     req: ToolCallRequest,
     workspace_root: &str,
 ) -> ToolCallDecision {
+    if !task_agrees(subject.stamp, cited) {
+        return malformed("the cited task is not the subject's task");
+    }
     authorizer.with_pinned(|pinned| {
         match decide_pinned(pinned, subject, cited, &req, workspace_root) {
-            Ok(obligations) => ToolCallDecision::Permitted { obligations },
-            Err(refused) => refused,
+            Ok(decision) | Err(decision) => decision,
         }
     })
 }
@@ -402,7 +443,7 @@ pub(crate) fn decide_tool_call<P: DecidesPinned>(
 mod tests {
     use super::*;
     use crate::composition::Composition;
-    use crate::handler::Stamp;
+    use crate::handler::{Stamp, TaskStamp};
     use crate::test_fixtures::{
         cited_task, fixture, link_grammar, write_0640, write_grammar, write_sensitive,
         write_tools_dropin, DirGuard, VENDOR_DIR,
@@ -420,6 +461,9 @@ mod tests {
 
     const HOME: &str = "/home/alice";
     const ROOT: &str = "/srv/work/x";
+    const AGENT_UID: u32 = 2001;
+    const AGENT_HOME: &str = "/var/lib/maknae-agents/hobi";
+    const AGENT_ROOT: &str = "/var/lib/maknae-agents/hobi/tasks/users/1000";
     const IMAGE: &str = "registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
     const GRAMMAR: &str = r#"schema_version: 1
@@ -505,7 +549,18 @@ shapes:
         .unwrap();
         link_grammar(&g.0, &vendor, "gh.yaml");
         write_tools_dropin(&g.0, "site.yaml", &tools());
-        basic.install(basic.compile_granting_tool_invoke(&["admin"]).unwrap());
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", AGENT_UID, "user");
+        crate::test_fixtures::write_agent_policy(
+            &g.0,
+            "hobi",
+            "schema_version: 1\npermissions:\n  allow: [\"Read(~/**)\", \"Write(~/**)\", \"Tool(gh gh:*)\", \"Tool(build cargo build *)\", \"Tool(lint cargo build *)\"]\n",
+        );
+        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        basic.install(
+            basic
+                .compile_granting_tool_invoke(&["admin", "user"])
+                .unwrap(),
+        );
         (g, Composition::with_us_baseline_ceiling(basic))
     }
 
@@ -513,21 +568,45 @@ shapes:
         nix::unistd::geteuid().as_raw()
     }
 
+    fn decide_as<P: DecidesPinned>(
+        a: &P,
+        stamp: &Stamp<'_>,
+        cited: Option<&CitedTask>,
+        req: ToolCallRequest,
+        root: &str,
+    ) -> ToolCallDecision {
+        let (uid, home) = match stamp {
+            Stamp::Client => (operator(), HOME),
+            Stamp::Agent { .. } => (AGENT_UID, AGENT_HOME),
+        };
+        let subject = SubjectFacts {
+            lane: Lane::Local,
+            uid,
+            home: Some(Path::new(home)),
+            conversation: None,
+            personal: None,
+            stamp,
+        };
+        decide_tool_call(a, &subject, cited, req, root)
+    }
+
+    /// The operator with no task, or agent hobi stamped with the cited task.
     fn decide<P: DecidesPinned>(
         a: &P,
         cited: Option<&CitedTask>,
         req: ToolCallRequest,
         root: &str,
     ) -> ToolCallDecision {
-        let subject = SubjectFacts {
-            lane: Lane::Local,
-            uid: operator(),
-            home: Some(Path::new(HOME)),
-            conversation: None,
-            personal: None,
-            stamp: &Stamp::Client,
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let task = cited.map(TaskStamp::of);
+        let stamp = match &task {
+            Some(task) => Stamp::Agent {
+                agent: &hobi,
+                task: Some(task),
+            },
+            None => Stamp::Client,
         };
-        decide_tool_call(a, &subject, cited, req, root)
+        decide_as(a, &stamp, cited, req, root)
     }
 
     fn shape(name: &str, slots: &[(&str, &str)], binding: Option<usize>) -> ToolCallRequest {
@@ -588,7 +667,7 @@ shapes:
 
     fn obligations(d: ToolCallDecision) -> Vec<Obligation> {
         match d {
-            ToolCallDecision::Permitted { obligations } => obligations,
+            ToolCallDecision::Permitted { obligations, .. } => obligations,
             ToolCallDecision::Refused { audit, .. } => panic!("refused: {audit}"),
         }
     }
@@ -756,7 +835,7 @@ shapes:
             &c,
             Some(&task),
             shape("issue.list", &[("state", "open")], None),
-            ROOT,
+            AGENT_ROOT,
         ));
         assert_eq!(ids(&obs), ["workspace.mask", "tool.launch"]);
         assert_eq!(obs[0], mask(&["/**/.env"]));
@@ -768,7 +847,7 @@ shapes:
         assert_eq!(l.str("mode"), Some("shape"));
         assert_eq!(l.str("shape"), Some("issue.list"));
         assert_eq!(l.str("entry"), Some("gh"));
-        assert_eq!(l.str("workspace.root"), Some(ROOT));
+        assert_eq!(l.str("workspace.root"), Some(AGENT_ROOT));
         assert_eq!(l.str("workspace.mode"), Some("ro"));
         assert_eq!(
             l.str("task"),
@@ -776,7 +855,7 @@ shapes:
         );
         assert_eq!(
             l.get("subject.uid"),
-            Some(&AttrValue::Int(i64::from(operator())))
+            Some(&AttrValue::Int(i64::from(AGENT_UID)))
         );
     }
 
@@ -828,7 +907,7 @@ shapes:
         ];
         for (req, why) in cases {
             let spy = Spy::on(&c);
-            let got = decide(&spy, Some(&task), req, ROOT);
+            let got = decide(&spy, Some(&task), req, AGENT_ROOT);
             assert_eq!(got, malformed(why));
             assert!(spy.decided().is_empty(), "{why}");
             assert_eq!(spy.mounts.load(Ordering::SeqCst), 0, "{why}");
@@ -854,7 +933,7 @@ shapes:
                 &spy,
                 Some(&task),
                 shape("pr.comment", &[("body", "b")], None),
-                ROOT
+                AGENT_ROOT
             ),
             malformed("bound git.change: unresolved")
         );
@@ -881,7 +960,7 @@ shapes:
                 &c,
                 Some(&task),
                 shape("pr.comment", &[("body", "b")], Some(index)),
-                ROOT,
+                AGENT_ROOT,
             ));
             assert_eq!(
                 launch(&obs).get("argv"),
@@ -964,19 +1043,19 @@ shapes:
         );
         let next = c
             .baseline()
-            .compile_granting_tool_invoke(&["admin"])
+            .compile_granting_tool_invoke(&["admin", "user"])
             .unwrap();
         let task = cited_task(vec![git("o/r", None)]);
         let call = || shape("issue.list", &[("state", "all")], None);
         let spy = Spy::on(&c);
         *spy.reload.lock().unwrap() = Some(next);
-        let pinned = obligations(decide(&spy, Some(&task), call(), ROOT));
+        let pinned = obligations(decide(&spy, Some(&task), call(), AGENT_ROOT));
         assert!(spy.reload.lock().unwrap().is_none());
         assert_eq!(
             launch(&pinned).get("argv"),
             Some(&list(&["issue", "list", "-R", "o/r", "--state=all"]))
         );
-        let after = obligations(decide(&c, Some(&task), call(), ROOT));
+        let after = obligations(decide(&c, Some(&task), call(), AGENT_ROOT));
         assert_eq!(
             launch(&after).get("argv"),
             Some(&list(&["issue", "list", "--repo", "o/r", "--state=all"]))
@@ -992,7 +1071,7 @@ shapes:
                 &c,
                 Some(&task),
                 shape("issue.list", &[("state", "open")], binding),
-                ROOT,
+                AGENT_ROOT,
             ));
             assert_eq!(
                 launch(&obs).get("argv"),
@@ -1040,7 +1119,7 @@ shapes:
                 &c,
                 Some(&task),
                 shape("issue.list", &[("state", "open")], Some(index)),
-                ROOT,
+                AGENT_ROOT,
             ));
             assert_eq!(
                 launch(&obs).get("argv"),
@@ -1064,7 +1143,7 @@ shapes:
             &spy,
             Some(&task),
             shape("issue.list", &[("state", "open")], Some(1)),
-            ROOT,
+            AGENT_ROOT,
         ));
         let [req] = spy.decided().try_into().unwrap();
         let r = &req.resource.0;
@@ -1093,7 +1172,7 @@ shapes:
         assert_eq!(r.get("tool.files.sha256"), None);
         assert_eq!(
             req.subject.0.get("uid"),
-            Some(&AttrValue::Int(i64::from(operator())))
+            Some(&AttrValue::Int(i64::from(AGENT_UID)))
         );
         assert_eq!(
             req.context.0.str(maknae_security::CONTEXT_DAC_LANE),
@@ -1114,13 +1193,13 @@ shapes:
             &spy,
             Some(&task),
             shape("pr.comment", &[("body", "sentinel-674 body")], None),
-            ROOT,
+            AGENT_ROOT,
         ));
         obligations(decide(
             &spy,
             Some(&task),
             shape("issue.note", &[("number", "12"), ("body", "note")], None),
-            ROOT,
+            AGENT_ROOT,
         ));
         let [comment, note] = spy.decided().try_into().unwrap();
         let comment = &comment.resource.0;
@@ -1196,7 +1275,7 @@ shapes:
         req.binding = Some(0);
         let task = cited_task(vec![git("o/a", None)]);
         assert_eq!(
-            decide(&spy, Some(&task), req, ROOT),
+            decide(&spy, Some(&task), req, AGENT_ROOT),
             malformed("an open call selects no binding")
         );
         assert!(spy.decided().is_empty());
@@ -1342,46 +1421,104 @@ shapes:
             role: Some("sentinel-674-role"),
             rule: None,
         };
-        let argv = LaunchCall::Open {
-            argv: vec!["build".into()],
-        };
-        let refused = |why: &str| ToolCallDecision::Refused {
-            audit: format!("tool: the call cannot be launched: {why}"),
-            wire: "not authorized".into(),
-            cited: cited.clone(),
-        };
-        assert_eq!(
-            assemble_launch(&imageless, "cargo", &argv, &per_call, &cited),
-            Err(refused("the entry has no image"))
-        );
-        let gh = catalog.entry("gh").unwrap();
-        assert_eq!(
-            assemble_launch(gh, "gh", &argv, &per_call, &cited),
-            Err(refused("the command's form does not take the call"))
-        );
-        assert_eq!(
-            assemble_launch(gh, "cargo", &argv, &per_call, &cited),
-            Err(refused("the program is not in the entry"))
-        );
-        let unknown = LaunchCall::Shape {
-            shape: "sentinel-674-shape".into(),
-            rendered: maknae_config::Rendered {
-                argv: Vec::new(),
-                stdin: None,
-                files: Vec::new(),
-            },
+        let argv = ["build".to_string()];
+        let launch = |entry| Launch {
+            entry,
+            program: "cargo",
+            command: &entry.commands["cargo"],
+            call: LaunchCall::Open { argv: &argv },
         };
         assert_eq!(
-            assemble_launch(gh, "gh", &unknown, &per_call, &cited),
-            Err(refused("the shape is not in the command"))
+            assemble_launch(&launch(&imageless), &per_call, &cited),
+            Err(ToolCallDecision::Refused {
+                audit: "tool: the call cannot be launched: the entry has no image".into(),
+                wire: "not authorized".into(),
+                cited: cited.clone(),
+            })
         );
-        assert!(assemble_launch(
-            catalog.entry("lint").unwrap(),
-            "cargo",
-            &argv,
-            &per_call,
-            &cited
-        )
-        .is_ok());
+        assert!(
+            assemble_launch(&launch(catalog.entry("lint").unwrap()), &per_call, &cited).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_stamp_whose_task_is_not_the_cited_task_is_refused() {
+        let (_g, c) = pdp(&[], NO_SENSITIVE);
+        let spy = Spy::on(&c);
+        let task = cited_task(vec![git("o/r", None)]);
+        let other = cited_task(vec![git("o/r", None)]);
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let other_stamp = TaskStamp::of(&other);
+        let own_stamp = TaskStamp::of(&task);
+        let call = || shape("issue.list", &[("state", "open")], None);
+        let refused = malformed("the cited task is not the subject's task");
+        for (stamp, cited) in [
+            (Stamp::Client, Some(&task)),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: None,
+                },
+                Some(&task),
+            ),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: Some(&other_stamp),
+                },
+                Some(&task),
+            ),
+            (
+                Stamp::Agent {
+                    agent: &hobi,
+                    task: Some(&own_stamp),
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(decide_as(&spy, &stamp, cited, call(), AGENT_ROOT), refused);
+        }
+        assert!(spy.decided().is_empty());
+        assert_eq!(spy.mounts.load(Ordering::SeqCst), 0);
+        let agrees = Stamp::Agent {
+            agent: &hobi,
+            task: Some(&own_stamp),
+        };
+        assert!(matches!(
+            decide_as(&spy, &agrees, Some(&task), call(), AGENT_ROOT),
+            ToolCallDecision::Permitted { .. }
+        ));
+    }
+
+    #[test]
+    fn the_permit_cites_the_permitting_rule_and_the_mount() {
+        let (_g, c) = pdp(&[], NO_SENSITIVE);
+        let ToolCallDecision::Permitted {
+            cited,
+            mount_cited,
+            audited,
+            ..
+        } = decide(&c, None, open("build", &["build"]), ROOT)
+        else {
+            panic!("refused");
+        };
+        assert_eq!(cited.role, Some("admin"));
+        assert_eq!(
+            cited.rule.map(|r| r.key),
+            Some("rule:permissions:allow:3".to_string())
+        );
+        let mount = mount_cited.unwrap();
+        assert_eq!(mount.role, Some("admin"));
+        assert_eq!(
+            mount.rule.map(|r| r.key),
+            Some("rule:permissions:allow:1".to_string())
+        );
+        assert!(audited);
+        let ToolCallDecision::Permitted { mount_cited, .. } =
+            decide(&c, None, open("lint", &["build"]), HOME)
+        else {
+            panic!("refused");
+        };
+        assert_eq!(mount_cited, None);
     }
 }

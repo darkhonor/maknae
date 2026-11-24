@@ -37,6 +37,21 @@ pub enum ShapeClass {
     Write,
 }
 
+impl ShapeClass {
+    pub const ALL: [ShapeClass; 2] = [ShapeClass::Read, ShapeClass::Write];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShapeClass::Read => "read",
+            ShapeClass::Write => "write",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForgeNeed {
     pub base: ForgeOps,
@@ -57,6 +72,23 @@ pub enum SlotAt {
     Option,
     Stdin,
     File,
+}
+
+impl SlotAt {
+    pub const ALL: [SlotAt; 4] = [SlotAt::Token, SlotAt::Option, SlotAt::Stdin, SlotAt::File];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SlotAt::Token => "token",
+            SlotAt::Option => "option",
+            SlotAt::Stdin => "stdin",
+            SlotAt::File => "file",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -217,11 +249,9 @@ fn parse_shape(name: &str, node: &Value) -> Result<Shape, String> {
     };
     closed_in_shape("grammar.shapes", map, SHAPE_KEYS)?;
     let description = text(get(map, "description"), "description")?.to_string();
-    let class = match text(get(map, "class"), "class")? {
-        "read" => ShapeClass::Read,
-        "write" => ShapeClass::Write,
-        other => return Err(format!("class `{other}` is not read or write")),
-    };
+    let class = text(get(map, "class"), "class")?;
+    let class =
+        ShapeClass::parse(class).ok_or_else(|| format!("class `{class}` is not read or write"))?;
     let forge = parse_forge(get(map, "forge"))?;
     let slots = parse_slots(get(map, "slots"))?;
     let Some(Value::Seq(tokens)) = get(map, "argv") else {
@@ -295,14 +325,12 @@ fn parse_slot(name: &str, node: &Value) -> Result<Slot, String> {
         return Err(format!("slot `{name}` must be a mapping"));
     };
     closed_in_shape("grammar.shapes.slots", map, SLOT_KEYS)?;
-    let at = match text(get(map, "at"), "at").map_err(|e| format!("slot `{name}`: {e}"))? {
-        "token" => SlotAt::Token,
-        "option" => SlotAt::Option,
-        "stdin" => SlotAt::Stdin,
-        "file" => SlotAt::File,
-        other => {
+    let at = text(get(map, "at"), "at").map_err(|e| format!("slot `{name}`: {e}"))?;
+    let at = match SlotAt::parse(at) {
+        Some(at) => at,
+        None => {
             return Err(format!(
-                "slot `{name}`: at `{other}` is not token, option, stdin or file"
+                "slot `{name}`: at `{at}` is not token, option, stdin or file"
             ))
         }
     };
@@ -450,15 +478,44 @@ const BODY_MAX: usize = 65_536;
 const OPEN_TOKENS_MAX: usize = 64;
 const OPEN_TOKEN_MAX: usize = 4096;
 
+/// A slot name or bound key the grammar defines; only this module builds one, so a refusal
+/// never carries request input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrammarName(String);
+
+impl GrammarName {
+    fn of(name: &str) -> Self {
+        Self(name.to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for GrammarName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallRefusal {
-    MissingSlot(String),
+    MissingSlot(GrammarName),
     UnexpectedSlot,
-    Invariant { slot: String, rule: &'static str },
-    Constraint { slot: String },
-    UnresolvedBound(String),
-    BadBound(String),
-    OpenToken { index: usize, rule: &'static str },
+    Invariant {
+        slot: GrammarName,
+        rule: &'static str,
+    },
+    Constraint {
+        slot: GrammarName,
+    },
+    UnresolvedBound(GrammarName),
+    BadBound(GrammarName),
+    OpenToken {
+        index: usize,
+        rule: &'static str,
+    },
     OpenTooMany,
 }
 
@@ -478,7 +535,7 @@ pub struct Rendered {
 fn check_value(name: &str, slot: &Slot, value: &str) -> Result<(), CallRefusal> {
     let refuse = |rule| {
         Err(CallRefusal::Invariant {
-            slot: name.to_string(),
+            slot: GrammarName::of(name),
             rule,
         })
     };
@@ -516,13 +573,13 @@ fn check_value(name: &str, slot: &Slot, value: &str) -> Result<(), CallRefusal> 
         Some(Constraint::Enum(members)) if members.contains(value) => Ok(()),
         Some(Constraint::Pattern(re)) if re.is_match(value) => Ok(()),
         Some(Constraint::Enum(_)) | Some(Constraint::Pattern(_)) => Err(CallRefusal::Constraint {
-            slot: name.to_string(),
+            slot: GrammarName::of(name),
         }),
     }
 }
 
 fn bound_value<'a>(kind: &str, field: &str, bound: &'a Bound) -> Result<&'a str, CallRefusal> {
-    let key = || format!("{kind}.{field}");
+    let key = || GrammarName(format!("{kind}.{field}"));
     let value = bound
         .get(kind, field)
         .ok_or_else(|| CallRefusal::UnresolvedBound(key()))?;
@@ -548,13 +605,13 @@ impl Shape {
         let given = |name: &str| {
             slots
                 .get(name)
-                .ok_or_else(|| CallRefusal::MissingSlot(name.to_string()))
+                .ok_or_else(|| CallRefusal::MissingSlot(GrammarName::of(name)))
         };
         for (name, slot) in &self.slots {
             check_value(name, slot, given(name)?)?;
         }
         let position = |name: &str| CallRefusal::Invariant {
-            slot: name.to_string(),
+            slot: GrammarName::of(name),
             rule: "position",
         };
         let mut argv = Vec::with_capacity(self.argv.len());
@@ -696,7 +753,7 @@ impl fmt::Display for GrammarLoadError {
         match self {
             Self::Directory(dir) => write!(
                 f,
-                "the grammar directory {} must be owned by root (uid 0) and not group- or other-writable",
+                "the grammar directory {} must be owned by root (uid 0), not group-writable and with no world access",
                 dir.display()
             ),
             Self::Io(reason) => write!(f, "grammar directory: {reason}"),
@@ -786,7 +843,10 @@ fn load_required(
         .enumerate(std::path::Path::new(""), None)
         .map_err(|e| GrammarLoadError::Io(e.to_string()))?
         .value;
-    entries.retain(|entry| entry.name.to_string_lossy().ends_with(GRAMMAR_SUFFIX));
+    entries.retain(|entry| {
+        let name = entry.name.to_string_lossy();
+        !name.starts_with('.') && name.ends_with(GRAMMAR_SUFFIX)
+    });
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let vendor =
         maknae_io::open_anchor_resolved(&vendor_path, req.vendor.clone(), StrategyPref::Auto);
@@ -1521,7 +1581,7 @@ shapes:
         assert_eq!(
             e,
             CallRefusal::Invariant {
-                slot: "word".into(),
+                slot: GrammarName::of("word"),
                 rule: "leading_dash"
             }
         );
@@ -1532,7 +1592,7 @@ shapes:
             assert_eq!(
                 e,
                 CallRefusal::Invariant {
-                    slot: "word".into(),
+                    slot: GrammarName::of("word"),
                     rule
                 }
             );
@@ -1547,7 +1607,7 @@ shapes:
         assert_eq!(
             e,
             CallRefusal::Constraint {
-                slot: "state".into()
+                slot: GrammarName::of("state")
             }
         );
     }
@@ -1565,7 +1625,7 @@ shapes:
             assert_eq!(
                 e,
                 CallRefusal::Constraint {
-                    slot: "number".into()
+                    slot: GrammarName::of("number")
                 }
             );
         }
@@ -1588,7 +1648,7 @@ shapes:
         assert_eq!(
             e,
             CallRefusal::Invariant {
-                slot: "body".into(),
+                slot: GrammarName::of("body"),
                 rule: "too_long"
             }
         );
@@ -1614,7 +1674,7 @@ shapes:
                 .render(&slots(&[("word", &tok_split)]), &Bound::empty())
                 .unwrap_err(),
             CallRefusal::Invariant {
-                slot: "word".into(),
+                slot: GrammarName::of("word"),
                 rule: "too_long"
             }
         );
@@ -1654,7 +1714,7 @@ shapes:
         let e = shape("issue.list")
             .render(&slots(&[]), &git_bound())
             .unwrap_err();
-        assert_eq!(e, CallRefusal::MissingSlot("state".into()));
+        assert_eq!(e, CallRefusal::MissingSlot(GrammarName::of("state")));
         let e = shape("issue.list")
             .render(&slots(&[("state", "open"), ("extra", "x")]), &git_bound())
             .unwrap_err();
@@ -1669,14 +1729,14 @@ shapes:
         only_base.insert("git.base", "o/r");
         assert_eq!(
             pr.render(&given, &only_base).unwrap_err(),
-            CallRefusal::UnresolvedBound("git.change".into())
+            CallRefusal::UnresolvedBound(GrammarName::of("git.change"))
         );
         for bad in ["-12", "1\n2", ""] {
             let mut b = git_bound();
             b.insert("git.change", bad);
             assert_eq!(
                 pr.render(&given, &b).unwrap_err(),
-                CallRefusal::BadBound("git.change".into())
+                CallRefusal::BadBound(GrammarName::of("git.change"))
             );
         }
     }
@@ -2057,14 +2117,12 @@ mod load_tests {
     }
 
     #[test]
-    fn bare_suffix_member_is_disabled() {
-        let f = Fixture::new("bare");
+    fn dot_members_are_ignored_as_in_tools_d() {
+        let f = Fixture::new("dot");
         f.local(".yaml", GH);
-        let set = f.load().unwrap();
-        assert!(set.grammars.is_empty());
-        let d = only_disabled(&set);
-        assert_eq!(d.file, ".yaml");
-        assert!(d.reason.contains("not a program name"), "{}", d.reason);
+        f.local(".#gh.yaml", GH);
+        f.local("..yaml", GH);
+        assert_eq!(f.load(), Ok(GrammarSet::empty()));
     }
 
     #[cfg(target_os = "linux")]
@@ -2249,7 +2307,7 @@ mod load_tests {
 mod shipped_gh_tests {
     use super::*;
 
-    const SHAPES: [&str; 25] = [
+    const SHAPES: [&str; 22] = [
         "pr.view",
         "pr.diff",
         "pr.checks",
@@ -2272,9 +2330,6 @@ mod shipped_gh_tests {
         "issue.reopen",
         "issue.lock",
         "issue.unlock",
-        "issue.pin",
-        "issue.unpin",
-        "issue.develop",
     ];
 
     fn gh() -> Grammar {
@@ -2378,10 +2433,6 @@ mod shipped_gh_tests {
             render("issue.edit.add-label", &[("number", "7"), ("label", "bug")]),
             ["issue", "edit", "7", "-R", "o/r", "--add-label", "bug"]
         );
-        assert_eq!(
-            render("issue.develop", &[("number", "7"), ("branch", "fix/7")]),
-            ["issue", "develop", "7", "-R", "o/r", "--name", "fix/7"]
-        );
     }
 
     #[test]
@@ -2401,20 +2452,6 @@ mod shipped_gh_tests {
         assert!(refuses(
             "issue.edit.add-assignee",
             &[("number", "1"), ("login", "@me")]
-        ));
-        assert!(refuses(
-            "issue.develop",
-            &[("number", "1"), ("branch", "-b")]
-        ));
-        for branch in ["a..b", "a//b", "a/", "a.", "/a", "a b"] {
-            assert!(
-                refuses("issue.develop", &[("number", "1"), ("branch", branch)]),
-                "{branch}"
-            );
-        }
-        assert!(!refuses(
-            "issue.develop",
-            &[("number", "1"), ("branch", "fix/7-a.b_c")]
         ));
         assert!(refuses(
             "issue.edit.title",

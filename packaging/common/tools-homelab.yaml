@@ -164,7 +164,7 @@ tools:
     commands:
       gh:
         grammar: gh
-        shapes: [issue.create, issue.comment, issue.edit.title, issue.edit.body, issue.edit.add-label, issue.edit.remove-label, issue.edit.add-assignee, issue.edit.remove-assignee, issue.close, issue.reopen, issue.lock, issue.unlock, issue.pin, issue.unpin, issue.develop]
+        shapes: [issue.create, issue.comment, issue.edit.title, issue.edit.body, issue.edit.add-label, issue.edit.remove-label, issue.edit.add-assignee, issue.edit.remove-assignee, issue.close, issue.reopen, issue.lock, issue.unlock]
         timeout: 2m
         output: 1MiB
   rust-fetch:

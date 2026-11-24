@@ -121,6 +121,21 @@ pub enum ToolIsolation {
     Vm,
 }
 
+impl ToolIsolation {
+    pub const ALL: [ToolIsolation; 2] = [ToolIsolation::Container, ToolIsolation::Vm];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolIsolation::Container => "container",
+            ToolIsolation::Vm => "vm",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolNetwork {
     None,
@@ -134,16 +149,66 @@ pub enum ToolWorkspaceAccess {
     None,
 }
 
+impl ToolWorkspaceAccess {
+    pub const ALL: [ToolWorkspaceAccess; 3] = [
+        ToolWorkspaceAccess::Rw,
+        ToolWorkspaceAccess::Ro,
+        ToolWorkspaceAccess::None,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolWorkspaceAccess::Rw => "rw",
+            ToolWorkspaceAccess::Ro => "ro",
+            ToolWorkspaceAccess::None => "none",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolVolumeAccess {
     Ro,
     Rw,
 }
 
+impl ToolVolumeAccess {
+    pub const ALL: [ToolVolumeAccess; 2] = [ToolVolumeAccess::Ro, ToolVolumeAccess::Rw];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolVolumeAccess::Ro => "ro",
+            ToolVolumeAccess::Rw => "rw",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolVolumeScope {
     Task,
     Tasker,
+}
+
+impl ToolVolumeScope {
+    pub const ALL: [ToolVolumeScope; 2] = [ToolVolumeScope::Task, ToolVolumeScope::Tasker];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolVolumeScope::Task => "task",
+            ToolVolumeScope::Tasker => "tasker",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +221,21 @@ pub struct ToolVolume {
 pub enum OutputToModel {
     Redacted,
     StatusOnly,
+}
+
+impl OutputToModel {
+    pub const ALL: [OutputToModel; 2] = [OutputToModel::Redacted, OutputToModel::StatusOnly];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputToModel::Redacted => "redacted",
+            OutputToModel::StatusOnly => "status_only",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == text)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -297,6 +377,7 @@ impl ToolsCatalog {
         catalog.disabled = skipped;
         let mut dropin_canonical = Vec::new();
         let mut docs: Vec<(String, Doc)> = Vec::new();
+        let mut unparsed: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
         for dropin in dropins {
             match dropin {
                 DropIn::Read { file, text } => match parse_top(&file, &text) {
@@ -305,6 +386,8 @@ impl ToolsCatalog {
                         docs.push((file, doc));
                     }
                     Err(e) => {
+                        let (classes, tools) = names_of(&text);
+                        unparsed.push((file.clone(), classes, tools));
                         dropin_canonical.push((file.clone(), Value::Str(text)));
                         catalog.disabled.push(Disabled {
                             entry: file,
@@ -335,8 +418,15 @@ impl ToolsCatalog {
             }
             files
         };
-        let class_files = defined(|d| &d.classes);
-        let tool_files = defined(|d| &d.tools);
+        let mut class_files = defined(|d| &d.classes);
+        let mut tool_files = defined(|d| &d.tools);
+        for (file, classes, tools) in &unparsed {
+            for (files, names) in [(&mut class_files, classes), (&mut tool_files, tools)] {
+                for name in names {
+                    files.entry(name.as_str()).or_default().push(file.as_str());
+                }
+            }
+        }
         let mut classes: BTreeMap<&str, Result<CredentialClass, String>> = BTreeMap::new();
         for (file, doc) in &sources {
             for (name, body) in &doc.classes {
@@ -470,6 +560,18 @@ fn defined_in(files: &[&str]) -> String {
     format!("defined in more than one file: {}", files.join(", "))
 }
 
+/// The class and tool names of a drop-in whose YAML loads but whose schema does not.
+fn names_of(text: &str) -> (Vec<String>, Vec<String>) {
+    let Ok(Value::Map(top)) = crate::load_str(text) else {
+        return (Vec::new(), Vec::new());
+    };
+    let keys = |key: &str| match get(&top, key) {
+        Some(Value::Map(items)) => items.iter().map(|(name, _)| name.clone()).collect(),
+        Some(_) | None => Vec::new(),
+    };
+    (keys("credential_classes"), keys("tools"))
+}
+
 fn parse_top(file: &str, text: &str) -> Result<Doc, ToolsError> {
     let invalid = |reason: &str| ToolsError::Invalid(reason.to_string());
     let Value::Map(top) = crate::load_str(text).map_err(ToolsError::Config)? else {
@@ -551,8 +653,8 @@ fn read_main(
 
 fn dropin_dir_refusal(dir: &Path, owner: Option<u32>) -> String {
     let need = match owner {
-        Some(uid) => format!("be owned by uid {uid} and not be group- or other-writable"),
-        None => "not be group- or other-writable".to_string(),
+        Some(uid) => format!("be owned by uid {uid}, not group-writable and with no world access"),
+        None => "not be group-writable and have no world access".to_string(),
     };
     format!("the drop-in directory {} must {need}", dir.display())
 }
@@ -567,7 +669,7 @@ fn read_dropins(
         .map_err(|e| ToolsError::DropIns(e.to_string()))?;
     let required = maknae_io::AnchorRequired {
         owner: target.owner,
-        mode_mask: Some(0o022),
+        mode_mask: Some(0o027),
     };
     let anchor = match maknae_io::open_anchor(&dir, required, StrategyPref::Auto) {
         Ok(anchor) => anchor,
@@ -711,7 +813,7 @@ pub(crate) fn tool_entry_name_ok(name: &str) -> bool {
 }
 
 pub(crate) fn tool_program_name_ok(name: &str) -> bool {
-    !name.is_empty()
+    !matches!(name, "" | "." | "..")
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
@@ -951,14 +1053,7 @@ fn parse_entry(
         .transpose()?;
     let image = get(map, "image").map(parse_image).transpose()?;
     let isolation = get(map, "isolation").map_or(Ok(ToolIsolation::Container), |v| {
-        choice(
-            v,
-            "isolation",
-            &[
-                ("container", ToolIsolation::Container),
-                ("vm", ToolIsolation::Vm),
-            ],
-        )
+        choice(v, "isolation", &ToolIsolation::ALL.map(|t| (t.as_str(), t)))
     })?;
     let executes_workspace = flag(
         get(map, "executes_workspace").ok_or("executes_workspace is required")?,
@@ -969,11 +1064,7 @@ fn parse_entry(
         choice(
             v,
             "workspace",
-            &[
-                ("rw", ToolWorkspaceAccess::Rw),
-                ("ro", ToolWorkspaceAccess::Ro),
-                ("none", ToolWorkspaceAccess::None),
-            ],
+            &ToolWorkspaceAccess::ALL.map(|t| (t.as_str(), t)),
         )
     })?;
     let volumes = get(map, "volumes").map_or(Ok(BTreeMap::new()), parse_volumes)?;
@@ -1005,10 +1096,7 @@ fn parse_entry(
     let output_to_model = choice(
         get(map, "output_to_model").ok_or("output_to_model is required")?,
         "output_to_model",
-        &[
-            ("redacted", OutputToModel::Redacted),
-            ("status_only", OutputToModel::StatusOnly),
-        ],
+        &OutputToModel::ALL.map(|t| (t.as_str(), t)),
     )?;
     let resources = get(map, "resources")
         .map(|v| {
@@ -1136,17 +1224,14 @@ fn parse_volumes(v: &Value) -> Result<BTreeMap<String, ToolVolume>, String> {
             let access = choice(
                 get(m, "access").ok_or("volume access is required")?,
                 "volume access",
-                &[("ro", ToolVolumeAccess::Ro), ("rw", ToolVolumeAccess::Rw)],
+                &ToolVolumeAccess::ALL.map(|t| (t.as_str(), t)),
             )?;
             let scope = get(m, "scope")
                 .map(|v| {
                     choice(
                         v,
                         "volume scope",
-                        &[
-                            ("task", ToolVolumeScope::Task),
-                            ("tasker", ToolVolumeScope::Tasker),
-                        ],
+                        &ToolVolumeScope::ALL.map(|t| (t.as_str(), t)),
                     )
                 })
                 .transpose()?;
@@ -2049,7 +2134,7 @@ mod tests {
             ));
             assert!(c.entry(SENTINEL).is_some(), "{program}: {:?}", c.disabled());
         }
-        for program in ["a b", "a/b", "a@b", "a*b", "a:b", "a=b"] {
+        for program in ["a b", "a/b", "a@b", "a*b", "a:b", "a=b", ".", ".."] {
             let c = catalog(&doc(
                 "  {}\n",
                 &sound(
@@ -2317,7 +2402,7 @@ mod tests {
             shapes("github-issues-read"),
             ["issue.list", "issue.status", "issue.view"]
         );
-        assert_eq!(shapes("github-issues-write").len(), 15);
+        assert_eq!(shapes("github-issues-write").len(), 12);
         for (entry, app) in [
             ("github-issues-read", "maknae-github-issues-read"),
             ("github-issues-write", "maknae-github-issues-write"),
@@ -2591,11 +2676,11 @@ mod tests {
         let dir = Path::new("/etc/maknae/tools.d");
         assert_eq!(
             dropin_dir_refusal(dir, Some(0)),
-            "the drop-in directory /etc/maknae/tools.d must be owned by uid 0 and not be group- or other-writable"
+            "the drop-in directory /etc/maknae/tools.d must be owned by uid 0, not group-writable and with no world access"
         );
         assert_eq!(
             dropin_dir_refusal(dir, None),
-            "the drop-in directory /etc/maknae/tools.d must not be group- or other-writable"
+            "the drop-in directory /etc/maknae/tools.d must not be group-writable and have no world access"
         );
         assert_eq!(
             ToolsError::DropIns("x".to_string()).to_string(),
@@ -2819,6 +2904,27 @@ mod tests {
         }
 
         #[test]
+        fn a_schema_failed_dropin_still_counts_its_names_as_duplicates() {
+            let bad = entry_doc("sentinel-674-main", ECHO)
+                .replace("schema_version: 1", "schema_version: 2");
+            let c = loaded(
+                "dropin_dup_bad",
+                Some(&entry_doc("sentinel-674-main", ECHO)),
+                &[("a.yaml", &bad)],
+            );
+            assert!(c.entry("sentinel-674-main").is_none(), "{:?}", c.disabled());
+            assert!(reason(&c, "sentinel-674-main").contains("more than one file"));
+            assert!(reason(&c, "sentinel-674-main").contains("tools.d/a.yaml"));
+            let unloadable = "schema_version: 1\ntools: [\n";
+            let c = loaded(
+                "dropin_dup_yaml",
+                Some(&entry_doc("sentinel-674-main", ECHO)),
+                &[("a.yaml", unloadable)],
+            );
+            assert!(c.entry("sentinel-674-main").is_some(), "{:?}", c.disabled());
+        }
+
+        #[test]
         fn unparseable_dropin_disables_only_its_names() {
             for bad in [
                 "schema_version: 1\ntools: [\n".to_string(),
@@ -2881,6 +2987,23 @@ mod tests {
             assert!(reason(&c, "tools.d/link.yaml").contains("a symlink"));
             assert!(reason(&c, "tools.d/sub.yaml").contains("a directory"));
             assert!(!c.canonical().contains("link.yaml"));
+        }
+
+        #[test]
+        fn a_world_readable_dropin_directory_fails_the_load() {
+            let d = dir("dropin_rdir");
+            dropin(&d, "a.yaml", &entry_doc("sentinel-674-a", ECHO));
+            std::fs::set_permissions(
+                d.join(TOOLS_DROPIN_DIR),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let got = load(&d);
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(
+                matches!(&got, Err(ToolsError::DropIns(m)) if *m == dropin_dir_refusal(&d.join(TOOLS_DROPIN_DIR), None)),
+                "{got:?}"
+            );
         }
 
         #[test]

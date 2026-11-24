@@ -163,25 +163,3 @@ shapes:
     argv: [issue, unlock, "{number}", -R, "{git.base}"]
     slots:
       number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
-  issue.pin:
-    description: "Pin an issue."
-    class: write
-    forge: { base: [issue-write] }
-    argv: [issue, pin, "{number}", -R, "{git.base}"]
-    slots:
-      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
-  issue.unpin:
-    description: "Unpin an issue."
-    class: write
-    forge: { base: [issue-write] }
-    argv: [issue, unpin, "{number}", -R, "{git.base}"]
-    slots:
-      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
-  issue.develop:
-    description: "Create a branch linked to an issue."
-    class: write
-    forge: { base: [issue-write] }
-    argv: [issue, develop, "{number}", -R, "{git.base}", --name, "{branch}"]
-    slots:
-      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
-      branch: { at: token, pattern: '[A-Za-z0-9]([A-Za-z0-9_-]|[./][A-Za-z0-9_-]){0,127}', description: "The branch name to create." }

@@ -91,16 +91,62 @@ pub struct CatalogEntry {
 pub struct CatalogShape {
     pub name: String,
     pub description: String,
-    pub access: String,
+    pub access: CatalogAccess,
     pub slots: Vec<CatalogSlot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogSlot {
     pub name: String,
-    pub at: String,
+    pub at: CatalogSlotAt,
     pub members: Vec<String>,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogAccess {
+    Read,
+    Write,
+}
+
+impl CatalogAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        [Self::Read, Self::Write]
+            .into_iter()
+            .find(|a| a.as_str() == s)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogSlotAt {
+    Token,
+    Option,
+    Stdin,
+    File,
+}
+
+impl CatalogSlotAt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Token => "token",
+            Self::Option => "option",
+            Self::Stdin => "stdin",
+            Self::File => "file",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        [Self::Token, Self::Option, Self::Stdin, Self::File]
+            .into_iter()
+            .find(|a| a.as_str() == s)
+    }
 }
 
 impl CatalogShape {
@@ -110,11 +156,17 @@ impl CatalogShape {
                 ATTR_DESCRIPTION.into(),
                 AttrValue::Str(self.description.clone()),
             ),
-            (ATTR_ACCESS.into(), AttrValue::Str(self.access.clone())),
+            (
+                ATTR_ACCESS.into(),
+                AttrValue::Str(self.access.as_str().into()),
+            ),
         ]);
         for slot in &self.slots {
             let base = format!("{SLOT_PREFIX}{}", slot.name);
-            attrs.insert(format!("{base}/at"), AttrValue::Str(slot.at.clone()));
+            attrs.insert(
+                format!("{base}/at"),
+                AttrValue::Str(slot.at.as_str().into()),
+            );
             attrs.insert(
                 format!("{base}/description"),
                 AttrValue::Str(slot.description.clone()),
@@ -130,31 +182,37 @@ impl CatalogShape {
     }
 
     fn of(name: &str, attrs: &Attrs) -> Option<Self> {
-        let mut slots: BTreeMap<&str, CatalogSlot> = BTreeMap::new();
+        type Partial = (Option<CatalogSlotAt>, Vec<String>, String);
+        let mut slots: BTreeMap<&str, Partial> = BTreeMap::new();
         for (key, value) in attrs {
             let Some(rest) = key.strip_prefix(SLOT_PREFIX) else {
                 continue;
             };
             let (slot, field) = rest.split_once('/')?;
-            let entry = slots.entry(slot).or_insert_with(|| CatalogSlot {
-                name: slot.to_owned(),
-                at: String::new(),
-                members: Vec::new(),
-                description: String::new(),
-            });
-            let text = str_of(Some(value))?.to_owned();
+            let (at, members, description) = slots.entry(slot).or_default();
+            let text = str_of(Some(value))?;
             match field {
-                "at" => entry.at = text,
-                "description" => entry.description = text,
-                member if member.starts_with("member/") => entry.members.push(text),
+                "at" => *at = Some(CatalogSlotAt::parse(text)?),
+                "description" => *description = text.to_owned(),
+                member if member.starts_with("member/") => members.push(text.to_owned()),
                 _ => return None,
             }
         }
         Some(Self {
             name: name.to_owned(),
             description: str_of(attrs.get(ATTR_DESCRIPTION))?.to_owned(),
-            access: str_of(attrs.get(ATTR_ACCESS))?.to_owned(),
-            slots: slots.into_values().collect(),
+            access: CatalogAccess::parse(str_of(attrs.get(ATTR_ACCESS))?)?,
+            slots: slots
+                .into_iter()
+                .map(|(slot, (at, members, description))| {
+                    Some(CatalogSlot {
+                        name: slot.to_owned(),
+                        at: at?,
+                        members,
+                        description,
+                    })
+                })
+                .collect::<Option<_>>()?,
         })
     }
 }
@@ -620,7 +678,7 @@ mod tests {
         );
     }
 
-    const KIND_FENCES: usize = 11;
+    const KIND_EXEMPT: [(&str, &str); 2] = [("Pattern", "pattern"), ("Shape", "sha")];
 
     const FENCE: [&str; 17] = [
         "credential",
@@ -702,14 +760,15 @@ mod tests {
         assert_eq!(seen, want);
         for name in kinds.iter().chain(&allowed) {
             let lower = name.to_ascii_lowercase();
-            let fences = if allowed.contains(name) {
-                &FENCE[..]
-            } else {
-                &FENCE[..KIND_FENCES]
-            };
-            for fence in fences {
+            for fence in FENCE {
+                if KIND_EXEMPT.contains(&(*name, fence)) {
+                    continue;
+                }
                 assert!(!lower.contains(fence), "{name} names {fence}");
             }
+        }
+        for (kind, fence) in KIND_EXEMPT {
+            assert!(kinds.contains(&kind) && FENCE.contains(&fence));
         }
     }
 
@@ -920,17 +979,17 @@ mod tests {
             CatalogShape {
                 name: "issue.list".into(),
                 description: "List issues.".into(),
-                access: "read".into(),
+                access: CatalogAccess::Read,
                 slots: vec![
                     CatalogSlot {
                         name: "state".into(),
-                        at: "option".into(),
+                        at: CatalogSlotAt::Option,
                         members: vec!["all".into(), "closed".into(), "open".into()],
                         description: "Which issues.".into(),
                     },
                     CatalogSlot {
                         name: "title".into(),
-                        at: "token".into(),
+                        at: CatalogSlotAt::Token,
                         members: Vec::new(),
                         description: "A title.".into(),
                     },
@@ -939,7 +998,7 @@ mod tests {
             CatalogShape {
                 name: "pr.view".into(),
                 description: "View a PR.".into(),
-                access: "read".into(),
+                access: CatalogAccess::Read,
                 slots: Vec::new(),
             },
         ]
@@ -1089,6 +1148,62 @@ mod tests {
             (ATTR_EXECUTES_WORKSPACE.into(), AttrValue::U64(0)),
             (ATTR_OUTPUT.into(), AttrValue::Str("redacted".into())),
         ])
+    }
+
+    #[test]
+    fn a_shape_decodes_only_known_access_and_slot_spellings() {
+        let attrs = |access: &str, slot: &[(&str, &str)]| {
+            let mut a = Attrs::from([
+                (ATTR_DESCRIPTION.into(), AttrValue::Str("d".into())),
+                (ATTR_ACCESS.into(), AttrValue::Str(access.into())),
+            ]);
+            for (field, value) in slot {
+                a.insert(
+                    format!("{SLOT_PREFIX}n/{field}"),
+                    AttrValue::Str((*value).into()),
+                );
+            }
+            a
+        };
+        let full = [
+            ("at", "option"),
+            ("description", "x"),
+            ("member/000000", "m"),
+        ];
+        assert_eq!(
+            CatalogShape::of("s", &attrs("write", &full)),
+            Some(CatalogShape {
+                name: "s".into(),
+                description: "d".into(),
+                access: CatalogAccess::Write,
+                slots: vec![CatalogSlot {
+                    name: "n".into(),
+                    at: CatalogSlotAt::Option,
+                    members: vec!["m".into()],
+                    description: "x".into(),
+                }],
+            })
+        );
+        for a in [CatalogAccess::Read, CatalogAccess::Write] {
+            assert_eq!(CatalogAccess::parse(a.as_str()), Some(a));
+        }
+        for at in [
+            CatalogSlotAt::Token,
+            CatalogSlotAt::Option,
+            CatalogSlotAt::Stdin,
+            CatalogSlotAt::File,
+        ] {
+            assert_eq!(CatalogSlotAt::parse(at.as_str()), Some(at));
+        }
+        assert_eq!(CatalogShape::of("s", &attrs("admin", &[])), None);
+        assert_eq!(
+            CatalogShape::of("s", &attrs("read", &[("at", "argv")])),
+            None
+        );
+        assert_eq!(
+            CatalogShape::of("s", &attrs("read", &[("description", "x")])),
+            None
+        );
     }
 
     #[test]

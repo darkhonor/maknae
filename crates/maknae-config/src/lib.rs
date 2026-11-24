@@ -108,7 +108,8 @@ pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
     AgentMatch, AuthzError, AuthzPolicy, EffectiveLists, HomeUnbound, Match3, ModelRef, MountSide,
     PathGlob, Pattern, RawActionGrants, RawDestinations, Request, ShapePattern, Stage,
-    SubjectActions, SubjectPermissions, SubjectPolicy, ToolCall, ToolPattern, ToolTarget,
+    SubjectActions, SubjectPermissions, SubjectPolicy, ToolCall, ToolPattern, ToolPermissions,
+    ToolTarget,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
@@ -147,8 +148,8 @@ pub use forges::{
 pub use grammar::shipped_grammars;
 pub use grammar::{
     check_open_argv, load_grammars, shape_name_ok, ArgvToken, CallRefusal, Constraint,
-    DisabledGrammar, ForgeNeed, Grammar, GrammarError, GrammarLoadError, GrammarSet, Rendered,
-    Shape, ShapeClass, Slot, SlotAt, SlotFile, Tested, GRAMMARS_DIR, VENDOR_GRAMMAR_DIR,
+    DisabledGrammar, ForgeNeed, Grammar, GrammarError, GrammarLoadError, GrammarName, GrammarSet,
+    Rendered, Shape, ShapeClass, Slot, SlotAt, SlotFile, Tested, GRAMMARS_DIR, VENDOR_GRAMMAR_DIR,
 };
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use grammar::{load_grammars_with_requirement, GrammarRequirement};

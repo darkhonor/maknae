@@ -75,7 +75,7 @@ pub fn destination_entry_is_acceptable(entry: &str) -> bool {
 pub struct RawActionGrants {
     pub allow: Vec<ActionPattern>,
     pub deny: Vec<ActionPattern>,
-    pub permissions: SubjectPermissions,
+    pub permissions: ToolPermissions,
 }
 
 /// One action entry as written: an exact term (`fs.read`) or a family
@@ -172,6 +172,48 @@ pub struct SubjectPermissions {
 }
 
 impl SubjectPermissions {
+    pub fn allow_sources(&self) -> &[String] {
+        &self.allow_sources
+    }
+
+    pub fn deny_sources(&self) -> &[String] {
+        &self.deny_sources
+    }
+}
+
+/// `roles.<role>.permissions`: only [`role_permissions`] builds one, and every pattern it
+/// holds is a `Pattern::Tool`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ToolPermissions {
+    allow: Vec<Pattern>,
+    deny: Vec<Pattern>,
+    allow_sources: Vec<String>,
+    deny_sources: Vec<String>,
+}
+
+impl ToolPermissions {
+    fn of(
+        allow: Vec<ToolPattern>,
+        deny: Vec<ToolPattern>,
+        allow_sources: Vec<String>,
+        deny_sources: Vec<String>,
+    ) -> Self {
+        ToolPermissions {
+            allow: allow.into_iter().map(Pattern::Tool).collect(),
+            deny: deny.into_iter().map(Pattern::Tool).collect(),
+            allow_sources,
+            deny_sources,
+        }
+    }
+
+    pub fn allow(&self) -> &[Pattern] {
+        &self.allow
+    }
+
+    pub fn deny(&self) -> &[Pattern] {
+        &self.deny
+    }
+
     pub fn allow_sources(&self) -> &[String] {
         &self.allow_sources
     }
@@ -297,24 +339,34 @@ impl AuthzPolicy {
         home: Option<&Path>,
         fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        self.evaluate3_floored(None, None, req, home, fold)
+        self.evaluate3_floored(None, req, home, fold)
     }
 
-    /// [`Self::evaluate3`] under a subject's own permission set (#608) and a role's
-    /// `Tool(...)` grants: `None`, `None` is exactly `evaluate3`; `Some` subject consults
-    /// the site deny, then the subject's deny, then the subject's allow, and ignores the
-    /// site allow. A `Some` role adds its deny after those and its allow after the allow
-    /// in force.
+    /// [`Self::evaluate3`] under a subject's own permission set (#608): `None` is exactly
+    /// `evaluate3`; `Some` consults the site deny, then the subject's deny, then the
+    /// subject's allow, and ignores the site allow.
     pub fn evaluate3_floored(
         &self,
         subject: Option<&SubjectPermissions>,
-        role: Option<&str>,
         req: &Request<'_>,
         home: Option<&Path>,
         fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        let (deny, allow) = self.lists(subject, role);
+        let (deny, allow) = self.lists(subject, None);
         evaluate3_over(&deny, &allow, req, home, fold)
+    }
+
+    /// [`Self::evaluate3_floored`] of a tool call with a role's `Tool(...)` grants: the
+    /// role's deny after the others, its allow after the allow in force.
+    pub fn evaluate_tool_floored(
+        &self,
+        subject: Option<&SubjectPermissions>,
+        role: Option<&ToolPermissions>,
+        call: &ToolCall,
+        fold: Fold,
+    ) -> Result<Match3, HomeUnbound> {
+        let (deny, allow) = self.lists(subject, role);
+        evaluate3_over(&deny, &allow, &Request::Tool(call), None, fold)
     }
 
     /// [`Self::evaluate3_floored`] for an agent: the site deny, then the built-in
@@ -329,7 +381,7 @@ impl AuthzPolicy {
     ) -> Result<AgentMatch, HomeUnbound> {
         let (deny, allow) = self.right_lists(right);
         agent_match(evaluate3_over(&deny, &allow, req, home, fold)?, || {
-            self.evaluate3_floored(subject, None, req, home, fold)
+            self.evaluate3_floored(subject, req, home, fold)
         })
     }
 
@@ -338,7 +390,7 @@ impl AuthzPolicy {
         &'a self,
         right: Option<&'a SubjectPermissions>,
         subject: Option<&'a SubjectPermissions>,
-        role: Option<&str>,
+        role: Option<&'a ToolPermissions>,
     ) -> EffectiveLists<'a> {
         EffectiveLists {
             right: right.map(|r| Stage::of(self.right_lists(r))),
@@ -347,20 +399,19 @@ impl AuthzPolicy {
     }
 
     /// `role`'s `roles.<role>.permissions`, if the role has an entry.
-    pub fn role_permissions(&self, role: &str) -> Option<&SubjectPermissions> {
+    pub fn role_permissions(&self, role: &str) -> Option<&ToolPermissions> {
         self.action_grants.get(role).map(|g| &g.permissions)
     }
 
     fn lists<'a>(
         &'a self,
         subject: Option<&'a SubjectPermissions>,
-        role: Option<&str>,
+        role: Option<&'a ToolPermissions>,
     ) -> (DenyLists<'a>, AllowLists<'a>) {
         let site_deny = SourcedList {
             patterns: &self.deny,
             sources: &self.deny_sources,
         };
-        let role = role.and_then(|r| self.role_permissions(r));
         let role_deny = role.map(|r| SourcedList {
             patterns: &r.deny,
             sources: &r.deny_sources,
@@ -935,8 +986,12 @@ impl ToolPattern {
                     Side::Allow => args.matches_any(&call.argv, &call.bound),
                     Side::Deny => args.matches_any_for_deny(&call.argv, &call.bound),
                 },
+                (ToolTarget::Args(args), Some(_)) => match side {
+                    Side::Allow => false,
+                    Side::Deny => args.matches_any_for_deny(&call.argv, &call.bound),
+                },
                 (ToolTarget::Shape(pattern), Some(shape)) => pattern.matches(shape),
-                (ToolTarget::Args(_), Some(_)) | (ToolTarget::Shape(_), None) => false,
+                (ToolTarget::Shape(_), None) => false,
             }
     }
 }
@@ -1497,13 +1552,13 @@ fn roles_term_list(v: &Value) -> Result<Vec<ActionPattern>, AuthzError> {
 }
 
 /// `roles.<role>.permissions`: `Tool(...)` entries only.
-fn role_permissions(role: &str, pm: &[(String, Value)]) -> Result<SubjectPermissions, AuthzError> {
+fn role_permissions(role: &str, pm: &[(String, Value)]) -> Result<ToolPermissions, AuthzError> {
     check_known_keys(
         &format!("authz.roles.{role}.permissions"),
         pm,
         &["allow", "deny"],
     )?;
-    let list = |key: &str| -> Result<(Vec<Pattern>, Vec<String>), AuthzError> {
+    let list = |key: &str| -> Result<(Vec<ToolPattern>, Vec<String>), AuthzError> {
         let sources: Vec<String> = match get(pm, key) {
             None => Vec::new(),
             Some(Value::Seq(items)) => items
@@ -1524,7 +1579,7 @@ fn role_permissions(role: &str, pm: &[(String, Value)]) -> Result<SubjectPermiss
         let patterns = sources
             .iter()
             .map(|s| match parse_pattern(s)? {
-                p @ Pattern::Tool(_) => Ok(p),
+                Pattern::Tool(t) => Ok(t),
                 Pattern::Read(_) | Pattern::Write(_) => Err(AuthzError::Yaml(format!(
                     "roles.{role}.permissions: `{s}` is not a Tool(...) grant"
                 ))),
@@ -1534,12 +1589,12 @@ fn role_permissions(role: &str, pm: &[(String, Value)]) -> Result<SubjectPermiss
     };
     let (allow, allow_sources) = list("allow")?;
     let (deny, deny_sources) = list("deny")?;
-    Ok(SubjectPermissions {
+    Ok(ToolPermissions::of(
         allow,
         deny,
         allow_sources,
         deny_sources,
-    })
+    ))
 }
 
 fn subject_list(v: &Value, what: &str) -> Result<Vec<String>, AuthzError> {
@@ -1776,7 +1831,7 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
                 // would turn a written `deny:` into a silent permit, and
                 // nothing here would notice.
                 let permissions = match get(rb, "permissions") {
-                    None => SubjectPermissions::default(),
+                    None => ToolPermissions::default(),
                     Some(Value::Map(pm)) => role_permissions(role, pm)?,
                     Some(_) => {
                         return Err(AuthzError::Yaml(format!(
@@ -4044,7 +4099,7 @@ mod tests {
             .unwrap();
             let s = p.subjects["alice"].permissions.as_ref();
             assert_eq!(
-                p.evaluate3_floored(s, None, &req, None, Fold::None),
+                p.evaluate3_floored(s, &req, None, Fold::None),
                 want,
                 "{site_allow} {site_deny} {sub_allow} {sub_deny}"
             );
@@ -4336,18 +4391,22 @@ mod tests {
     }
 
     #[test]
-    fn shape_pattern_never_matches_positional_call_and_vice_versa() {
+    fn shape_pattern_never_matches_positional_call_and_args_deny_matches_rendered_argv() {
         let shape = parse_pattern("Tool(a gh:*)").unwrap();
         let positional = parse_pattern("Tool(a gh issue *)").unwrap();
+        let unrelated = parse_pattern("Tool(a gh pr *)").unwrap();
         let pos_call = tool_call("a", "gh", &["issue", "close"]);
         let shp_call = shape_call("issue.close");
         for side in [Side::Allow, Side::Deny] {
             let hit = |p: &Pattern, c: &ToolCall| p.matches_req(&Request::Tool(c), None, side);
             assert_eq!(hit(&shape, &pos_call), Ok(false));
-            assert_eq!(hit(&positional, &shp_call), Ok(false));
             assert_eq!(hit(&shape, &shp_call), Ok(true));
             assert_eq!(hit(&positional, &pos_call), Ok(true));
+            assert_eq!(hit(&unrelated, &shp_call), Ok(false));
         }
+        let hit = |side| positional.matches_req(&Request::Tool(&shp_call), None, side);
+        assert_eq!(hit(Side::Allow), Ok(false));
+        assert_eq!(hit(Side::Deny), Ok(true));
         let wrong = parse_pattern("Tool(b gh:*)").unwrap();
         let other = parse_pattern("Tool(a glab:*)").unwrap();
         for p in [wrong, other] {
@@ -4470,8 +4529,8 @@ mod tests {
             [p.deny.as_slice(), alice.deny.as_slice()]
         );
 
-        let role = p.effective_lists(None, None, Some("user"));
-        assert!(same(&role.floored, p.lists(None, Some("user"))));
+        let role = p.effective_lists(None, None, Some(user));
+        assert!(same(&role.floored, p.lists(None, Some(user))));
         assert_eq!(
             role.floored.allow,
             [p.allow.as_slice(), user.allow.as_slice()]
@@ -4480,8 +4539,8 @@ mod tests {
         assert!(std::ptr::eq(role.floored.allow[1], user.allow.as_slice()));
         assert!(std::ptr::eq(role.floored.deny[1], user.deny.as_slice()));
 
-        let both = p.effective_lists(None, Some(alice), Some("user"));
-        assert!(same(&both.floored, p.lists(Some(alice), Some("user"))));
+        let both = p.effective_lists(None, Some(alice), Some(user));
+        assert!(same(&both.floored, p.lists(Some(alice), Some(user))));
         assert_eq!(
             both.floored.allow,
             [alice.allow.as_slice(), user.allow.as_slice()]
@@ -4495,7 +4554,7 @@ mod tests {
             ]
         );
 
-        let unlisted = p.effective_lists(None, None, Some("admin"));
+        let unlisted = p.effective_lists(None, None, p.role_permissions("admin"));
         assert_eq!(unlisted, site);
 
         let agent = p.effective_lists(Some(&right), Some(alice), None);
@@ -4583,12 +4642,11 @@ mod tests {
         ))
         .unwrap();
         let alice = p.subjects["alice"].permissions.as_ref();
-        let eval = |subject, role, argv: &[&str]| {
-            p.evaluate3_floored(
+        let eval = |subject, role: Option<&str>, argv: &[&str]| {
+            p.evaluate_tool_floored(
                 subject,
-                role,
-                &Request::Tool(&tool_call("e", "p", argv)),
-                None,
+                role.and_then(|r| p.role_permissions(r)),
+                &tool_call("e", "p", argv),
                 Fold::None,
             )
             .unwrap()
@@ -4644,13 +4702,13 @@ mod tests {
         let denied = tool_call("a", "prog", &["run", "build", "sentinel-674-x"]);
         let allowed = tool_call("a", "prog", &["run", "sentinel-674-x"]);
         assert_eq!(
-            p.evaluate3_floored(None, None, &Request::Tool(&denied), None, Fold::None),
+            p.evaluate3_floored(None, &Request::Tool(&denied), None, Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Tool(a prog run build *)".into()
             })
         );
         assert_eq!(
-            p.evaluate3_floored(None, None, &Request::Tool(&allowed), None, Fold::None),
+            p.evaluate3_floored(None, &Request::Tool(&allowed), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Tool(a prog run *)".into()
             })
@@ -4668,17 +4726,17 @@ mod tests {
             source: "Tool(e git checkout {git.base})".into(),
         });
         assert_eq!(
-            p.evaluate3_floored(None, None, &Request::Tool(&checkout), None, Fold::None),
+            p.evaluate3_floored(None, &Request::Tool(&checkout), None, Fold::None),
             denied
         );
         let own = p.subjects["s"].permissions.as_ref().unwrap();
         assert_eq!(
-            p.evaluate3_floored(Some(own), None, &Request::Tool(&checkout), None, Fold::None),
+            p.evaluate3_floored(Some(own), &Request::Tool(&checkout), None, Fold::None),
             denied
         );
         let status = tool_call("e", "git", &["status", "x"]);
         assert_eq!(
-            p.evaluate3_floored(Some(own), None, &Request::Tool(&status), None, Fold::None),
+            p.evaluate3_floored(Some(own), &Request::Tool(&status), None, Fold::None),
             Ok(Match3::DenyMatch {
                 source: "Tool(e git status {git.base})".into(),
             })
@@ -4699,7 +4757,7 @@ mod tests {
         .unwrap();
         let call = tool_call("e", "git", &["checkout", "sentinel-674-main"]);
         assert_eq!(
-            p.evaluate3_floored(None, None, &Request::Tool(&call), None, Fold::None),
+            p.evaluate3_floored(None, &Request::Tool(&call), None, Fold::None),
             Ok(Match3::NoMatch)
         );
         let mut bound = call.clone();
@@ -4707,7 +4765,7 @@ mod tests {
         b.insert("git.base", "sentinel-674-main");
         bound.bound = vec![b];
         assert_eq!(
-            p.evaluate3_floored(None, None, &Request::Tool(&bound), None, Fold::None),
+            p.evaluate3_floored(None, &Request::Tool(&bound), None, Fold::None),
             Ok(Match3::AllowMatch {
                 source: "Tool(e git checkout {git.base})".into(),
             })
@@ -4716,7 +4774,7 @@ mod tests {
         b.insert("git.base", "other");
         bound.bound = vec![b];
         assert_eq!(
-            p.evaluate3_floored(None, None, &Request::Tool(&bound), None, Fold::None),
+            p.evaluate3_floored(None, &Request::Tool(&bound), None, Fold::None),
             Ok(Match3::NoMatch)
         );
     }
@@ -4808,7 +4866,7 @@ mod tests {
         let s = p.subjects["alice"].permissions.as_ref();
         let home = Some(Path::new("/home/a"));
         let eval = |path: &str| {
-            p.evaluate3_floored(s, None, &Request::Read(Path::new(path)), home, Fold::None)
+            p.evaluate3_floored(s, &Request::Read(Path::new(path)), home, Fold::None)
                 .unwrap()
         };
         assert_eq!(
@@ -4832,7 +4890,6 @@ mod tests {
         assert_eq!(eval("/srv/site/f"), Match3::NoMatch);
         assert_eq!(
             p.evaluate3_floored(
-                None,
                 None,
                 &Request::Read(Path::new("/srv/site/f")),
                 home,

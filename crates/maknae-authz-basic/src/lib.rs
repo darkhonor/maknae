@@ -1146,10 +1146,13 @@ fn tool_problems(
             s.permissions.as_ref()?,
         ))
     });
-    let roles = policy
-        .action_grants
-        .iter()
-        .map(|(role, g)| (format!("roles.{role}.permissions"), &g.permissions));
+    let roles = policy.action_grants.iter().map(|(role, g)| {
+        (
+            format!("roles.{role}.permissions"),
+            (g.permissions.deny(), g.permissions.deny_sources()),
+            (g.permissions.allow(), g.permissions.allow_sources()),
+        )
+    });
     let agent_lists = agents
         .load
         .policies
@@ -1166,19 +1169,20 @@ fn tool_problems(
         (&policy.deny[..], policy.deny_sources()),
         (&policy.allow[..], policy.allow_sources()),
     ));
-    let lists = site
-        .chain(
-            subjects
-                .chain(roles)
-                .chain(agent_lists)
-                .map(|(section, p)| {
-                    (
-                        section,
-                        (&p.deny[..], p.deny_sources()),
-                        (&p.allow[..], p.allow_sources()),
-                    )
-                }),
+    type Listed<'p> = (&'p [maknae_config::Pattern], &'p [String]);
+    fn own(
+        (section, p): (String, &maknae_config::SubjectPermissions),
+    ) -> (String, Listed<'_>, Listed<'_>) {
+        (
+            section,
+            (&p.deny[..], p.deny_sources()),
+            (&p.allow[..], p.allow_sources()),
         )
+    }
+    let lists = site
+        .chain(subjects.map(own))
+        .chain(roles)
+        .chain(agent_lists.map(own))
         .flat_map(|(section, deny, allow)| {
             [
                 (format!("{section}.deny"), deny.0, deny.1),
@@ -1209,10 +1213,18 @@ fn tool_problems(
                                     | maknae_config::CommandForm::Open,
                                 ) => Some(IdentityProblem::ToolGrantUnknownShape { source }),
                                 (
+                                    maknae_config::ToolTarget::Args(_),
+                                    maknae_config::CommandForm::Grammar { .. },
+                                ) => Some(IdentityProblem::ToolGrantFormMismatch { source }),
+                                (
                                     maknae_config::ToolTarget::Shape(_),
                                     maknae_config::CommandForm::Grammar { .. },
                                 )
-                                | (maknae_config::ToolTarget::Args(_), _) => None,
+                                | (
+                                    maknae_config::ToolTarget::Args(_),
+                                    maknae_config::CommandForm::Positional(_)
+                                    | maknae_config::CommandForm::Open,
+                                ) => None,
                             },
                         },
                     },
@@ -5855,6 +5867,35 @@ mod tests {
             "{others:?}"
         );
         assert_eq!(others.len(), 2, "{others:?}");
+    }
+
+    #[test]
+    fn an_argument_pattern_on_a_grammar_program_is_reported_in_either_list() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+        );
+        let text = "schema_version: 1\ntools:\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n      sh: { open: true }\n      cargo: { subcommands: [\"build *\"] }\n";
+        let catalog = maknae_config::ToolsCatalog::parse_with(text, &grammars).unwrap();
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-shape gh pr view)\", \"Tool(sentinel-674-shape sh -c *)\", \"Tool(sentinel-674-shape cargo build *)\"]\n  deny: [\"Tool(sentinel-674-shape gh pr review *)\", \"Tool(sentinel-674-shape gh *)\"]\nroles:\n  user:\n    permissions:\n      deny: [\"Tool(sentinel-674-shape gh pr *)\"]\n";
+        let src = source_with(authz, None, &[]).with_tools(catalog);
+        let expected = [
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "permissions.deny Tool(sentinel-674-shape gh pr review *)".into(),
+            },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "permissions.deny Tool(sentinel-674-shape gh *)".into(),
+            },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "permissions.allow Tool(sentinel-674-shape gh pr view)".into(),
+            },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "roles.user.permissions.deny Tool(sentinel-674-shape gh pr *)".into(),
+            },
+        ];
+        assert_eq!(src.identity_problems(), expected);
+        assert_eq!(compiled(&src).identity_problems()[..], expected);
     }
 
     #[test]
