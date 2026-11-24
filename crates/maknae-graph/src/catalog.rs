@@ -620,6 +620,28 @@ mod tests {
         );
     }
 
+    const KIND_FENCES: usize = 11;
+
+    const FENCE: [&str; 17] = [
+        "credential",
+        "class",
+        "app",
+        "image",
+        "volume",
+        "network",
+        "site",
+        "deny",
+        "resource",
+        "lifetime",
+        "isolation",
+        "pattern",
+        "argv",
+        "digest",
+        "sha",
+        "canonical",
+        "template",
+    ];
+
     #[test]
     fn the_vocabulary_names_no_fence_attribute() {
         let kinds: Vec<&str> = SCHEMA.node_kinds.iter().map(|(_, n)| *n).collect();
@@ -641,6 +663,8 @@ mod tests {
             "text",
             "host",
             "provider",
+            "open",
+            "access",
         ];
         assert_eq!(
             [
@@ -649,17 +673,27 @@ mod tests {
                 ATTR_OUTPUT,
                 ATTR_TEXT,
                 ATTR_HOST,
-                ATTR_PROVIDER
+                ATTR_PROVIDER,
+                ATTR_OPEN,
+                ATTR_ACCESS
             ],
             allowed
         );
-        let g = build(&sample()).unwrap();
+        let mut shaped = sample();
+        shaped
+            .entries
+            .extend(with_shapes().entries.into_iter().map(|mut e| {
+                e.name.insert_str(0, "x-");
+                e
+            }));
+        let g = build(&shaped).unwrap();
         let mut seen: Vec<&str> = g
             .nodes()
             .iter()
             .flat_map(|n| n.attrs.keys())
             .chain(g.edges().iter().flat_map(|e| e.attrs.keys()))
             .map(String::as_str)
+            .filter(|k| !k.starts_with(SLOT_PREFIX))
             .collect();
         seen.sort_unstable();
         seen.dedup();
@@ -668,19 +702,12 @@ mod tests {
         assert_eq!(seen, want);
         for name in kinds.iter().chain(&allowed) {
             let lower = name.to_ascii_lowercase();
-            for fence in [
-                "credential",
-                "class",
-                "app",
-                "image",
-                "volume",
-                "network",
-                "site",
-                "deny",
-                "resource",
-                "lifetime",
-                "isolation",
-            ] {
+            let fences = if allowed.contains(name) {
+                &FENCE[..]
+            } else {
+                &FENCE[..KIND_FENCES]
+            };
+            for fence in fences {
                 assert!(!lower.contains(fence), "{name} names {fence}");
             }
         }
@@ -960,22 +987,76 @@ mod tests {
     #[test]
     fn shape_attrs_name_no_pattern_argv_or_digest() {
         let g = build(&with_shapes()).unwrap();
-        let fixed = [ATTR_DESCRIPTION, ATTR_ACCESS];
         for n in g.nodes().iter().filter(|n| n.kind == SHAPE) {
             for key in n.attrs.keys() {
-                let ok = fixed.contains(&key.as_str())
-                    || key
-                        .strip_prefix("slot/")
-                        .and_then(|r| r.split_once('/'))
-                        .is_some_and(|(_, f)| {
-                            matches!(f, "at" | "description") || f.starts_with("member/")
-                        });
-                assert!(ok, "{key}");
-                for fence in ["pattern", "argv", "digest", "sha", "image", "credential"] {
-                    assert!(!key.contains(fence), "{key}");
+                let name = match key.strip_prefix(SLOT_PREFIX) {
+                    None => key.as_str(),
+                    Some(rest) => {
+                        let (_, field) = rest.split_once('/').unwrap();
+                        assert!(
+                            matches!(field, "at" | "description") || field.starts_with("member/"),
+                            "{key}"
+                        );
+                        field.split('/').next().unwrap()
+                    }
+                };
+                assert!(
+                    [ATTR_DESCRIPTION, ATTR_ACCESS, "at", "member"].contains(&name),
+                    "{key}"
+                );
+                for fence in FENCE {
+                    assert!(!name.contains(fence), "{key} names {fence}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_unknown_slot_field_hides_the_shape_and_program_kinds_stay_distinct() {
+        let mut bad = with_shapes();
+        let mut g = build(&bad).unwrap();
+        let mut b = GraphBuilder::new(GraphSpace::Shared, 0);
+        for n in g.nodes() {
+            let mut n = n.clone();
+            if n.kind == SHAPE && n.key == "gh/gh/issue.list" {
+                n.attrs
+                    .insert("slot/state/bogus".into(), AttrValue::Str("x".into()));
+            }
+            b = b.node(n);
+        }
+        for e in g.edges() {
+            b = b.edge(e.clone());
+        }
+        g = b.build(&SCHEMA, &CompiledSet::default()).unwrap();
+        let listed: Vec<String> = shapes(&g, "gh", "gh").into_iter().map(|s| s.name).collect();
+        assert_eq!(listed, ["pr.view"]);
+
+        bad.entries[2].programs =
+            vec![("both".into(), vec!["x *".into()]), ("none".into(), vec![])];
+        bad.entries[2].open = vec!["both".into(), "only-open".into()];
+        bad.entries[2].shapes = vec![
+            ("only-shapes".into(), gh_shapes()[1..].to_vec()),
+            ("a".into(), gh_shapes()[1..].to_vec()),
+        ];
+        let g = build(&bad).unwrap();
+        let back = input_of(&g).unwrap();
+        let tools = back.entries.iter().find(|e| e.name == "tools").unwrap();
+        let mut programs = tools.programs.clone();
+        programs.sort();
+        assert_eq!(
+            programs,
+            [
+                ("both".to_owned(), vec!["x *".to_owned()]),
+                ("none".to_owned(), vec![])
+            ]
+        );
+        let mut open = tools.open.clone();
+        open.sort();
+        assert_eq!(open, ["both", "only-open"]);
+        let mut shaped: Vec<&str> = tools.shapes.iter().map(|(p, _)| p.as_str()).collect();
+        shaped.sort_unstable();
+        assert_eq!(shaped, ["a", "only-shapes"]);
+        assert!(decode(&encode(&bad).unwrap()).is_ok());
     }
 
     #[test]

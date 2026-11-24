@@ -14,6 +14,14 @@ pub(crate) fn catalog_lines(reply: &ToolCatalogReply) -> Result<Vec<String>, Str
     Ok(lines(&g))
 }
 
+fn members(members: &[String]) -> String {
+    members
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn lines(g: &Graph) -> Vec<String> {
     let mut out = Vec::new();
     for entry in g.nodes().iter().filter(|n| n.kind == ENTRY) {
@@ -46,7 +54,7 @@ fn lines(g: &Graph) -> Vec<String> {
                         "    {}  {}  {}  {}",
                         terminal_safe(&slot.name),
                         terminal_safe(&slot.at),
-                        terminal_safe(&slot.members.join("|")),
+                        terminal_safe(&members(&slot.members)),
                         terminal_safe(&slot.description)
                     ));
                 }
@@ -147,7 +155,7 @@ mod tests {
                         slots: vec![CatalogSlot {
                             name: "state".into(),
                             at: "option".into(),
-                            members: vec!["all".into(), "open".into()],
+                            members: vec!["all".into(), "a|b,c".into()],
                             description: "Which.".into(),
                         }],
                     }],
@@ -165,7 +173,7 @@ mod tests {
             [
                 "gh",
                 "  gh:issue.list  read  List issues.",
-                "    state  option  all|open  Which.",
+                "    state  option  \"all\",\"a|b,c\"  Which.",
                 "  sh  (open)",
             ]
         );
