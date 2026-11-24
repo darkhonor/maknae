@@ -139,7 +139,7 @@ fn select<'a>(
     let count = bound.bindings.len();
     let index = match (index, count) {
         (Some(i), _) if i < count => i,
-        (Some(i), _) => return Err(malformed(&format!("binding {i}: out of range"))),
+        (Some(_), _) => return Err(malformed("binding: out of range")),
         (None, 0) => return Ok(None),
         (None, 1) => 0,
         (None, _) => {
@@ -248,18 +248,13 @@ fn resolve<'t>(
     resource: &mut Attributes,
 ) -> Result<(&'t ToolEntry, LaunchCall), ToolCallDecision> {
     let (name, program) = (&req.entry, &req.program);
-    let entry = tools.entry(name).ok_or_else(|| {
-        denied(
-            format!("tool: unknown or disabled entry {name}"),
-            Citation::default(),
-        )
-    })?;
-    let command = entry.commands.get(program).ok_or_else(|| {
-        denied(
-            format!("tool: program {program} not in entry {name}"),
-            Citation::default(),
-        )
-    })?;
+    let entry = tools
+        .entry(name)
+        .ok_or_else(|| denied("tool: unknown or disabled entry", Citation::default()))?;
+    let command = entry
+        .commands
+        .get(program)
+        .ok_or_else(|| denied("tool: program not in the entry", Citation::default()))?;
     let bound = match cited {
         Some(cited) => cited.bound(),
         None => TaskBound {
@@ -277,7 +272,7 @@ fn resolve<'t>(
         (CommandForm::Grammar { shapes, .. }, CallInput::Shape { shape, slots }) => {
             let template = shapes.get(shape).ok_or_else(|| {
                 denied(
-                    format!("tool: shape {shape} is not enabled for {name}/{program}"),
+                    format!("tool: shape not enabled for {name}/{program}"),
                     Citation::default(),
                 )
             })?;
@@ -919,6 +914,7 @@ shapes:
         let obs = obligations(decide(&spy, None, open("lint", &["build"]), HOME));
         assert_eq!(ids(&obs), ["tool.launch"]);
         assert_eq!(launch(&obs).str("workspace.mode"), Some("none"));
+        assert_eq!(launch(&obs).get("workspace.root"), None);
         assert_eq!(spy.mounts.load(Ordering::SeqCst), 0);
     }
 
@@ -1017,9 +1013,9 @@ shapes:
                 None,
                 "the task has 2 bindings; the call must select one",
             ),
-            (Some(&two), Some(2), "binding 2: out of range"),
-            (Some(&one), Some(1), "binding 1: out of range"),
-            (None, Some(0), "binding 0: out of range"),
+            (Some(&two), Some(2), "binding: out of range"),
+            (Some(&one), Some(1), "binding: out of range"),
+            (None, Some(0), "binding: out of range"),
         ];
         for (task, index, why) in cases {
             assert_eq!(
@@ -1215,15 +1211,12 @@ shapes:
         let cases = [
             (
                 open("sentinel-674-entry", &["build"]),
-                "tool: unknown or disabled entry sentinel-674-entry",
+                "tool: unknown or disabled entry",
             ),
-            (
-                no_program,
-                "tool: program sentinel-674-program not in entry lint",
-            ),
+            (no_program, "tool: program not in the entry"),
             (
                 shape("sentinel-674-shape", &[], None),
-                "tool: shape sentinel-674-shape is not enabled for gh/gh",
+                "tool: shape not enabled for gh/gh",
             ),
             (
                 ToolCallRequest {
@@ -1254,7 +1247,15 @@ shapes:
             ),
         ];
         for (req, why) in cases {
-            assert_eq!(decide(&spy, None, req, ROOT), denied(why));
+            let got = decide(&spy, None, req, ROOT);
+            let ToolCallDecision::Refused { audit, wire, .. } = &got else {
+                panic!("{got:?}");
+            };
+            assert!(
+                !audit.contains("sentinel-674") && !wire.contains("sentinel-674"),
+                "{got:?}"
+            );
+            assert_eq!(got, denied(why));
         }
         assert!(spy.decided().is_empty());
         assert_eq!(spy.mounts.load(Ordering::SeqCst), 0);

@@ -290,7 +290,12 @@ pub(crate) fn launch_obligation(
             p.insert("forge.head", ops(ForgeOps::EMPTY));
         }
     }
-    p.insert("workspace.root", text(&per_call.workspace_root));
+    match entry.workspace {
+        ToolWorkspaceAccess::Rw | ToolWorkspaceAccess::Ro => {
+            p.insert("workspace.root", text(&per_call.workspace_root));
+        }
+        ToolWorkspaceAccess::None => {}
+    }
     if let Some(task) = &per_call.task {
         p.insert("task", text(task));
     }
@@ -587,7 +592,6 @@ tools:
             ("volumes.name", s(&[])),
             ("volumes.scope", s(&[])),
             ("workspace.mode", str_("none")),
-            ("workspace.root", str_("/w")),
         ] {
             expected.insert(k, v);
         }
