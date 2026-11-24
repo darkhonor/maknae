@@ -1217,6 +1217,7 @@ mod tests {
                     program: (*program).into(),
                     argv: argv.iter().map(|a| (*a).to_owned()).collect(),
                     bound: Vec::new(),
+                    shape: None,
                 };
                 let r = build_tool_request(
                     stamp,
@@ -1498,6 +1499,7 @@ mod tests {
             program: "cargo".into(),
             argv: vec!["build".into()],
             bound: Vec::new(),
+            shape: None,
         };
         let host = maknae_config::SensitiveList::empty();
         let ceiling = ceiling(Ceiling::baseline_for(US));
@@ -1583,6 +1585,7 @@ mod tests {
                     .map(str::to_owned)
                     .to_vec(),
                 bound: Vec::new(),
+                shape: None,
             };
             let r = build_tool_request(
                 &Stamp::Agent {

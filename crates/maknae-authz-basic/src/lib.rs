@@ -1178,10 +1178,27 @@ fn tool_problems(
                 match pattern {
                     maknae_config::Pattern::Tool(t) => match tools.entry(&t.entry) {
                         None => Some(IdentityProblem::ToolGrantUnknownEntry { source }),
-                        Some(e) if !e.commands.contains_key(&t.program) => {
-                            Some(IdentityProblem::ToolGrantUnknownProgram { source })
-                        }
-                        Some(_) => None,
+                        Some(e) => match e.commands.get(&t.program) {
+                            None => Some(IdentityProblem::ToolGrantUnknownProgram { source }),
+                            Some(command) => match (&t.target, &command.form) {
+                                (
+                                    maknae_config::ToolTarget::Shape(pattern),
+                                    maknae_config::CommandForm::Grammar { shapes, .. },
+                                ) if !shapes.keys().any(|name| pattern.matches(name)) => {
+                                    Some(IdentityProblem::ToolGrantUnknownShape { source })
+                                }
+                                (
+                                    maknae_config::ToolTarget::Shape(_),
+                                    maknae_config::CommandForm::Positional(_)
+                                    | maknae_config::CommandForm::Open,
+                                ) => Some(IdentityProblem::ToolGrantUnknownShape { source }),
+                                (
+                                    maknae_config::ToolTarget::Shape(_),
+                                    maknae_config::CommandForm::Grammar { .. },
+                                )
+                                | (maknae_config::ToolTarget::Args(_), _) => None,
+                            },
+                        },
                     },
                     maknae_config::Pattern::Read(_) | maknae_config::Pattern::Write(_) => None,
                 }
@@ -5647,6 +5664,55 @@ mod tests {
         ];
         assert_eq!(src.identity_problems(), expected);
         assert_eq!(compiled(&src).identity_problems()[..], expected);
+    }
+
+    #[test]
+    fn grant_naming_a_disabled_shape_is_inert_with_a_warning() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n").unwrap(),
+        );
+        let text = "schema_version: 1\ntools:\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n      sh: { open: true }\n      cargo: { subcommands: [\"build *\"] }\n";
+        let catalog = maknae_config::ToolsCatalog::parse_with(text, &grammars).unwrap();
+        assert!(catalog.disabled().is_empty(), "{:?}", catalog.disabled());
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-shape gh:pr.view)\", \"Tool(sentinel-674-shape gh:pr.*)\", \"Tool(sentinel-674-shape gh:*)\", \"Tool(sentinel-674-shape gh:issue.list)\", \"Tool(sentinel-674-shape gh:issue.*)\", \"Tool(sentinel-674-shape gh:pr)\", \"Tool(sentinel-674-shape sh:x)\", \"Tool(sentinel-674-shape cargo:x)\", \"Tool(sentinel-674-shape glab:x)\", \"Tool(sentinel-674-gone gh:pr.view)\"]\n  deny: [\"Tool(sentinel-674-shape gh:issue.close)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-shape gh:renamed.*)\", \"Tool(sentinel-674-shape gh:pr.view)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(catalog);
+        let shapes = |problems: &[IdentityProblem]| -> Vec<String> {
+            problems
+                .iter()
+                .filter_map(|p| match p {
+                    IdentityProblem::ToolGrantUnknownShape { source } => Some(source.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let expected = [
+            "permissions.deny Tool(sentinel-674-shape gh:issue.close)",
+            "permissions.allow Tool(sentinel-674-shape gh:issue.list)",
+            "permissions.allow Tool(sentinel-674-shape gh:issue.*)",
+            "permissions.allow Tool(sentinel-674-shape gh:pr)",
+            "permissions.allow Tool(sentinel-674-shape sh:x)",
+            "permissions.allow Tool(sentinel-674-shape cargo:x)",
+            "subjects.ursula.permissions.allow Tool(sentinel-674-shape gh:renamed.*)",
+        ];
+        assert_eq!(shapes(src.identity_problems()), expected);
+        let snap = compiled(&src);
+        assert_eq!(shapes(snap.identity_problems()), expected);
+        let others: Vec<_> = snap
+            .identity_problems()
+            .iter()
+            .filter(|p| !matches!(p, IdentityProblem::ToolGrantUnknownShape { .. }))
+            .collect();
+        assert!(
+            others.iter().all(|p| matches!(
+                p,
+                IdentityProblem::ToolGrantUnknownEntry { .. }
+                    | IdentityProblem::ToolGrantUnknownProgram { .. }
+            )),
+            "{others:?}"
+        );
+        assert_eq!(others.len(), 2, "{others:?}");
     }
 
     #[test]

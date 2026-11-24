@@ -23,7 +23,8 @@ pub fn record_fields(p: &IdentityProblem) -> (&'static str, String, &'static str
         | IdentityProblem::AgentSkipped { .. }
         | IdentityProblem::ToolEntryDisabled { .. }
         | IdentityProblem::ToolGrantUnknownEntry { .. }
-        | IdentityProblem::ToolGrantUnknownProgram { .. } => ("deny", p.to_string(), "unavailable"),
+        | IdentityProblem::ToolGrantUnknownProgram { .. }
+        | IdentityProblem::ToolGrantUnknownShape { .. } => ("deny", p.to_string(), "unavailable"),
         IdentityProblem::Unresolved { .. }
         | IdentityProblem::Contained { .. }
         | IdentityProblem::Unbound { .. }
@@ -380,13 +381,17 @@ mod tests {
             IdentityProblem::ToolGrantUnknownProgram {
                 source: "authz.yaml".into(),
             },
+            IdentityProblem::ToolGrantUnknownShape {
+                source: "authz.yaml".into(),
+            },
         ];
         assert_eq!(
             counts(&p),
             [
                 "tool_entry_disabled=1",
                 "tool_grant_unknown_entry=1",
-                "tool_grant_unknown_program=1"
+                "tool_grant_unknown_program=1",
+                "tool_grant_unknown_shape=1"
             ]
         );
         for p in &p {

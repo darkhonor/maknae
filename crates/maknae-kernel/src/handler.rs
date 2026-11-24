@@ -948,6 +948,7 @@ mod tests {
             program: "sentinel-674-prog".into(),
             argv: vec!["test".into(), "a b".into(), String::new()],
             bound: Vec::new(),
+            shape: None,
         };
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
         let task = TaskStamp {
@@ -1087,6 +1088,7 @@ mod tests {
             program: "gh".into(),
             argv: vec!["pr".into()],
             bound: Vec::new(),
+            shape: None,
         };
         let mut want = Attributes::new();
         want.insert("tool.entry", AttrValue::Str("sentinel-168a-entry".into()));

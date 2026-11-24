@@ -5,7 +5,8 @@ use crate::binding::Resolution;
 use crate::decide::{LoadedPolicy, SubjectEntry};
 use crate::role::Role;
 use maknae_config::{
-    ArgPattern, CommandForm, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolsCatalog,
+    ArgPattern, CommandForm, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolTarget,
+    ToolsCatalog,
 };
 use maknae_graph::catalog::{CatalogEntry, CatalogForge, CatalogInput, CatalogOutput};
 use maknae_proto::{CatalogDigest, CredentialRef, TOOL_CATALOG_MAX_BYTES};
@@ -210,7 +211,10 @@ fn admits(stage: &Stage<'_>, entry: &str, program: &str, ceiling: &ArgPattern) -
 
 fn tool_args<'p>(p: &'p Pattern, entry: &str, program: &str) -> Option<&'p ArgPattern> {
     match p {
-        Pattern::Tool(t) if t.entry == entry && t.program == program => Some(&t.args),
+        Pattern::Tool(t) if t.entry == entry && t.program == program => match &t.target {
+            ToolTarget::Args(args) => Some(args),
+            ToolTarget::Shape(_) => None,
+        },
         Pattern::Tool(_) | Pattern::Read(_) | Pattern::Write(_) => None,
     }
 }
@@ -390,7 +394,9 @@ mod tests {
                 .push(maknae_config::Pattern::Tool(maknae_config::ToolPattern {
                     entry: "rust-build".into(),
                     program: "cargo".into(),
-                    args: maknae_config::ArgPattern::parse(args).unwrap(),
+                    target: maknae_config::ToolTarget::Args(
+                        maknae_config::ArgPattern::parse(args).unwrap(),
+                    ),
                 }));
         }
         entry.right = Some(right);

@@ -1650,6 +1650,7 @@ fn tool_ceiling(
         program: program.to_string(),
         argv: argv.to_vec(),
         bound,
+        shape: None,
     })
 }
 

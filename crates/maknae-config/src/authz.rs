@@ -247,6 +247,7 @@ pub struct ToolCall {
     pub program: String,
     pub argv: Vec<String>,
     pub bound: Vec<Bound>,
+    pub shape: Option<String>,
 }
 
 /// A `~` pattern was evaluated with no home, or with one that is not an
@@ -797,40 +798,115 @@ pub enum Pattern {
     Tool(ToolPattern),
 }
 
-/// `Tool(<entry> <program> <argv pattern>)`: decides `tool.invoke`.
+/// `Tool(<entry> <program> <argv pattern>)` or `Tool(<entry> <program>:<shape>)`:
+/// decides `tool.invoke`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolPattern {
     pub entry: String,
     pub program: String,
-    pub args: ArgPattern,
+    pub target: ToolTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolTarget {
+    Args(ArgPattern),
+    Shape(ShapePattern),
+}
+
+/// A shape name, or the whole-segment prefix before `.*` (`""` for `*`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShapePattern {
+    Exact(String),
+    Prefix(String),
+}
+
+impl ShapePattern {
+    fn parse(text: &str) -> Option<ShapePattern> {
+        if text == "*" {
+            return Some(ShapePattern::Prefix(String::new()));
+        }
+        if let Some(prefix) = text.strip_suffix(".*") {
+            return crate::grammar::shape_name_ok(prefix)
+                .then(|| ShapePattern::Prefix(prefix.to_string()));
+        }
+        crate::grammar::shape_name_ok(text).then(|| ShapePattern::Exact(text.to_string()))
+    }
+
+    pub fn matches(&self, shape: &str) -> bool {
+        match self {
+            ShapePattern::Exact(name) => name == shape,
+            ShapePattern::Prefix(prefix) => {
+                prefix.is_empty()
+                    || shape
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            }
+        }
+    }
+
+    pub fn covers(&self, other: &ShapePattern) -> bool {
+        match (self, other) {
+            (ShapePattern::Exact(a), ShapePattern::Exact(b)) => a == b,
+            (ShapePattern::Exact(_), ShapePattern::Prefix(_)) => false,
+            (ShapePattern::Prefix(_), ShapePattern::Exact(name)) => self.matches(name),
+            (ShapePattern::Prefix(a), ShapePattern::Prefix(b)) => {
+                a.is_empty()
+                    || a == b
+                    || b.strip_prefix(a.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            }
+        }
+    }
+
+    pub fn overlaps(&self, other: &ShapePattern) -> bool {
+        self.covers(other) || other.covers(self)
+    }
 }
 
 impl ToolPattern {
     fn parse(spec: &str, inner: &str) -> Result<ToolPattern, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
         let mut parts = inner.splitn(3, ' ');
-        let (Some(entry), Some(program), Some(rest)) = (parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(entry), Some(second), third) = (parts.next(), parts.next(), parts.next()) else {
             return Err(bad());
         };
-        if !crate::tools::tool_entry_name_ok(entry) || !crate::tools::tool_program_name_ok(program)
-        {
+        if !crate::tools::tool_entry_name_ok(entry) {
             return Err(bad());
         }
-        let args = ArgPattern::parse(rest).map_err(|_| bad())?;
+        let (program, target) = match second.split_once(':') {
+            Some((program, shape)) => {
+                if third.is_some() {
+                    return Err(bad());
+                }
+                let shape = ShapePattern::parse(shape).ok_or_else(bad)?;
+                (program, ToolTarget::Shape(shape))
+            }
+            None => {
+                let rest = third.ok_or_else(bad)?;
+                let args = ArgPattern::parse(rest).map_err(|_| bad())?;
+                (second, ToolTarget::Args(args))
+            }
+        };
+        if !crate::tools::tool_program_name_ok(program) {
+            return Err(bad());
+        }
         Ok(ToolPattern {
             entry: entry.to_string(),
             program: program.to_string(),
-            args,
+            target,
         })
     }
 
     fn matches(&self, call: &ToolCall, side: Side) -> bool {
         self.entry == call.entry
             && self.program == call.program
-            && match side {
-                Side::Allow => self.args.matches_any(&call.argv, &call.bound),
-                Side::Deny => self.args.matches_any_for_deny(&call.argv, &call.bound),
+            && match (&self.target, &call.shape) {
+                (ToolTarget::Args(args), None) => match side {
+                    Side::Allow => args.matches_any(&call.argv, &call.bound),
+                    Side::Deny => args.matches_any_for_deny(&call.argv, &call.bound),
+                },
+                (ToolTarget::Shape(pattern), Some(shape)) => pattern.matches(shape),
+                (ToolTarget::Args(_), Some(_)) | (ToolTarget::Shape(_), None) => false,
             }
     }
 }
@@ -3987,6 +4063,7 @@ mod tests {
             program: program.into(),
             argv: argv.iter().map(|a| (*a).into()).collect(),
             bound: Vec::new(),
+            shape: None,
         }
     }
 
@@ -3997,7 +4074,10 @@ mod tests {
         };
         assert_eq!(t.entry, "cargo-test");
         assert_eq!(t.program, "cargo");
-        assert_eq!(t.args, ArgPattern::parse("test *").unwrap());
+        assert_eq!(
+            t.target,
+            ToolTarget::Args(ArgPattern::parse("test *").unwrap())
+        );
     }
 
     #[test]
@@ -4019,6 +4099,139 @@ mod tests {
                 Err(AuthzError::BadPattern(bad.into())),
                 "{bad}"
             );
+        }
+    }
+
+    fn shape_pattern(text: &str) -> ShapePattern {
+        let Pattern::Tool(t) = parse_pattern(&format!("Tool(a gh:{text})")).unwrap() else {
+            panic!("expected a Tool pattern");
+        };
+        let ToolTarget::Shape(p) = t.target else {
+            panic!("expected a shape target");
+        };
+        p
+    }
+
+    fn shape_call(shape: &str) -> ToolCall {
+        ToolCall {
+            shape: Some(shape.into()),
+            ..tool_call("a", "gh", &["issue", "close"])
+        }
+    }
+
+    #[test]
+    fn shape_form_parses_exact_prefix_and_star() {
+        assert_eq!(
+            shape_pattern("issue.close"),
+            ShapePattern::Exact("issue.close".into())
+        );
+        assert_eq!(shape_pattern("pr"), ShapePattern::Exact("pr".into()));
+        assert_eq!(
+            shape_pattern("issue.*"),
+            ShapePattern::Prefix("issue".into())
+        );
+        assert_eq!(
+            shape_pattern("issue.edit.*"),
+            ShapePattern::Prefix("issue.edit".into())
+        );
+        assert_eq!(shape_pattern("*"), ShapePattern::Prefix(String::new()));
+        let Pattern::Tool(t) = parse_pattern("Tool(a gh:pr.*)").unwrap() else {
+            panic!("expected a Tool pattern");
+        };
+        assert_eq!((t.entry.as_str(), t.program.as_str()), ("a", "gh"));
+    }
+
+    #[test]
+    fn shape_form_rejects_a_third_token_and_bad_names() {
+        for bad in [
+            "Tool(a gh:issue.close extra)",
+            "Tool(a gh:issue.close )",
+            "Tool(a gh:*  *)",
+            "Tool(a gh:)",
+            "Tool(a :issue)",
+            "Tool(a gh:issue*)",
+            "Tool(a gh:issue.**)",
+            "Tool(a gh:.*)",
+            "Tool(a gh:issue..close)",
+            "Tool(a gh:Issue.close)",
+            "Tool(a gh:issue.close.)",
+            "Tool(a gh:issue:close)",
+            "Tool(a gh/x:issue)",
+            "Tool(a gh:*.close)",
+            "Tool(a gh:iss*.close)",
+        ] {
+            assert_eq!(
+                parse_pattern(bad),
+                Err(AuthzError::BadPattern(bad.into())),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_matches_only_at_segment_boundary() {
+        let p = shape_pattern("issue.*");
+        for (shape, want) in [
+            ("issue.edit.title", true),
+            ("issue.close", true),
+            ("issue", false),
+            ("issues", false),
+            ("issues.close", false),
+            ("pr.issue.close", false),
+        ] {
+            assert_eq!(p.matches(shape), want, "{shape}");
+        }
+        let star = shape_pattern("*");
+        assert!(star.matches("issue") && star.matches("pr.view"));
+        let exact = shape_pattern("issue.close");
+        assert!(exact.matches("issue.close"));
+        assert!(!exact.matches("issue.close.x") && !exact.matches("issue"));
+    }
+
+    #[test]
+    fn shape_pattern_never_matches_positional_call_and_vice_versa() {
+        let shape = parse_pattern("Tool(a gh:*)").unwrap();
+        let positional = parse_pattern("Tool(a gh issue *)").unwrap();
+        let pos_call = tool_call("a", "gh", &["issue", "close"]);
+        let shp_call = shape_call("issue.close");
+        for side in [Side::Allow, Side::Deny] {
+            let hit = |p: &Pattern, c: &ToolCall| p.matches_req(&Request::Tool(c), None, side);
+            assert_eq!(hit(&shape, &pos_call), Ok(false));
+            assert_eq!(hit(&positional, &shp_call), Ok(false));
+            assert_eq!(hit(&shape, &shp_call), Ok(true));
+            assert_eq!(hit(&positional, &pos_call), Ok(true));
+        }
+        let wrong = parse_pattern("Tool(b gh:*)").unwrap();
+        let other = parse_pattern("Tool(a glab:*)").unwrap();
+        for p in [wrong, other] {
+            assert_eq!(
+                p.matches_req(&Request::Tool(&shp_call), None, Side::Allow),
+                Ok(false)
+            );
+        }
+    }
+
+    #[test]
+    fn shape_overlaps_and_covers() {
+        for (a, b, covers, overlaps) in [
+            ("*", "issue.*", true, true),
+            ("issue.*", "*", false, true),
+            ("issue.*", "issue.close", true, true),
+            ("issue.close", "issue.*", false, true),
+            ("pr.*", "issue.*", false, false),
+            ("issue.*", "issue.edit.*", true, true),
+            ("issue.edit.*", "issue.*", false, true),
+            ("issue.*", "issues.*", false, false),
+            ("issue.close", "issue.close", true, true),
+            ("issue.close", "issue.edit", false, false),
+            ("issue", "issue.*", false, false),
+            ("issue.*", "issue", false, false),
+            ("*", "*", true, true),
+        ] {
+            let (pa, pb) = (shape_pattern(a), shape_pattern(b));
+            assert_eq!(pa.covers(&pb), covers, "{a} covers {b}");
+            assert_eq!(pa.overlaps(&pb), overlaps, "{a} overlaps {b}");
+            assert_eq!(pb.overlaps(&pa), overlaps, "{b} overlaps {a}");
         }
     }
 
