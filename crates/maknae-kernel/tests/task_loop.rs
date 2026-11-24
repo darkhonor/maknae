@@ -246,7 +246,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         banner: Default::default(),
         reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(board),
-        switches: Arc::new(maknae_kernel::SwitchesOff),
+        switches: Arc::new(maknae_kernel::FixedSwitches::default()),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -4983,6 +4983,89 @@ mod board {
         assert_eq!(
             bodies(&page_of(w.board("hobi", read(None), h).await.0)),
             ["sentinel-695-on"]
+        );
+    }
+
+    const BOARD_ON: &str =
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nboard: true\n";
+    const BOARD_OFF: &str =
+        "schema_version: 1\npermissions:\n  allow: []\n  deny: []\nboard: false\n";
+
+    impl World {
+        /// The switches the daemon builds, from a `maknae.yaml` that ends in `site`.
+        fn configured(&mut self, tag: &str, site: &str) {
+            let dir = self.root.join(tag);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+            common::write_0640(
+                &dir.join("maknae.yaml"),
+                &format!("deployment:\n  mode: container\n{site}"),
+            );
+            let boot = maknae_kernel::boot_as_owner(&dir).expect("boots");
+            self.agents.switches = Arc::new(maknae_kernel::ConfiguredSwitches::from_boot(
+                &boot,
+                Arc::new(maknae_kernel::SnapshotEnrollment(Arc::clone(&self.pdp))),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_configured_switches_gate_on_maknae_yaml_and_the_installed_policy() {
+        let mut w = board_world("board-configured");
+        let h = w.at_work("hobi");
+        w.agent_policy("hobi", BOARD_ON);
+        w.configured("site-on", "board:\n  enabled: true\n");
+        posted(w.board("hobi", post(note("sentinel-698-on")), h).await.0);
+
+        w.configured("site-absent", "");
+        let (answer, records) = w.board("hobi", post(note("sentinel-698-site")), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: site", "unavailable")
+        );
+        w.configured("site-off", "board:\n  enabled: false\n");
+        let (answer, records) = w.board("hobi", post(note("sentinel-698-site")), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: site", "unavailable")
+        );
+
+        w.configured("site-on-again", "board:\n  enabled: true\n");
+        w.agent_policy("hobi", BOARD_OFF);
+        let (answer, records) = w.board("hobi", post(note("sentinel-698-agent")), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: agent", "unavailable")
+        );
+        w.agent_policy("hobi", PLAIN);
+        let (answer, records) = w.board("hobi", post(note("sentinel-698-agent")), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: agent", "unavailable")
+        );
+
+        w.agent_policy("hobi", BOARD_ON);
+        w.enable(w.me, false);
+        let (answer, records) = w.board("hobi", post(note("sentinel-698-tasker")), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: tasker", "unavailable")
+        );
+
+        w.enable(w.me, true);
+        posted(
+            w.board("hobi", post(note("sentinel-698-reloaded")), h)
+                .await
+                .0,
+        );
+        assert_eq!(
+            bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+            ["sentinel-698-on", "sentinel-698-reloaded"]
         );
     }
 

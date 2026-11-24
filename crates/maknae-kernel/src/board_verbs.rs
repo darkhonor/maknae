@@ -13,6 +13,8 @@ use maknae_security::{AttrValue, Attributes, Authorizer, Decision, Verdict};
 use crate::blocking_guard::{admit_blocking, Offload};
 use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore};
 use crate::board_store::{BoardKey, HeldFor, LabelValue, Stored};
+use crate::boot::BootConfig;
+use crate::enrollment::EnrollmentView;
 use crate::task::CitedTask;
 
 pub trait BoardSwitches: Send + Sync {
@@ -20,16 +22,28 @@ pub trait BoardSwitches: Send + Sync {
     fn agent(&self, agent: &AgentId) -> bool;
 }
 
-/// The production switches until #698: the board is served nowhere.
-pub struct SwitchesOff;
+/// The site switch from `maknae.yaml`, and each agent's from the installed snapshot.
+pub struct ConfiguredSwitches {
+    site: bool,
+    view: Arc<dyn EnrollmentView>,
+}
 
-impl BoardSwitches for SwitchesOff {
+impl ConfiguredSwitches {
+    pub fn from_boot(boot: &BootConfig, view: Arc<dyn EnrollmentView>) -> Self {
+        ConfiguredSwitches {
+            site: boot.board().enabled,
+            view,
+        }
+    }
+}
+
+impl BoardSwitches for ConfiguredSwitches {
     fn site(&self) -> bool {
-        false
+        self.site
     }
 
-    fn agent(&self, _: &AgentId) -> bool {
-        false
+    fn agent(&self, agent: &AgentId) -> bool {
+        self.view.board(agent)
     }
 }
 
@@ -777,11 +791,49 @@ mod tests {
 
     const BOB: BoardKey = BoardKey(1000);
 
+    fn boot_with(board: Option<bool>) -> crate::BootConfig {
+        use maknae_config::Value;
+        let mut sections = vec![(
+            "deployment".to_string(),
+            Value::Map(vec![("mode".into(), Value::Str("container".into()))]),
+        )];
+        if let Some(on) = board {
+            sections.push((
+                "board".to_string(),
+                Value::Map(vec![("enabled".into(), Value::Bool(on))]),
+            ));
+        }
+        crate::boot::assemble(maknae_config::Document::from_sections_for_test(sections))
+            .expect("assembles")
+    }
+
     #[test]
-    fn the_production_switches_are_off() {
-        let hobi = AgentId::parse("sentinel-695-hobi").unwrap();
-        assert!(!SwitchesOff.site());
-        assert!(!SwitchesOff.agent(&hobi));
+    fn the_configured_switches_read_the_site_from_boot_and_the_agent_from_the_view() {
+        use crate::enrollment::{Boarding, FixedEnrollment};
+        let jin = AgentId::parse("sentinel-698-jin").unwrap();
+        let unknown = AgentId::parse("sentinel-698-nobody").unwrap();
+        let enrolled = FixedEnrollment([(hobi(), 12_101), (jin.clone(), 12_103)].into());
+        let views: [(&str, Arc<dyn crate::EnrollmentView>, bool); 2] = [
+            (
+                "agent on",
+                Arc::new(Boarding(enrolled.clone(), [hobi()].into())),
+                true,
+            ),
+            (
+                "agent off",
+                Arc::new(Boarding(enrolled.clone(), BTreeSet::new())),
+                false,
+            ),
+        ];
+        for (board, site) in [(None, false), (Some(false), false), (Some(true), true)] {
+            for (name, view, agent) in &views {
+                let s = ConfiguredSwitches::from_boot(&boot_with(board), Arc::clone(view));
+                assert_eq!(s.site(), site, "{board:?} {name}");
+                assert_eq!(s.agent(&hobi()), *agent, "{board:?} {name}");
+                assert!(!s.agent(&jin), "{board:?} {name}");
+                assert!(!s.agent(&unknown), "{board:?} {name}");
+            }
+        }
     }
 
     fn hobi() -> AgentId {

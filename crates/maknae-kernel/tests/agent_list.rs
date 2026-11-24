@@ -232,7 +232,7 @@ fn world_bound(tag: &str, agents: &[Agent], bindings: &str) -> World {
         banner: Default::default(),
         reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(maknae_kernel::BoardStore::new()),
-        switches: Arc::new(maknae_kernel::SwitchesOff),
+        switches: Arc::new(maknae_kernel::FixedSwitches::default()),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;

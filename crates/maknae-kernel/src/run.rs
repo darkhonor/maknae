@@ -5713,7 +5713,7 @@ impl AgentAdmission {
             banner: Banner::default(),
             reach: crate::egress_socket::no_reach("no egress socket in this test"),
             board: Arc::new(crate::board::BoardStore::new()),
-            switches: Arc::new(crate::board_verbs::SwitchesOff),
+            switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
         }
     }
 }
@@ -11460,7 +11460,12 @@ async fn boot_after_sink(
         containment: containment_status,
         tasks,
         board,
-        switches: Arc::new(crate::board_verbs::SwitchesOff),
+        switches: Arc::new(crate::board_verbs::ConfiguredSwitches::from_boot(
+            &boot,
+            Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
+                &authorizer,
+            ))),
+        )),
         banner: Arc::new(std::sync::RwLock::new(banner)),
         banner_load: seams.banner_load,
         #[cfg(test)]
@@ -21121,7 +21126,7 @@ mod reload_fixture {
                 .unwrap(),
                 None => crate::board::BoardStore::new(),
             }),
-            switches: Arc::new(crate::board_verbs::SwitchesOff),
+            switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
