@@ -7137,6 +7137,7 @@ mod board {
             assert_eq!(w.settings_of(w.me), Settings::default());
         }
 
+        /// The caller holds `STORE.write()` until the stalled work has landed.
         async fn twice_while_the_store_stalls(
             w: &World,
             verbs: (Verb, Verb),
@@ -7144,7 +7145,6 @@ mod board {
             (RespResult, Vec<AuditRecord>),
             (RespResult, Vec<AuditRecord>),
         ) {
-            let _alone = STORE.write().await;
             w.board_blobs.slow(Some(Duration::from_millis(3500)));
             let (first, second) = (Records::new(0), Records::new(0));
             let stalls = w.board_blobs.clone();
@@ -7170,6 +7170,7 @@ mod board {
         #[tokio::test]
         async fn a_settings_write_the_store_does_not_take_or_finish_in_time_is_refused() {
             let w = manage_world("manage-settings-stalled", "user");
+            let _alone = STORE.write().await;
             let ((late, late_records), (busy, busy_records)) = twice_while_the_store_stalls(
                 &w,
                 (
@@ -7179,6 +7180,17 @@ mod board {
             )
             .await;
             assert_eq!(refused(&late), Some(BoardDefect::OutcomeUnknown));
+            assert_eq!(late_records.len(), 2, "{late_records:?}");
+            assert_eq!(
+                late_records[1].board,
+                settings_said(None, Some(OFF)),
+                "what the store held when the write did not answer"
+            );
+            assert_eq!(
+                busy_records[1].board,
+                settings_said(None, Some(OFF)),
+                "what the store held when the write could not start"
+            );
             assert_eq!(
                 (
                     late_records[1].outcome.result.as_str(),
@@ -7230,6 +7242,7 @@ mod board {
             let posts: Vec<PostId> = (0..2)
                 .map(|i| w.stored("hobi", &format!("sentinel-698-{i}"), PostLabels::default()))
                 .collect();
+            let _alone = STORE.write().await;
             let ((late, late_records), (busy, busy_records)) =
                 twice_while_the_store_stalls(&w, (clear(), clear())).await;
             assert_eq!(refused(&late), Some(BoardDefect::OutcomeUnknown));
@@ -7263,6 +7276,17 @@ mod board {
                     ("permit", reason, posture)
                 );
                 assert_eq!(records[1].board, None, "{reason}: nothing is named removed");
+            }
+            let landed = tokio::time::Instant::now() + Duration::from_secs(5);
+            while posts
+                .iter()
+                .any(|id| w.board_blobs.has(&format!("post.{}.{id}", w.me)))
+            {
+                assert!(
+                    tokio::time::Instant::now() < landed,
+                    "the late deletes never land"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
 
