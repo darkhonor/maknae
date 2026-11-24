@@ -99,6 +99,8 @@ pub enum Dispatch {
     TaskRequested,
     /// The peer asked for its own tool catalog. No datum: the catalog is the installed snapshot's.
     ToolCatalogRequested,
+    /// A `board.post` or `board.read`.
+    BoardRequested,
 }
 
 /// The verbs routed to `mutation::handle`; only these resolve the requester's home.
@@ -171,6 +173,7 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpPromptGet
         | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
         Verb::ToolCatalog {} => Dispatch::ToolCatalogRequested,
+        Verb::BoardPost { .. } | Verb::BoardRead { .. } => Dispatch::BoardRequested,
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
@@ -200,6 +203,8 @@ pub fn task_op(verb: &Verb) -> Option<&'static str> {
         Verb::Ping
         | Verb::Whoami
         | Verb::ToolCatalog {}
+        | Verb::BoardPost { .. }
+        | Verb::BoardRead { .. }
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -443,6 +448,8 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::TaskClaim { .. } => "session.task",
         Verb::TaskReport { .. } => "session.task",
         Verb::AgentList { .. } => "session.task",
+        Verb::BoardPost { .. } => "board.post",
+        Verb::BoardRead { .. } => "board.read",
     }
 }
 
@@ -546,6 +553,20 @@ pub fn build_authz_request(
         resource.insert("path", AttrValue::Str(path.clone()));
     }
     stamp_conversation(&mut resource, facts);
+    if let (
+        Verb::BoardPost { .. } | Verb::BoardRead { .. },
+        Stamp::Agent {
+            task: Some(task), ..
+        },
+    ) = (verb, stamp)
+    {
+        if task.root.starts_with("users/") {
+            resource.insert(
+                maknae_security::RESOURCE_BOARD,
+                AttrValue::Str(task.root.clone()),
+            );
+        }
+    }
     if let (Verb::SessionPrompt { .. }, Some(a)) = (verb, admitted) {
         resource.insert(
             "destination",
@@ -855,6 +876,65 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
         assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
+    }
+
+    #[test]
+    fn a_board_request_is_stamped_with_the_cited_tasks_board() {
+        use maknae_security::{AttrValue, RESOURCE_BOARD};
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let stamp_of = |root: &str| TaskStamp {
+            id: maknae_proto::TaskId([0x69; 16]),
+            tasker: "uid:1000".into(),
+            root: root.into(),
+            start: 0,
+        };
+        let person = stamp_of("users/1000");
+        let agent_rooted = stamp_of("agents/hobi");
+        let board = |verb: &Verb, task: Option<&TaskStamp>| {
+            build_authz_request(
+                verb,
+                2001,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Agent { agent: &hobi, task },
+            )
+            .resource
+            .0
+            .get(RESOURCE_BOARD)
+            .cloned()
+        };
+        let verbs = all_verbs();
+        let board_verbs: Vec<&Verb> = verbs
+            .iter()
+            .filter(|v| matches!(v, Verb::BoardPost { .. } | Verb::BoardRead { .. }))
+            .collect();
+        assert_eq!(board_verbs.len(), 2);
+        for verb in &board_verbs {
+            assert_eq!(
+                board(verb, Some(&person)),
+                Some(AttrValue::Str("users/1000".into()))
+            );
+            assert_eq!(board(verb, Some(&agent_rooted)), None);
+            assert_eq!(board(verb, None), None);
+            let client = build_authz_request(
+                verb,
+                1000,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &Stamp::Client,
+            );
+            assert_eq!(client.resource.0.get(RESOURCE_BOARD), None);
+        }
+        for verb in verbs
+            .iter()
+            .filter(|v| !matches!(v, Verb::BoardPost { .. } | Verb::BoardRead { .. }))
+        {
+            assert_eq!(board(verb, Some(&person)), None, "{}", verb_to_action(verb));
+        }
     }
 
     #[test]
@@ -1434,7 +1514,9 @@ mod tests {
                 "session.list",
                 "session.delete",
                 "session.task",
-                "tool.catalog"
+                "tool.catalog",
+                "board.post",
+                "board.read"
             ],
             "the hand-copied list in the class test above must match the constant"
         );
@@ -2277,6 +2359,16 @@ mod tests {
             },
             Verb::AgentList { after: None },
             Verb::ToolCatalog {},
+            Verb::BoardPost {
+                post: maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new("b".into())),
+                    attachments: vec![],
+                },
+            },
+            Verb::BoardRead { seen_through: None },
         ]
     }
 
@@ -2286,7 +2378,7 @@ mod tests {
 
     /// #148: every term is EXACTLY one of control plane or content-bearing, and
     /// the split is what the vocabulary says it is. Pinned over `all_verbs()`
-    /// (60 client action terms) + the two `kernel.*` pseudo-actions, AND
+    /// (62 client action terms) + the two `kernel.*` pseudo-actions, AND
     /// `all_verbs()` is cross-checked against `ci/gates/verb-manifest.txt`'s
     /// `action` rows (critical-review round 1 of PR B: the manifest is
     /// extracted from `verb_to_action`, which the compiler forces a new
@@ -2435,13 +2527,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_board_bound_tests_use_the_configured_floor() {
+        assert_eq!(maknae_config::PROMPT_MAX_BYTES_FLOOR, 64 * 1024);
+    }
+
     /// #67 D4: the vocabulary is the size the spec says.
     #[test]
-    fn the_vocabulary_is_sixty_client_reachable_terms() {
+    fn the_vocabulary_is_sixty_two_client_reachable_terms() {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
-        assert_eq!(terms.len(), 60);
-        assert_eq!(all_verbs().len(), 71);
+        assert_eq!(terms.len(), 62);
+        assert_eq!(all_verbs().len(), 73);
     }
 
     /// Two terms sharing an action string would be decided as one another —

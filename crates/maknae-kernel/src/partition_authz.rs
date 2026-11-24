@@ -1,11 +1,12 @@
 //! The partition operand (#628, ADR-0008 amendment 2026-11-11): a mandatory deny that
-//! keeps an agent's file verbs inside the partition of the task it cites. It abstains
-//! for every subject off the agent channel, and it never permits.
+//! keeps an agent's file verbs inside the partition of the task it cites, and its
+//! `board.*` requests on that task's root board (#695). It abstains for every subject
+//! off the agent channel, and it never permits.
 
 use maknae_config::{fold_path, Fold, Reach};
 use maknae_security::{
     AttrValue, Authorizer, Decided, FsOperation, Request, Verdict, CHANNEL_AGENT, CHANNEL_CLIENT,
-    CONTEXT_FS_OPERATION, SUBJECT_CHANNEL, SUBJECT_HOME, SUBJECT_ROOT_TASKER,
+    CONTEXT_FS_OPERATION, RESOURCE_BOARD, SUBJECT_CHANNEL, SUBJECT_HOME, SUBJECT_ROOT_TASKER,
 };
 
 use crate::sensitive_authz::FILE_VERBS;
@@ -16,6 +17,8 @@ pub const PARTITION_BACKEND_NAME: &str = "maknae-partition";
 pub(crate) const TASKS_DIR: &str = "tasks";
 
 const KINDS: [&str; 2] = ["users", "agents"];
+
+pub(crate) const BOARD_ACTIONS: [&str; 2] = ["board.post", "board.read"];
 
 /// The composition's named field. It holds no state: every fact it decides on is
 /// stamped on the request by the kernel.
@@ -39,11 +42,16 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
     const ABSTAIN: Verdict = Verdict::NotApplicable { note: None };
     let action = req.action.0.as_str();
     match req.subject.0.get(SUBJECT_CHANNEL) {
-        None if action.starts_with("fs.") => return Verdict::Indeterminate,
+        None if action.starts_with("fs.") || BOARD_ACTIONS.contains(&action) => {
+            return Verdict::Indeterminate
+        }
         None => return ABSTAIN,
         Some(AttrValue::Str(c)) if c == CHANNEL_CLIENT => return ABSTAIN,
         Some(AttrValue::Str(c)) if c == CHANNEL_AGENT => {}
         Some(_) => return Verdict::Indeterminate,
+    }
+    if BOARD_ACTIONS.contains(&action) {
+        return decide_board(req);
     }
     if !FILE_VERBS.contains(&action) {
         return if action.starts_with("fs.") {
@@ -122,6 +130,37 @@ fn decide_partition(req: &Request, fold: Fold) -> Verdict {
         Some(_) => deny("the path is in another tasker's partition"),
         None => deny("the request cites no task"),
     }
+}
+
+fn decide_board(req: &Request) -> Verdict {
+    let root = match req.subject.0.get(SUBJECT_ROOT_TASKER) {
+        None => {
+            return Verdict::Deny {
+                reason: "partition: the request cites no task".into(),
+            }
+        }
+        Some(AttrValue::Str(key)) if is_partition_key(key) => key,
+        Some(_) => return Verdict::Indeterminate,
+    };
+    let Some(AttrValue::Str(board)) = req.resource.0.get(RESOURCE_BOARD) else {
+        return Verdict::Indeterminate;
+    };
+    if !is_partition_key(board) || !is_person_board(board) {
+        return Verdict::Indeterminate;
+    }
+    if board == root {
+        Verdict::NotApplicable { note: None }
+    } else {
+        Verdict::Deny {
+            reason: "partition: the board is outside the task's partition".into(),
+        }
+    }
+}
+
+/// `users/<uid>` with the uid in canonical decimal, as `BoardKey::partition` writes it.
+fn is_person_board(key: &str) -> bool {
+    key.strip_prefix("users/")
+        .is_some_and(|uid| uid.parse::<u32>().is_ok_and(|n| n.to_string() == uid))
 }
 
 /// `users/<name>` or `agents/<name>`, as `RootTasker::partition` writes it.
@@ -322,6 +361,123 @@ mod tests {
     fn partition_mount_off_agent_channel_abstains() {
         for path in ["/opt/x", "/home/hobi-svc/tasks/users/1001"] {
             assert_eq!(decide(&person(mount("fs.read", path, None))), NA);
+        }
+    }
+
+    fn board(action: &str, root: Option<&str>, key: Option<AttrValue>) -> Request {
+        let mut r = agent(action, None, root);
+        if let Some(key) = key {
+            r.resource.0.insert(RESOURCE_BOARD, key);
+        }
+        r
+    }
+
+    fn key(k: &str) -> Option<AttrValue> {
+        Some(AttrValue::Str(k.into()))
+    }
+
+    #[test]
+    fn partition_board_inside_the_tasks_partition_abstains() {
+        for action in BOARD_ACTIONS {
+            assert_eq!(
+                decide(&board(action, MINE, key("users/1000"))),
+                NA,
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn partition_board_of_another_person_denies() {
+        for action in BOARD_ACTIONS {
+            for other in ["users/1002", "users/10000"] {
+                refused(
+                    &board(action, MINE, key(other)),
+                    "the board is outside the task's partition",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_no_task_denies() {
+        for action in BOARD_ACTIONS {
+            for k in [key("users/1000"), None] {
+                refused(&board(action, None, k), "the request cites no task");
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_missing_or_malformed_key_is_indeterminate() {
+        for action in BOARD_ACTIONS {
+            for k in [
+                None,
+                Some(AttrValue::Int(1000)),
+                key("users/"),
+                key("users/1/x"),
+            ] {
+                assert_eq!(
+                    decide(&board(action, MINE, k.clone())),
+                    Verdict::Indeterminate,
+                    "{action} {k:?}"
+                );
+            }
+            for root in [
+                AttrValue::Int(1000),
+                AttrValue::Str("users/".into()),
+                AttrValue::Str("users/1/x".into()),
+            ] {
+                let mut r = board(action, None, key("users/1000"));
+                r.subject.0.insert(SUBJECT_ROOT_TASKER, root.clone());
+                assert_eq!(decide(&r), Verdict::Indeterminate, "{action} {root:?}");
+            }
+            for root in [Some("agents/hobi"), MINE] {
+                assert_eq!(
+                    decide(&board(action, root, key("agents/hobi"))),
+                    Verdict::Indeterminate,
+                    "{action} {root:?}: a board is a person's partition"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_key_must_be_a_canonical_uid() {
+        for action in BOARD_ACTIONS {
+            for k in ["users/alice", "users/001", "users/-1", "users/4294967296"] {
+                assert_eq!(
+                    decide(&board(action, Some(k), key(k))),
+                    Verdict::Indeterminate,
+                    "{action} {k}: even when the root names the same board"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_off_the_agent_channel_abstains() {
+        for action in BOARD_ACTIONS {
+            for root in [MINE, None] {
+                for k in [key("users/1002"), None, Some(AttrValue::Int(1))] {
+                    assert_eq!(decide(&person(board(action, root, k))), NA);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partition_board_with_no_channel_is_indeterminate() {
+        for action in BOARD_ACTIONS {
+            for root in [MINE, None] {
+                for k in [key("users/1000"), key("users/1002"), None] {
+                    let mut unstamped = asked(None, Some(HOME), action, None, root);
+                    if let Some(k) = k {
+                        unstamped.resource.0.insert(RESOURCE_BOARD, k);
+                    }
+                    assert_eq!(decide(&unstamped), Verdict::Indeterminate, "{action}");
+                }
+            }
         }
     }
 
@@ -551,7 +707,7 @@ mod tests {
 
     #[test]
     fn the_operand_abstains_for_people_and_never_permits() {
-        let actions = FILE_VERBS.iter().copied().chain([
+        let actions = FILE_VERBS.iter().copied().chain(BOARD_ACTIONS).chain([
             "fs.move",
             "fs.link",
             "fs.chmod",
@@ -576,7 +732,7 @@ mod tests {
                     );
                     assert_eq!(decide(&person(on_agent)), NA, "{action} {path:?}");
                     let unstamped = asked(None, Some(HOME), action, path, root);
-                    let want = if action.starts_with("fs.") {
+                    let want = if action.starts_with("fs.") || BOARD_ACTIONS.contains(&action) {
                         Verdict::Indeterminate
                     } else {
                         NA

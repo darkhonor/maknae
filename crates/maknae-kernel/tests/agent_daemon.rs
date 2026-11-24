@@ -435,6 +435,8 @@ fn admission(
             unsigned: Arc::clone(unsigned),
         }),
         banner: Default::default(),
+        board: Arc::new(maknae_kernel::BoardStore::new()),
+        switches: Arc::new(maknae_kernel::SwitchesOff),
     }
 }
 

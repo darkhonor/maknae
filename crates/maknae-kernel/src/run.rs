@@ -80,7 +80,7 @@ use crate::handler::{
     AUTHZ_DECIDE_TIMEOUT,
 };
 use crate::session::{gather, FactsGate, SessionChannel, SessionRecord};
-use maknae_proto::{encode_response_zeroizing, ProtoErrCode, ProtoError};
+use maknae_proto::{encode_response_zeroizing, BoardDefect, ProtoErrCode, ProtoError};
 use maknae_security::{
     combine, finalize, guarded_decide_cited, Authorizer, Decision, RuleCitation,
 };
@@ -708,6 +708,7 @@ pub(crate) fn make_record(
             task_id: None,
             parent_task_id: None,
             task_op: None,
+            board_op: None,
             tasker: None,
             bindings: Vec::new(),
         },
@@ -716,6 +717,7 @@ pub(crate) fn make_record(
         object_requested: None,
         mutation: None,
         egress: None,
+        board: None,
         conversation: None,
         graph: None,
         rule: None,
@@ -1089,14 +1091,14 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         .await;
         return;
     }
-    let task = match task_for(
+    let cited = match task_for(
         session.admission,
         request.task.as_ref(),
         session.agent(),
         peer_uid,
         &agents.tasks,
     ) {
-        Ok(task) => task,
+        Ok(cited) => cited,
         Err(cause) => {
             end_session(
                 &mut stream,
@@ -1113,7 +1115,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             return;
         }
     };
-    let task = task.as_ref().map(crate::handler::TaskStamp::of);
+    let task = cited.as_ref().map(crate::handler::TaskStamp::of);
     let stamp = match &session.channel {
         SessionChannel::Client => Stamp::Client,
         SessionChannel::Agent { agent, .. } => Stamp::Agent {
@@ -1210,6 +1212,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         }
         Verb::AgentList { after: Some(after) } if maknae_config::AgentId::parse(after).is_err() => {
             Some(("agent list", "cursor not acceptable".to_string()))
+        }
+        Verb::BoardPost {
+            post:
+                maknae_proto::PostDraft {
+                    to: maknae_proto::Addressee::Agents(ids),
+                    ..
+                },
+        } if ids
+            .iter()
+            .any(|id| maknae_config::AgentId::parse(id).is_err()) =>
+        {
+            Some(("board.post", "addressee not an agent id".to_string()))
         }
         Verb::AdminHeldList {
             filter: Some(maknae_proto::HeldFilter::Agent(agent)),
@@ -1332,6 +1346,40 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             authz_decide_timeout,
             &stamp,
             tasks,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
+    }
+
+    if dispatch_verb(&request.verb) == Dispatch::BoardRequested {
+        let trail = Trail {
+            emit: &emit,
+            cfg: &cfg,
+            class,
+            host: &host,
+            socket: &socket,
+            uid: peer_uid,
+            peer_uri: peer_uri.as_deref(),
+            peer_user: peer_user.as_deref(),
+            session_id,
+            seq,
+            au3_1: &au3_1,
+        };
+        serve_board_verb(
+            &mut stream,
+            &trail,
+            &request.verb,
+            lane,
+            &authorizer,
+            &live,
+            authz_decide_timeout,
+            &stamp,
+            BoardCtx {
+                agents: &agents,
+                channel_agent: session.agent(),
+                cited: cited.as_ref(),
+            },
         )
         .await;
         close_bounded(&mut stream).await;
@@ -1609,7 +1657,8 @@ pub async fn handle_with_attempt_caps<S, E, P>(
         | Dispatch::ConversationCloseRequested
         | Dispatch::ConversationListRequested
         | Dispatch::ConversationDeleteRequested
-        | Dispatch::TaskRequested => {
+        | Dispatch::TaskRequested
+        | Dispatch::BoardRequested => {
             let appended = emit_request_outcome(
                 &emit,
                 &host,
@@ -1747,7 +1796,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         action,
                         &au3_1,
                     )
-                    .await
+                    .await;
                 }
                 Err(_) => {
                     refuse_unencodable_bounded(
@@ -2276,6 +2325,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 }
                 Dispatch::NoBehaviour
                 | Dispatch::ToolCatalogRequested
+                | Dispatch::BoardRequested
                 | Dispatch::MutationRequested
                 | Dispatch::PromptRequested
                 | Dispatch::ConversationNewRequested
@@ -2316,7 +2366,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         verb_to_action(&request.verb),
                         &au3_1,
                     )
-                    .await
+                    .await;
                 }
                 Err(_) => {
                     refuse_unencodable_bounded(
@@ -2729,7 +2779,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                                     "session.prompt",
                                     &au3_1,
                                 )
-                                .await
+                                .await;
                             }
                             Err(_) => {
                                 refuse_unencodable_bounded(
@@ -3066,6 +3116,19 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
             .await;
     }
 
+    async fn refuse_board<S>(&self, stream: &mut S, rec: &AuditRecord, defect: BoardDefect)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.refuse(
+            stream,
+            rec,
+            ProtoErrCode::BoardRefused(defect),
+            maknae_proto::board_refused_message(defect),
+        )
+        .await;
+    }
+
     async fn unreadable(&self, action: &str, names: &[String]) {
         for name in names {
             let mut rec = self.record(
@@ -3088,11 +3151,12 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         role: Option<&'static str>,
         rule: Option<&RuleCitation>,
         action: &str,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         self.respond(stream, outcome, payload, role, rule, action, None)
-            .await;
+            .await
     }
 
     /// [`Self::deliver`] with the subject's catalog digest on the reply.
@@ -3106,13 +3170,15 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         rule: Option<&RuleCitation>,
         action: &str,
         catalog_digest: Option<CatalogDigest>,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         self.respond(stream, outcome, payload, role, rule, action, catalog_digest)
-            .await;
+            .await
     }
 
+    /// Whether the outcome record was appended and the reply written within its bound.
     #[allow(clippy::too_many_arguments)]
     async fn respond<S>(
         &self,
@@ -3123,18 +3189,19 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         rule: Option<&RuleCitation>,
         action: &str,
         catalog_digest: Option<CatalogDigest>,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         if !may_respond(self.record_bounded(outcome).await) {
-            return;
+            return false;
         }
         let response = Response {
             protocol_version: PROTOCOL_VERSION,
             result: RespResult::Ok(payload),
             catalog_digest,
         };
-        match encode_response(&response) {
+        match encode_reply(&response) {
             Ok(bytes) => {
                 write_frame_bounded(
                     stream,
@@ -3174,7 +3241,8 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
                     action,
                     self.au3_1,
                 )
-                .await
+                .await;
+                false
             }
         }
     }
@@ -3581,6 +3649,235 @@ async fn serve_conversation_verb<S, E, P>(
                 .await;
         }
     }
+}
+
+/// Who asks on this channel, the task it cites, and the board store and switches.
+struct BoardCtx<'a> {
+    agents: &'a AgentAdmission,
+    channel_agent: Option<&'a maknae_config::AgentId>,
+    cited: Option<&'a crate::task::CitedTask>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_board_verb<S, E, P>(
+    stream: &mut S,
+    trail: &Trail<'_, E>,
+    verb: &Verb,
+    lane: maknae_security::Lane,
+    authorizer: &Arc<P>,
+    live: &Arc<crate::live::LiveConfig>,
+    timeout: Duration,
+    stamp: &Stamp<'_>,
+    board: BoardCtx<'_>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
+{
+    use crate::board_verbs as bv;
+    let action = verb_to_action(verb);
+    let store = &board.agents.board;
+    let known = board
+        .cited
+        .and_then(|c| crate::board_store::BoardKey::of(&c.root));
+    let gated = bv::gate(
+        board.channel_agent,
+        board.cited,
+        &*board.agents.switches,
+        store,
+    );
+    let key = match gated {
+        Ok(key) => key,
+        Err(off) => {
+            let rec = bv::on_board(
+                trail.record(action, "deny", &off.to_string(), "unavailable"),
+                known,
+            );
+            trail.unauthorized(stream, &rec).await;
+            return;
+        }
+    };
+    let (_, _, generation) = live.admission();
+    let request = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
+    let (verdict, role, rule) =
+        decide_bounded(authorizer, live, request.clone(), generation, timeout).await;
+    let decided = |result: &str, reason: &str, posture: &str| {
+        decision_record(
+            bv::on_board(trail.record(action, result, reason, posture), known),
+            role,
+            rule.as_ref(),
+        )
+    };
+    match finalize(verdict) {
+        Decision::Deny { reason } => {
+            trail
+                .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                .await;
+            return;
+        }
+        Decision::Permit { obligations } => {
+            if let Err(unhonorable) = discharge_plan(&obligations) {
+                let reason = format!("unhonorable obligation: {}", unhonorable.0);
+                trail
+                    .unauthorized(stream, &decided("deny", &reason, "unauthorized"))
+                    .await;
+                return;
+            }
+        }
+    }
+    let (Some(key), Some(cited), Some(agent)) = (key, board.cited, board.channel_agent) else {
+        let reason = bv::Off::NoTask.to_string();
+        trail
+            .unauthorized(stream, &decided("deny", &reason, "unavailable"))
+            .await;
+        return;
+    };
+    let deadline = || tokio::time::Instant::now() + timeout;
+
+    if let Verb::BoardPost { post } = verb {
+        let digest = match bv::post_digest(post) {
+            Ok(digest) => digest,
+            Err(e) => {
+                let r = crate::board::BoardRefusal::Store(format!("the post does not encode: {e}"));
+                let rec = decided("deny", &r.to_string(), bv::posture(&r));
+                trail.refuse_board(stream, &rec, bv::defect_of(&r)).await;
+                return;
+            }
+        };
+        let audit = bv::post_audit(post, &digest);
+        let described = |mut rec: AuditRecord| {
+            rec.board = Some(audit.clone());
+            rec
+        };
+        if let Some(target) = post.in_reply_to {
+            let visible = match store.get(key, target) {
+                None => false,
+                Some(target) => {
+                    let asked = vec![bv::post_request(&request, key, &target)];
+                    bv::decide_posts(authorizer, live, generation, timeout, &request, asked)
+                        .await
+                        .verdicts
+                        == [bv::PostVerdict::Permit]
+                }
+            };
+            if !visible {
+                let r = crate::board::BoardRefusal::NoSuchPost;
+                let rec = described(decided("deny", &r.to_string(), bv::posture(&r)));
+                trail.refuse_board(stream, &rec, bv::defect_of(&r)).await;
+                return;
+            }
+        }
+        let intent = described(decided("permit", "intent recorded", "authorized"));
+        if !trail.record_bounded(&intent).await {
+            return;
+        }
+        let (s, view, by) = (
+            Arc::clone(store),
+            Arc::clone(&board.agents.view),
+            (
+                maknae_proto::Author::Agent(agent.as_str().to_owned()),
+                Some(trail.uid),
+            ),
+        );
+        let maknae_proto::Labels {} = &cited.signed.task.labels;
+        let (task, labels, draft) = (
+            cited.signed.task.task_id,
+            crate::board_store::PostLabels::default(),
+            post.clone(),
+        );
+        let done = bv::offload(trail.uid, deadline(), move || {
+            s.post(key, by, Some(task), labels, draft, &*view)
+        })
+        .await;
+        match done {
+            Ok(stored) => {
+                let mut outcome = trail.outcome(&intent, "done", "authorized");
+                outcome.board = Some(bv::posted_audit(audit.clone(), &stored));
+                let payload = Payload::BoardPosted(stored.post.id);
+                trail
+                    .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                    .await;
+            }
+            Err(r) => {
+                let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                trail
+                    .refuse_board(stream, &outcome, bv::defect_of(&r))
+                    .await;
+            }
+        }
+        return;
+    }
+
+    if let Verb::BoardRead { seen_through } = verb {
+        let plan = store.plan_read(key, agent, *seen_through);
+        let mut intent = decided("permit", "intent recorded", "authorized");
+        intent.board = Some(bv::cursor_audit(plan.cursor));
+        if !trail.record_bounded(&intent).await {
+            return;
+        }
+        let acknowledge = |to: u64| {
+            let (s, a) = (Arc::clone(store), agent.clone());
+            bv::offload(trail.uid, deadline(), move || s.acknowledge(key, &a, to))
+        };
+        let mut cursor = plan.cursor;
+        if let Some(to) = plan.ack_to {
+            match acknowledge(to).await {
+                Ok(moved) => cursor = moved,
+                Err(r) => {
+                    let outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                    return;
+                }
+            }
+        }
+        let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
+        let deciding = bv::Deciding {
+            authorizer,
+            live,
+            generation,
+            timeout,
+            request: &request,
+        };
+        let bv::Read {
+            walk,
+            base_confirmed,
+            stalled,
+        } = bv::read_page(
+            store,
+            key,
+            &*board.agents.view,
+            &deciding,
+            (cursor, plan.upper),
+            budget,
+        )
+        .await;
+        if !base_confirmed || (stalled && walk.page.posts.is_empty()) {
+            let mut outcome = trail.outcome(&intent, bv::UNDECIDED, "unavailable");
+            outcome.outcome.result = "deny".into();
+            outcome.board = Some(bv::read_audit(&walk, cursor));
+            trail
+                .refuse_board(stream, &outcome, BoardDefect::TryAgain)
+                .await;
+        } else {
+            let mut outcome = trail.outcome(&intent, "done", "authorized");
+            outcome.board = Some(bv::read_audit(&walk, cursor));
+            let sent = walk.sent.clone();
+            let payload = Payload::BoardPage(walk.page);
+            if trail
+                .deliver(stream, &outcome, payload, role, rule.as_ref(), action)
+                .await
+            {
+                store.sent(key, agent, &sent);
+            }
+        }
+        return;
+    }
+
+    trail
+        .unauthorized(stream, &decided("deny", "not a board verb", "unauthorized"))
+        .await;
 }
 
 type StoreChange = Box<
@@ -4830,6 +5127,16 @@ async fn refuse_unencodable_bounded<S, E: AuditEmit + Send + Sync>(
     }
 }
 
+/// A reply encoded into a zeroizing buffer sized to it before it is filled, so it never grows.
+fn encode_reply(
+    response: &Response,
+) -> Result<maknae_io::Zeroizing<Vec<u8>>, maknae_proto::ProtoCodecError> {
+    let mut size = crate::task_store::Counted(0);
+    ciborium::into_writer(response, &mut size)
+        .map_err(|e| maknae_proto::ProtoCodecError::Encode(e.to_string()))?;
+    encode_response_zeroizing(response, size.0)
+}
+
 /// SIZE-BOUNDED write of an already-encoded response: a
 /// PERMIT whose delivery is refused is refused EXPLICITLY (`TooLarge` with a
 /// corrective record), never truncated and never silently oversized. The write
@@ -4855,7 +5162,8 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
     seq: &Seq,
     action: &str,
     au3_1: &serde_json::Value,
-) where
+) -> bool
+where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // A task verb answers with what was stored under any cap the range allows (#628).
@@ -4870,14 +5178,15 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
             session_id, seq, action, au3_1,
         )
         .await;
-        return;
+        return false;
     }
     let written = tokio::time::timeout(
         Duration::from_millis(cfg.read_timeout_ms),
         write_frame(stream, class, bytes),
     )
     .await;
-    if !matches!(written, Ok(Ok(()))) {
+    let written = matches!(written, Ok(Ok(())));
+    if !written {
         emit_request_outcome(
             emit,
             host,
@@ -4899,6 +5208,7 @@ async fn write_frame_bounded<S, E: AuditEmit + Send + Sync>(
         )
         .await;
     }
+    written
 }
 
 /// Write one generic error frame, bounded like every response write. The
@@ -5228,6 +5538,8 @@ pub struct AgentAdmission {
     pub tasks: Arc<crate::task::TaskStore>,
     pub signer: Arc<dyn crate::task::TaskSigner>,
     pub banner: Banner,
+    pub board: Arc<crate::board::BoardStore>,
+    pub switches: Arc<dyn crate::board_verbs::BoardSwitches>,
 }
 
 /// The operator's banner: loaded at start, replaced by each applied reload.
@@ -5241,6 +5553,8 @@ impl AgentAdmission {
             tasks: Arc::new(crate::task::TaskStore::new()),
             signer: Arc::new(crate::task::UnverifiedSigner),
             banner: Banner::default(),
+            board: Arc::new(crate::board::BoardStore::new()),
+            switches: Arc::new(crate::board_verbs::SwitchesOff),
         }
     }
 }
@@ -5982,6 +6296,7 @@ pub fn run(config_dir: &Path) -> ExitCode {
         policy_load: maknae_authz_basic::PolicySource::load,
         conversations_open: production_conversations,
         tasks_open: production_tasks,
+        board_open: production_board,
         banner_load: maknae_config::load_banner,
     };
     let code = runtime.block_on(async move {
@@ -7026,6 +7341,8 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     containment: Arc<ContainmentStatus>,
     /// Reconciled against every installed snapshot.
     tasks: Arc<crate::task::TaskStore>,
+    board: Arc<crate::board::BoardStore>,
+    switches: Arc<dyn crate::board_verbs::BoardSwitches>,
     banner: Banner,
     banner_load: BannerLoader,
     #[cfg(test)]
@@ -7149,21 +7466,23 @@ where
             tasks: Arc::clone(&self.tasks),
             signer,
             banner: Arc::clone(&self.banner),
+            board: Arc::clone(&self.board),
+            switches: Arc::clone(&self.switches),
         }
     }
 
     /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
-    /// marks every open task whose agent it no longer enrolls, without I/O. Called after
-    /// the install's own locks are released: `mark_unenrolled` reads the snapshot under the
-    /// store lock. [`Reloader::settle_tasks`] follows once the turn is released.
+    /// marks every open task whose agent it no longer enrolls, and the board's posts to hold
+    /// and cursors to drop, without I/O. Called after the install's own locks are released:
+    /// `mark_unenrolled` and `mark` read the snapshot under their store's lock.
+    /// [`Reloader::settle_tasks`] follows once the turn is released.
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
         if let Some(snapshot) = snapshot {
             self.authorizer.baseline().install(snapshot);
         }
-        self.tasks
-            .mark_unenrolled(&crate::enrollment::SnapshotEnrollment(Arc::clone(
-                &self.authorizer,
-            )));
+        let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer));
+        self.tasks.mark_unenrolled(&view);
+        self.board.mark(&view);
     }
 
     /// Records and performs the closes `install_and_reconcile` marked, in a session of its
@@ -7179,8 +7498,13 @@ where
             seq: &seq,
             au3_1: &self.au3_1,
         };
+        let view: Arc<dyn crate::enrollment::EnrollmentView> = Arc::new(
+            crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer)),
+        );
         settle_tasks(
             &self.tasks,
+            &self.board,
+            &view,
             self.sink.as_ref(),
             &ctx,
             BLOCKING_OPERATION_TIMEOUT,
@@ -7993,21 +8317,34 @@ where
                 }))
             }
             HeldOp::Release { target, after } => {
+                use crate::enrollment::EnrollmentView;
                 let after = after.map(maknae_proto::TaskCursor::seq);
-                let (ids, more) = match target {
+                let (ids, more, subject) = match target {
                     maknae_proto::HeldTarget::Task(t) => {
                         let id = t.to_id();
                         let seq = self.tasks.record(&id).map_or(0, |rec| rec.seq);
-                        (vec![(seq, id)], false)
+                        (vec![(seq, id)], false, None)
                     }
                     maknae_proto::HeldTarget::User(t) => {
-                        self.held_seqs(&view, self.held_user(t).await?, after)
+                        let who = self.held_user(t).await?;
+                        let uid = match &who {
+                            HeldWho::Uid(uid) => Some(*uid),
+                            HeldWho::Every | HeldWho::Agent(_) => None,
+                        };
+                        let (ids, more) = self.held_seqs(&view, who, after);
+                        (ids, more, uid)
                     }
                     maknae_proto::HeldTarget::Agent(a) => {
-                        self.held_seqs(&view, held_agent(a)?, after)
+                        let who = held_agent(a)?;
+                        let uid = match &who {
+                            HeldWho::Agent(id) => view.agent_uid(id),
+                            HeldWho::Every | HeldWho::Uid(_) => None,
+                        };
+                        let (ids, more) = self.held_seqs(&view, who, after);
+                        (ids, more, uid)
                     }
                 };
-                self.release_held(&r, view, ids, after, more).await
+                self.release_held(&r, view, ids, after, more, subject).await
             }
         }
     }
@@ -8047,6 +8384,7 @@ where
         ids: Vec<(u64, maknae_proto::TaskId)>,
         after: Option<u64>,
         more: bool,
+        subject: Option<u32>,
     ) -> Result<maknae_proto::Payload, ContainAnswer> {
         use crate::containment::{Kind, LiveRefusal};
         use crate::task_verbs as tv;
@@ -8067,6 +8405,7 @@ where
         let mut outcomes = Vec::new();
         let mut attempted = Vec::new();
         let mut unreached = false;
+        let mut broke = false;
         for (seq_no, id) in ids {
             if started.elapsed() + self.held_stage * HELD_TASK_STAGES as u32
                 > self.held_stage * HELD_LOOP_STAGES as u32
@@ -8122,6 +8461,7 @@ where
                     | ReleaseResult::OutcomeUnknown
                     | ReleaseResult::Unauthorized
             ) {
+                broke = true;
                 break;
             }
             #[cfg(test)]
@@ -8133,12 +8473,116 @@ where
                 }
             }
         }
+        let mut next = tv::release_next(&attempted, after, more || unreached);
+        let (mut posts_released, mut posts_held) = (0, 0);
+        let stopped = broke || unreached || more;
+        if let Some(uid) = subject.filter(|uid| !stopped && self.board.held_count(*uid) > 0) {
+            match attempted.last() {
+                Some((last, _)) => next = Some(maknae_proto::TaskCursor::from_seq(*last)),
+                None => {
+                    posts_released = self
+                        .release_posts(r, &ctx, requester, &view, uid, started)
+                        .await?;
+                    let held = self.board.held_count(uid);
+                    posts_held = u32::try_from(held).unwrap_or(u32::MAX);
+                    next = (posts_released > 0 && held > 0)
+                        .then(|| maknae_proto::TaskCursor::from_seq(after.unwrap_or(0)));
+                }
+            }
+        }
         Ok(maknae_proto::Payload::HeldReleased(
             maknae_proto::ReleasePage {
-                next: tv::release_next(&attempted, after, more || unreached),
+                next,
                 outcomes,
+                posts_released,
+                posts_held,
             },
         ))
+    }
+
+    /// One page of the posts held for `uid`, under the turn and re-authorized once; each
+    /// lift recorded before it is written. The count is of holds lifted.
+    async fn release_posts(
+        &self,
+        r: &HeldRequest<'_>,
+        ctx: &BootCtx<'_>,
+        requester: (u32, u64),
+        view: &crate::enrollment::SnapshotEnrollment<B>,
+        uid: u32,
+        started: tokio::time::Instant,
+    ) -> Result<u32, ContainAnswer> {
+        use crate::containment::{Kind, LiveRefusal};
+        use crate::enrollment::EnrollmentView;
+        use maknae_config::{HELD_LOOP_STAGES, HELD_TASK_STAGES};
+        #[cfg(test)]
+        {
+            let before = self.held_between.lock().unwrap().clone();
+            if let Some((reached, go)) = before {
+                reached.notify_one();
+                go.notified().await;
+            }
+        }
+        let turn = tokio::time::timeout(self.turn_wait, self.lock.lock()).await;
+        let decided = match turn {
+            Err(_) => Err(LiveRefusal::Busy),
+            Ok(_) if *self.stopping.borrow() || *self.drain.borrow() != Drain::Serving => {
+                Err(LiveRefusal::Stopping)
+            }
+            Ok(_) => self.reauthorize(r.action).await,
+        };
+        if let Err(refusal) = decided {
+            return Err(live_refused(Kind::Held, None, None, refusal));
+        }
+        if view.contained(uid) {
+            return Ok(0);
+        }
+        let mut released = 0;
+        let held = self.board.held_for(uid, maknae_proto::HELD_PAGE_MAX);
+        for (i, (key, id, seq, lifted)) in held.into_iter().enumerate() {
+            if started.elapsed() + self.held_stage * HELD_TASK_STAGES as u32
+                > self.held_stage * HELD_LOOP_STAGES as u32
+            {
+                break;
+            }
+            let rec = board_release_record(ctx, requester, key, id, seq, lifted);
+            if !self.append_post_release(&rec).await {
+                if i == 0 {
+                    return Err(live_refused(
+                        Kind::Held,
+                        None,
+                        None,
+                        LiveRefusal::Failed("the trail refused the record".into()),
+                    ));
+                }
+                break;
+            }
+            let board = Arc::clone(&self.board);
+            let writer_view = view.clone();
+            let deadline = tokio::time::Instant::now() + HELD_TASK_WRITE_BOUND;
+            let written = crate::board_verbs::offload(requester.0, deadline, move || {
+                board.release(key, id, lifted, &writer_view)
+            })
+            .await;
+            if let Err((posture, reason)) = lift_outcome(&written) {
+                let rec =
+                    post_release_record(ctx, requester, key, id, seq, ("deny", posture, &reason));
+                self.append_post_release(&rec).await;
+                break;
+            }
+            released += 1;
+        }
+        drop(turn);
+        Ok(released)
+    }
+
+    async fn append_post_release(&self, rec: &AuditRecord) -> bool {
+        match self.sink.emit_within(rec, self.append_bound).await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("maknaed: AUDIT WRITE FAILED on a held-post release record: {e}");
+                false
+            }
+        }
     }
 
     async fn release_one(
@@ -9125,6 +9569,7 @@ struct BootSeams {
     policy_load: PolicyLoader,
     conversations_open: ConversationsOpener,
     tasks_open: TasksOpener,
+    board_open: BoardOpener,
     banner_load: BannerLoader,
 }
 
@@ -9186,6 +9631,53 @@ async fn open_tasks(
         sink.emit_within(&task_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
             .await
             .map_err(|e| refused(format!("the trail refused a task record: {e}")))?;
+        store.settle(&finding).map_err(|e| refused(e.to_string()))?;
+    }
+    Ok(store)
+}
+
+type BoardOpener = fn(
+    &Path,
+    u32,
+    WrappingKey,
+) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError>;
+
+fn production_board(
+    dir: &Path,
+    owner: u32,
+    key: WrappingKey,
+) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+    let blobs =
+        crate::conversation::dir_store::DirBlobs::open(dir, owner, key, crate::board_store::BOARD)
+            .map_err(|e| crate::task_store::StoreError::Io(e.to_string()))?;
+    crate::board::BoardStore::open(Box::new(blobs), Arc::new(crate::task_store::SystemClock))
+        .map(Arc::new)
+}
+
+/// Opens the board store with the graph key, records each unreadable record in the
+/// trail, then quarantines it.
+async fn open_board<E: AuditEmit>(
+    config_dir: &Path,
+    state_dir: &Path,
+    seams: &BootSeams,
+    owner: u32,
+    sink: &E,
+    ctx: &BootCtx<'_>,
+) -> Result<Arc<crate::board::BoardStore>, RunError> {
+    let dir = state_dir.join(maknae_config::state::BOARD_DIR);
+    let refused = |e: String| {
+        RunError::Other(format!(
+            "board store {} cannot be opened: {e}",
+            dir.display()
+        ))
+    };
+    let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
+    let store = (seams.board_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+        .map_err(|e| refused(e.to_string()))?;
+    for finding in store.take_boot_findings() {
+        sink.emit_within(&board_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
+            .await
+            .map_err(|e| refused(format!("the trail refused a board record: {e}")))?;
         store.settle(&finding).map_err(|e| refused(e.to_string()))?;
     }
     Ok(store)
@@ -9258,6 +9750,73 @@ fn held_release_record(
     rec.subject.task_id = Some(task.to_string());
     rec.subject.tasker = tasker.map(maknae_proto::tasker_text);
     rec.subject.parent_task_id = parent.map(ToString::to_string);
+    rec.source.uid = requester.0;
+    rec
+}
+
+/// `Ok` for a lift that counts; otherwise the posture and reason of its corrective record.
+fn lift_outcome(
+    written: &Result<crate::board::Lifted, crate::board::BoardRefusal>,
+) -> Result<(), (&'static str, String)> {
+    use crate::board::{BoardRefusal as R, Lifted};
+    match written {
+        Ok(Lifted::Done) => Ok(()),
+        Ok(Lifted::Remarked) => Err(("refused", "post not released: contained again".into())),
+        Err(why @ R::StillContained) => Err(("refused", format!("post not released: {why}"))),
+        Err(
+            why @ (R::Store(_)
+            | R::Unavailable(_)
+            | R::Full
+            | R::AuthorAtCap
+            | R::NoSuchPost
+            | R::Random),
+        ) => Err(("unavailable", format!("post not released: {why}"))),
+    }
+}
+
+/// An administrator's release of one hold on a post, appended before it is written.
+fn board_release_record(
+    ctx: &BootCtx<'_>,
+    requester: (u32, u64),
+    key: crate::board_store::BoardKey,
+    id: maknae_proto::PostId,
+    seq: u64,
+    lifted: crate::board_store::HeldFor,
+) -> AuditRecord {
+    use crate::board_store::HeldFor;
+    let reason = match lifted {
+        HeldFor::Author => "post released (author)",
+        HeldFor::Person => "post released (person)",
+    };
+    post_release_record(
+        ctx,
+        requester,
+        key,
+        id,
+        seq,
+        ("permit", "authorized", reason),
+    )
+}
+
+fn post_release_record(
+    ctx: &BootCtx<'_>,
+    requester: (u32, u64),
+    key: crate::board_store::BoardKey,
+    id: maknae_proto::PostId,
+    seq: u64,
+    (result, posture, reason): (&str, &str, &str),
+) -> AuditRecord {
+    let reason = format!("{reason}{}", crate::task_verbs::requested_by(requester));
+    let mut rec = crate::board_verbs::on_board(
+        ctx.record("admin.release", result, &reason, posture, None),
+        Some(key),
+    );
+    rec.subject.board_op = Some("release".into());
+    rec.board = Some(maknae_audit_append::BoardAudit {
+        post_id: Some(id.to_string()),
+        seq: Some(seq),
+        ..maknae_audit_append::BoardAudit::default()
+    });
     rec.source.uid = requester.0;
     rec
 }
@@ -9444,10 +10003,96 @@ async fn close_due<E: AuditEmit>(
     }
 }
 
+/// [`close_due`] for the board store: one record per due expiry, hold or cursor removal,
+/// then the store performs that batch.
+async fn board_due<E: AuditEmit>(
+    board: &Arc<crate::board::BoardStore>,
+    view: &Arc<dyn crate::enrollment::EnrollmentView>,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+    deadline: tokio::time::Instant,
+) -> Swept {
+    let mut stopped = None;
+    while stopped.is_none() {
+        let mut recorded = Vec::new();
+        for due in board.due(TASK_CLOSE_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                stopped = Some("the pass ran out of time".into());
+                break;
+            }
+            if !due.recorded {
+                if let Err(e) = emit
+                    .emit_within(&board_due_record(ctx, &due), AUDIT_APPEND_TIMEOUT)
+                    .await
+                {
+                    stopped = Some(format!("the trail refused a board record: {e}"));
+                    break;
+                }
+            }
+            recorded.push(due);
+        }
+        if recorded.is_empty() {
+            break;
+        }
+        let (b, v) = (Arc::clone(board), Arc::clone(view));
+        match crate::task::offload(ctx.euid, deadline, move || Ok(b.perform(&recorded, &*v))).await
+        {
+            Ok(0) => stopped = stopped.or(Some("the board store stored none".into())),
+            Ok(_) => {}
+            Err(e) => stopped = Some(e.to_string()),
+        }
+    }
+    Swept {
+        remaining: board.due(usize::MAX).len(),
+        stopped,
+    }
+}
+
+/// [`record_task_notices`] for the board store.
+async fn record_board_notices<E: AuditEmit>(
+    board: &crate::board::BoardStore,
+    emit: &E,
+    ctx: &BootCtx<'_>,
+) -> bool {
+    let mut notices = std::collections::VecDeque::from(board.take_notices());
+    let taken = notices.len();
+    while let Some(notice) = notices.pop_front() {
+        let rec = board_notice_record(ctx, &notice);
+        if emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await.is_err() {
+            notices.push_front(notice);
+            board.return_notices(notices.into(), taken);
+            return false;
+        }
+    }
+    board.return_notices(Vec::new(), taken);
+    true
+}
+
+/// [`record_task_failure`] for the board store.
+async fn record_board_failure<E: AuditEmit>(emit: &E, ctx: &BootCtx<'_>, why: &str) {
+    let ctx = BootCtx {
+        event: "board",
+        ..*ctx
+    };
+    let rec = ctx.record(
+        "board.manage",
+        "deny",
+        &format!("store: {why}"),
+        "unavailable",
+        None,
+    );
+    if let Err(e) = emit.emit_within(&rec, AUDIT_APPEND_TIMEOUT).await {
+        eprintln!("maknaed: AUDIT WRITE FAILED on a board store record ({why}): {e}");
+    }
+}
+
 /// One pass: the due closes and expiries, the counters when `counters`, then the store's
-/// notices. Whatever it leaves undone is itself recorded.
+/// notices; then the board's due items and notices. Whatever it leaves undone is itself
+/// recorded.
 async fn settle_tasks<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
+    board: &Arc<crate::board::BoardStore>,
+    view: &Arc<dyn crate::enrollment::EnrollmentView>,
     emit: &E,
     ctx: &BootCtx<'_>,
     budget: Duration,
@@ -9481,6 +10126,22 @@ async fn settle_tasks<E: AuditEmit>(
     for why in [left, unstored, unsaid].into_iter().flatten() {
         record_task_failure(emit, ctx, &why, AUDIT_APPEND_TIMEOUT).await;
     }
+    if tokio::time::Instant::now() >= deadline {
+        return;
+    }
+    let swept = board_due(board, view, emit, ctx, deadline).await;
+    let said = record_board_notices(board, emit, ctx).await;
+    let left = match (swept.remaining, swept.stopped) {
+        (0, _) => None,
+        (n, why) => Some(format!(
+            "{n} board expiries, holds or cursor removals remain due: {}",
+            why.unwrap_or_else(|| "the pass ended".into())
+        )),
+    };
+    let unsaid = (!said).then(|| "the trail refused a board store record".to_string());
+    for why in [left, unsaid].into_iter().flatten() {
+        record_board_failure(emit, ctx, &why).await;
+    }
 }
 
 /// A task-store failure goes to the trail; stderr only when the trail itself refuses it.
@@ -9509,12 +10170,14 @@ async fn record_task_failure<E: AuditEmit>(
 /// is recorded and left to the sweep; only a trail that refuses that record refuses boot.
 async fn reconcile_tasks_at_boot<E: AuditEmit>(
     tasks: &Arc<crate::task::TaskStore>,
+    board: &Arc<crate::board::BoardStore>,
     view: &dyn crate::enrollment::EnrollmentView,
     emit: &E,
     ctx: &BootCtx<'_>,
     budget: Duration,
 ) -> Result<(), RunError> {
     tasks.mark_unenrolled(view);
+    board.mark(view);
     let ctx = task_ctx(ctx);
     let swept = close_due(tasks, emit, &ctx, tokio::time::Instant::now() + budget).await;
     if swept.remaining == 0 {
@@ -9535,8 +10198,9 @@ async fn reconcile_tasks_at_boot<E: AuditEmit>(
 
 /// Sweeps the task store every `TASK_SWEEP_EVERY` and once more, within
 /// `TASK_SWEEP_STOP_TIMEOUT`, when `stop` is notified.
+/// `agents` gives the task and board stores and the enrollment view the sweep acts on.
 async fn sweep_tasks<E: AuditEmit>(
-    tasks: Arc<crate::task::TaskStore>,
+    agents: AgentAdmission,
     emit: Arc<E>,
     where_: WhereCtx,
     euid: u32,
@@ -9560,7 +10224,16 @@ async fn sweep_tasks<E: AuditEmit>(
             _ = tick.tick() => (false, BLOCKING_OPERATION_TIMEOUT),
             _ = stop.notified() => (true, TASK_SWEEP_STOP_TIMEOUT),
         };
-        settle_tasks(&tasks, &*emit, &ctx, budget, true).await;
+        settle_tasks(
+            &agents.tasks,
+            &agents.board,
+            &agents.view,
+            &*emit,
+            &ctx,
+            budget,
+            true,
+        )
+        .await;
         if stopping {
             return;
         }
@@ -9620,6 +10293,85 @@ fn task_finding_record(ctx: &BootCtx<'_>, finding: &crate::task_store::BootFindi
             rec.object = Some(format!("task-record:{name}"));
             rec
         }
+    }
+}
+
+fn board_finding_record(
+    ctx: &BootCtx<'_>,
+    finding: &crate::board_store::BoardFinding,
+) -> AuditRecord {
+    use crate::board_store::BoardFinding;
+    let ctx = BootCtx {
+        event: "board",
+        ..*ctx
+    };
+    match finding {
+        BoardFinding::Quarantined { name, why } => {
+            let mut rec = ctx.record(
+                "board.manage",
+                "deny",
+                &format!("quarantined: {why}"),
+                "unavailable",
+                None,
+            );
+            rec.object = Some(format!("board:{name}"));
+            rec
+        }
+    }
+}
+
+fn board_record(
+    ctx: &BootCtx<'_>,
+    (result, posture, reason): (&str, &str, &str),
+    op: &str,
+    key: crate::board_store::BoardKey,
+    audit: Option<maknae_audit_append::BoardAudit>,
+) -> AuditRecord {
+    let ctx = BootCtx {
+        event: "board",
+        ..*ctx
+    };
+    let mut rec = crate::board_verbs::on_board(
+        ctx.record("board.manage", result, reason, posture, None),
+        Some(key),
+    );
+    rec.subject.board_op = Some(op.into());
+    rec.board = audit;
+    rec
+}
+
+/// The record of a post expiry, a hold or a cursor removal, appended before the store
+/// performs it.
+fn board_due_record(ctx: &BootCtx<'_>, due: &crate::board::BoardDue) -> AuditRecord {
+    let (op, reason) = crate::board_verbs::due_said(due.why);
+    let mut rec = board_record(
+        ctx,
+        ("deny", "unavailable", reason),
+        op,
+        due.key,
+        crate::board_verbs::due_audit(due),
+    );
+    rec.subject.agent = due.reader.as_ref().map(|a| a.as_str().to_owned());
+    rec
+}
+
+fn board_notice_record(ctx: &BootCtx<'_>, notice: &crate::board::BoardNotice) -> AuditRecord {
+    use crate::board::BoardNotice;
+    match notice {
+        BoardNotice::Settled { key, id } => board_record(
+            ctx,
+            (
+                "permit",
+                "authorized",
+                "settled: an unknown post was removed",
+            ),
+            "expire",
+            *key,
+            Some(maknae_audit_append::BoardAudit {
+                post_id: Some(id.to_string()),
+                ..maknae_audit_append::BoardAudit::default()
+            }),
+        ),
     }
 }
 
@@ -10279,6 +11031,15 @@ async fn boot_after_sink(
         &graph_ctx,
     )
     .await?;
+    let board = open_board(
+        config_dir,
+        state_dir,
+        seams,
+        euid,
+        sink.as_ref(),
+        &graph_ctx,
+    )
+    .await?;
     booted.status.baseline = crate::baseline::BaselineStatus::new(crate::baseline::BaselineState {
         accepted: run,
         pending: pending.clone(),
@@ -10378,6 +11139,7 @@ async fn boot_after_sink(
     let authorizer = Arc::new(authorizer);
     reconcile_tasks_at_boot(
         &tasks,
+        &board,
         &crate::enrollment::SnapshotEnrollment(Arc::clone(&authorizer)),
         sink.as_ref(),
         &graph_ctx,
@@ -10531,6 +11293,8 @@ async fn boot_after_sink(
         lookup_breaker: account_lookup_breaker(),
         containment: containment_status,
         tasks,
+        board,
+        switches: Arc::new(crate::board_verbs::SwitchesOff),
         banner: Arc::new(std::sync::RwLock::new(banner)),
         banner_load: seams.banner_load,
         #[cfg(test)]
@@ -10710,7 +11474,7 @@ where
     let agents = reloader.agent_admission(Arc::new(crate::task::PlaneSigner(Arc::clone(client))));
     let sweep_stop = Arc::new(tokio::sync::Notify::new());
     let mut sweeper = tokio::spawn(sweep_tasks(
-        Arc::clone(&reloader.tasks),
+        agents.clone(),
         Arc::clone(sink),
         wctx.clone(),
         reloader.euid,
@@ -11832,6 +12596,194 @@ mod record_widths {
         let cases = Who::new(false).task_verb_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
         assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
+    }
+
+    fn widest_addressees() -> Vec<String> {
+        let id = widest_agent_id();
+        let stem = &id[..id.len() - 1];
+        let ids: Vec<String> = ('a'..='h').map(|c| format!("{stem}{c}")).collect();
+        assert!(ids.iter().all(|a| AgentId::parse(a).is_ok()));
+        ids
+    }
+
+    fn widest_post() -> maknae_proto::PostDraft {
+        let secret = |n: usize| maknae_proto::SecretText("b".repeat(n).into());
+        maknae_proto::PostDraft {
+            kind: maknae_proto::PostKind::Question,
+            to: maknae_proto::Addressee::Agents(widest_addressees()),
+            in_reply_to: Some(maknae_proto::PostId([0xff; 16])),
+            body: secret(maknae_proto::BOARD_POST_MAX_BYTES),
+            attachments: (0..maknae_proto::BOARD_ATTACHMENTS_MAX)
+                .map(|_| maknae_proto::Attachment {
+                    label: "l".repeat(maknae_proto::BOARD_LABEL_MAX_BYTES),
+                    media: maknae_proto::Media::TextMarkdown,
+                    content: secret(maknae_proto::BOARD_POST_MAX_BYTES),
+                })
+                .collect(),
+        }
+    }
+
+    impl Who {
+        fn board_case(
+            &self,
+            verb: &Verb,
+            (result, reason, posture): (&str, &str, &str),
+            board: maknae_audit_append::BoardAudit,
+        ) -> Case {
+            let (role, rule) = self.decided(verb);
+            let action = crate::handler::verb_to_action(verb);
+            let mut rec = decision_record(
+                crate::board_verbs::on_board(
+                    request_outcome_record(
+                        &host(),
+                        self.socket(),
+                        u32::MAX,
+                        None,
+                        Some(&widest_user()),
+                        None,
+                        None,
+                        u64::MAX,
+                        u64::MAX,
+                        (action, None, None),
+                        (result, reason, posture),
+                        &serde_json::Value::Null,
+                    ),
+                    Some(crate::board_store::BoardKey(u32::MAX)),
+                ),
+                role,
+                rule.as_ref(),
+            );
+            rec.board = Some(board);
+            self.session().stamp(&mut rec);
+            Case {
+                label: format!("{action}: {result} {reason}"),
+                rec,
+                tasker: Some(held_tasker()),
+                task: Some(TASK.to_string()),
+                parent: None,
+                op: None,
+            }
+        }
+
+        fn board_cases(&self) -> Vec<Case> {
+            use crate::board::BoardRefusal as R;
+            use crate::board_verbs as bv;
+            let draft = widest_post();
+            let digest = bv::post_digest(&draft).expect("the widest post encodes");
+            assert_eq!(digest.len(), 64);
+            let posted = bv::posted_audit(
+                bv::post_audit(&draft, &digest),
+                &crate::board_store::Stored {
+                    post: maknae_proto::Post {
+                        id: maknae_proto::PostId([0xff; 16]),
+                        author: maknae_proto::Author::Agent(widest_agent_id()),
+                        task: Some(TASK),
+                        at_secs: i64::MAX,
+                        labels: maknae_proto::Labels {},
+                        draft: draft.clone(),
+                    },
+                    seq: u64::MAX,
+                    author_uid: Some(u32::MAX),
+                    labels: crate::board_store::PostLabels::default(),
+                    held: std::collections::BTreeSet::new(),
+                },
+            );
+            let refusals = [
+                R::Full,
+                R::AuthorAtCap,
+                R::NoSuchPost,
+                R::Random,
+                R::Store("not done: the board store was busy".into()),
+                R::Unavailable(format!(
+                    "{}the board store did not answer in time",
+                    crate::task::OUTCOME_UNKNOWN
+                )),
+            ];
+            let post = Verb::BoardPost {
+                post: draft.clone(),
+            };
+            let described = bv::post_audit(&draft, &digest);
+            let mut all = vec![
+                self.board_case(
+                    &post,
+                    ("permit", "intent recorded", "authorized"),
+                    described.clone(),
+                ),
+                self.board_case(&post, ("permit", "done", "authorized"), posted),
+                self.board_case(
+                    &post,
+                    ("deny", &R::NoSuchPost.to_string(), "unauthorized"),
+                    described.clone(),
+                ),
+            ];
+            for r in &refusals {
+                let reason = r.to_string();
+                let said = ("permit", reason.as_str(), bv::posture(r));
+                all.push(self.board_case(&post, said, described.clone()));
+            }
+            let read = Verb::BoardRead {
+                seen_through: Some(maknae_proto::PostId([0xff; 16])),
+            };
+            let walk = bv::Walk {
+                page: maknae_proto::BoardPage {
+                    posts: Vec::new(),
+                    more: true,
+                },
+                first_seq: Some(u64::MAX),
+                last_seq: Some(u64::MAX),
+                returned: u32::MAX,
+                withheld: u32::MAX,
+                sent: Vec::new(),
+            };
+            let at = bv::cursor_audit(u64::MAX);
+            all.extend([
+                self.board_case(
+                    &read,
+                    ("permit", "intent recorded", "authorized"),
+                    at.clone(),
+                ),
+                self.board_case(
+                    &read,
+                    ("permit", "done", "authorized"),
+                    bv::read_audit(&walk, u64::MAX),
+                ),
+                self.board_case(
+                    &read,
+                    ("deny", bv::UNDECIDED, "unavailable"),
+                    bv::read_audit(&walk, u64::MAX),
+                ),
+            ]);
+            for r in &refusals[4..] {
+                let reason = format!("read {r}");
+                let mut case = self.board_case(
+                    &read,
+                    ("permit", &r.to_string(), bv::posture(r)),
+                    at.clone(),
+                );
+                case.label = reason;
+                all.push(case);
+            }
+            all
+        }
+    }
+
+    #[test]
+    fn the_board_records_of_the_widest_agent_mirror_as_measured() {
+        let cases = Who::new(false).board_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        assert_eq!(
+            widest_label(&cases),
+            "board.post: permit done",
+            "the post outcome, with its id and sequence, is the widest"
+        );
+        let widest = cases
+            .iter()
+            .find(|c| c.label == "board.post: permit done")
+            .expect("the post outcome");
+        let line = macos_mirror(&widest.rec).full_line;
+        let digest = widest.rec.board.as_ref().and_then(|b| b.digest.clone());
+        assert!(line.contains(&digest.expect("a digest")), "{line}");
+        assert!(!line.contains(&"b".repeat(64)), "no content");
     }
 
     const WIDEST_RELEASE: &str =
@@ -15781,6 +16733,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             policy_load: maknae_authz_basic::PolicySource::load,
             conversations_open: memory_conversations,
             tasks_open: memory_tasks,
+            board_open: memory_board,
             banner_load: owned_banner,
         }
     }
@@ -15804,6 +16757,14 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         _: WrappingKey,
     ) -> Result<Arc<crate::task::TaskStore>, crate::task_store::StoreError> {
         Ok(Arc::new(crate::task::TaskStore::new()))
+    }
+
+    fn memory_board(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        Ok(Arc::new(crate::board::BoardStore::new()))
     }
 
     fn memory_conversations(
@@ -16138,6 +17099,196 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .all(|r| r.event == "boot" && r.outcome.result == "deny"));
         assert!(!blobs.has(pending));
         assert_eq!(blobs.aside(), vec!["sentinel-628-unreadable".to_string()]);
+    }
+
+    fn corrupt_board() -> (crate::task_store::MemTaskBlobs, String) {
+        let b = crate::task_store::MemTaskBlobs::default();
+        let name = format!("post.1000.{}", maknae_proto::PostId([0x95; 16]));
+        b.put(&name, b"sentinel-695-corrupt-post");
+        (b, name)
+    }
+
+    fn mem_board(
+        b: &crate::task_store::MemTaskBlobs,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        crate::board::BoardStore::open(
+            Box::new(b.clone()),
+            Arc::new(crate::task_store::SystemClock),
+        )
+        .map(Arc::new)
+    }
+
+    static BOARD_AT_BOOT: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+    static BOARD_OPENED_AT: Mutex<Option<(PathBuf, u32)>> = Mutex::new(None);
+
+    fn board_found_at_boot(
+        dir: &Path,
+        owner: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        *BOARD_OPENED_AT.lock().unwrap() = Some((dir.to_path_buf(), owner));
+        mem_board(&BOARD_AT_BOOT.get_or_init(corrupt_board).0)
+    }
+
+    #[test]
+    fn the_board_store_opens_beside_the_task_store() {
+        let _g = env_lock();
+        let d = fixture("board-opens");
+        let _ = block_on_run_inner_with(
+            &d.0,
+            BootSeams {
+                board_open: board_found_at_boot,
+                ..seams_with(TestEnv::default())
+            },
+        );
+        let (dir, owner) = BOARD_OPENED_AT
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("boot opens the board store");
+        assert_eq!(dir, state_dir(&d.0).join(maknae_config::state::BOARD_DIR));
+        assert_eq!(owner, nix::unistd::geteuid().as_raw());
+        let recs: Vec<AuditRecord> = trail_of(&d, "audit.jsonl")
+            .into_iter()
+            .filter(|r| r.event == "board")
+            .collect();
+        let (blobs, name) = BOARD_AT_BOOT.get().unwrap();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        assert_eq!(recs[0].object, Some(format!("board:{name}")));
+        assert_eq!(blobs.aside(), vec![name.clone()]);
+    }
+
+    struct BoardWitness {
+        blobs: crate::task_store::MemTaskBlobs,
+        refuse: bool,
+        seen: Mutex<Vec<(AuditRecord, Vec<String>)>>,
+    }
+
+    impl AuditEmit for BoardWitness {
+        fn emit(
+            &self,
+            rec: &AuditRecord,
+        ) -> impl Future<Output = Result<(), maknae_audit_append::AuditError>> + Send {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((rec.clone(), self.blobs.aside()));
+            let r = match self.refuse {
+                true => Err(maknae_audit_append::AuditError::WritePrimary(
+                    "sentinel-695-trail-refused".into(),
+                )),
+                false => Ok(()),
+            };
+            async move { r }
+        }
+    }
+
+    static BOARD_ORDERED: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+    static BOARD_REFUSED: std::sync::OnceLock<(crate::task_store::MemTaskBlobs, String)> =
+        std::sync::OnceLock::new();
+
+    fn board_ordered(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        mem_board(&BOARD_ORDERED.get_or_init(corrupt_board).0)
+    }
+
+    fn board_refused(
+        _: &Path,
+        _: u32,
+        _: WrappingKey,
+    ) -> Result<Arc<crate::board::BoardStore>, crate::task_store::StoreError> {
+        mem_board(&BOARD_REFUSED.get_or_init(corrupt_board).0)
+    }
+
+    async fn open_board_into(
+        opener: BoardOpener,
+        witness: &BoardWitness,
+    ) -> Result<Arc<crate::board::BoardStore>, RunError> {
+        let (seq, au3_1) = (Seq::new(), serde_json::json!({}));
+        let ctx = BootCtx {
+            event: "boot",
+            host: "h",
+            socket: "s",
+            euid: 77,
+            session_id: 9,
+            seq: &seq,
+            au3_1: &au3_1,
+        };
+        let seams = BootSeams {
+            board_open: opener,
+            ..test_seams()
+        };
+        open_board(
+            Path::new("/sentinel-695-config"),
+            Path::new("/sentinel-695-state"),
+            &seams,
+            77,
+            witness,
+            &ctx,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_board_finding_is_recorded_before_it_is_settled() {
+        let (blobs, name) = BOARD_ORDERED.get_or_init(corrupt_board);
+        let witness = BoardWitness {
+            blobs: blobs.clone(),
+            refuse: false,
+            seen: Mutex::default(),
+        };
+        let opened = open_board_into(board_ordered, &witness).await;
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        let seen = witness.seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (rec, aside_when_recorded) = &seen[0];
+        assert!(
+            aside_when_recorded.is_empty(),
+            "settled before it was recorded"
+        );
+        assert_eq!(
+            (rec.event.as_str(), rec.action.as_str()),
+            ("board", "board.manage")
+        );
+        assert_eq!(
+            (
+                rec.outcome.result.as_str(),
+                rec.outcome.posture.as_str(),
+                rec.outcome.reason.as_str()
+            ),
+            (
+                "deny",
+                "unavailable",
+                "quarantined: the record does not decode"
+            )
+        );
+        assert_eq!(rec.object, Some(format!("board:{name}")));
+        assert_eq!(blobs.aside(), vec![name.clone()]);
+    }
+
+    #[tokio::test]
+    async fn boot_refuses_when_the_trail_refuses_a_board_finding() {
+        let (blobs, name) = BOARD_REFUSED.get_or_init(corrupt_board);
+        let witness = BoardWitness {
+            blobs: blobs.clone(),
+            refuse: true,
+            seen: Mutex::default(),
+        };
+        let opened = open_board_into(board_refused, &witness).await;
+        assert!(
+            matches!(&opened, Err(RunError::Other(m))
+                if m.contains("the trail refused a board record")
+                    && m.contains("sentinel-695-trail-refused")),
+            "{:?}",
+            opened.err()
+        );
+        assert!(blobs.aside().is_empty());
+        assert!(blobs.has(name));
     }
 
     fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {
@@ -19257,6 +20408,7 @@ mod reload_fixture {
         pub(super) gate: Option<Arc<maknae_authz_basic::EvaluationGate>>,
         pub(super) held_stage: Duration,
         pub(super) task_blobs: Option<crate::task_store::MemTaskBlobs>,
+        pub(super) board_blobs: Option<crate::task_store::MemTaskBlobs>,
     }
 
     impl Default for Opts<'_> {
@@ -19275,6 +20427,7 @@ mod reload_fixture {
                 turn_wait: BLOCKING_OPERATION_TIMEOUT,
                 held_stage: Duration::from_millis(maknae_config::BLOCKING_STAGE_TIMEOUT_MS),
                 task_blobs: None,
+                board_blobs: None,
                 count_decisions: false,
                 accounts: Arc::new(maknae_vault::account_uid),
                 lookup_bound: BLOCKING_OPERATION_TIMEOUT,
@@ -19565,6 +20718,15 @@ mod reload_fixture {
                 .unwrap(),
                 None => crate::task::TaskStore::new(),
             }),
+            board: Arc::new(match opts.board_blobs {
+                Some(blobs) => crate::board::BoardStore::open(
+                    Box::new(blobs),
+                    Arc::new(crate::task_store::SystemClock),
+                )
+                .unwrap(),
+                None => crate::board::BoardStore::new(),
+            }),
+            switches: Arc::new(crate::board_verbs::SwitchesOff),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
@@ -24068,6 +25230,188 @@ mod reload_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_contain_landing_while_a_post_release_waits_for_the_turn_releases_nothing() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture(
+            "held-post-race",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(ROOT_ADMIN),
+        )
+        .await;
+        let fx = Arc::new(with_agents(fx, &[HOBI]).await);
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1002, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let (reached, go) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        *fx.reloader.held_between.lock().unwrap() = Some((Arc::clone(&reached), Arc::clone(&go)));
+        let batch = tokio::spawn({
+            let fx = Arc::clone(&fx);
+            async move {
+                let target = HeldTarget::Agent("hobi".into());
+                fx.held(
+                    HeldOp::Release {
+                        target: &target,
+                        after: None,
+                    },
+                    0,
+                )
+                .await
+            }
+        });
+        bounded(reached.notified()).await;
+        *fx.reloader.held_between.lock().unwrap() = None;
+        bounded(fx.contain_uid(HOBI_UID, 0))
+            .await
+            .expect("the contain takes the turn first");
+        go.notify_one();
+        let page = release_page(bounded(batch).await.unwrap());
+        assert_eq!(counts(&page), (0, 2, None));
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        assert!(fx
+            .reloader
+            .board
+            .candidates(crate::board_store::BoardKey(1002), 0, 10)
+            .is_empty());
+        assert_eq!(fx.reloader.board.held_count(HOBI_UID), 2);
+        assert!(
+            post_records(&fx).is_empty(),
+            "the check under the turn writes no post record"
+        );
+    }
+
+    #[test]
+    fn a_remarked_lift_is_not_counted_and_is_recorded_as_not_released() {
+        use crate::board::{BoardRefusal, Lifted};
+        assert_eq!(lift_outcome(&Ok(Lifted::Done)), Ok(()));
+        assert_eq!(
+            lift_outcome(&Ok(Lifted::Remarked)),
+            Err(("refused", "post not released: contained again".into()))
+        );
+        assert_eq!(
+            lift_outcome(&Err(BoardRefusal::StillContained)),
+            Err(("refused", "post not released: still contained".into()))
+        );
+        assert_eq!(
+            lift_outcome(&Err(BoardRefusal::Store("x".into()))),
+            Err(("unavailable", "post not released: store: x".into()))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_later_posts_refused_record_ends_the_page_and_the_next_page_resumes() {
+        use maknae_proto::{HeldTarget, TaskCursor};
+        let fx = fixture_with(
+            "held-post-later",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                bound: STALL_BOUND,
+                ..Opts::default()
+            },
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1002, HOBI)];
+        assert_eq!(posts[1].seq, 2);
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        *fx.reloader.sink.stall.lock().unwrap() =
+            |r| r.action == "admin.release" && r.board.as_ref().and_then(|b| b.seq) == Some(2);
+        let target = HeldTarget::Agent("hobi".into());
+        let first = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(counts(&first), (1, 1, Some(TaskCursor::from_seq(0))));
+        assert!(live(&fx, &posts[0]) && !live(&fx, &posts[1]));
+        *fx.reloader.sink.stall.lock().unwrap() = never;
+        let second = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: first.next.as_ref(),
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(counts(&second), (1, 0, None));
+        assert!(posts.iter().all(|p| live(&fx, p)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_post_held_for_both_reasons_for_one_uid_is_readable_only_after_both_lifts() {
+        use maknae_proto::{HeldTarget, TaskCursor};
+        let fx = fixture_with(
+            "held-post-both",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                bound: STALL_BOUND,
+                ..Opts::default()
+            },
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let post = posted_by(&fx, HOBI_UID, HOBI);
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(fx.reloader.board.held_count(HOBI_UID), 2);
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        *fx.reloader.sink.stall.lock().unwrap() =
+            |r| r.outcome.reason.starts_with("post released (person)");
+        let target = HeldTarget::User(ContainTarget::Uid(HOBI_UID));
+        let first = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(counts(&first), (1, 1, Some(TaskCursor::from_seq(0))));
+        assert!(!live(&fx, &post), "the second hold still withholds it");
+        *fx.reloader.sink.stall.lock().unwrap() = never;
+        let second = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: first.next.as_ref(),
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(counts(&second), (1, 0, None));
+        assert!(live(&fx, &post));
+        let reasons: Vec<_> = post_records(&fx)
+            .iter()
+            .map(|r| r.outcome.reason.split(';').next().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            reasons,
+            ["post released (author)", "post released (person)"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_release_answers_busy_while_a_live_edit_holds_the_turn() {
         use maknae_proto::{HeldTarget, TaskState};
         let fx = fixture_with(
@@ -24330,6 +25674,449 @@ mod reload_tests {
             .await,
         );
         assert_eq!((page.outcomes.len(), page.next), (0, None));
+    }
+
+    const POST_BODY: &str = "sentinel-695-held-post-body";
+
+    struct Posted {
+        key: crate::board_store::BoardKey,
+        id: maknae_proto::PostId,
+        seq: u64,
+    }
+
+    fn posted_by(fx: &Fx, board: u32, (agent, uid): (&str, u32)) -> Posted {
+        let key = crate::board_store::BoardKey(board);
+        let stored = fx
+            .reloader
+            .board
+            .post(
+                key,
+                (maknae_proto::Author::Agent(agent.into()), Some(uid)),
+                None,
+                crate::board_store::PostLabels::default(),
+                maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(POST_BODY.to_string().into()),
+                    attachments: Vec::new(),
+                },
+                &crate::enrollment::FixedEnrollment(Default::default()),
+            )
+            .unwrap();
+        Posted {
+            key,
+            id: stored.post.id,
+            seq: stored.seq,
+        }
+    }
+
+    fn live(fx: &Fx, post: &Posted) -> bool {
+        fx.reloader.board.get(post.key, post.id).is_some()
+    }
+
+    fn post_records(fx: &Fx) -> Vec<AuditRecord> {
+        held_records(fx)
+            .into_iter()
+            .filter(|r| r.subject.board_op.as_deref() == Some("release"))
+            .collect()
+    }
+
+    /// Follows `next` as the CLI does, failing if it does not end within `max` pages.
+    async fn follow(
+        fx: &Fx,
+        target: &maknae_proto::HeldTarget,
+        max: usize,
+    ) -> Vec<maknae_proto::ReleasePage> {
+        let mut pages = Vec::new();
+        let mut after = None;
+        loop {
+            assert!(pages.len() < max, "paging did not end: {pages:?}");
+            let page = release_page(
+                fx.held(
+                    HeldOp::Release {
+                        target,
+                        after: after.as_ref(),
+                    },
+                    0,
+                )
+                .await,
+            );
+            after = page.next.clone();
+            pages.push(page);
+            if after.is_none() {
+                return pages;
+            }
+        }
+    }
+
+    fn counts(page: &maknae_proto::ReleasePage) -> (u32, u32, Option<maknae_proto::TaskCursor>) {
+        (page.posts_released, page.posts_held, page.next.clone())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releasing_a_subject_with_no_held_task_releases_its_posts() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture("held-posts", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let mine: Vec<_> = (0..3).map(|_| posted_by(&fx, 1002, HOBI)).collect();
+        let theirs = posted_by(&fx, 1003, JIN);
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        bounded(fx.contain_uid(1003, 0)).await.unwrap();
+        assert!(mine.iter().all(|p| !live(&fx, p)) && !live(&fx, &theirs));
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        assert!(
+            mine.iter().all(|p| !live(&fx, p)),
+            "a release lifts no hold"
+        );
+        let target = HeldTarget::Agent("hobi".into());
+        let page = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        let session = fx.last_session();
+        assert!(page.outcomes.is_empty());
+        assert_eq!(counts(&page), (3, 0, None));
+        assert!(mine.iter().all(|p| live(&fx, p)));
+        assert!(!live(&fx, &theirs), "another subject's post stays held");
+        let seen: Vec<_> = post_records(&fx)
+            .iter()
+            .map(|r| {
+                (
+                    r.event.clone(),
+                    r.source.uid,
+                    r.object.clone(),
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.outcome.reason.clone(),
+                    r.board.as_ref().map(|b| (b.post_id.clone(), b.seq)),
+                )
+            })
+            .collect();
+        let want: Vec<_> = mine
+            .iter()
+            .map(|p| {
+                (
+                    "request".to_string(),
+                    0,
+                    Some("board:users/1002".to_string()),
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    format!("post released (author); requested by uid 0 in session {session}"),
+                    Some((Some(p.id.to_string()), Some(p.seq))),
+                )
+            })
+            .collect();
+        assert_eq!(seen, want);
+        for r in fx.records() {
+            assert!(!serde_json::to_string(&r).unwrap().contains(POST_BODY));
+        }
+
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(1003), 0).await),
+            ContainmentOutcome::Released
+        );
+        let person = HeldTarget::User(ContainTarget::Uid(1003));
+        let pages = follow(&fx, &person, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(1, 0, None)]);
+        assert!(live(&fx, &theirs));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn posts_are_released_only_after_the_subjects_tasks() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState};
+        let fx = fixture("held-order", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let posts = [posted_by(&fx, 1002, JIN), posted_by(&fx, 1002, JIN)];
+        let ids = held_by_a_released_tasker(&fx, 1002, 2).await;
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        let target = HeldTarget::User(ContainTarget::Uid(1002));
+        let first = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(
+            first.outcomes,
+            [
+                outcome(&ids[0], R::Released, Some(TaskState::Queued)),
+                outcome(&ids[1], R::Released, Some(TaskState::Queued)),
+            ]
+        );
+        assert_eq!(counts(&first), (0, 0, Some(cursor_of(&fx, &ids[1]))));
+        assert!(
+            posts.iter().all(|p| !live(&fx, p)),
+            "no post on a task page"
+        );
+        assert!(post_records(&fx).is_empty());
+        let second = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: first.next.as_ref(),
+                },
+                0,
+            )
+            .await,
+        );
+        assert!(second.outcomes.is_empty());
+        assert_eq!(counts(&second), (2, 0, None));
+        assert!(posts.iter().all(|p| live(&fx, p)));
+        let records = held_records(&fx);
+        let tasks_end = records
+            .iter()
+            .rposition(|r| r.object.as_deref().is_some_and(|o| o.starts_with("task:")))
+            .unwrap();
+        let posts_start = records
+            .iter()
+            .position(|r| r.subject.board_op.as_deref() == Some("release"))
+            .unwrap();
+        assert!(tasks_end < posts_start);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_that_stays_held_does_not_block_the_posts_or_loop() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState, Tasker};
+        let fx = fixture("held-stays", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let t = given(&fx, HOBI, Tasker::Uid(1002), None);
+        let post = posted_by(&fx, 1002, JIN);
+        bounded(fx.contain_uid(1002, 0)).await.unwrap();
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(1002), 0).await),
+            ContainmentOutcome::Released
+        );
+        let target = HeldTarget::User(ContainTarget::Uid(1002));
+        let pages = follow(&fx, &target, 4).await;
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(
+            pages[0].outcomes,
+            [outcome(&t, R::AgentContained, Some(TaskState::Held))]
+        );
+        assert_eq!(counts(&pages[0]), (0, 0, Some(cursor_of(&fx, &t))));
+        assert!(pages[1].outcomes.is_empty());
+        assert_eq!(counts(&pages[1]), (1, 0, None));
+        assert!(live(&fx, &post));
+        assert_eq!(task_state(&fx, &t), TaskState::Held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releasing_while_the_subject_is_still_contained_terminates_and_reports_posts_held() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskState, Tasker};
+        let fx = fixture("held-still", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let t = given(&fx, HOBI, Tasker::Uid(1002), None);
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1003, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        let target = HeldTarget::Agent("hobi".into());
+        let pages = follow(&fx, &target, 4).await;
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(
+            pages[0].outcomes,
+            [outcome(&t, R::AgentContained, Some(TaskState::Held))]
+        );
+        assert_eq!(counts(&pages[0]), (0, 0, Some(cursor_of(&fx, &t))));
+        assert_eq!(counts(&pages[1]), (0, 2, None));
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        assert!(post_records(&fx).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_page_releases_at_most_a_page_of_posts_and_continues() {
+        use maknae_proto::{HeldTarget, TaskCursor, HELD_PAGE_MAX};
+        let fx = fixture("held-page", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts: Vec<_> = (0..40).map(|_| posted_by(&fx, 1002, HOBI)).collect();
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(fx.reloader.board.held_count(HOBI_UID), 40);
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let target = HeldTarget::Agent("hobi".into());
+        let pages = follow(&fx, &target, 4).await;
+        assert_eq!(
+            pages.iter().map(counts).collect::<Vec<_>>(),
+            [
+                (HELD_PAGE_MAX as u32, 8, Some(TaskCursor::from_seq(0))),
+                (8, 0, None)
+            ]
+        );
+        assert!(posts[..HELD_PAGE_MAX]
+            .iter()
+            .all(|p| post_records(&fx).iter().any(|r| r
+                .board
+                .as_ref()
+                .and_then(|b| b.post_id.clone())
+                == Some(p.id.to_string()))));
+        assert!(posts.iter().all(|p| live(&fx, p)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_post_release_is_recorded_before_it_is_written() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture(
+            "held-post-trail",
+            CONTAIN_AND_RELEASE_TO_ADMIN,
+            Some(ROOT_ADMIN),
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1002, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        fx.refuse("admin.release");
+        let target = HeldTarget::Agent("hobi".into());
+        let got = fx
+            .held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await;
+        let Err(ContainAnswer::Unavailable { why, .. }) = got else {
+            panic!("{got:?}")
+        };
+        assert_eq!(why, "the trail refused the record");
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        assert_eq!(fx.reloader.board.held_count(HOBI_UID), 2);
+        *fx.reloader.sink.refuse.lock().unwrap() = None;
+        let pages = follow(&fx, &target, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_post_release_whose_write_fails_is_recorded_again_and_ends_the_page() {
+        use crate::task_store::Fail;
+        use maknae_proto::HeldTarget;
+        let blobs = crate::task_store::MemTaskBlobs::default();
+        let fx = fixture_with(
+            "held-post-write",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                board_blobs: Some(blobs.clone()),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let posts = [posted_by(&fx, 1002, HOBI), posted_by(&fx, 1002, HOBI)];
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let target = HeldTarget::Agent("hobi".into());
+        blobs.fail(Some(Fail::Every));
+        let pages = follow(&fx, &target, 3).await;
+        blobs.fail(None);
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(0, 2, None)]);
+        let by = format!("; requested by uid 0 in session {}", fx.last_session());
+        let said: Vec<_> = post_records(&fx)
+            .iter()
+            .map(|r| {
+                (
+                    r.outcome.result.clone(),
+                    r.outcome.posture.clone(),
+                    r.outcome.reason.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (
+                    "permit".to_string(),
+                    "authorized".to_string(),
+                    format!("post released (author){by}")
+                ),
+                (
+                    "deny".to_string(),
+                    "unavailable".to_string(),
+                    format!("post not released: store: sentinel-628-write-refused{by}")
+                ),
+            ]
+        );
+        assert!(posts.iter().all(|p| !live(&fx, p)));
+        let pages = follow(&fx, &target, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn releasing_one_task_releases_no_posts() {
+        use maknae_proto::{HeldTarget, ReleaseResult as R, TaskRef, TaskState};
+        let fx = fixture("held-one", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI, JIN]).await;
+        let post = posted_by(&fx, 1002, JIN);
+        let ids = held_by_a_released_tasker(&fx, 1002, 2).await;
+        assert_eq!(fx.reloader.board.held_count(1002), 1);
+        let target = HeldTarget::Task(TaskRef::from_id(&ids[0]));
+        let page = release_page(
+            fx.held(
+                HeldOp::Release {
+                    target: &target,
+                    after: None,
+                },
+                0,
+            )
+            .await,
+        );
+        assert_eq!(
+            page.outcomes,
+            [outcome(&ids[0], R::Released, Some(TaskState::Queued))]
+        );
+        assert_eq!(counts(&page), (0, 0, None));
+        assert!(!live(&fx, &post));
+        assert_eq!(fx.reloader.board.held_count(1002), 1);
+        assert!(post_records(&fx).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_that_lifts_one_of_two_holds_counts_it_and_continues() {
+        use maknae_proto::HeldTarget;
+        let fx = fixture("held-two", CONTAIN_AND_RELEASE_TO_ADMIN, Some(ROOT_ADMIN)).await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let both = posted_by(&fx, 1002, HOBI);
+        let one = posted_by(&fx, 1003, HOBI);
+        bounded(fx.contain_uid(1002, 0)).await.unwrap();
+        bounded(fx.contain_uid(HOBI_UID, 0)).await.unwrap();
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(HOBI_UID), 0).await),
+            ContainmentOutcome::Released
+        );
+        let agent = HeldTarget::Agent("hobi".into());
+        let pages = follow(&fx, &agent, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+        assert!(!live(&fx, &both), "the person's hold remains");
+        assert!(live(&fx, &one));
+        assert_eq!(
+            answer_code(&fx.release(ContainTarget::Uid(1002), 0).await),
+            ContainmentOutcome::Released
+        );
+        let person = HeldTarget::User(ContainTarget::Uid(1002));
+        let pages = follow(&fx, &person, 3).await;
+        assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(1, 0, None)]);
+        assert!(live(&fx, &both));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -26744,6 +28531,11 @@ mod task_sweep_tests {
     use crate::task_store::{Fail, ManualClock, MemTaskBlobs, CLAIM_LEASE};
     use maknae_proto::{TaskClose, TaskId, TaskState, Tasker};
 
+    /// A view that contains no one.
+    fn no_one() -> Arc<dyn crate::enrollment::EnrollmentView> {
+        Arc::new(FixedEnrollment(Default::default()))
+    }
+
     /// Records every append, and refuses the `fail`th and every one after it. With a
     /// store, it notes whether each close it records finds its task still open.
     struct Trail {
@@ -27939,6 +29731,8 @@ mod task_sweep_tests {
         blobs.fail(Some(Fail::Records));
         settle_tasks(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
+            &no_one(),
             &*trail,
             &ctx(&seq, &au),
             Duration::from_secs(30),
@@ -27960,6 +29754,8 @@ mod task_sweep_tests {
         blobs.fail(None);
         settle_tasks(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
+            &no_one(),
             &*trail,
             &ctx(&seq, &au),
             Duration::from_secs(30),
@@ -27980,6 +29776,7 @@ mod task_sweep_tests {
         blobs.slow(Some(Duration::from_millis(400)));
         let booted = reconcile_tasks_at_boot(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
             &nobody(),
             &*trail,
             &ctx(&seq, &au),
@@ -28008,6 +29805,8 @@ mod task_sweep_tests {
             assert!(Instant::now() < until, "the pass that outlived boot lands");
             settle_tasks(
                 &store,
+                &Arc::new(crate::board::BoardStore::new()),
+                &no_one(),
                 &*trail,
                 &ctx(&seq, &au),
                 Duration::from_secs(5),
@@ -28030,6 +29829,7 @@ mod task_sweep_tests {
         let refusing = Trail::new(1);
         let refused = reconcile_tasks_at_boot(
             &store,
+            &Arc::new(crate::board::BoardStore::new()),
             &nobody(),
             &*refusing,
             &ctx(&seq, &au),
@@ -28056,7 +29856,10 @@ mod task_sweep_tests {
             au3_1: serde_json::json!({}),
         };
         let mut sweeping = tokio::spawn(sweep_tasks(
-            Arc::clone(&store),
+            AgentAdmission {
+                tasks: Arc::clone(&store),
+                ..AgentAdmission::none()
+            },
             Arc::clone(&trail),
             where_,
             77,
@@ -28098,5 +29901,369 @@ mod task_sweep_tests {
             trail.reasons(),
             ["store: the final task sweep was aborted at shutdown"]
         );
+    }
+
+    const BOARD_T0: i64 = 1_800_000_000;
+    const BOARD_RETAIN: i64 = crate::board_store::BOARD_RETENTION.as_secs() as i64;
+
+    fn board_mem() -> (
+        MemTaskBlobs,
+        Arc<ManualClock>,
+        Arc<crate::board::BoardStore>,
+    ) {
+        let (blobs, clock) = (MemTaskBlobs::default(), Arc::new(ManualClock::at(BOARD_T0)));
+        let store = Arc::new(
+            crate::board::BoardStore::open(Box::new(blobs.clone()), clock.clone()).unwrap(),
+        );
+        (blobs, clock, store)
+    }
+
+    fn board_post(
+        store: &crate::board::BoardStore,
+        uid: u32,
+        body: &str,
+    ) -> Arc<crate::board_store::Stored> {
+        store
+            .post(
+                crate::board_store::BoardKey(uid),
+                (maknae_proto::Author::Agent("hobi".into()), Some(2001)),
+                None,
+                crate::board_store::PostLabels::default(),
+                maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new(body.into())),
+                    attachments: Vec::new(),
+                },
+                &crate::enrollment::FixedEnrollment(Default::default()),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sweep_records_a_post_expiry_before_performing_it() {
+        const BODY: &str = "sentinel-695-expiring-body";
+        let (_tblobs, _tclock, tasks) = mem(1_000);
+        let (blobs, clock, board) = board_mem();
+        let post = board_post(&board, 1000, BODY);
+        let key = crate::board_store::BoardKey(1000);
+        clock.set(BOARD_T0 + BOARD_RETAIN);
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let refusing = Trail::new(1);
+        settle_tasks(
+            &tasks,
+            &board,
+            &no_one(),
+            &*refusing,
+            &ctx(&seq, &au),
+            soon_budget(),
+            true,
+        )
+        .await;
+        assert!(refusing.recs().is_empty());
+        assert!(
+            board.due(10).iter().any(|d| d.post == Some(post.post.id)),
+            "a refused record leaves the post in the store, due"
+        );
+        assert!(blobs.has(&format!("post.1000.{}", post.post.id)));
+        let trail = Trail::new(0);
+        settle_tasks(
+            &tasks,
+            &board,
+            &no_one(),
+            &*trail,
+            &ctx(&seq, &au),
+            soon_budget(),
+            true,
+        )
+        .await;
+        let recs = trail.recs();
+        assert_eq!(recs.len(), 1, "{:?}", trail.reasons());
+        let r = &recs[0];
+        assert_eq!(
+            (
+                r.event.as_str(),
+                r.action.as_str(),
+                r.outcome.result.as_str()
+            ),
+            ("board", "board.manage", "deny")
+        );
+        assert_eq!(
+            (r.outcome.reason.as_str(), r.outcome.posture.as_str()),
+            ("expired", "unavailable")
+        );
+        assert_eq!(r.object.as_deref(), Some("board:users/1000"));
+        assert_eq!(r.subject.board_op.as_deref(), Some("expire"));
+        let audit = r.board.as_ref().unwrap();
+        assert_eq!(audit.post_id, Some(post.post.id.to_string()));
+        assert_eq!(audit.seq, Some(post.seq));
+        assert!(!serde_json::to_string(r).unwrap().contains(BODY));
+        assert!(board.get(key, post.post.id).is_none());
+        assert!(!blobs.has(&format!("post.1000.{}", post.post.id)));
+    }
+
+    fn soon_budget() -> Duration {
+        Duration::from_secs(30)
+    }
+
+    #[test]
+    fn each_board_due_and_notice_has_its_record() {
+        use crate::board::{BoardDue, BoardDueFor, BoardNotice};
+        use crate::board_store::{BoardKey, HeldFor};
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let ctx = ctx(&seq, &au);
+        let id = maknae_proto::PostId([0x69; 16]);
+        let post = |why| BoardDue {
+            key: BoardKey(1000),
+            post: Some(id),
+            seq: Some(7),
+            reader: None,
+            why,
+            recorded: false,
+        };
+        let cursor = BoardDue {
+            key: BoardKey(1001),
+            post: None,
+            seq: None,
+            reader: Some(maknae_config::AgentId::parse("rm").unwrap()),
+            why: BoardDueFor::DropCursor,
+            recorded: false,
+        };
+        let shape = |r: AuditRecord| {
+            assert_eq!(
+                (r.event.as_str(), r.action.as_str()),
+                ("board", "board.manage")
+            );
+            let audit = r.board.unwrap_or_default();
+            (
+                r.outcome.result,
+                r.outcome.posture,
+                r.outcome.reason,
+                r.subject.board_op,
+                r.object,
+                audit.post_id,
+                audit.seq,
+            )
+        };
+        let on = |uid: u32| Some(format!("board:users/{uid}"));
+        let op = |s: &str| Some(s.to_string());
+        let deny = || ("deny".to_string(), "unavailable".to_string());
+        let (d, u) = deny();
+        assert_eq!(
+            shape(board_due_record(&ctx, &post(BoardDueFor::Expire))),
+            (
+                d.clone(),
+                u.clone(),
+                "expired".into(),
+                op("expire"),
+                on(1000),
+                Some(id.to_string()),
+                Some(7)
+            )
+        );
+        for (f, said) in [
+            (HeldFor::Author, "post held: contained (author)"),
+            (HeldFor::Person, "post held: contained (person)"),
+        ] {
+            let rec = board_due_record(&ctx, &post(BoardDueFor::Hold(f)));
+            assert_eq!(rec.subject.agent, None);
+            assert_eq!(
+                shape(rec),
+                (
+                    d.clone(),
+                    u.clone(),
+                    said.into(),
+                    op("hold"),
+                    on(1000),
+                    Some(id.to_string()),
+                    Some(7)
+                )
+            );
+        }
+        let dropped = board_due_record(&ctx, &cursor);
+        assert_eq!(dropped.subject.agent.as_deref(), Some("rm"));
+        assert_eq!(
+            shape(dropped),
+            (
+                d.clone(),
+                u.clone(),
+                "cursor removed: agent gone".into(),
+                op("expire"),
+                on(1001),
+                None,
+                None
+            )
+        );
+        let settled = shape(board_notice_record(
+            &ctx,
+            &BoardNotice::Settled {
+                key: BoardKey(1000),
+                id,
+            },
+        ));
+        assert_eq!(
+            (settled.0.as_str(), settled.1.as_str()),
+            ("permit", "authorized"),
+            "a settled notice keeps the task store's shape"
+        );
+        assert_eq!(
+            (
+                settled.2.as_str(),
+                settled.3.clone(),
+                settled.4.clone(),
+                settled.5.clone()
+            ),
+            (
+                "settled: an unknown post was removed",
+                op("expire"),
+                on(1000),
+                Some(id.to_string())
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_board_failure_does_not_stop_the_task_sweep() {
+        let (_tblobs, _tclock, tasks) = mem(1_000);
+        let id = working(&tasks, "hobi", Tasker::Uid(1000));
+        tasks.mark_unenrolled(&nobody());
+        let (blobs, clock, board) = board_mem();
+        let post = board_post(&board, 1000, "sentinel-695-stuck");
+        clock.set(BOARD_T0 + BOARD_RETAIN);
+        blobs.fail(Some(Fail::Every));
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let trail = Trail::new(0);
+        settle_tasks(
+            &tasks,
+            &board,
+            &no_one(),
+            &*trail,
+            &ctx(&seq, &au),
+            soon_budget(),
+            true,
+        )
+        .await;
+        let recs = trail.recs();
+        let said: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r.event.as_str(), r.outcome.reason.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("task", "closed:agent-gone"),
+                ("board", "expired"),
+                (
+                    "board",
+                    "store: 1 board expiries, holds or cursor removals remain due: the board store stored none"
+                ),
+            ]
+        );
+        assert_eq!(recs[2].action, "board.manage");
+        assert_eq!(recs[2].outcome.posture, "unavailable");
+        assert_eq!(tasks.record(&id).unwrap().close, Some(TaskClose::AgentGone));
+        assert!(
+            board.due(10).iter().any(|d| d.post == Some(post.post.id)),
+            "the post is still in the store, due again"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_past_its_deadline_skips_the_board_steps() {
+        let pass = |board: Arc<crate::board::BoardStore>| async move {
+            let (_tblobs, _tclock, tasks) = mem(1_000);
+            working(&tasks, "hobi", Tasker::Uid(1000));
+            tasks.mark_unenrolled(&nobody());
+            let (seq, au) = (Seq::new(), serde_json::json!({}));
+            let trail = Trail::new(0);
+            settle_tasks(
+                &tasks,
+                &board,
+                &no_one(),
+                &*trail,
+                &ctx(&seq, &au),
+                Duration::ZERO,
+                false,
+            )
+            .await;
+            trail.recs()
+        };
+        let (_blobs, clock, board) = board_mem();
+        let post = board_post(&board, 1000, "sentinel-695-late");
+        clock.set(BOARD_T0 + BOARD_RETAIN);
+        let late = pass(Arc::clone(&board)).await;
+        let empty = pass(Arc::new(crate::board::BoardStore::new())).await;
+        let shape = |recs: &[AuditRecord]| {
+            recs.iter()
+                .map(|r| (r.event.clone(), r.outcome.reason.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert!(!late.is_empty());
+        assert_eq!(
+            shape(&late),
+            shape(&empty),
+            "the task steps' records are unchanged"
+        );
+        assert!(late.iter().all(|r| r.event == "task"), "{:?}", shape(&late));
+        assert!(
+            board.due(10).iter().any(|d| d.post == Some(post.post.id)),
+            "due again next pass"
+        );
+        assert_eq!(board.due(10).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod reply_encoding_tests {
+    use super::*;
+    use maknae_proto::{Addressee, Author, BoardPage, Labels, Post, PostDraft, PostId, PostKind};
+
+    fn page(posts: usize, body: usize) -> Response {
+        let posts = (0..posts)
+            .map(|i| Post {
+                id: PostId([i as u8; 16]),
+                author: Author::Agent("sentinel-695-hobi".into()),
+                task: None,
+                at_secs: 1_800_000_000,
+                labels: Labels {},
+                draft: PostDraft {
+                    kind: PostKind::Note,
+                    to: Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new("b".repeat(body))),
+                    attachments: Vec::new(),
+                },
+            })
+            .collect();
+        Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::BoardPage(BoardPage { posts, more: true })),
+            catalog_digest: None,
+        }
+    }
+
+    #[test]
+    fn a_board_page_reply_is_encoded_into_a_buffer_that_never_grew() {
+        let prompt_max = maknae_config::PROMPT_MAX_BYTES_FLOOR;
+        let budget = maknae_proto::board_page_budget(prompt_max);
+        let cap = FrameCaps::responses(maknae_proto::prompt_response_cap(prompt_max))
+            .cap(FrameClass::Prompt);
+        let n = maknae_proto::BOARD_READ_PAGE_POSTS;
+        for (posts, body) in [(1, 0), (1, 1000), (n, budget / n - 128)] {
+            let response = page(posts, body);
+            let bytes = encode_reply(&response).unwrap();
+            assert_eq!(
+                bytes.capacity(),
+                bytes.len(),
+                "{posts} posts of {body}: the buffer grew"
+            );
+            assert!(bytes.len() <= cap, "{} > {cap}", bytes.len());
+            assert_eq!(
+                bytes.as_slice(),
+                encode_response(&response).unwrap().as_slice(),
+                "the reply's bytes are unchanged"
+            );
+        }
     }
 }

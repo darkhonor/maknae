@@ -745,6 +745,14 @@ pub enum Verb {
     AgentList {
         after: Option<String>,
     },
+    /// Post to the board of the cited task's root tasker (ADR-0040).
+    BoardPost {
+        post: crate::PostDraft,
+    },
+    /// The next page of that board after the reader's cursor; `seen_through` acknowledges what was read.
+    BoardRead {
+        seen_through: Option<crate::PostId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -810,6 +818,8 @@ pub enum Payload {
     HeldReleased(crate::ReleasePage),
     /// The requesting subject's catalog, released only on the `tool.catalog` Permit.
     ToolCatalog(ToolCatalogReply),
+    BoardPosted(crate::PostId),
+    BoardPage(crate::BoardPage),
 }
 
 pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
@@ -1270,6 +1280,8 @@ pub enum ProtoErrCode {
     /// honest-record treatment as `UnknownVerb` below.
     NotImplemented,
     ReplyUnusable(ReplyDefect),
+    /// A permitted board request that was not carried out; the message is [`crate::board_refused_message`].
+    BoardRefused(crate::BoardDefect),
     /// The exchange could not be attempted for lack of capacity: the Egress
     /// Daemon was at capacity, restarting or down, or the daemon's own egress
     /// budget was spent. Nothing left the host. Availability is not
@@ -1304,7 +1316,9 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::TaskAdd { .. }
         | Verb::TaskReport { .. }
         | Verb::TaskClaim { .. }
-        | Verb::TaskCollect { .. } => FrameClass::Prompt,
+        | Verb::TaskCollect { .. }
+        | Verb::BoardPost { .. }
+        | Verb::BoardRead { .. } => FrameClass::Prompt,
         Verb::SessionNew { .. }
         | Verb::Read { .. }
         | Verb::FsWrite { .. }
@@ -1442,9 +1456,9 @@ pub fn encode_list_chunk(c: &crate::ListChunk) -> Result<Vec<u8>, ProtoCodecErro
 pub fn decode_list_chunk(bytes: &[u8]) -> Result<crate::ListChunk, ProtoCodecError> {
     decode_followup(bytes)
 }
-/// Encode into a pre-sized zeroizing buffer (the prompt reply's encode). Pre-sizing
-/// prevents realloc from leaving un-zeroized partial copies of content in freed heap;
-/// `capacity` should be the frame budget plus envelope margin.
+/// Encode into a pre-sized zeroizing buffer. Pre-sizing prevents realloc from leaving
+/// un-zeroized partial copies of content in freed heap, so `capacity` must be at least
+/// the encoded size; a caller that counts the response first passes that exact size.
 pub fn encode_response_zeroizing(
     r: &Response,
     capacity: usize,
@@ -1666,6 +1680,39 @@ mod tests {
                 result: RespResult::Err(ProtoError {
                     code: ProtoErrCode::ReplyUnusable(d),
                     message: REPLY_UNUSABLE_MESSAGE.into(),
+                }),
+                catalog_digest: None,
+            };
+            let mut buf = Vec::new();
+            ciborium::into_writer(&resp, &mut buf).unwrap();
+            let back: Response = ciborium::from_reader(&buf[..]).unwrap();
+            assert_eq!(back, resp, "{d:?}");
+        }
+    }
+
+    #[test]
+    fn a_board_refusal_round_trips_for_each_defect() {
+        use crate::{board_refused_message, BoardDefect};
+        let messages: Vec<&str> = BoardDefect::ALL
+            .iter()
+            .map(|d| board_refused_message(*d))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "try again",
+                "outcome unknown",
+                "board full",
+                "author at cap",
+                "no such post"
+            ]
+        );
+        for d in BoardDefect::ALL {
+            let resp = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Err(ProtoError {
+                    code: ProtoErrCode::BoardRefused(d),
+                    message: board_refused_message(d).into(),
                 }),
                 catalog_digest: None,
             };
@@ -3955,13 +4002,31 @@ mod tests {
                 (Verb::McpResourceRead, FrameClass::Control),
                 (Verb::McpPromptGet, FrameClass::Control),
                 (Verb::McpSamplingCreate, FrameClass::Control),
+                (
+                    Verb::BoardPost {
+                        post: crate::PostDraft {
+                            kind: crate::PostKind::Note,
+                            to: crate::Addressee::Board,
+                            in_reply_to: None,
+                            body: SecretText(zeroize::Zeroizing::new("b".into())),
+                            attachments: vec![],
+                        },
+                    },
+                    FrameClass::Prompt,
+                ),
+                (
+                    Verb::BoardRead {
+                        seen_through: Some(crate::PostId([7; 16])),
+                    },
+                    FrameClass::Prompt,
+                ),
             ]
         }
 
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 61);
+            assert_eq!(all.len(), 63);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
@@ -4227,6 +4292,112 @@ mod tests {
         assert_eq!(encoded.len(), cited);
         assert_eq!(decode_request(&encoded).unwrap(), with);
         assert!(encode_request_zeroizing(&with, cited - 1).is_err());
+    }
+
+    fn board_text(n: usize) -> SecretText {
+        SecretText(zeroize::Zeroizing::new("s".repeat(n)))
+    }
+
+    fn max_board_draft() -> crate::PostDraft {
+        let attachments: Vec<crate::Attachment> = (0..crate::BOARD_ATTACHMENTS_MAX)
+            .map(|i| crate::Attachment {
+                label: format!("{i}").repeat(crate::BOARD_LABEL_MAX_BYTES),
+                media: crate::Media::TextMarkdown,
+                content: board_text(1000),
+            })
+            .collect();
+        let used: usize = attachments
+            .iter()
+            .map(|a| a.label.len() + a.content.0.len())
+            .sum();
+        crate::PostDraft {
+            kind: crate::PostKind::Question,
+            to: crate::Addressee::Agents(
+                (0..crate::BOARD_ADDRESSEES_MAX)
+                    .map(|i| format!("{i}").repeat(32))
+                    .collect(),
+            ),
+            in_reply_to: Some(crate::PostId([0xff; 16])),
+            body: board_text(crate::BOARD_POST_MAX_BYTES - used),
+            attachments,
+        }
+    }
+
+    fn board_post(draft: crate::PostDraft) -> crate::Post {
+        crate::Post {
+            id: crate::PostId([0xee; 16]),
+            author: crate::Author::Agent("a".repeat(32)),
+            task: Some(crate::TaskId([0xdd; 16])),
+            at_secs: i64::MIN,
+            labels: crate::Labels {},
+            draft,
+        }
+    }
+
+    fn encoded_len<T: Serialize>(v: &T) -> usize {
+        let mut buf = Vec::new();
+        ciborium::into_writer(v, &mut buf).unwrap();
+        buf.len()
+    }
+
+    #[test]
+    fn a_max_size_board_post_fits_the_prompt_request_at_the_floor() {
+        let draft = max_board_draft();
+        assert_eq!(draft.content_len(), crate::BOARD_POST_MAX_BYTES);
+        let request = Request {
+            protocol_version: PROTOCOL_VERSION,
+            verb: Verb::BoardPost { post: draft },
+            task: Some(crate::TaskId([0xa5; 16])),
+        };
+        assert_eq!(class_of(&request.verb), FrameClass::Prompt);
+        let cap = crate::prompt_request_cap(PROMPT_MAX_BYTES_FLOOR);
+        let encoded = encode_request_zeroizing(&request, cap).unwrap();
+        assert!(encoded.len() <= cap, "{}", encoded.len());
+        assert_eq!(decode_request(&encoded).unwrap(), request);
+    }
+
+    #[test]
+    fn a_page_of_max_posts_ended_by_the_byte_budget_fits_the_prompt_response_at_the_floor() {
+        let budget = crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR);
+        let mut posts = Vec::new();
+        let mut used = 0usize;
+        loop {
+            let post = board_post(max_board_draft());
+            let size = encoded_len(&post);
+            if used + size > budget || posts.len() == crate::BOARD_READ_PAGE_POSTS {
+                break;
+            }
+            used += size;
+            posts.push(post);
+        }
+        assert!(!posts.is_empty());
+        assert!(posts.len() < crate::BOARD_READ_PAGE_POSTS);
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::BoardPage(crate::BoardPage { posts, more: true })),
+            catalog_digest: Some(CatalogDigest([0xff; 32])),
+        };
+        let bytes = encode_response(&response).unwrap();
+        assert!(
+            bytes.len() <= crate::prompt_response_cap(PROMPT_MAX_BYTES_FLOOR),
+            "{}",
+            bytes.len()
+        );
+        assert_eq!(decode_response(&bytes).unwrap(), response);
+    }
+
+    #[test]
+    fn a_page_of_min_posts_is_ended_by_the_count_cap() {
+        let mut draft = max_board_draft();
+        draft.attachments.clear();
+        draft.body = board_text(1);
+        let post = board_post(draft);
+        let pages = crate::BOARD_READ_PAGE_POSTS + 1;
+        assert!(
+            pages * encoded_len(&post) <= crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR),
+            "{}",
+            encoded_len(&post)
+        );
     }
 
     #[test]

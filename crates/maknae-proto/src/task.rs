@@ -644,6 +644,14 @@ pub struct ReleaseOutcome {
 pub struct ReleasePage {
     pub outcomes: Vec<ReleaseOutcome>,
     pub next: Option<TaskCursor>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub posts_released: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub posts_held: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 pub fn epoch_to_rfc3339(secs: u64, millis: u32) -> String {
@@ -1816,6 +1824,8 @@ mod tests {
                 })
                 .collect(),
             next: None,
+            posts_released: 0,
+            posts_held: 0,
         });
         for payload in [agents, held, empty_held, released] {
             let resp = crate::Response {
@@ -1827,6 +1837,44 @@ mod tests {
             let back = crate::decode_response(&bytes).unwrap();
             assert_eq!(back, resp);
             assert_eq!(crate::encode_response(&back).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_release_page_without_posts_encodes_as_before() {
+        #[derive(Serialize)]
+        struct Before {
+            outcomes: Vec<ReleaseOutcome>,
+            next: Option<TaskCursor>,
+        }
+        let outcomes = vec![ReleaseOutcome {
+            task: TaskRef::from_id(&TaskId([6; 16])),
+            result: ReleaseResult::Released,
+            state: Some(TaskState::Queued),
+            parent: None,
+        }];
+        let next = Some(TaskCursor::from_seq(7));
+        let before = enc(&Before {
+            outcomes: outcomes.clone(),
+            next: next.clone(),
+        });
+        let page = ReleasePage {
+            outcomes,
+            next,
+            posts_released: 0,
+            posts_held: 0,
+        };
+        assert_eq!(enc(&page), before);
+        assert_eq!(dec::<ReleasePage>(&before).unwrap(), page);
+        for (released, held) in [(3, 0), (0, 5), (32, 8)] {
+            let counted = ReleasePage {
+                posts_released: released,
+                posts_held: held,
+                ..page.clone()
+            };
+            let bytes = enc(&counted);
+            assert_ne!(bytes, before);
+            assert_eq!(dec::<ReleasePage>(&bytes).unwrap(), counted);
         }
     }
 
@@ -1935,6 +1983,8 @@ mod tests {
         assert_fits_a_control_frame(crate::Payload::HeldReleased(ReleasePage {
             outcomes: vec![outcome; HELD_PAGE_MAX],
             next: Some(TaskCursor::from_seq(u64::MAX)),
+            posts_released: u32::MAX,
+            posts_held: u32::MAX,
         }));
     }
 

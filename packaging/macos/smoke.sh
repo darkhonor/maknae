@@ -156,6 +156,15 @@ phase1() {
     grep -qF 'verify "$TASKS ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the task store dir" \
         || fail "postinstall does not verify the task store dir"
+    grep -qE '^install -d .*/usr/local/var/db/maknae/state/board$' "$HERE/scripts/preinstall" \
+        && fail "preinstall creates the board store beneath a daemon-owned state dir" \
+        || ok "preinstall leaves the board store to postinstall"
+    grep -qF 'hold_dir "$BOARD"' "$HERE/scripts/postinstall" \
+        && ok "postinstall holds the board store while root works on it" \
+        || fail "postinstall does not hold the board store"
+    grep -qF 'verify "$BOARD ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
+        && ok "postinstall verifies the board store dir" \
+        || fail "postinstall does not verify the board store dir"
     grep -qF 'verify "$STATE ownership/mode" "$MUID $MGID 700"' "$HERE/scripts/postinstall" \
         && ok "postinstall verifies the kernel graph state dir" \
         || fail "postinstall does not verify the kernel graph state dir"

@@ -13,3 +13,4 @@ pub const MARKER_MAX_BYTES: u64 = 4096;
 
 pub const CONVERSATIONS_DIR: &str = "conversations";
 pub const TASKS_DIR: &str = "tasks";
+pub const BOARD_DIR: &str = "board";

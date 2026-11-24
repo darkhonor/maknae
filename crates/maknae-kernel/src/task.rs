@@ -25,7 +25,7 @@ const RETRY_FIRST_SECS: u32 = 1;
 const RETRY_MAX_SECS: u32 = 60;
 const MOVED: &str = "not done: the queue changed during the claim";
 const DUE_A_HOLD: &str = "not done: the task is due a hold";
-const ID_DRAWS: u32 = 4;
+pub(crate) const ID_DRAWS: u32 = 4;
 const CONTAINED: &str = "the tasker, the root of its chain or the agent is contained";
 
 /// A queued task whose tasker's standing was found good, and the policy load it was
@@ -2592,7 +2592,7 @@ fn abandoned() -> TaskRefusal {
     TaskRefusal::Unavailable("not done: the submission was abandoned".into())
 }
 
-fn draw_id() -> Result<[u8; 16], TaskRefusal> {
+pub(crate) fn draw_id() -> Result<[u8; 16], TaskRefusal> {
     let mut id = [0u8; 16];
     maknae_crypto::random::fill(&mut id[..]).map_err(|_| TaskRefusal::Random)?;
     Ok(id)

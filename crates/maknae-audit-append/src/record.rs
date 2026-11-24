@@ -46,6 +46,10 @@ pub struct Subject {
     /// `drop`, `collect`, `claim` or `report`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_op: Option<String>,
+    /// The kernel's own board operation: `expire` or `hold` on a `board.manage` record,
+    /// `release` on an `admin.release` record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_op: Option<String>,
     /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasker: Option<String>,
@@ -173,6 +177,43 @@ pub struct EgressAudit {
     pub completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_tool_calls: Vec<RefusedToolCall>,
+}
+
+/// The board block of a `board.post`, `board.read`, `board.manage` or `admin.release`
+/// record (ADR-0040 decision 12).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardAudit {
+    /// 32 hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `board`, `tasker` or `agents:<a>,<b>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_bytes: Option<u32>,
+    /// SHA-256, 64 hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u64>,
 }
 
 /// A tool call the Egress Daemon refused for its argument bound (#426).
@@ -383,6 +424,8 @@ pub struct AuditRecord {
     /// other record and on a prompt refused before any send was considered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<EgressAudit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<BoardAudit>,
     /// The loop's conversation identifier on `fs.write` records (#265) —
     /// client-supplied, informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -488,6 +531,7 @@ mod tests {
                 task_id: None,
                 parent_task_id: None,
                 task_op: None,
+                board_op: None,
                 tasker: None,
                 bindings: Vec::new(),
             },
@@ -496,6 +540,7 @@ mod tests {
             object_requested: None,
             mutation: None,
             egress: None,
+            board: None,
             conversation: None,
             graph: None,
             rule: None,
@@ -513,6 +558,74 @@ mod tests {
                 sig: None,
             },
         }
+    }
+
+    #[test]
+    fn a_record_without_a_board_block_serializes_as_before() {
+        let rec = sample();
+        assert!(rec.board.is_none() && rec.subject.board_op.is_none());
+        assert_eq!(
+            canonical_json(&rec).unwrap(),
+            r#"{"action":"connect","au3_1":{},"event":"connection.accept","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"group membership: maknae-ops","result":"permit"},"seq":1,"session_id":42,"source":{"gid":1000,"pid":4242,"plane_uri_san":"spiffe://d/plane/cli","uid":1000},"subject":{"plane_uri_san":"spiffe://d/plane/cli","user":"alice"},"ts":"2026-08-11T00:00:00.000Z","where":{"component":"kernel","host":"maknaed-01","socket":"/run/maknae/plane.sock"}}"#
+        );
+    }
+
+    #[test]
+    fn a_board_block_with_every_field_set_round_trips() {
+        let full = BoardAudit {
+            post_id: Some("ab".repeat(16)),
+            seq: Some(3),
+            kind: Some("note".into()),
+            to: Some("board".into()),
+            in_reply_to: Some("cd".repeat(16)),
+            attachments: Some(2),
+            body_bytes: Some(100),
+            attachment_bytes: Some(200),
+            digest: Some("ef".repeat(32)),
+            first_seq: Some(1),
+            last_seq: Some(9),
+            returned: Some(5),
+            withheld: Some(4),
+            cursor: Some(10),
+        };
+        let mut rec = sample();
+        rec.board = Some(full.clone());
+        let back: AuditRecord = serde_json::from_str(&canonical_json(&rec).unwrap()).unwrap();
+        assert_eq!(back.board, Some(full));
+        assert_eq!(serde_json::to_string(&BoardAudit::default()).unwrap(), "{}");
+    }
+
+    #[test]
+    fn a_board_block_round_trips_and_omits_what_is_absent() {
+        let mut rec = sample();
+        rec.subject.board_op = Some("hold".into());
+        rec.board = Some(BoardAudit {
+            post_id: Some("ab".repeat(16)),
+            seq: Some(3),
+            to: Some("agents:hobi,jin".into()),
+            ..BoardAudit::default()
+        });
+        let json = canonical_json(&rec).unwrap();
+        assert!(json.contains(r#""board":{"post_id":"#), "{json}");
+        assert!(json.contains(r#""board_op":"hold""#), "{json}");
+        for absent in [
+            "kind",
+            "in_reply_to",
+            "attachments",
+            "body_bytes",
+            "attachment_bytes",
+            "digest",
+            "first_seq",
+            "last_seq",
+            "returned",
+            "withheld",
+            "cursor",
+        ] {
+            assert!(!json.contains(&format!("\"{absent}\"")), "{absent}: {json}");
+        }
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.board, rec.board);
+        assert_eq!(back.subject.board_op.as_deref(), Some("hold"));
     }
 
     #[test]
@@ -944,6 +1057,7 @@ mod tests {
                     task_id: None,
                     parent_task_id: None,
                     task_op: None,
+                    board_op: None,
                     tasker: None,
                     bindings: Vec::new(),
                 },
@@ -952,6 +1066,7 @@ mod tests {
                 object_requested: None,
                 mutation: None,
                 egress: None,
+                board: None,
                 conversation: None,
                 graph: None,
                 rule: None,

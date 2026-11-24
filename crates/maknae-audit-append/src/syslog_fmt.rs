@@ -179,7 +179,14 @@ pub(crate) fn format_line_unchecked(
         ("task", rec.subject.task_id.as_deref().map(scrub)),
         ("parent", rec.subject.parent_task_id.as_deref().map(scrub)),
         ("tasker", rec.subject.tasker.as_deref().map(scrub)),
-        ("op", rec.subject.task_op.as_deref().map(scrub)),
+        (
+            "op",
+            rec.subject
+                .task_op
+                .as_deref()
+                .or(rec.subject.board_op.as_deref())
+                .map(scrub),
+        ),
     ];
     line.push_str(&macos_summary(
         action,
@@ -652,6 +659,7 @@ mod tests {
                 task_id: None,
                 parent_task_id: None,
                 task_op: None,
+                board_op: None,
                 tasker: None,
                 bindings: Vec::new(),
             },
@@ -660,6 +668,7 @@ mod tests {
             object_requested: None,
             mutation: None,
             egress: None,
+            board: None,
             conversation: None,
             graph: None,
             rule: None,
@@ -731,6 +740,23 @@ mod tests {
             s.starts_with("maknae audit: fs.read deny subject=alice role=none session=7 seq=3 "),
             "summary text not as specified: {s}"
         );
+    }
+
+    #[test]
+    fn the_summary_line_carries_a_board_op() {
+        let mut r = rec("no");
+        r.subject.board_op = Some("hold".into());
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
+        assert!(s.contains(" op=hold session=7"), "{s}");
+        r.subject.task_op = Some("collect".into());
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
+        assert!(s.contains(" op=collect session=7"), "{s}");
     }
 
     #[test]

@@ -113,7 +113,7 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|HeldView|held_list.entries|5|wire"
   "crates/maknae-proto/src/task.rs|TaskView|held_list.entries.view|10|wire"
   "crates/maknae-proto/src/task.rs|GitBinding|held_list.entries.view.bindings|4|wire"
-  "crates/maknae-proto/src/task.rs|ReleasePage|held_release|2|wire"
+  "crates/maknae-proto/src/task.rs|ReleasePage|held_release|4|wire"
   "crates/maknae-proto/src/task.rs|ReleaseOutcome|held_release.outcomes|4|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"
@@ -430,6 +430,8 @@ PAYLOAD_DISPOSITIONS=(
   "HeldTasks|struct:HeldPage"
   "HeldReleased|struct:ReleasePage"
   "ToolCatalog|bytes"   # #674: the subject's own catalog, released only on the tool.catalog Permit
+  "BoardPosted|bytes"   # #695: the id of the caller's own post, 16 opaque random bytes, released only on its board.post Permit
+  "BoardPage|bytes"   # #695: posts released only on the board.read Permit of each post
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

@@ -477,6 +477,8 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::HeldTasks(_) => "held task list",
         Payload::HeldReleased(_) => "held task release",
         Payload::ToolCatalog(_) => "tool catalog",
+        Payload::BoardPosted(_) => "board post",
+        Payload::BoardPage(_) => "board page",
     }
 }
 
@@ -1045,6 +1047,13 @@ where
                     }) {
                         return Ok(false);
                     }
+                    if page.posts_released > 0 {
+                        emit(format!("{} post hold(s) lifted", page.posts_released));
+                    }
+                    if page.next.is_none() && page.posts_held > 0 {
+                        emit(format!("{} post hold(s) remain", page.posts_held));
+                        all_released = false;
+                    }
                     page.next
                 }
                 (v, p) => {
@@ -1378,7 +1387,9 @@ pub(crate) fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(),
         | (v, p @ Payload::Agents(_))
         | (v, p @ Payload::HeldTasks(_))
         | (v, p @ Payload::HeldReleased(_))
-        | (v, p @ Payload::ToolCatalog(_)) => Err(format!(
+        | (v, p @ Payload::ToolCatalog(_))
+        | (v, p @ Payload::BoardPosted(_))
+        | (v, p @ Payload::BoardPage(_)) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -3652,6 +3663,8 @@ mod tests {
         SentOutcome::Payload(Payload::HeldReleased(maknae_proto::ReleasePage {
             outcomes: results.iter().map(|r| outcome(*r, None, None)).collect(),
             next: next.map(maknae_proto::TaskCursor::from_seq),
+            posts_released: 0,
+            posts_held: 0,
         }))
     }
 
@@ -3737,6 +3750,43 @@ mod tests {
 
         let (result, lines, _) = run_pages(&release_all(), vec![page_of(&[R::Released], None)]);
         assert_eq!((result, lines.len()), (Ok(true), 1));
+    }
+
+    fn post_page(released: u32, held: u32, next: Option<u64>) -> SentOutcome {
+        SentOutcome::Payload(Payload::HeldReleased(maknae_proto::ReleasePage {
+            outcomes: Vec::new(),
+            next: next.map(maknae_proto::TaskCursor::from_seq),
+            posts_released: released,
+            posts_held: held,
+        }))
+    }
+
+    #[test]
+    fn paging_prints_post_counts_and_a_post_left_held_fails() {
+        use maknae_proto::ReleaseResult as R;
+        let (result, lines, sent) = run_pages(
+            &release_all(),
+            vec![
+                page_of(&[R::Released], Some(5)),
+                post_page(32, 8, Some(5)),
+                post_page(8, 0, None),
+            ],
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            lines[1..],
+            ["32 post hold(s) lifted", "8 post hold(s) lifted"]
+        );
+        let (result, lines, sent) = run_pages(&release_all(), vec![post_page(0, 2, None)]);
+        assert_eq!(result, Ok(false));
+        assert_eq!(
+            (lines, sent.len()),
+            (vec!["2 post hold(s) remain".to_string()], 1)
+        );
+        let (result, lines, _) = run_pages(&release_all(), vec![post_page(3, 1, None)]);
+        assert_eq!(result, Ok(false));
+        assert_eq!(lines, ["3 post hold(s) lifted", "1 post hold(s) remain"]);
     }
 
     #[test]

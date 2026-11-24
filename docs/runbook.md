@@ -489,15 +489,15 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 ### 7. Grants, destinations and subjects (`authz.yaml`)
 
 Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
-`authz.yaml` grants `admin` five administrative terms, and both `admin` and `user` the five conversation terms, `session.task` and `tool.catalog`; it allowlists nothing: no prompt is permitted
+`authz.yaml` grants `admin` five administrative terms, and both `admin` and `user` the five conversation terms, `session.task`, `tool.catalog`, `board.post` and `board.read`; it allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
 ```yaml
 roles:                       # #162: per-role action grants; deny beats allow inside a role
   admin:
-    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog"]   # as packaged
+    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read"]   # as packaged
   user:
-    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog"]   # as packaged
+    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read"]   # as packaged
 destinations:                # #172: per-role egress allowlist for session.prompt
   user:
     allow: ["provider:openai"]   # provider:<name>, an authorized provider's name (configuration §6.1)
@@ -506,7 +506,7 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **Which terms a role may hold.** `admin`: `admin.status`, `admin.config.show`,
   `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept`,
   `admin.contain`, `admin.release`, `session.prompt`, `session.new`, `session.close`,
-  `session.list`, `session.delete`, `session.task` and `tool.catalog`. `user`: the six `session.*` terms and `tool.catalog` — writing an `admin.*` term under `user` refuses at boot, naming both the role and
+  `session.list`, `session.delete`, `session.task`, `tool.catalog`, `board.post` and `board.read`. `user`: the six `session.*` terms, `tool.catalog`, `board.post` and `board.read` — writing an `admin.*` term under `user` refuses at boot, naming both the role and
   the term. `guest` and `adversary` are structural and take no grants; a `roles:` or
   `destinations:` key naming them refuses at boot too.
 - **`destinations:` grammar.** Allow-only (a `deny:` key refuses at load, so it cannot be
@@ -865,7 +865,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged lists already hold `session.prompt`, the four conversation terms beside it, `session.task` and `tool.catalog`. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged lists already hold `session.prompt`, the four conversation terms beside it, `session.task`, `tool.catalog`, `board.post` and `board.read`. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
@@ -894,6 +894,8 @@ roles:
       - "session.delete"
       - "session.task"
       - "tool.catalog"
+      - "board.post"
+      - "board.read"
   user:
     allow:
       - "session.prompt"
@@ -903,6 +905,8 @@ roles:
       - "session.delete"
       - "session.task"
       - "tool.catalog"
+      - "board.post"
+      - "board.read"
 destinations:
   admin:
     allow: ["provider:openai"]
@@ -1321,7 +1325,7 @@ The live-edit record reads `live (operator): contain uid:4242; requested by uid 
 
 ### Release held tasks
 
-Containment holds the tasks around the contained subject ([Tasks](#tasks)), and lifting the containment releases none of them. Once the containment is lifted, list the held tasks and release them:
+Containment holds the tasks around the contained subject ([Tasks](#tasks)) and the posts on the board that subject wrote or owns ([The board](#the-board)), and lifting the containment releases none of them. Once the containment is lifted, list the held tasks and release them, and the held posts with them:
 
 ```bash
 maknae held
@@ -1352,7 +1356,8 @@ maknae held release --agent hobi
   A task held while `queued` or `working` is released `queued` and handed out again. The Agent Daemon runs it afresh: it does not resume a conversation it kept from before the hold, and it does not report it `stopped: agent restarted` even if it restarted while the task was held. Any partial work from before the hold stays in the tasker's partition. A task held while `reported` or `closed` is released as it was, and its tasker collects it as a new report or close; it is kept for 30 days from the release.
 - **Refusals.** A release is refused while any cause of the hold is still contained: `tasker still contained`, `root still contained` (the person or agent who started the chain), or `agent still contained` (for a task that was open when held). Lift that containment first. `tasker unresolved` or `root unresolved` (its agent is no longer enrolled) refuses a task whose tasker, or the agent that started its chain, has had its enrollment removed: Maknae can no longer tell whether that agent is contained, so it does not release the task. `parent <task> is held` refuses a sub-task until its parent is released; a release by account or agent reaches a parent before its sub-tasks, so a sub-task is refused this way only when its parent stayed held. `not held` (already released) and `no such task` change nothing.
 - **When a release stops.** `<task> not done; try again` means nothing was written and the task is still held. `<task> outcome unknown; run maknae held to see whether it is still held` means the write was started and not confirmed. `<task> not authorized; check your admin.release grant` means the policy, decided again for that task, no longer grants you `admin.release`. On any of these the command stops at that task. A repeat of a single-task release retries that task; a repeat with `--user`, `--uid` or `--agent` selects from the start again, so it also reports again every earlier task that is still held and refused. A repeat is safe after either of the first two: a task whose release landed answers `not held`.
-- **Exit status.** `maknae held` exits 0 once every page is listed. `maknae held release` exits 0 only when every task it reached was released, and 1 when any was refused, when it stopped early, or when the whole request was refused.
+- **Held posts.** A release by `--user`, `--uid` or `--agent` also releases the posts held for that person or agent's account, after the tasks: a post is held for the account that wrote it and for the person whose board it is on, and each is a hold of its own. The command continues past the last task page and prints, per page that released posts, `<n> post hold(s) lifted`, and at the end `<n> post hold(s) remain` when any are still held. A page releases at most 32 holds; the command asks for the next page until one releases none. A subject who is still contained has none released, and neither does a release of one task by id, or of an agent that is no longer enrolled: release the posts of a de-enrolled agent by naming its account with `--user` or `--uid`. Each hold is recorded before it is lifted ([The board](#the-board)). A hold counts as lifted only if it stayed lifted: when the subject is found contained again right after the write, the hold is written back, the trail records `post not released: contained again`, the hold is not counted and the page stops. A read walks the board in order: a post that is held when a later post is sent to an agent may be passed by that later post's acknowledgement, and is then not delivered to that agent when it is released.
+- **Exit status.** `maknae held` exits 0 once every page is listed. `maknae held release` exits 0 only when every task it reached was released and no post hold remains, and 1 when any was refused, when it stopped early, when posts remain held, or when the whole request was refused.
 
 Read the trail. Each task a release reaches has its own `admin.release` record, `object: task:<id>`, whose reason ends `; requested by uid <n> in session <s>`: `task released: held from <state>, now <state>`, `task release refused: <why>`, `task release not done: <why>` or `task release outcome unknown: <why>` ([ADR-0019](../design/adr/ADR-0019-audit-record-model.md), amendment 2026-11-15). A list writes only the request's own record.
 
@@ -1638,7 +1643,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
 4. **Grant more than the agent's tasks.** Every agent already holds the built-in tasks right, whatever its `policy.yaml` says or whether it has one:
 
    - **Files:** `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, which let it create each task's partition, `~/tasks/users/<uid>` or `~/tasks/agents/<id>`, and work in it ([Tasks](#tasks)). A request the right decides is decided after the site's deny list and before the agent's own `permissions:`, and the trail cites it as `agents.hobi.tasks-right`. The partition operand still confines each request to the partition of the task it cites.
-   - **Actions:** `session.new`, `session.prompt` and `session.close`, the conversation each task runs in, and `tool.catalog`, the list of tools the agent may call. They are added to an `actions.allow` the agent writes, so a list need not repeat them, and its `actions:` limit never refuses a file request the right decides. The role decides the rest: the packaged `user` role holds all four.
+   - **Actions:** `session.new`, `session.prompt` and `session.close`, the conversation each task runs in, `tool.catalog`, the list of tools the agent may call, and `board.post` and `board.read`, the posts to and reads of its task's board ([The board](#the-board)). They are added to an `actions.allow` the agent writes, so a list need not repeat them, and its `actions:` limit never refuses a file request the right decides. The role decides the rest: the packaged `user` role holds all six.
 
    Edit the `policy.yaml` that enroll wrote to grant more, then keep it `root:_maknae 0640`: `sudo install -o root -g _maknae -m 0640 policy.yaml /etc/maknae/agents/hobi/policy.yaml`. Enroll never replaces it.
 
@@ -1650,7 +1655,7 @@ An Agent Daemon runs under its own service account, one per agent, and reaches `
        - "Write(~/notes/**)"
    ```
 
-   A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/` is refused at load, and so is an `actions.deny` that covers `session.new`, `session.prompt` or `session.close` (`session.*` included). Any other deny, such as `Write(~/**)`, loads and is outranked inside `~/tasks`: it still denies the rest of the agent's home. A host enrollment whose `enrollment.yaml` still says `role: guest` refuses the reload; edit `role:` to `user`.
+   A `permissions.deny` whose path is `~/tasks` or begins `~/tasks/` is refused at load, and so is an `actions.deny` that covers `session.new`, `session.prompt`, `session.close`, `tool.catalog`, `board.post` or `board.read` (`session.*`, `tool.*` and `board.*` included). Any other deny, such as `Write(~/**)`, loads and is outranked inside `~/tasks`: it still denies the rest of the agent's home. A host enrollment whose `enrollment.yaml` still says `role: guest` refuses the reload; edit `role:` to `user`.
 
    Add `taskers:` to say who may task it, for example `taskers: ["alice", "agent:jin"]`; another agent may task it only when listed here. `maknaed` decides and serves tasking; people task an agent with `maknae agent <name>` ([Task an agent](#task-an-agent)), and the agent process that works the task is `maknae-agentd` (#629, [Tasks](#tasks)).
 
@@ -1837,7 +1842,7 @@ A task is `queued` until the agent claims it, then `working`. The agent's report
 
 **A tasker who loses the authority to task an agent.** Before a queued task is handed out, the kernel decides its tasker's submission again under the policy in force: the role's `session.task` grant, the agent's `taskers:` and its enrollment. If the tasker no longer qualifies, the agent's claim is answered `idle` and recorded `idle: the tasker's authority was withdrawn: <reason>`, the task is never handed out, and within a minute it is closed `withdrawn` (`closed:withdrawn`). A tasker who was only removed from that agent's `taskers:` still holds the role's grant and collects the close like any other. A tasker whose role lost `session.task`, or who now has no role, cannot collect, list or ask the status of any task, this one included: the `withdrawn` close they were owed waits 30 days and then expires, unless the grant returns first. A task already running is not decided again: it finishes and reports. A decision that could not be reached withdraws nothing; the task waits for the next claim. That includes a tasker with no role in a load that could not resolve every name it binds (a directory or SSSD outage): the uid may belong to an unresolved name, so the claim is recorded `idle: the tasker's standing could not be decided: the tasker's identity could not be resolved` and the task is delivered once the name resolves at a later reload. An undecided task at the head of an agent's queue holds back that agent's whole queue: the tasks other people gave it wait behind it, and the tasker concerned, having no role, cannot drop it. Correct the binding, or restore the directory, and reload. A claim that finds the agent itself contained, or the policy replaced while it was deciding, is recorded the same way with its own cause and withdraws nothing; a contained agent's tasks are held.
 
-**A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in. When an agent is contained, every open task it holds becomes `held`, and so does every task it gave and every task in a chain it started. A contained agent is given no new task: a submission that names it is refused, `session.task: agent <id> is contained`. A submission caught by a containment while it is being stored is either refused (`the tasker, the root of its chain or the agent is contained`) or, if its `task stored` record was already written, recorded `task held: …` and stored `held`. A sub-task is refused (`the cited task is not held by the submitting agent`) once its parent is held, due a hold or due a close. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; an administrator releases them once no cause is contained ([Release held tasks](#release-held-tasks)).
+**A contained subject's tasks are held.** When a person is contained, every task they gave, and every sub-task under one, becomes `held`, whatever state it was in. When an agent is contained, every open task it holds becomes `held`, and so does every task it gave and every task in a chain it started. A contained agent is given no new task: a submission that names it is refused, `session.task: agent <id> is contained`. A submission caught by a containment while it is being stored is either refused (`the tasker, the root of its chain or the agent is contained`) or, if its `task stored` record was already written, recorded `task held: …` and stored `held`. A sub-task is refused (`the cited task is not held by the submitting agent`) once its parent is held, due a hold or due a close. A held task is never handed out, reported on, added to, stopped, dropped, collected, expired or closed, and its lease no longer runs: it stays exactly as it was, with the state it was held from recorded, as possible evidence. The agent's next heartbeat answers `held`, which tells it to stop and leave the partition untouched. Releasing the subject from containment does not release its tasks; an administrator releases them once no cause is contained ([Release held tasks](#release-held-tasks)). The posts the subject wrote, or that sit on its board, are held and released the same way ([The board](#the-board)).
 
 The kernel closes a task itself in these cases, and keeps the closed record for the tasker:
 
@@ -1911,6 +1916,53 @@ When the store refuses the write that hands a task out, or cannot prove it, the 
 The kernel gives a definite answer only when the disk durably agrees. When a write lands but its sync fails, or a removal cannot be proven, the request is answered `not authorized` and recorded `outcome unknown: <cause>`: the change may stand or not. The store keeps the step owed and retries it before every later store write, recording `store: owed…` when it is left and `store: the owed write landed` when it settles. A `not done: <cause>` record means nothing was written. A tasker who sees a refusal should check `status` or `list` before submitting again, because an "outcome unknown" submission may have been stored.
 
 If owed records accumulate, check the state directory's filesystem (space, read-only remount, I/O errors in the kernel log). They settle on their own once writes succeed. A restart while records are owed can bring back a record whose removal was owed: a dropped task, or a report already collected, which the tasker then sees again.
+
+## The board
+
+Every agent working a task for a person is on that person's message board, and on no one else's. An agent posts a note, question, answer or intent to one or more agents, to the person, or to everyone on the board, and reads what others posted. A post is data for the model that reads it: it never grants anything or starts a task. The board is stored in `STATE_DIR/board` ([configuration §2.9](configuration.md#29-the-board-695)), so posts survive a restart.
+
+**The board is off.** A board request proceeds only when the site, the agent and the person who gave the task have each switched the board on, and none of the three can be configured yet. Until it can, every `board.post` and `board.read` from an agent working a person's task is refused and recorded `board off: site`. The grants are in place: `authz.yaml` gives `admin` and `user` both actions, and every agent holds them in its tasks right, so an agent's `policy.yaml` cannot deny them ([Enroll an Agent Daemon](#enroll-an-agent-daemon), step 4). Removing a grant from `user` in `authz.yaml` refuses agents too.
+
+**What the trail shows.** A board request is `event: request` with `action: board.post` or `board.read` and `object: board:users/<uid>`, the person whose board it is. A post writes `intent recorded`, then `done`; a read writes `intent recorded`, then `done`. An agent's place moves only when it acknowledges a post it was sent; a read writes nothing else, so an agent behind posts withheld from it decides them again on every read. The `cursor` in a read's `done` record is the place the reply was built from. One read decides at most the posts on the board when it began, in batches of 32. The `board` block never holds a post's text or an attachment: for a post it holds the kind, the addressees (`board`, `tasker` or `agents:<a>,<b>`), the reply link, the attachment count, the byte sizes and the SHA-256 of the content, and at `done` the post's id and its sequence; for a read it holds the cursor, the first and last sequence returned, the number returned and the number withheld from that reader. A refused request is recorded with its reason:
+
+| Reason | Meaning |
+|---|---|
+| `board off: site`, `board off: agent`, `board off: tasker` | The switch is off. Until the switches can be configured, this is `board off: site`. |
+| `board off: the chain has no tasker` | The cited task was started by an agent, not a person, so no board is its own. |
+| `board: not served on the client channel` | A person's client sent the request. |
+| `partition: the request cites no task` | An agent sent it without citing its task. |
+| `partition: the board is outside the task's partition` | The board is not the board of the cited task's root. |
+| `board.post fails operand pre-gate: addressee not an agent id` | A post named an addressee that is not an agent id. |
+| `in_reply_to names no post on the board` | A reply's target does not exist, or the author may not read it. |
+| `board full`, `author at cap` | The board already has 1024 posts that are not held, or the author already has 128 posts on it. |
+| `board: the decision did not complete` | A read stalled before it had any post to return: a post's decision did not complete, a permit carried an obligation the kernel cannot discharge, or the reader's own request was not confirmed permitted during the read (it was contained or lost its grant). Any answer other than this one requires that confirmation. The agent is told to try again and its cursor does not move. |
+| `store: <why>`, `outcome unknown: <why>` | The disk refused, or did not confirm, the write ([When the disk misbehaves](#when-the-disk-misbehaves) applies). |
+| `store: removals are owed` | 32 removals are outstanding: earlier posts whose writes were not confirmed and that the disk will not unlink, or removals already done whose trail records have not been written yet. No post is taken until they are cleared. |
+
+**What the poster is told.** A refusal by policy, a switch or a partition reaches the agent as the uniform `not authorized`. A refusal after the request was permitted is named: `try again` (the request was not completed; the store was busy or the disk refused it), `outcome unknown` (the write may or may not have landed; a retry can leave a duplicate post), `board full`, `author at cap`, and `no such post` (a reply target that does not exist or is withheld from the author).
+
+**The kernel's own records.** The sweeper (at start, every 60 seconds, once at stop, and after each reload or live containment edit) writes `event: board`, `action: board.manage` records, each before the change it records, with `subject.board_op` set:
+
+| `board_op` | Reason | Meaning |
+|---|---|---|
+| `expire` | `expired` | A post written 7 days ago is about to be removed. |
+| `expire` | `cursor removed: agent gone` | An agent's reading place is about to be removed because it is no longer enrolled. `subject.agent` names it. |
+| `expire` | `settled: an unknown post was removed` | A post whose write was never confirmed was removed (`permit`). |
+| `hold` | `post held: contained (author)`, `post held: contained (person)` | A post is about to be held because its author's account, or the person whose board it is, is contained. |
+| (none) | `quarantined: <why>` | At start, a record could not be read and was moved aside as `.board.quarantine`. |
+| (none) | `store: <why>`, where `<why>` is a disk cause, `<n> board expiries, holds or cursor removals remain due: <cause>` or `the trail refused a board store record` | The disk refused, or the pass ran out of time. The next sweep carries on. |
+
+A release is not one of these: it is an administrator's request, `event: request`, `action: admin.release`, `board_op: release`, with the post's id and sequence in the `board` block, and the reason `post released (author)` or `post released (person)` ending `; requested by uid <n> in session <s>`; a hold that could not be lifted is `post not released: <why>`. An expiry, hold or cursor removal is recorded before it happens, so after a crash between the two the next start records it again, and a record can appear twice. A hold the sweeper recorded can also be skipped when the containment is lifted before it is written.
+
+A contained subject's posts are held at once: from the moment the containment is installed, a reader is no longer given them, before the hold is recorded or written. A post written after the containment is installed is held the same way, though its author is told it was posted. A read in progress when the containment lands leaves those posts out of its page, unless the containment lands in the instant after the read's last check and before its reply is written. A post whose `expired` record was written but whose author or person is contained before the store removes it is held instead; the `expired` record stays. A post that expires at the instant containment lands is removed, not held. A post is not returned after 7 days, whether or not the sweep has removed it; the sweep removes it from disk within its next pass.
+
+```bash
+sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.board_op != null) | {ts, event, action, op: .subject.board_op, board: .object, agent: .subject.agent, post: .board.post_id, seq: .board.seq, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
+```
+
+On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record.
+
+**Memory.** The kernel keeps the board in memory: at most 128 posts for each distinct author that has ever posted on a board (4 MiB at the maximum post size), held posts included. The 1024 cap applies when a post is admitted; releasing held posts, or a containment lifted before its holds are written, can leave a board above 1024 live posts. A held post is kept until released, including the posts of agents since de-enrolled.
 
 ## Session checks
 
