@@ -508,6 +508,28 @@ pub fn compile(
                 c.add_edge(role_id, edge, id);
             }
         }
+        for (effect, entries) in [
+            (Effect::Deny, grants.permissions.deny_sources()),
+            (Effect::Allow, grants.permissions.allow_sources()),
+        ] {
+            let (edge, word) = effect_attrs(effect);
+            for (i, entry) in entries.iter().enumerate() {
+                let mut attrs = Attrs::new();
+                attrs.insert(ATTR_ENTRY.into(), AttrValue::Str(entry.clone()));
+                attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
+                let id = c.rule(
+                    format!("rule:roles.{role}.permissions:{word}:{i}"),
+                    attrs,
+                    &sec,
+                    Cited::RolePath {
+                        role: role_key,
+                        effect,
+                        source: entry.clone(),
+                    },
+                );
+                c.add_edge(role_id, edge, id);
+            }
+        }
     }
     for (role, allowed) in &destinations.0 {
         let role_key = static_role(role)?;
@@ -1157,6 +1179,49 @@ mod tests {
             .graph()
             .lookup(RULE, "rule:permissions:deny:1")
             .is_some());
+    }
+
+    #[test]
+    fn role_tool_grants_are_rule_nodes_in_the_roles_section() {
+        let s = source("schema_version: 1\nroles:\n  user:\n    permissions:\n      allow: [\"Tool(e p a *)\"]\n      deny: [\"Tool(e p a b)\"]\n");
+        let snap = snap(&s);
+        let g = snap.graph();
+        let user = g.lookup(ROLE, "user").unwrap();
+        for (effect, source, key, edge) in [
+            (
+                Effect::Deny,
+                "Tool(e p a b)",
+                "rule:roles.user.permissions:deny:0",
+                DENIES,
+            ),
+            (
+                Effect::Allow,
+                "Tool(e p a *)",
+                "rule:roles.user.permissions:allow:0",
+                PERMITS,
+            ),
+        ] {
+            let c = snap
+                .cite(&Cited::RolePath {
+                    role: "user",
+                    effect,
+                    source: source.into(),
+                })
+                .unwrap();
+            let rule = g.node(NodeId(c.node)).unwrap();
+            assert_eq!(rule.key, key);
+            assert_eq!(str_attr(rule, ATTR_ENTRY), Some(source));
+            assert_eq!(c.section, "/etc/maknae/authz.yaml#roles.user");
+            assert!(g.out_edges(user.id, edge).any(|e| e.to == rule.id));
+        }
+        assert_eq!(
+            snap.cite(&Cited::RolePath {
+                role: "admin",
+                effect: Effect::Allow,
+                source: "Tool(e p a *)".into(),
+            }),
+            None
+        );
     }
 
     #[test]

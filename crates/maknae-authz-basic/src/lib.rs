@@ -1139,6 +1139,10 @@ fn tool_problems(
             s.permissions.as_ref()?,
         ))
     });
+    let roles = policy
+        .action_grants
+        .iter()
+        .map(|(role, g)| (format!("roles.{role}.permissions"), &g.permissions));
     let agent_lists = agents
         .load
         .policies
@@ -1156,13 +1160,18 @@ fn tool_problems(
         (&policy.allow[..], policy.allow_sources()),
     ));
     let lists = site
-        .chain(subjects.chain(agent_lists).map(|(section, p)| {
-            (
-                section,
-                (&p.deny[..], p.deny_sources()),
-                (&p.allow[..], p.allow_sources()),
-            )
-        }))
+        .chain(
+            subjects
+                .chain(roles)
+                .chain(agent_lists)
+                .map(|(section, p)| {
+                    (
+                        section,
+                        (&p.deny[..], p.deny_sources()),
+                        (&p.allow[..], p.allow_sources()),
+                    )
+                }),
+        )
         .flat_map(|(section, deny, allow)| {
             [
                 (format!("{section}.deny"), deny.0, deny.1),
@@ -5713,6 +5722,39 @@ mod tests {
             "{others:?}"
         );
         assert_eq!(others.len(), 2, "{others:?}");
+    }
+
+    #[test]
+    fn role_tool_grants_are_scanned_like_every_other_list() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+        );
+        let text = "schema_version: 1\ntools:\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n";
+        let catalog = maknae_config::ToolsCatalog::parse_with(text, &grammars).unwrap();
+        let authz = "schema_version: 1\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-gone-subject x y)\"]\nroles:\n  admin:\n    permissions:\n      deny: [\"Tool(sentinel-674-gone-admin x y)\"]\n  user:\n    permissions:\n      allow: [\"Tool(sentinel-674-shape gh:pr.view)\", \"Tool(sentinel-674-shape gh:renamed)\", \"Tool(sentinel-674-shape glab x)\"]\n      deny: [\"Tool(sentinel-674-gone x y)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(catalog);
+        let expected = [
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "subjects.ursula.permissions.allow Tool(sentinel-674-gone-subject x y)"
+                    .into(),
+            },
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "roles.admin.permissions.deny Tool(sentinel-674-gone-admin x y)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "roles.user.permissions.deny Tool(sentinel-674-gone x y)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownShape {
+                source: "roles.user.permissions.allow Tool(sentinel-674-shape gh:renamed)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "roles.user.permissions.allow Tool(sentinel-674-shape glab x)".into(),
+            },
+        ];
+        assert_eq!(src.identity_problems(), expected);
+        assert_eq!(compiled(&src).identity_problems()[..], expected);
     }
 
     #[test]

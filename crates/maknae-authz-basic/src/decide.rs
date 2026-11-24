@@ -158,6 +158,11 @@ pub(crate) enum Cited {
         agent: String,
         source: String,
     },
+    RolePath {
+        role: &'static str,
+        effect: Effect,
+        source: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1319,14 +1324,20 @@ fn evaluate_floored(
     home: Option<&std::path::Path>,
 ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound> {
     match scope {
-        FsScope::Read => {
-            lp.policy
-                .evaluate3_floored(set, &maknae_config::Request::Read(path), home, lp.fold)
-        }
-        FsScope::Write => {
-            lp.policy
-                .evaluate3_floored(set, &maknae_config::Request::Write(path), home, lp.fold)
-        }
+        FsScope::Read => lp.policy.evaluate3_floored(
+            set,
+            None,
+            &maknae_config::Request::Read(path),
+            home,
+            lp.fold,
+        ),
+        FsScope::Write => lp.policy.evaluate3_floored(
+            set,
+            None,
+            &maknae_config::Request::Write(path),
+            home,
+            lp.fold,
+        ),
         FsScope::ReadSubtree => lp
             .policy
             .evaluate_read_subtree_floored(set, path, home, lp.fold),
@@ -1432,8 +1443,9 @@ fn decide_fs(
     let decided = decide_grants(
         lp,
         entry,
+        None,
         |right, set| evaluate_agent(lp, right, set, scope, path, home),
-        |set| evaluate_floored(lp, set, scope, path, home),
+        |set, _| evaluate_floored(lp, set, scope, path, home),
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
@@ -1465,22 +1477,57 @@ fn mask_obligation(patterns: Vec<String>) -> Obligation {
     }
 }
 
-/// Deny-first over the site and the subject's or agent's own lists, citing the entry that
-/// decided; `absent` is the note when no entry matches.
+/// A person's role whose `roles.<role>.permissions` join the floored lists; an agent
+/// inherits none.
+pub(crate) fn role_stage(
+    entry: Option<&SubjectEntry>,
+    role_key: &'static str,
+) -> Option<&'static str> {
+    match entry.map(|e| &e.origin) {
+        Some(SubjectOrigin::Agent(_)) => None,
+        Some(SubjectOrigin::Authz) | None => Some(role_key),
+    }
+}
+
+/// Which written list a matched entry came from, in the order the lists are consulted.
+enum Origin<'e> {
+    Site,
+    Subject(&'e SubjectEntry),
+    Role(&'static str),
+}
+
+/// The first list, in consult order, that holds `source`; the lists' sources are
+/// index-aligned with their patterns, so one always does.
+fn origin_of<'e, const N: usize>(
+    source: &str,
+    lists: [Option<(&[String], Origin<'e>)>; N],
+) -> Origin<'e> {
+    lists
+        .into_iter()
+        .flatten()
+        .find(|(sources, _)| sources.iter().any(|s| s == source))
+        .map_or(Origin::Site, |(_, origin)| origin)
+}
+
+/// Deny-first over the site, the subject's or agent's own lists and the role's `Tool(...)`
+/// grants, citing the entry that decided; `absent` is the note when no entry matches.
 fn decide_grants(
     lp: &LoadedPolicy,
     entry: Option<&SubjectEntry>,
+    role: Option<&'static str>,
     agent: impl FnOnce(
         &maknae_config::SubjectPermissions,
         Option<&maknae_config::SubjectPermissions>,
     ) -> Result<AgentMatch, maknae_config::HomeUnbound>,
     floored: impl FnOnce(
         Option<&maknae_config::SubjectPermissions>,
+        Option<&'static str>,
     ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound>,
     absent: String,
 ) -> Decision {
     let subject = entry.and_then(|e| e.permissions.as_ref().map(|p| (e, p)));
     let set = subject.map(|(_, p)| p);
+    let role = role.and_then(|r| role_stage(entry, r));
     let matched = match entry.and_then(SubjectEntry::agent_right) {
         Some((id, right)) => match agent(right, set) {
             Ok(AgentMatch::Right { source }) => {
@@ -1495,47 +1542,74 @@ fn decide_grants(
             Ok(AgentMatch::Floored(m)) => Ok(m),
             Err(unbound) => Err(unbound),
         },
-        None => floored(set),
+        None => floored(set, role),
     };
     let Ok(matched) = matched else {
         return (Verdict::Indeterminate, None);
     };
-    match (matched, subject) {
-        (maknae_config::Match3::DenyMatch { source }, Some((e, _)))
-            if !lp.policy.deny_sources().contains(&source) =>
-        {
-            (
-                Verdict::Deny {
-                    reason: format!("denied by {}.permissions entry {source}", e.section()),
-                },
-                Some(e.cited_path(Effect::Deny, source)),
-            )
-        }
-        (maknae_config::Match3::DenyMatch { source }, _) => (
-            Verdict::Deny {
+    let role_permissions = role.and_then(|r| Some((r, lp.policy.role_permissions(r)?)));
+    match matched {
+        maknae_config::Match3::DenyMatch { source } => {
+            let origin = origin_of(
+                &source,
+                [
+                    Some((lp.policy.deny_sources(), Origin::Site)),
+                    subject.map(|(e, p)| (p.deny_sources(), Origin::Subject(e))),
+                    role_permissions.map(|(r, p)| (p.deny_sources(), Origin::Role(r))),
+                ],
+            );
+            let (reason, cited) = match origin {
                 // Audit-only provenance (spec §4.4): this reason reaches the
                 // audit record; #77's wiring must never copy it onto the wire.
-                reason: format!("denied by policy entry {source}"),
-            },
-            Some(Cited::Path {
-                effect: Effect::Deny,
-                source,
-            }),
-        ),
-        (maknae_config::Match3::AllowMatch { source }, Some((e, _))) => (
-            permit_with_audit(),
-            Some(e.cited_path(Effect::Allow, source)),
-        ),
-        (maknae_config::Match3::AllowMatch { source }, None) => (
-            permit_with_audit(),
-            Some(Cited::Path {
-                effect: Effect::Allow,
-                source,
-            }),
-        ),
-        (maknae_config::Match3::NoMatch, _) => {
-            (Verdict::NotApplicable { note: Some(absent) }, None)
+                Origin::Site => (
+                    format!("denied by policy entry {source}"),
+                    Cited::Path {
+                        effect: Effect::Deny,
+                        source,
+                    },
+                ),
+                Origin::Subject(e) => (
+                    format!("denied by {}.permissions entry {source}", e.section()),
+                    e.cited_path(Effect::Deny, source),
+                ),
+                Origin::Role(role) => (
+                    format!("denied by roles.{role}.permissions entry {source}"),
+                    Cited::RolePath {
+                        role,
+                        effect: Effect::Deny,
+                        source,
+                    },
+                ),
+            };
+            (Verdict::Deny { reason }, Some(cited))
         }
+        maknae_config::Match3::AllowMatch { source } => {
+            let in_force = match subject {
+                Some((e, p)) => (p.allow_sources(), Origin::Subject(e)),
+                None => (lp.policy.allow_sources(), Origin::Site),
+            };
+            let origin = origin_of(
+                &source,
+                [
+                    Some(in_force),
+                    role_permissions.map(|(r, p)| (p.allow_sources(), Origin::Role(r))),
+                ],
+            );
+            let cited = match origin {
+                Origin::Site => Cited::Path {
+                    effect: Effect::Allow,
+                    source,
+                },
+                Origin::Subject(e) => e.cited_path(Effect::Allow, source),
+                Origin::Role(role) => Cited::RolePath {
+                    role,
+                    effect: Effect::Allow,
+                    source,
+                },
+            };
+            (permit_with_audit(), Some(cited))
+        }
+        maknae_config::Match3::NoMatch => (Verdict::NotApplicable { note: Some(absent) }, None),
     }
 }
 
@@ -1668,11 +1742,15 @@ fn decide_tool(
     decide_grants(
         lp,
         lp.subjects.get(uid),
+        Some(role_key),
         |right, set| {
             lp.policy
                 .evaluate3_agent(right, set, &request, None, lp.fold)
         },
-        |set| lp.policy.evaluate3_floored(set, &request, None, lp.fold),
+        |set, role| {
+            lp.policy
+                .evaluate3_floored(set, role, &request, None, lp.fold)
+        },
         format!("role {role_key}: no capability entry for tool.invoke"),
     )
 }
@@ -7012,6 +7090,181 @@ mod tests {
                 source: "Tool(sentinel-674-build cargo build *)".into(),
             })
         );
+    }
+
+    fn role_cite(effect: Effect, source: &str) -> Option<Cited> {
+        Some(Cited::RolePath {
+            role: "user",
+            effect,
+            source: source.into(),
+        })
+    }
+
+    const ROLE_USER_TOOLS: &str = "roles:\n  user:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo test *)\", \"Tool(sentinel-674-vault vault read *)\"]\n      deny: [\"Tool(sentinel-674-build cargo build --release*)\", \"Tool(sentinel-674-build cargo build -v*)\"]\n";
+
+    #[test]
+    fn role_tool_allow_joins_site_list() {
+        let lp = lp_tool(
+            &format!("permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n{ROLE_USER_TOOLS}"),
+            &["admin", "user"],
+            &[],
+        );
+        let user = tool_decided(&lp, &build(TOOL_USER, &["test", "x"]));
+        assert_eq!(
+            (user.verdict, user.cited),
+            (
+                permit_with_audit(),
+                role_cite(Effect::Allow, "Tool(sentinel-674-build cargo test *)")
+            )
+        );
+        let site = tool_decided(&lp, &build(TOOL_USER, &["build", "x"]));
+        assert_eq!(
+            (site.verdict, site.cited),
+            (
+                permit_with_audit(),
+                site_cite(Effect::Allow, "Tool(sentinel-674-build cargo build *)")
+            )
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_ADMIN, &["test", "x"])).verdict,
+            no_tool_entry("admin")
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_ADMIN, &["build", "x"])).cited,
+            site_cite(Effect::Allow, "Tool(sentinel-674-build cargo build *)")
+        );
+    }
+
+    #[test]
+    fn role_tool_allow_joins_subject_list_that_replaces_site() {
+        let lp = lp_tool(
+            &format!("permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\nsubjects:\n  tuser:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo test *)\"]\n{ROLE_USER_TOOLS}"),
+            &["user"],
+            &[],
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build", "x"])).verdict,
+            no_tool_entry("user")
+        );
+        let subject = tool_decided(&lp, &build(TOOL_USER, &["test", "x"]));
+        assert_eq!(subject.verdict, permit_with_audit());
+        assert_eq!(
+            subject.cited,
+            Some(Cited::SubjectPath {
+                subject: "tuser".into(),
+                effect: Effect::Allow,
+                source: "Tool(sentinel-674-build cargo test *)".into(),
+            })
+        );
+        let role = tool_decided(
+            &lp,
+            &tool_req(TOOL_USER, "sentinel-674-vault", "vault", &["read", "x"]),
+        );
+        assert_eq!(
+            (role.verdict, role.cited),
+            (
+                permit_with_audit(),
+                role_cite(Effect::Allow, "Tool(sentinel-674-vault vault read *)")
+            )
+        );
+    }
+
+    #[test]
+    fn role_deny_overrides_site_allow() {
+        let site = "permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n  deny: [\"Tool(sentinel-674-build cargo build -v*)\"]\n";
+        let replaced = "subjects:\n  tuser:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo build *)\"]\n      deny: [\"Tool(sentinel-674-build cargo build --release-x*)\"]\n";
+        for body in [
+            format!("{site}{ROLE_USER_TOOLS}"),
+            format!("{site}{replaced}{ROLE_USER_TOOLS}"),
+        ] {
+            let lp = lp_tool(&body, &["admin", "user"], &[]);
+            let d = tool_decided(&lp, &build(TOOL_USER, &["build", "--release"]));
+            assert_eq!(
+                d.verdict,
+                deny("denied by roles.user.permissions entry Tool(sentinel-674-build cargo build --release*)"),
+                "{body}"
+            );
+            assert_eq!(
+                d.cited,
+                role_cite(
+                    Effect::Deny,
+                    "Tool(sentinel-674-build cargo build --release*)"
+                )
+            );
+            let first = tool_decided(&lp, &build(TOOL_USER, &["build", "-v"]));
+            assert_eq!(
+                (first.verdict, first.cited),
+                (
+                    deny("denied by policy entry Tool(sentinel-674-build cargo build -v*)"),
+                    site_cite(Effect::Deny, "Tool(sentinel-674-build cargo build -v*)")
+                )
+            );
+            assert_eq!(
+                tool_decided(&lp, &build(TOOL_ADMIN, &["build", "--release"])).verdict,
+                permit_with_audit()
+            );
+        }
+        let lp = lp_tool(
+            &format!("{site}{replaced}{ROLE_USER_TOOLS}"),
+            &["user"],
+            &[],
+        );
+        let own = tool_decided(&lp, &build(TOOL_USER, &["build", "--release-x"]));
+        assert_eq!(
+            own.verdict,
+            deny("denied by subjects.tuser.permissions entry Tool(sentinel-674-build cargo build --release-x*)")
+        );
+    }
+
+    #[test]
+    fn agent_ignores_role_tool_grants() {
+        let site = AGENT_SITE.replace(
+            "  user:\n    allow: [\"session.prompt\", \"session.new\"]\n",
+            "  user:\n    allow: [\"session.prompt\", \"session.new\"]\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo build *)\"]\n      deny: [\"Tool(sentinel-674-build cargo test --x*)\"]\n",
+        );
+        assert_ne!(site, AGENT_SITE);
+        for agent_policy in [
+            None,
+            Some("schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo test *)\"]\n"),
+        ] {
+            let mut lp = lp_agent("user", agent_policy);
+            lp.policy = maknae_config::parse_authz(&site).unwrap();
+            lp.action_grants = tool_grants(&["user"], &[]);
+            lp.tools = std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap());
+            let agent = tool_decided(
+                &lp,
+                &on_channel(
+                    build(HOBI_UID, &["build"]),
+                    Some(maknae_security::CHANNEL_AGENT),
+                    Some("hobi"),
+                ),
+            );
+            assert_eq!(agent.verdict, no_tool_entry("user"), "{agent_policy:?}");
+            let human = tool_decided(&lp, &build(HUMAN_UID, &["build"]));
+            assert_eq!(
+                (human.verdict, human.cited),
+                (
+                    permit_with_audit(),
+                    role_cite(Effect::Allow, "Tool(sentinel-674-build cargo build *)")
+                )
+            );
+        }
+        let mut lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo test *)\"]\n"),
+        );
+        lp.policy = maknae_config::parse_authz(&site).unwrap();
+        lp.action_grants = tool_grants(&["user"], &[]);
+        lp.tools = std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap());
+        let own = tool_decided(
+            &lp,
+            &on_channel(
+                build(HOBI_UID, &["test", "--x"]),
+                Some(maknae_security::CHANNEL_AGENT),
+                Some("hobi"),
+            ),
+        );
+        assert_eq!(own.verdict, permit_with_audit());
     }
 
     #[test]

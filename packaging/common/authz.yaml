@@ -61,3 +61,15 @@ roles:
       - "tool.catalog"
       - "board.post"
       - "board.read"
+
+# A role may also hold Tool(...) grants (#674): its allow joins the allow list in force
+# for each person bound to the role (the one above, or the person's own under subjects:),
+# and its deny joins the deny lists. Agents never inherit them. Only Tool(...) entries
+# are accepted here. To use, add a permissions: key to the role's entry above:
+#
+#   user:
+#     permissions:
+#       allow:
+#         - "Tool(github-read gh:pr.*)"
+#       deny:
+#         - "Tool(github-read gh:pr.merge)"

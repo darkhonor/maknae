@@ -2,7 +2,7 @@
 //! subject's grants reach, as `maknae_graph::catalog` bytes. A hint; no decision reads it.
 
 use crate::binding::Resolution;
-use crate::decide::{LoadedPolicy, SubjectEntry};
+use crate::decide::{role_stage, LoadedPolicy, SubjectEntry};
 use crate::role::Role;
 use maknae_config::{
     ArgPattern, CommandForm, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolTarget,
@@ -39,13 +39,13 @@ pub(crate) fn input(
     forges: &ForgeSet,
     budget: usize,
 ) -> Result<CatalogInput, CatalogError> {
-    if matches!(
-        lp.roles.role_for(uid, principal_uid),
-        Resolution::Role(Role::Adversary) | Resolution::NoRole
-    ) {
-        return Ok(CatalogInput::default());
-    }
-    let lists = effective_lists(lp, uid);
+    let role = match lp.roles.role_for(uid, principal_uid) {
+        Resolution::Role(Role::Adversary) | Resolution::NoRole => {
+            return Ok(CatalogInput::default())
+        }
+        Resolution::Role(role @ (Role::Admin | Role::User | Role::Guest)) => role,
+    };
+    let lists = effective_lists(lp, uid, Some(role.key()));
     let stages: Vec<&Stage<'_>> = lists.right.iter().chain([&lists.floored]).collect();
     let agent = lp.agents.get(uid).is_some();
     let mut spent = 0usize;
@@ -89,7 +89,7 @@ pub(crate) fn forge_credentials(
     {
         return Vec::new();
     }
-    let lists = effective_lists(lp, uid);
+    let lists = effective_lists(lp, uid, None);
     let stages: Vec<&Stage<'_>> = lists.right.iter().chain([&lists.floored]).collect();
     let refs: BTreeSet<(&str, &str)> = lp
         .tools
@@ -107,11 +107,16 @@ pub(crate) fn forge_credentials(
         .collect()
 }
 
-fn effective_lists(lp: &LoadedPolicy, uid: u32) -> maknae_config::EffectiveLists<'_> {
+fn effective_lists<'a>(
+    lp: &'a LoadedPolicy,
+    uid: u32,
+    role: Option<&'static str>,
+) -> maknae_config::EffectiveLists<'a> {
     let subject = lp.subjects.get(uid);
     lp.policy.effective_lists(
         subject.and_then(SubjectEntry::agent_right).map(|(_, r)| r),
         subject.and_then(|s| s.permissions.as_ref()),
+        role.and_then(|r| role_stage(subject, r)),
     )
 }
 
@@ -199,6 +204,7 @@ fn admits(stage: &Stage<'_>, entry: &str, program: &str, ceiling: &ArgPattern) -
     stage
         .allow
         .iter()
+        .flat_map(|l| l.iter())
         .filter_map(|p| tool_args(p, entry, program))
         .any(|a| a.overlaps(ceiling))
         && !stage
@@ -352,6 +358,40 @@ mod tests {
             ["fetch --locked*"]
         );
         assert!(cat::patterns(&alice, "rust-build", "cargo").is_empty());
+    }
+
+    #[test]
+    fn catalog_includes_role_granted_patterns() {
+        let roles = "roles:\n  user:\n    permissions:\n      allow: [\"Tool(rust-fetch cargo fetch --locked*)\"]\n      deny: [\"Tool(rust-build cargo build *)\"]\n";
+        let authz = format!(
+            "{}{roles}",
+            site(
+                &[
+                    "Tool(rust-build cargo build *)",
+                    "Tool(rust-build cargo test *)"
+                ],
+                &[]
+            )
+        );
+        let s = snap_with(&authz, HOMELAB, load(vec![hobi()], &[]));
+        let bob = graph(&s, BOB);
+        assert_eq!(sorted(cat::entries(&bob)), ["rust-build", "rust-fetch"]);
+        assert_eq!(cat::patterns(&bob, "rust-build", "cargo"), ["test *"]);
+        assert_eq!(
+            cat::patterns(&bob, "rust-fetch", "cargo"),
+            ["fetch --locked*"]
+        );
+        let replaced = format!(
+            "{}subjects:\n  alice:\n    permissions:\n      allow: [\"Tool(rust-build cargo build *)\"]\n{roles}",
+            site(&["Tool(rust-build cargo test *)"], &[])
+        );
+        let alice = graph(&snap(&replaced, HOMELAB), ALICE);
+        assert_eq!(cat::entries(&alice), ["rust-fetch"]);
+        let policy = agent_policy(&["Tool(rust-build cargo build *)"]);
+        let agent = snap_with(&authz, HOMELAB, load(vec![hobi()], &[("hobi", &policy)]));
+        let hobi = graph(&agent, HOBI);
+        assert_eq!(cat::entries(&hobi), ["rust-build"]);
+        assert_eq!(cat::patterns(&hobi, "rust-build", "cargo"), ["build *"]);
     }
 
     #[test]
