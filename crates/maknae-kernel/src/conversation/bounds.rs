@@ -177,14 +177,14 @@ mod tests {
             bytes: u64::MAX,
             chain_head: "f".repeat(64),
         };
-        let bytes = encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ConversationList(ConversationPage {
+        let bytes = encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ConversationList(ConversationPage {
                 entries: vec![view; page_limit()],
                 next: Some(id),
             })),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap();
         assert!(bytes.len() <= CONTROL_RESPONSE_MAX, "{}", bytes.len());
     }

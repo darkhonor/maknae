@@ -750,11 +750,7 @@ pub(crate) async fn refuse_with<S: AsyncWrite + Unpin, E: AuditEmit>(
         send(
             stream,
             cfg,
-            Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Err(answer),
-                catalog_digest: None,
-            },
+            Response::new(PROTOCOL_VERSION, RespResult::Err(answer), None),
         )
         .await;
     }
@@ -785,11 +781,11 @@ pub(crate) async fn disclose<S: AsyncWrite + Unpin, E: AuditEmit>(
     cap: usize,
     deadline: tokio::time::Instant,
 ) -> bool {
-    let encoded = match maknae_proto::encode_response(&Response {
-        protocol_version: PROTOCOL_VERSION,
-        result: RespResult::Ok(answer),
-        catalog_digest: None,
-    }) {
+    let encoded = match maknae_proto::encode_response(&Response::new(
+        PROTOCOL_VERSION,
+        RespResult::Ok(answer),
+        None,
+    )) {
         _ if tokio::time::Instant::now() >= deadline => {
             Err("deadline passed before the answer was recorded")
         }
@@ -1187,16 +1183,16 @@ async fn attempt<S: AsyncRead + AsyncWrite + Unpin, E: AuditEmit>(
         None => MutationExchange::begin(id, scope.clone(), limits),
     }
     .ok();
-    let bytes = maknae_proto::encode_response(&Response {
-        protocol_version: PROTOCOL_VERSION,
-        result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
+    let bytes = maknae_proto::encode_response(&Response::new(
+        PROTOCOL_VERSION,
+        RespResult::Ok(Payload::MutationAttempt(MutationGrant {
             id,
             scope,
             limits,
             label,
         })),
-        catalog_digest: None,
-    })
+        None,
+    ))
     .ok()
     .filter(|bytes| bytes.len() <= caps.response);
     let delivered = match (exchange, bytes) {
@@ -2811,14 +2807,14 @@ mod tests {
         }
     }
     fn uniform_refusal() -> Vec<u8> {
-        maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Err(ProtoError {
+        maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Err(ProtoError {
                 code: ProtoErrCode::Unauthorized,
                 message: "not authorized".into(),
             }),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap()
     }
     #[tokio::test]
@@ -3288,14 +3284,14 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let entry = file.to_str().unwrap().to_string();
         let host = || SensitiveList::from_entries(std::slice::from_ref(&entry)).unwrap();
-        let want = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Err(ProtoError {
+        let want = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Err(ProtoError {
                 code: ProtoErrCode::Protected,
                 message: maknae_proto::protected_message(maknae_proto::HOST_SENSITIVE_LIST, &entry),
             }),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap();
         let armed = maknae_io::open_path_for_stat(&file).ok();
         assert!(armed.is_some());
@@ -3822,17 +3818,17 @@ mod tests {
         let ssh = fx.root.join(".ssh");
         std::fs::create_dir(&ssh).unwrap();
         let host = || SensitiveList::from_entries(&["~/.ssh/**".to_string()]).unwrap();
-        let want = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Err(ProtoError {
+        let want = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Err(ProtoError {
                 code: ProtoErrCode::Protected,
                 message: maknae_proto::protected_message(
                     maknae_proto::HOST_SENSITIVE_LIST,
                     "~/.ssh/**",
                 ),
             }),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap();
         for fd in [maknae_io::open_directory_for_delegation(&ssh).ok(), None] {
             let frames = list_on(
@@ -4867,11 +4863,11 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn an_answer_exactly_the_size_of_its_frame_is_sent() {
-        let exact = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(stat161()),
-            catalog_digest: None,
-        })
+        let exact = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(stat161()),
+            None,
+        ))
         .unwrap()
         .len();
         let mut stream: Vec<u8> = Vec::new();

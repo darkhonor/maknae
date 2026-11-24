@@ -745,11 +745,11 @@ mod tests {
             ("c1", "{\"path\":\"/w/a\"}", None)
         );
         assert_eq!(c.blocks.len(), 1);
-        let cbor = maknae_proto::encode_response(&maknae_proto::Response {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(c)),
-            catalog_digest: None,
-        })
+        let cbor = maknae_proto::encode_response(&maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(c)),
+            None,
+        ))
         .unwrap();
         assert!(!cbor.windows(12).any(|w| w == b"SENTINEL-426"));
     }

@@ -576,9 +576,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_prompt_reply_over_the_control_cap_is_read_with_the_prompt_cap() {
-        let reply = maknae_proto::Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
+        let reply = maknae_proto::Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
                 reasoning: None,
                 blocks: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new("y".repeat(100 * 1024))),
@@ -586,8 +586,8 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
             })),
-            catalog_digest: None,
-        };
+            None,
+        );
         let body = maknae_proto::encode_response(&reply).unwrap();
         assert!(body.len() > maknae_proto::CONTROL_RESPONSE_MAX);
         let transport = maknae_config::TransportConfig {
@@ -844,9 +844,9 @@ mod tests {
     }
 
     fn small_prompt_reply() -> Vec<u8> {
-        maknae_proto::encode_response(&maknae_proto::Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
+        maknae_proto::encode_response(&maknae_proto::Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
                 reasoning: None,
                 blocks: vec![maknae_proto::ContentBlock::Text {
                     text: maknae_proto::SecretText(zeroize::Zeroizing::new("sentinel-413".into())),
@@ -854,8 +854,8 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
             })),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap()
     }
 

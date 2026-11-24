@@ -44,6 +44,7 @@ pub mod sync;
 mod task;
 pub mod task_store;
 mod task_verbs;
+mod tool_launch;
 mod uid_gate;
 pub mod vocabulary;
 mod workspace;

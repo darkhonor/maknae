@@ -1712,14 +1712,16 @@ mod tests {
             signature: signature(alg, &part, &chain, &vec![0x5a; rest]),
         };
         assert_eq!(dec::<SignedTask>(&enc(&signed)).unwrap(), signed);
-        let response = |catalog_digest| crate::Response {
-            protocol_version: crate::PROTOCOL_VERSION,
-            result: crate::RespResult::Ok(crate::Payload::TaskDelivered(TaskDelivery {
-                signed: Bytes::new(enc(&signed).into()),
-                partition: format!("tasks/agents/{agent}"),
-                fresh: true,
-            })),
-            catalog_digest,
+        let response = |catalog_digest| {
+            crate::Response::new(
+                crate::PROTOCOL_VERSION,
+                crate::RespResult::Ok(crate::Payload::TaskDelivered(TaskDelivery {
+                    signed: Bytes::new(enc(&signed).into()),
+                    partition: format!("tasks/agents/{agent}"),
+                    fresh: true,
+                })),
+                catalog_digest,
+            )
         };
         let bare = crate::encode_response(&response(None)).unwrap().len();
         let stamped = crate::encode_response(&response(Some(crate::CatalogDigest([0xff; 32]))))
@@ -1820,11 +1822,11 @@ mod tests {
             assert_eq!(back, req);
         }
         for payload in task_payloads("round-trip") {
-            let resp = crate::Response {
-                protocol_version: crate::PROTOCOL_VERSION,
-                result: crate::RespResult::Ok(payload),
-                catalog_digest: None,
-            };
+            let resp = crate::Response::new(
+                crate::PROTOCOL_VERSION,
+                crate::RespResult::Ok(payload),
+                None,
+            );
             let back = crate::decode_response(&crate::encode_response(&resp).unwrap()).unwrap();
             assert_eq!(back, resp);
         }
@@ -2158,11 +2160,11 @@ mod tests {
             posts_held: 0,
         });
         for payload in [agents, held, empty_held, released] {
-            let resp = crate::Response {
-                protocol_version: crate::PROTOCOL_VERSION,
-                result: crate::RespResult::Ok(payload),
-                catalog_digest: None,
-            };
+            let resp = crate::Response::new(
+                crate::PROTOCOL_VERSION,
+                crate::RespResult::Ok(payload),
+                None,
+            );
             let bytes = crate::encode_response(&resp).unwrap();
             let back = crate::decode_response(&bytes).unwrap();
             assert_eq!(back, resp);
@@ -2231,11 +2233,11 @@ mod tests {
                 color: Some(BannerColor::Rgb(255, 255, 255)),
             }),
         };
-        let resp = crate::Response {
-            protocol_version: crate::PROTOCOL_VERSION,
-            result: crate::RespResult::Ok(crate::Payload::Agents(page)),
-            catalog_digest: None,
-        };
+        let resp = crate::Response::new(
+            crate::PROTOCOL_VERSION,
+            crate::RespResult::Ok(crate::Payload::Agents(page)),
+            None,
+        );
         let bytes = crate::encode_response(&resp).unwrap();
         assert!(
             bytes.len() <= crate::CONTROL_RESPONSE_MAX,
@@ -2245,11 +2247,11 @@ mod tests {
     }
 
     fn assert_fits_a_control_frame(payload: crate::Payload) {
-        let resp = crate::Response {
-            protocol_version: crate::PROTOCOL_VERSION,
-            result: crate::RespResult::Ok(payload),
-            catalog_digest: None,
-        };
+        let resp = crate::Response::new(
+            crate::PROTOCOL_VERSION,
+            crate::RespResult::Ok(payload),
+            None,
+        );
         let bytes = crate::encode_response(&resp).unwrap();
         assert!(
             bytes.len() <= crate::CONTROL_RESPONSE_MAX,
@@ -3430,16 +3432,16 @@ mod tests {
                 .map(|_| secret(&"f".repeat(each)))
                 .collect();
             items[0] = secret(&"f".repeat(prompt_max - each * (items.len() - 1)));
-            let response = crate::Response {
-                protocol_version: crate::PROTOCOL_VERSION,
-                result: crate::RespResult::Ok(crate::Payload::TaskFollowUps(TaskFollowUps {
+            let response = crate::Response::new(
+                crate::PROTOCOL_VERSION,
+                crate::RespResult::Ok(crate::Payload::TaskFollowUps(TaskFollowUps {
                     task: TaskRef::from_id(&id(0xf0)),
                     from: u32::MAX,
                     items,
                     addendum: Some(Bytes::new(enc(&signed).into())),
                 })),
-                catalog_digest: Some(crate::CatalogDigest([0xff; 32])),
-            };
+                Some(crate::CatalogDigest([0xff; 32])),
+            );
             let len = crate::encode_response(&response).unwrap().len();
             assert!(
                 len <= prompt_response_cap(prompt_max),

@@ -716,6 +716,38 @@ pub fn discharge_plan(
     Ok(())
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) const FORWARDED: [&str; 2] = ["tool.launch", "workspace.mask"];
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) struct ToolCallDischarge {
+    pub(crate) forward: Vec<maknae_security::Obligation>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) fn discharge_for_tool_call(
+    obligations: &[maknae_security::Obligation],
+) -> Result<ToolCallDischarge, UnhonorableObligation> {
+    let mut forward = Vec::new();
+    for ob in obligations {
+        if FORWARDED.contains(&ob.id.as_str()) {
+            forward.push(ob.clone());
+        } else {
+            discharge_plan(std::slice::from_ref(ob))?;
+        }
+    }
+    Ok(ToolCallDischarge { forward })
+}
+
 /// The lexical canonical-form pre-gate over a client-supplied read path
 /// (parent spec §4.4): absolute; no `.`/`..` components; no empty segments
 /// after the leading `/` (no `//`, no trailing `/`; bare `/` passes vacuously
@@ -2184,6 +2216,57 @@ mod tests {
             discharge_plan(&[ob]),
             Err(UnhonorableObligation("audit".into()))
         );
+    }
+
+    fn ob_with(id: &str, key: &str) -> maknae_security::Obligation {
+        let mut params = maknae_security::Attributes::new();
+        params.insert(key, maknae_security::AttrValue::List(vec!["x".into()]));
+        maknae_security::Obligation {
+            id: id.into(),
+            params,
+        }
+    }
+
+    #[test]
+    fn discharge_plan_refuses_tool_launch() {
+        assert_eq!(
+            discharge_plan(&[audit_ob(), ob_with("tool.launch", "argv")]),
+            Err(UnhonorableObligation("tool.launch".into()))
+        );
+    }
+
+    #[test]
+    fn tool_call_discharge_forwards_launch_and_mask() {
+        let launch = ob_with("tool.launch", "argv");
+        let mask = ob_with("workspace.mask", "patterns");
+        let discharged =
+            discharge_for_tool_call(&[audit_ob(), launch.clone(), mask.clone()]).unwrap();
+        assert_eq!(discharged.forward, [launch.clone(), mask.clone()]);
+        let discharged = discharge_for_tool_call(&[mask.clone(), launch.clone()]).unwrap();
+        assert_eq!(discharged.forward, [mask, launch]);
+        assert_eq!(discharge_for_tool_call(&[audit_ob()]).unwrap().forward, []);
+        assert_eq!(discharge_for_tool_call(&[]).unwrap().forward, []);
+        assert_eq!(FORWARDED, ["tool.launch", "workspace.mask"]);
+    }
+
+    #[test]
+    fn tool_call_discharge_refuses_unknown_ids() {
+        let launch = ob_with("tool.launch", "argv");
+        for refused in [
+            ob_with("exfil", "x"),
+            ob_with("audit", "scope"),
+            ob_with("tool.launch.extra", "argv"),
+        ] {
+            let id = refused.id.clone();
+            assert_eq!(
+                discharge_for_tool_call(&[launch.clone(), refused.clone()]).map(|d| d.forward),
+                Err(UnhonorableObligation(id.clone()))
+            );
+            assert_eq!(
+                discharge_for_tool_call(&[refused, audit_ob()]).map(|d| d.forward),
+                Err(UnhonorableObligation(id))
+            );
+        }
     }
 
     // ---- lexical_pregate (vector table cross-referenced with

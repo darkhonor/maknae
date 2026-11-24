@@ -63,6 +63,10 @@ impl Attributes {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &AttrValue)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +98,22 @@ mod tests {
         let mut b = Attributes::new();
         b.insert("flag", AttrValue::Bool(true));
         assert_eq!(b.set_of("flag"), None); // wrong type
+    }
+
+    #[test]
+    fn iter_yields_every_pair_in_key_order() {
+        let mut a = Attributes::new();
+        a.insert("b", AttrValue::Int(2));
+        a.insert("a", AttrValue::Str("x".into()));
+        let pairs: Vec<(&str, &AttrValue)> = a.iter().collect();
+        assert_eq!(
+            pairs,
+            [
+                ("a", &AttrValue::Str("x".into())),
+                ("b", &AttrValue::Int(2))
+            ]
+        );
+        assert_eq!(Attributes::new().iter().count(), 0);
     }
 
     #[test]
