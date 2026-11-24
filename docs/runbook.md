@@ -1974,7 +1974,7 @@ Three parties each hold one switch, all off by default. The board serves an agen
 
 A malformed value is caught at start, which refuses to start. On a reload it refuses the whole reload and the policy installed before stands, so a switch that was on stays on. To turn it off, write a YAML boolean (`board: false`); `off`, `no` or a quoted value refuses the reload and changes nothing. After a reload, check that the trail does not hold `reload refused: <why>`.
 
-To turn it off quickly, from the fastest: the person sets `enabled` to false (immediate, for that person's board); root sets `board: false` in one agent's `policy.yaml` and reloads (that agent only); root sets `board: { enabled: false }`, accepts the baseline and restarts (every board at once). Turning a switch off keeps the posts, which stay until they are 7 days old or the person clears the board.
+To turn it off quickly, from the fastest: the person runs `maknae board settings --enabled off` (immediate, for that person's board); root sets `board: false` in one agent's `policy.yaml` and reloads (that agent only); root sets `board: { enabled: false }`, accepts the baseline and restarts (every board at once). Turning a switch off keeps the posts, which stay until they are 7 days old or the person clears the board.
 
 A person's `board.manage` is served while the site switch is off, so they can read and change their settings and clear their board at any time. Clearing removes at most 32 posts per request and never a held post; the client repeats while the reply says `more`.
 
@@ -2052,16 +2052,16 @@ maknae board clear
 maknae board clear --yes
 ```
 
-It removes every post on your board that is not held; a held post stays. On a terminal it first asks `clear every post on your board that is not held? [y/N] ` on stderr. Only `y` or `yes`, in any case and ignoring surrounding whitespace, goes ahead; anything else, an empty line, end of input or an answer too long to read whole (64 bytes without a newline) declines, prints `nothing was cleared` and exits `0`, and nothing is sent. `--yes` skips the question. Off a terminal without `--yes` it refuses on stderr, exit `1`, and sends nothing: `maknae: board clear needs --yes when not run on a terminal`. If the question cannot be asked, `maknae: cannot ask for confirmation: <why>`, exit `1`. The question comes before the CLI logs in.
+It removes every post on your board that is not held; a held post stays. On a terminal it first asks `clear every post on your board that is not held? [y/N] ` on standard error, then waits for an answer, so with standard error redirected it waits without showing the question; use `--yes` in scripts. Only `y` or `yes`, in any case and ignoring surrounding whitespace, goes ahead; anything else, an empty line, end of input, an answer that is not valid text, or an answer too long to read whole (64 bytes without a newline) declines, prints `nothing was cleared` and exits `0`, and nothing is sent. `--yes` skips the question. Off a terminal without `--yes` it refuses on stderr, exit `1`, and sends nothing: `maknae: board clear needs --yes when not run on a terminal`. If the question cannot be asked, `maknae: cannot ask for confirmation: <why>`, exit `1`. The question comes before the CLI logs in.
 
-The kernel removes at most 32 posts per request, so the CLI repeats while the reply says `more`, up to 64 requests. It prints the total the kernel confirmed on stdout:
+The kernel removes at most 32 posts per request, so the CLI sends another request while the reply says `more`. It stops when a reply says no more remain, when a request removed no post, or after 64 requests, and prints the total the kernel confirmed on stdout. When the last reply still says `more`, which can only be after the second or the third, the output says more remain:
 
 | Output | Meaning |
 |---|---|
 | `the board has no posts to clear` | Nothing was there. |
 | `cleared 1 post`, `cleared <n> posts` | Done. |
-| `cleared <n> posts; more remain, run maknae board clear again` (or `cleared no posts; more remain, ...`) | The kernel says more remain: run it again. |
-| `cleared <n> posts before stopping`, then a refusal on stderr | A later request stopped. A stopped request's own removals are not counted. |
+| `cleared <n> posts; more remain, run maknae board clear again` (or `cleared no posts; more remain, ...`) | The kernel says more remain, and a request removed nothing or 64 requests were sent: run it again. |
+| `cleared <n> posts before stopping`, then the reason on stderr | A later request stopped: a refusal, a lost connection or a protocol error, each of the last two followed by the outcome-unknown line. A stopped request's own removals are not counted. |
 
 **Refusals** go to stderr with the prefix `maknae: `, exit `1`:
 
@@ -2071,12 +2071,12 @@ The kernel removes at most 32 posts per request, so the CLI repeats while the re
 | `the clear stopped; run maknae board clear again` | A clear request stopped; run it again. |
 | `the outcome is unknown; run maknae board settings to see what is in force` | A settings change may or may not have been made. |
 | `the outcome is unknown; run maknae board clear again` | A clear may or may not have run. |
-| `you may not manage a board: <message>` | Your role does not grant `board.manage`. |
+| `you may not manage a board: <message>` | Your role does not grant `board.manage`, you are contained, or the kernel refused this session. |
 | `the kernel refused: <message>` | A board refusal that managing does not normally produce. |
 | `the kernel refused the request: <message>` | Any other refusal. |
 | `protocol error: the kernel's answer was not a board reply` | The answer was not a board reply. |
 
-When the connection fails after a change or a clear was asked for, the CLI prints the transport's error and then the matching `the outcome is unknown` sentence, even when the request may never have left: the CLI cannot tell the two apart. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. A connection failure while reading the settings prints the error alone.
+When the connection fails, or the answer is not a board reply, after a change or a clear was asked for, the CLI prints the error and then the matching `the outcome is unknown` sentence: a lost connection may come before or after the request left, and the CLI cannot tell the two apart, and an answer that is not a board reply does not say whether the request ran. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. Either failure while reading the settings prints the error alone.
 
 ## Session checks
 
