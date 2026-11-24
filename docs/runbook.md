@@ -489,15 +489,15 @@ canonical-sorted — `maknae-audit-append/src/record.rs` — not declaration ord
 ### 7. Grants, destinations and subjects (`authz.yaml`)
 
 Three additive keys govern what a role, and with `subjects:` an individual account, may DO beyond the built-in rules. The packaged
-`authz.yaml` grants `admin` five administrative terms, and both `admin` and `user` the five conversation terms, `session.task`, `tool.catalog`, `board.post` and `board.read`; it allowlists nothing: no prompt is permitted
+`authz.yaml` grants `admin` five administrative terms, and both `admin` and `user` the five conversation terms, `session.task`, `tool.catalog`, `board.post`, `board.read` and `board.manage`; it allowlists nothing: no prompt is permitted
 until you write a `destinations:` entry.
 
 ```yaml
 roles:                       # #162: per-role action grants; deny beats allow inside a role
   admin:
-    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read"]   # as packaged
+    allow: ["admin.status", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read", "board.manage"]   # as packaged
   user:
-    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read"]   # as packaged
+    allow: ["session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read", "board.manage"]   # as packaged
 destinations:                # #172: per-role egress allowlist for session.prompt
   user:
     allow: ["provider:openai"]   # provider:<name>, an authorized provider's name (configuration §6.1)
@@ -506,7 +506,7 @@ destinations:                # #172: per-role egress allowlist for session.promp
 - **Which terms a role may hold.** `admin`: `admin.status`, `admin.config.show`,
   `admin.subject.list`, `admin.baseline.show`, `admin.baseline.accept`,
   `admin.contain`, `admin.release`, `session.prompt`, `session.new`, `session.close`,
-  `session.list`, `session.delete`, `session.task`, `tool.catalog`, `board.post` and `board.read`. `user`: the six `session.*` terms, `tool.catalog`, `board.post` and `board.read` — writing an `admin.*` term under `user` refuses at boot, naming both the role and
+  `session.list`, `session.delete`, `session.task`, `tool.catalog`, `board.post`, `board.read` and `board.manage`. `user`: the six `session.*` terms, `tool.catalog`, `board.post`, `board.read` and `board.manage` — writing an `admin.*` term under `user` refuses at boot, naming both the role and
   the term. `guest` and `adversary` are structural and take no grants; a `roles:` or
   `destinations:` key naming them refuses at boot too.
 - **`destinations:` grammar.** Allow-only (a `deny:` key refuses at load, so it cannot be
@@ -865,7 +865,7 @@ As yourself, not root, store your own API key in Vault under your own login: [fi
 
 ### 7. Grant the prompt
 
-Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged lists already hold `session.prompt`, the four conversation terms beside it, `session.task`, `tool.catalog`, `board.post` and `board.read`. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
+Edit `/etc/maknae/authz.yaml` in place. The packaged file already has a `roles:` key granting `admin` and `user` their terms, and a second `roles:` key refuses the whole file, so append a `destinations:` key; the packaged lists already hold `session.prompt`, the four conversation terms beside it, `session.task`, `tool.catalog`, `board.post`, `board.read` and `board.manage`. `sudoedit` and `tee -a` keep the file's owner, mode and label. Step 9's restart applies it; a daemon that is already serving applies it at the next reload, `sudo systemctl reload maknaed` ([Reload the policy](#reload-the-policy)):
 
 ```bash
 sudo tee -a /etc/maknae/authz.yaml >/dev/null <<'EOF'
@@ -896,6 +896,7 @@ roles:
       - "tool.catalog"
       - "board.post"
       - "board.read"
+      - "board.manage"
   user:
     allow:
       - "session.prompt"
@@ -907,6 +908,7 @@ roles:
       - "tool.catalog"
       - "board.post"
       - "board.read"
+      - "board.manage"
 destinations:
   admin:
     allow: ["provider:openai"]

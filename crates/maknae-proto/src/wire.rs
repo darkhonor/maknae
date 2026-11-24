@@ -763,6 +763,10 @@ pub enum Verb {
     BoardRead {
         seen_through: Option<crate::PostId>,
     },
+    /// Read or set the caller's own board settings, or clear the caller's own board.
+    BoardManage {
+        op: crate::BoardOp,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1393,7 +1397,8 @@ pub fn takes_task_request_cap(verb: &Verb) -> bool {
         | Verb::TaskReport { .. }
         | Verb::AgentList { .. }
         | Verb::BoardPost { .. }
-        | Verb::BoardRead { .. } => false,
+        | Verb::BoardRead { .. }
+        | Verb::BoardManage { .. } => false,
     }
 }
 
@@ -1471,7 +1476,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::TaskList { .. }
         | Verb::TaskStop { .. }
         | Verb::TaskDrop { .. }
-        | Verb::AgentList { .. } => FrameClass::Control,
+        | Verb::AgentList { .. }
+        | Verb::BoardManage { .. } => FrameClass::Control,
     }
 }
 
@@ -4108,6 +4114,30 @@ mod tests {
                     },
                     FrameClass::Prompt,
                 ),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Settings { set: None },
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Settings {
+                            set: Some(crate::BoardSettings {
+                                enabled: true,
+                                participate: false,
+                                report: crate::BoardReport::Every,
+                            }),
+                        },
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Clear,
+                    },
+                    FrameClass::Control,
+                ),
             ]
         }
 
@@ -4121,7 +4151,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 63);
+            assert_eq!(all.len(), 66);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }

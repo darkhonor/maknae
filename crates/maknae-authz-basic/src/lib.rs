@@ -38,7 +38,7 @@ use snapshot::Snapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
-pub(crate) const USER_GRANTABLE: [&str; 9] = [
+pub(crate) const USER_GRANTABLE: [&str; 10] = [
     "session.prompt",
     "session.new",
     "session.close",
@@ -48,6 +48,7 @@ pub(crate) const USER_GRANTABLE: [&str; 9] = [
     "tool.catalog",
     "board.post",
     "board.read",
+    "board.manage",
 ];
 
 /// Subject attribute key for the authenticated uid (pinned for #77; ADR-0018:
@@ -2219,7 +2220,8 @@ mod tests {
                 "session.task",
                 "tool.catalog",
                 "board.post",
-                "board.read"
+                "board.read",
+                "board.manage"
             ]
         );
     }
@@ -3373,6 +3375,89 @@ mod tests {
     }
 
     #[test]
+    fn board_manage_is_permitted_for_admin_and_user_and_refused_for_guest() {
+        let src = source_with(
+            SHIPPED,
+            Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"daemon\"]\n  guest: [\"bin\"]\n  adversary: [\"sys\"]\n"),
+            &[("root", 0), ("daemon", 1), ("bin", 2), ("sys", 3)],
+        );
+        let auth =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&src));
+        for op in ["settings", "clear"] {
+            let ask = |uid: i64| {
+                let mut r = liveness_req(Some(uid));
+                r.action = Action("board.manage".into());
+                r.context
+                    .0
+                    .insert(maknae_security::CONTEXT_BOARD_OP, AttrValue::Str(op.into()));
+                auth.decide_cited(&r)
+            };
+            for (uid, role, entry) in [(0, "admin", 14), (1, "user", 9)] {
+                let d = ask(uid);
+                assert_eq!(d.verdict, audit_permit(), "{op} {role}");
+                assert_eq!(d.role, Some(role));
+                assert_eq!(
+                    d.rule.map(|r| r.key),
+                    Some(format!("rule:roles.{role}:allow:{entry}")),
+                    "{op} {role}"
+                );
+            }
+            let guest = ask(2);
+            assert_eq!(
+                guest.verdict,
+                Verdict::NotApplicable {
+                    note: Some("role guest: no rule for board.manage".into())
+                }
+            );
+            assert_eq!(guest.role, Some("guest"));
+            assert_eq!(
+                ask(3).verdict,
+                Verdict::Deny {
+                    reason: "subject contained: role=adversary".into()
+                }
+            );
+            assert_eq!(
+                ask(4242).verdict,
+                Verdict::NotApplicable {
+                    note: Some("subject resolves to no role".into())
+                }
+            );
+        }
+        let denied = source_with(
+            "schema_version: 1\nroles:\n  user:\n    allow: [\"board.*\"]\n    deny: [\"board.manage\"]\n",
+            Some("schema_version: 1\nbindings:\n  user: [\"daemon\"]\n"),
+            &[("daemon", 1)],
+        );
+        let pdp =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&denied));
+        let mut r = liveness_req(Some(1));
+        r.action = Action("board.manage".into());
+        assert_eq!(
+            pdp.decide(&r),
+            Verdict::Deny {
+                reason: "denied by role grant board.manage".into()
+            }
+        );
+        r.action = Action("board.read".into());
+        assert_eq!(pdp.decide(&r), audit_permit());
+        let limited = source_with(
+            &format!("{SHIPPED}subjects:\n  daemon:\n    actions:\n      allow: [\"board.post\", \"board.read\"]\n"),
+            Some("schema_version: 1\nbindings:\n  user: [\"daemon\"]\n"),
+            &[("daemon", 1)],
+        );
+        let pdp =
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(&limited));
+        r.action = Action("board.manage".into());
+        assert_eq!(
+            pdp.decide(&r),
+            Verdict::Deny {
+                reason: "subject daemon: board.manage is not in subjects.daemon.actions allow"
+                    .into()
+            }
+        );
+    }
+
+    #[test]
     fn tool_catalog_is_subject_limitable_and_deniable_by_role() {
         let limited = source_with(
             &format!("{SHIPPED}subjects:\n  daemon:\n    actions:\n      allow: [\"session.*\"]\n"),
@@ -3418,7 +3503,13 @@ mod tests {
                 .collect()
         };
         let mut admin_terms = SHIPPED_ADMIN_TERMS.to_vec();
-        admin_terms.extend(["session.task", "tool.catalog", "board.post", "board.read"]);
+        admin_terms.extend([
+            "session.task",
+            "tool.catalog",
+            "board.post",
+            "board.read",
+            "board.manage",
+        ]);
         assert_eq!(allowed("admin"), admin_terms);
         assert_eq!(allowed("user"), USER_GRANTABLE);
         assert!(policy.action_grants.values().all(|g| g.deny.is_empty()));
@@ -7151,7 +7242,7 @@ mod tests {
                 .chain(KERNEL_TERMS.iter())
                 .copied()
                 .collect();
-            assert_eq!(terms.len(), 64);
+            assert_eq!(terms.len(), 65);
             let (uids, paths, homes, ops) = (uids(), paths(), homes(), operations());
             assert_eq!(
                 (uids.len(), paths.len(), homes.len(), ops.len()),
@@ -7179,7 +7270,7 @@ mod tests {
                     distinct(&ops),
                     distinct(&destinations),
                 ),
-                (64, 9, 22, 5, 8, 4)
+                (65, 9, 22, 5, 8, 4)
             );
             let mut cells = 0usize;
             let mut mismatches: Vec<String> = Vec::new();
@@ -7329,7 +7420,7 @@ mod tests {
                 &mismatches[..mismatches.len().min(10)]
             );
             let fs_cells = 6 * 8 * 22 * 5 + 8 * 22 * 5;
-            let other_cells = 57 + 4;
+            let other_cells = 58 + 4;
             assert_eq!(cells, 12 * 9 * (fs_cells + other_cells));
             assert_eq!(subject_entries, 1);
             assert_eq!(
@@ -8879,6 +8970,88 @@ mod tests {
                     format!("authz agents: agents/hobi/policy.yaml denies `{denied}`, but every agent holds session.new, session.prompt, session.close, tool.catalog, board.post and board.read to work its tasks")
                 );
             }
+        }
+
+        #[test]
+        fn an_enrolled_agent_never_holds_board_manage() {
+            let allowing = "schema_version: 1\nactions:\n  allow: [\"board.manage\", \"fs.*\"]\n";
+            let contained = Some("schema_version: 1\nbindings:\n  adversary: [\"hobi-svc\"]\n");
+            for (who, bindings, enrolled, role, reason) in [
+                (
+                    "user",
+                    None,
+                    hobi(),
+                    "user",
+                    "agent hobi: board.manage is never permitted to an agent",
+                ),
+                (
+                    "adversary",
+                    contained,
+                    hobi(),
+                    "adversary",
+                    "subject contained: role=adversary",
+                ),
+            ] {
+                let src = try_source(
+                    super::SHIPPED,
+                    bindings,
+                    &[("hobi-svc", HOBI)],
+                    load(vec![enrolled], &[("hobi", allowing)]),
+                )
+                .unwrap();
+                let a = auth(&src, 501);
+                for op in ["settings", "clear"] {
+                    let mut r = agent_channel(whoami(i64::from(HOBI)), "hobi");
+                    r.action = Action("board.manage".into());
+                    r.context
+                        .0
+                        .insert(maknae_security::CONTEXT_BOARD_OP, AttrValue::Str(op.into()));
+                    let d = a.decide_cited(&r);
+                    assert_eq!(
+                        d.verdict,
+                        Verdict::Deny {
+                            reason: reason.into()
+                        },
+                        "{who} {op}"
+                    );
+                    assert_eq!(d.role, Some(role), "{who} {op}");
+                    r.action = Action("board.read".into());
+                    let read = a.decide(&r);
+                    if who == "adversary" {
+                        assert!(matches!(read, Verdict::Deny { .. }), "{read:?}");
+                    } else {
+                        assert_eq!(read, audit_permit(), "{who}: the agent still reads");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn an_agent_policy_denying_board_manage_still_loads() {
+            let src = try_source(
+                super::shipped_denying(),
+                None,
+                &[],
+                load(
+                    vec![hobi()],
+                    &[(
+                        "hobi",
+                        "schema_version: 1\nactions:\n  deny: [\"board.manage\"]\n",
+                    )],
+                ),
+            )
+            .expect("board.manage is not in an agent's tasks right");
+            let a = auth(&src, 501);
+            let mut r = agent_channel(whoami(i64::from(HOBI)), "hobi");
+            r.action = Action("board.post".into());
+            assert_eq!(a.decide(&r), audit_permit());
+            r.action = Action("board.manage".into());
+            assert_eq!(
+                a.decide(&r),
+                Verdict::Deny {
+                    reason: "agent hobi: board.manage is never permitted to an agent".into()
+                }
+            );
         }
 
         #[test]

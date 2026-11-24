@@ -859,24 +859,24 @@ mod tests {
         let s = shipped_with_bindings();
         let snap = snap(&s);
         let g = snap.graph();
-        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 64);
+        assert_eq!(g.nodes().iter().filter(|n| n.kind == TERM).count(), 65);
         assert_eq!(g.nodes().iter().filter(|n| n.kind == CLASS).count(), 9);
         let rules: Vec<_> = g.nodes().iter().filter(|n| n.kind == RULE).collect();
-        assert_eq!(rules.len(), 43);
+        assert_eq!(rules.len(), 45);
         let admin = g.lookup(ROLE, "admin").unwrap();
         assert_eq!(g.out_edges(admin.id, DENIES).count(), 18);
-        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 16);
+        assert_eq!(g.out_edges(admin.id, PERMITS).count(), 17);
         let grants = g
             .lookup(SECTION, "/etc/maknae/authz.yaml#roles.admin")
             .unwrap();
-        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 14);
+        assert_eq!(g.in_edges(grants.id, DECLARED_BY).count(), 15);
         let user = g.lookup(ROLE, "user").unwrap();
         assert_eq!(g.out_edges(user.id, DENIES).count(), 18);
-        assert_eq!(g.out_edges(user.id, PERMITS).count(), 11);
+        assert_eq!(g.out_edges(user.id, PERMITS).count(), 12);
         let user_grants = g
             .lookup(SECTION, "/etc/maknae/authz.yaml#roles.user")
             .unwrap();
-        assert_eq!(g.in_edges(user_grants.id, DECLARED_BY).count(), 9);
+        assert_eq!(g.in_edges(user_grants.id, DECLARED_BY).count(), 10);
         let sec = g
             .lookup(SECTION, "/etc/maknae/authz.yaml#permissions")
             .unwrap();
@@ -907,7 +907,7 @@ mod tests {
         }
         assert_eq!(
             g.edges().len() - snap.persisted().edges().len(),
-            64 + 1 + 20 * 3 + 2 + 23 * 3
+            65 + 1 + 20 * 3 + 2 + 25 * 3
         );
 
         let deny0 = g.lookup(RULE, "rule:permissions:deny:0").unwrap();
@@ -1603,7 +1603,7 @@ mod tests {
             shown.starts_with("Snapshot { revision: 5, nodes: "),
             "{shown}"
         );
-        assert!(shown.ends_with(", rules: 43 }"), "{shown}");
+        assert!(shown.ends_with(", rules: 45 }"), "{shown}");
     }
 
     #[test]

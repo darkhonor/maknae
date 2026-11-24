@@ -30,9 +30,11 @@ permissions:
 # The terms each role holds on a fresh install: basic operation of a single-user host
 # for `admin` (#490), and for both roles the conversation terms (#170), `session.task`
 # (#609), which tasks an enrolled agent, `tool.catalog` (#674), which fetches a
-# reference list of tools, and `board.post` and `board.read` (#695), which post to and
-# read the board of a task's tasker; each call is still decided on its own. Edit the
-# lists to grant fewer or more; `admin.config.show` and `admin.contain` are grantable too.
+# reference list of tools, `board.post` and `board.read` (#695), which post to and
+# read the board of a task's tasker, and `board.manage` (#698), which reads and sets a
+# person's own board settings and clears their own board; each call is still decided on
+# its own. Edit the lists to grant fewer or more; `admin.config.show` and `admin.contain`
+# are grantable too.
 roles:
   admin:
     allow:
@@ -50,6 +52,7 @@ roles:
       - "tool.catalog"
       - "board.post"
       - "board.read"
+      - "board.manage"
   user:
     allow:
       - "session.prompt"
@@ -61,3 +64,4 @@ roles:
       - "tool.catalog"
       - "board.post"
       - "board.read"
+      - "board.manage"
