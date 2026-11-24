@@ -247,6 +247,18 @@ impl<B: Baseline> Composition<B> {
         &self,
         decide: impl FnOnce(&[&dyn Authorizer; 4], &Arc<maknae_config::SensitiveList>) -> R,
     ) -> R {
+        self.on_live_pinned(|ops, host, _| decide(ops, host))
+    }
+
+    /// [`Composition::on_live`], also handing over that snapshot's tools catalog.
+    fn on_live_pinned<R>(
+        &self,
+        decide: impl FnOnce(
+            &[&dyn Authorizer; 4],
+            &Arc<maknae_config::SensitiveList>,
+            &maknae_config::ToolsCatalog,
+        ) -> R,
+    ) -> R {
         let _turn = self.baseline.live_turn().share();
         let snap = self.baseline.snapshot();
         let base = OnSnapshot {
@@ -254,7 +266,11 @@ impl<B: Baseline> Composition<B> {
             snap: &snap,
         };
         let sensitive = SensitiveAuthorizer::new(snap.sensitive());
-        decide(&self.operands_with(&base, &sensitive), snap.sensitive())
+        decide(
+            &self.operands_with(&base, &sensitive),
+            snap.sensitive(),
+            snap.tools(),
+        )
     }
 }
 
@@ -264,6 +280,56 @@ impl<B: Baseline> crate::workspace::DecidesPinned for Composition<B> {
         reqs: &[Request],
     ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
         self.on_live(|ops, host| (compose_decide_cited_all(ops, reqs), Arc::clone(host)))
+    }
+
+    fn with_pinned<R>(&self, f: impl FnOnce(&dyn crate::workspace::PinnedPolicy) -> R) -> R {
+        self.on_live_pinned(|ops, host, tools| f(&PinnedView { ops, host, tools }))
+    }
+}
+
+/// The operands, host list and tools catalog of one live snapshot, captured once.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) struct PinnedView<'a> {
+    ops: &'a [&'a dyn Authorizer; 4],
+    host: &'a Arc<maknae_config::SensitiveList>,
+    tools: &'a maknae_config::ToolsCatalog,
+}
+
+impl crate::workspace::DecidesPinned for PinnedView<'_> {
+    fn decide_all_pinned(
+        &self,
+        reqs: &[Request],
+    ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
+        (
+            compose_decide_cited_all(self.ops, reqs),
+            Arc::clone(self.host),
+        )
+    }
+
+    fn with_pinned<R>(&self, f: impl FnOnce(&dyn crate::workspace::PinnedPolicy) -> R) -> R {
+        f(self)
+    }
+}
+
+impl crate::workspace::PinnedPolicy for PinnedView<'_> {
+    fn tools(&self) -> &maknae_config::ToolsCatalog {
+        self.tools
+    }
+
+    fn decide(&self, req: &Request) -> Decided {
+        compose_decide_cited(self.ops, req)
+    }
+
+    fn mount(
+        &self,
+        subject: &crate::workspace::SubjectFacts<'_>,
+        root: &str,
+        mode: crate::workspace::MountMode,
+    ) -> crate::workspace::MountDecision {
+        subject.mount(self, root, mode)
     }
 }
 

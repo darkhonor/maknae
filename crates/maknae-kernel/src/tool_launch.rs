@@ -90,7 +90,7 @@ fn list<'a>(items: impl Iterator<Item = &'a str>) -> AttrValue {
     AttrValue::List(items.map(str::to_string).collect())
 }
 
-fn ops(ops: ForgeOps) -> AttrValue {
+pub(crate) fn ops(ops: ForgeOps) -> AttrValue {
     AttrValue::Set(
         ForgeOp::ALL
             .iter()
@@ -100,7 +100,7 @@ fn ops(ops: ForgeOps) -> AttrValue {
     )
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     lower_hex(&maknae_crypto::sha256(bytes))
 }
 

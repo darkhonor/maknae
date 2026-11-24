@@ -183,6 +183,18 @@ impl Snapshot {
         &self.loaded.sensitive
     }
 
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub(crate) fn granting_action(mut self, role: &str, term: &'static str) -> Self {
+        let (allow, _) = self
+            .loaded
+            .action_grants
+            .0
+            .entry(role.to_string())
+            .or_default();
+        allow.push((term, term.to_string()));
+        self
+    }
+
     /// `uid`'s tool catalog over this snapshot, built on first use and kept for its life.
     /// The cache is not keyed by `forges`: they are restart-only (ADR-0039).
     pub(crate) fn catalog_for(

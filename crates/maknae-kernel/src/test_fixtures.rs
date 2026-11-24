@@ -151,6 +151,43 @@ pub(crate) fn write_tools(dir: &Path, body: &str) {
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
 }
 
+/// The vendor grammar directory inside a [`fixture`]'s config dir.
+pub(crate) const VENDOR_DIR: &str = "vendor";
+
+fn policy_subdir(dir: &Path, name: &str, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let sub = dir.join(name);
+    if !sub.exists() {
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    sub
+}
+
+/// `<dir>/grammars/<name>`, a site's own grammar file.
+pub(crate) fn write_grammar(dir: &Path, name: &str, text: &str) {
+    write_0640(
+        &policy_subdir(dir, maknae_config::GRAMMARS_DIR, 0o750).join(name),
+        text,
+    );
+}
+
+/// Enables `<vendor_dir>/<name>` with a link in `<config_dir>/grammars/`.
+pub(crate) fn link_grammar(config_dir: &Path, vendor_dir: &Path, name: &str) {
+    std::os::unix::fs::symlink(
+        vendor_dir.join(name),
+        policy_subdir(config_dir, maknae_config::GRAMMARS_DIR, 0o750).join(name),
+    )
+    .unwrap();
+}
+
+pub(crate) fn write_tools_dropin(dir: &Path, name: &str, text: &str) {
+    write_0640(
+        &policy_subdir(dir, maknae_config::TOOLS_DROPIN_DIR, 0o750).join(name),
+        text,
+    );
+}
+
 pub(crate) fn write_empty_sensitive(dir: &Path) {
     write_sensitive(dir, "schema_version: 1\nsensitive: []\n");
 }
@@ -198,7 +235,8 @@ pub(crate) fn fixture(
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let dir = dir.canonicalize().expect("canonicalize the fixture home");
-    let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
+    let paths =
+        maknae_authz_basic::PolicyPaths::in_dir(&dir).with_grammar_vendor(dir.join(VENDOR_DIR));
     for (path, body) in [(&paths.authz, Some(policy)), (&paths.bindings, bindings)] {
         let Some(body) = body else { continue };
         std::fs::write(path, body).unwrap();

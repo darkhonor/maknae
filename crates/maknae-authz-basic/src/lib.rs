@@ -2083,6 +2083,19 @@ impl HermeticAuthorizer {
         *self.hosts.write().unwrap_or_else(PoisonError::into_inner) = hosts;
     }
 
+    /// [`Self::compile_from_file`] with `tool.invoke` in `roles`' action grants, as the
+    /// decision core's tests inject it; it becomes grantable with its Verb in #479.
+    pub fn compile_granting_tool_invoke(
+        &self,
+        roles: &[&str],
+    ) -> Result<Arc<Snapshot>, AuthzBasicError> {
+        let compiled = Arc::try_unwrap(self.compile_from_file()?)
+            .map_err(|_| AuthzBasicError::Load("the compiled snapshot is shared".into()))?;
+        Ok(Arc::new(roles.iter().fold(compiled, |snap, role| {
+            snap.granting_action(role, "tool.invoke")
+        })))
+    }
+
     /// [`Self::compile_from_file`] then install; an `Err` leaves the old snapshot.
     pub fn reload_from_file(&self) -> Result<(), AuthzBasicError> {
         let next = self.compile_from_file()?;
@@ -6269,6 +6282,31 @@ mod tests {
             });
             auth.reload_from_file().unwrap();
             assert_eq!(auth.snapshot().agent_uid("hobi"), Some(2001));
+        }
+
+        #[test]
+        fn compile_granting_tool_invoke_grants_only_the_named_roles() {
+            let fx = Fixture::new("grant_tool_invoke");
+            write(&fx.policy(), EMPTY);
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            let action = |snap: &Snapshot, role: &str| {
+                snap.loaded()
+                    .action_grants
+                    .evaluate3_action(role, "tool.invoke")
+            };
+            let granted = auth.compile_granting_tool_invoke(&["user"]).unwrap();
+            assert_eq!(
+                action(&granted, "user"),
+                maknae_config::Match3::AllowMatch {
+                    source: "tool.invoke".into()
+                }
+            );
+            for role in ["admin", "guest"] {
+                assert_eq!(action(&granted, role), maknae_config::Match3::NoMatch);
+            }
+            let plain = auth.compile_from_file().unwrap();
+            assert_eq!(action(&plain, "user"), maknae_config::Match3::NoMatch);
         }
 
         const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";

@@ -66,6 +66,7 @@ files = [
   # #674: the workspace-mount decision; a wrong arm mounts a system directory or a home.
   "crates/maknae-kernel/src/workspace.rs",
   "crates/maknae-kernel/src/tool_launch.rs",
+  "crates/maknae-kernel/src/tool_call.rs",
   # #161: fs.list's per-entry decisions, bounds and order; a wrong arm releases a
   # withheld name.
   "crates/maknae-kernel/src/listing.rs",

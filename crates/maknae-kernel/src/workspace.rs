@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use maknae_config::{fold_path, Fold, Reach, SensitiveList};
+use maknae_config::{fold_path, Fold, Reach, SensitiveList, ToolsCatalog};
 use maknae_security::{
     AttrValue, Decided, Decision, FsOperation, Lane, Obligation, Request, RuleCitation, Verdict,
 };
@@ -29,8 +29,8 @@ const SYSTEM_PATHS: [&str; 12] = [
     "/var/log/maknae",
 ];
 
-const MASK: &str = "workspace.mask";
-const PATTERNS: &str = "patterns";
+pub(crate) const MASK: &str = "workspace.mask";
+pub(crate) const PATTERNS: &str = "patterns";
 
 #[cfg_attr(
     not(test),
@@ -66,6 +66,83 @@ pub(crate) enum MountDecision {
 /// Decides a batch and returns the host `sensitive.yaml` list of the snapshot it decided on.
 pub(crate) trait DecidesPinned {
     fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>);
+
+    /// Runs `f` against one policy snapshot: every lookup and decision it makes sees that snapshot.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by the tool-invocation verb, #479")
+    )]
+    fn with_pinned<R>(&self, f: impl FnOnce(&dyn PinnedPolicy) -> R) -> R;
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) trait PinnedPolicy {
+    fn tools(&self) -> &ToolsCatalog;
+    fn decide(&self, req: &Request) -> Decided;
+    fn mount(&self, subject: &SubjectFacts<'_>, root: &str, mode: MountMode) -> MountDecision;
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) struct SubjectFacts<'a> {
+    pub(crate) lane: Lane,
+    pub(crate) uid: u32,
+    pub(crate) home: Option<&'a Path>,
+    pub(crate) conversation: Option<&'a ConversationFacts>,
+    pub(crate) personal: Option<&'a AttrValue>,
+    pub(crate) stamp: &'a Stamp<'a>,
+}
+
+impl SubjectFacts<'_> {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by the tool-invocation verb, #479")
+    )]
+    pub(crate) fn mount<P: DecidesPinned>(
+        &self,
+        authorizer: &P,
+        root: &str,
+        mode: MountMode,
+    ) -> MountDecision {
+        decide_mount(
+            authorizer,
+            self.lane,
+            self.uid,
+            self.home,
+            self.conversation,
+            self.personal,
+            self.stamp,
+            root,
+            mode,
+        )
+    }
+}
+
+/// A [`DecidesPinned`] with no snapshot of its own to pin: each call decides on its own.
+#[cfg(test)]
+pub(crate) struct Unpinned<'a, P: DecidesPinned>(pub(crate) &'a P, pub(crate) &'a ToolsCatalog);
+
+#[cfg(test)]
+impl<P: DecidesPinned> PinnedPolicy for Unpinned<'_, P> {
+    fn tools(&self) -> &ToolsCatalog {
+        self.1
+    }
+
+    fn decide(&self, req: &Request) -> Decided {
+        self.0
+            .decide_all_pinned(std::slice::from_ref(req))
+            .0
+            .swap_remove(0)
+    }
+
+    fn mount(&self, subject: &SubjectFacts<'_>, root: &str, mode: MountMode) -> MountDecision {
+        subject.mount(self.0, root, mode)
+    }
 }
 
 const NOT_AUTHORIZED: &str = "not authorized";
@@ -1058,6 +1135,10 @@ mod tests {
     }
 
     impl DecidesPinned for Stub {
+        fn with_pinned<R>(&self, f: impl FnOnce(&dyn PinnedPolicy) -> R) -> R {
+            f(&Unpinned(self, &ToolsCatalog::empty()))
+        }
+
         fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>) {
             (
                 maknae_security::decide_each_cited(self, reqs),
@@ -1236,6 +1317,10 @@ mod tests {
     }
 
     impl DecidesPinned for Torn {
+        fn with_pinned<R>(&self, f: impl FnOnce(&dyn PinnedPolicy) -> R) -> R {
+            f(&Unpinned(self, &ToolsCatalog::empty()))
+        }
+
         fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>) {
             (
                 maknae_security::decide_each_cited(self, reqs),
@@ -1276,6 +1361,10 @@ mod tests {
     }
 
     impl DecidesPinned for Broken {
+        fn with_pinned<R>(&self, f: impl FnOnce(&dyn PinnedPolicy) -> R) -> R {
+            f(&Unpinned(self, &ToolsCatalog::empty()))
+        }
+
         fn decide_all_pinned(&self, reqs: &[Request]) -> (Vec<Decided>, Arc<SensitiveList>) {
             let permit = Decided {
                 verdict: Verdict::Permit {
