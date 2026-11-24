@@ -57,19 +57,20 @@ pub enum Confirm {
     NeedsYes,
 }
 
+/// `Unconfirmed`: no answer the request could be judged by, so a change may have landed.
 enum Stop {
     Answered(String),
-    Lost(String),
+    Unconfirmed(String),
 }
 
 impl Stop {
     fn err(self, command: BoardCommand, sent_a_change: bool) -> Vec<String> {
         match self {
             Stop::Answered(line) => vec![line],
-            Stop::Lost(error) if sent_a_change => {
-                vec![error, board_unknown_line(command).into()]
+            Stop::Unconfirmed(line) if sent_a_change => {
+                vec![line, board_unknown_line(command).into()]
             }
-            Stop::Lost(error) => vec![error],
+            Stop::Unconfirmed(line) => vec![line],
         }
     }
 }
@@ -81,9 +82,9 @@ fn answer(sent: Result<WireOutcome, String>, command: BoardCommand) -> Result<Pa
             Err(Stop::Answered(refused_line(code, &message, command)))
         }
         Ok(WireOutcome::WriteDone { .. } | WireOutcome::ReadDone { .. }) => {
-            Err(Stop::Answered(NOT_A_BOARD_REPLY.into()))
+            Err(Stop::Unconfirmed(NOT_A_BOARD_REPLY.into()))
         }
-        Err(error) => Err(Stop::Lost(one_line(&error))),
+        Err(error) => Err(Stop::Unconfirmed(one_line(&error))),
     }
 }
 
@@ -102,14 +103,14 @@ fn one_line(s: &str) -> String {
 fn settings_reply(sent: Result<WireOutcome, String>) -> Result<BoardSettings, Stop> {
     match answer(sent, BoardCommand::Settings)? {
         Payload::BoardSettings(settings) => Ok(settings),
-        _ => Err(Stop::Answered(NOT_A_BOARD_REPLY.into())),
+        _ => Err(Stop::Unconfirmed(NOT_A_BOARD_REPLY.into())),
     }
 }
 
 fn cleared_reply(sent: Result<WireOutcome, String>) -> Result<BoardCleared, Stop> {
     match answer(sent, BoardCommand::Clear)? {
         Payload::BoardCleared(cleared) => Ok(cleared),
-        _ => Err(Stop::Answered(NOT_A_BOARD_REPLY.into())),
+        _ => Err(Stop::Unconfirmed(NOT_A_BOARD_REPLY.into())),
     }
 }
 
@@ -202,9 +203,14 @@ pub fn confirm(
     }
     prompt.write_all(CONFIRM_PROMPT)?;
     prompt.flush()?;
-    let mut line = String::new();
-    let read = answer.take(CONFIRM_ANSWER_MAX_BYTES).read_line(&mut line)?;
-    let cut = read == CONFIRM_ANSWER_MAX_BYTES as usize && !line.ends_with('\n');
+    let mut bytes = Vec::new();
+    let read = answer
+        .take(CONFIRM_ANSWER_MAX_BYTES)
+        .read_until(b'\n', &mut bytes)?;
+    let cut = read == CONFIRM_ANSWER_MAX_BYTES as usize && !bytes.ends_with(b"\n");
+    let Ok(line) = std::str::from_utf8(&bytes) else {
+        return Ok(Confirm::Declined);
+    };
     let line = line.trim();
     Ok(
         if !cut && (line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes")) {
@@ -692,7 +698,19 @@ mod tests {
             )
             .await;
             assert_eq!(sent.len(), 2);
-            assert_eq!(said_, said(&[], &[NOT_A_BOARD_REPLY], false));
+            assert_eq!(
+                said_,
+                said(&[], &[NOT_A_BOARD_REPLY, SETTINGS_UNKNOWN], false)
+            );
+        }
+        for bad in [cleared(1, false), write_done(), read_done()] {
+            let (said_, sent) =
+                run_settings(change(Some(true), Some(true), Some(Every)), vec![bad]).await;
+            assert_eq!(sent, vec![write(s(true, true, Every))]);
+            assert_eq!(
+                said_,
+                said(&[], &[NOT_A_BOARD_REPLY, SETTINGS_UNKNOWN], false)
+            );
         }
         let (said_, sent) =
             run_settings(change(None, Some(true), None), vec![cleared(0, false)]).await;
@@ -827,14 +845,15 @@ mod tests {
         for bad in [settled(s(true, true, Every)), write_done(), read_done()] {
             let (said_, sent) = run_clear(vec![bad]).await;
             assert_eq!(sent.len(), 1);
-            assert_eq!(said_, said(&[], &[NOT_A_BOARD_REPLY], false));
+            assert_eq!(said_, said(&[], &[NOT_A_BOARD_REPLY, CLEAR_UNKNOWN], false));
         }
-        let (said_, _) = run_clear(vec![cleared(2, true), write_done()]).await;
+        let (said_, sent) = run_clear(vec![cleared(2, true), write_done()]).await;
+        assert_eq!(sent.len(), 2);
         assert_eq!(
             said_,
             said(
                 &["cleared 2 posts before stopping"],
-                &[NOT_A_BOARD_REPLY],
+                &[NOT_A_BOARD_REPLY, CLEAR_UNKNOWN],
                 false
             )
         );
@@ -937,6 +956,21 @@ mod tests {
         fits.extend_from_slice(b"y\n");
         assert_eq!(fits.len(), 64);
         assert_eq!(ask(&fits).0, Confirm::Go);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_text_declines() {
+        let mut cut_in_a_character = vec![b' '; 63];
+        cut_in_a_character.extend_from_slice("é\n".as_bytes());
+        assert_eq!(ask(&cut_in_a_character).0, Confirm::Declined);
+        assert_eq!(ask(b"\xff\n").0, Confirm::Declined);
+        assert_eq!(ask(b"y\xff\n").0, Confirm::Declined);
+        assert_eq!(ask(b"y\n").0, Confirm::Go);
+        assert_eq!(ask(b"YES\r\n").0, Confirm::Go);
+        let mut whole = b"yes".to_vec();
+        whole.extend_from_slice(&[b' '; 60]);
+        whole.push(b'\n');
+        assert_eq!(ask(&whole).0, Confirm::Go);
     }
 
     #[test]

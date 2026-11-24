@@ -7211,6 +7211,14 @@ mod board {
 
             let (answer, _) = w.manage(set(true, false, BoardReport::Off)).await;
             assert!(settings_reply(answer).enabled);
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: true,
+                    participate: false,
+                    report: maknae_kernel::Report::Off
+                }
+            );
 
             posted(w.board("hobi", post(note("sentinel-713-after")), h).await.0);
             assert_eq!(w.posts().len(), 1);

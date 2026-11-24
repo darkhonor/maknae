@@ -371,15 +371,19 @@ struct BoardArgs {
 enum BoardSub {
     /// Show or change your board settings.
     Settings {
+        /// Let the agents on your tasks use your board.
         #[arg(long, value_enum)]
         enabled: Option<OnOff>,
+        /// Let yourself post to your board as well as read it.
         #[arg(long, value_enum)]
         participate: Option<OnOff>,
+        /// What the board reports to you: nothing, a summary of new posts, or every new post.
         #[arg(long, value_enum)]
         report: Option<ReportArg>,
     },
     /// Remove every post on your board that is not held.
     Clear {
+        /// Clear without asking first.
         #[arg(long)]
         yes: bool,
     },

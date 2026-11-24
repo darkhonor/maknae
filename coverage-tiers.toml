@@ -952,7 +952,7 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 
 [[t3]]
 path = "bins/maknae/src/cli.rs"
-why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto) Amended 2026-11-03 (#470): send_verb, SentOutcome and the frame helpers moved to maknae-loop (send.rs T3, outcome.rs T2); this file keeps argument parsing and the CLI own verbs. Amended 2026-11-08 (#170): maknae session list and close; the paging and the --cwd filter are T1 in maknae-agent::conversations, the id rule is ConversationId::parse in maknae-proto, and session_verb's parsing is tested here."
+why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto) Amended 2026-11-03 (#470): send_verb, SentOutcome and the frame helpers moved to maknae-loop (send.rs T3, outcome.rs T2); this file keeps argument parsing and the CLI own verbs. Amended 2026-11-08 (#170): maknae session list and close; the paging and the --cwd filter are T1 in maknae-agent::conversations, the id rule is ConversationId::parse in maknae-proto, and session_verb's parsing is tested here. Amended 2026-11-24 (#713): maknae board settings and clear; which settings a change touches, when a result is done, the clear loop and the confirmation are T1 in maknae-agent::board; this file maps the confirmation and the flow's result to output and exit codes, tested here, and that the confirmation runs before any request is checked by running the commands against a daemon."
 
 [[t3]]
 path = "bins/maknae/src/tools.rs"
