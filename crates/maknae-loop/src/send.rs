@@ -16,8 +16,8 @@ fn response_caps(transport: &maknae_config::TransportConfig) -> FrameCaps {
     ))
 }
 
-/// A task's answer is sized by the kernel's current task text bound, which the agent
-/// knows only as enrollment copied it.
+/// A task's or the board's answer is sized by the kernel's current text bound, which the
+/// agent knows only as enrollment copied it.
 fn reply_caps(verb: &maknae_proto::Verb, transport: &maknae_config::TransportConfig) -> FrameCaps {
     match verb {
         maknae_proto::Verb::TaskClaim { .. }
@@ -29,7 +29,9 @@ fn reply_caps(verb: &maknae_proto::Verb, transport: &maknae_config::TransportCon
         | maknae_proto::Verb::TaskStop { .. }
         | maknae_proto::Verb::TaskDrop { .. }
         | maknae_proto::Verb::TaskCollect { .. }
-        | maknae_proto::Verb::AgentList { .. } => FrameCaps::responses(
+        | maknae_proto::Verb::AgentList { .. }
+        | maknae_proto::Verb::BoardPost { .. }
+        | maknae_proto::Verb::BoardRead { .. } => FrameCaps::responses(
             maknae_proto::prompt_response_cap(maknae_config::PROMPT_MAX_CEILING),
         ),
         _ => response_caps(transport),
@@ -770,6 +772,29 @@ mod tests {
             tasked += usize::from(task);
         }
         assert_eq!(tasked, 2);
+    }
+
+    #[test]
+    fn the_board_verbs_are_read_at_the_ceiling_cap() {
+        let transport = maknae_config::TransportConfig {
+            prompt_max_bytes: 4096,
+            ..Default::default()
+        };
+        let ceiling = maknae_proto::prompt_response_cap(maknae_config::PROMPT_MAX_CEILING);
+        for verb in [
+            maknae_proto::Verb::BoardPost {
+                post: maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(zeroize::Zeroizing::new("b".into())),
+                    attachments: vec![],
+                },
+            },
+            maknae_proto::Verb::BoardRead { seen_through: None },
+        ] {
+            assert_eq!(reply_caps(&verb, &transport).prompt, ceiling, "{verb:?}");
+        }
     }
 
     #[test]

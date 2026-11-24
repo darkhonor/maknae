@@ -389,6 +389,16 @@
 1002 tool.catalog None -> NotApplicable { note: Some("role guest: no rule for tool.catalog") } Some("guest") None
 666 tool.catalog None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
 4242 tool.catalog None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 board.post None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:12 in /etc/maknae/authz.yaml#roles.admin")
+1001 board.post None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:7 in /etc/maknae/authz.yaml#roles.user")
+1002 board.post None -> NotApplicable { note: Some("role guest: no rule for board.post") } Some("guest") None
+666 board.post None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 board.post None -> NotApplicable { note: Some("subject resolves to no role") } None None
+1000 board.read None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:13 in /etc/maknae/authz.yaml#roles.admin")
+1001 board.read None -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:8 in /etc/maknae/authz.yaml#roles.user")
+1002 board.read None -> NotApplicable { note: Some("role guest: no rule for board.read") } Some("guest") None
+666 board.read None -> Deny { reason: "subject contained: role=adversary" } Some("adversary") None
+4242 board.read None -> NotApplicable { note: Some("subject resolves to no role") } None None
 1000 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
 1001 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None
 1002 kernel.contain None -> NotApplicable { note: Some("kernel action requested by a subject that is not the kernel: kernel.contain") } None None

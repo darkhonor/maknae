@@ -171,7 +171,7 @@ mod tests {
         let unit = include_str!("../../../../packaging/common/maknaed.service");
         let lines: Vec<&str> = unit.lines().map(str::trim).collect();
         for want in [
-            "StateDirectory=maknae maknae/conversations maknae/tasks",
+            "StateDirectory=maknae maknae/conversations maknae/tasks maknae/board",
             "StateDirectoryMode=0700",
         ] {
             assert_eq!(lines.iter().filter(|l| **l == want).count(), 1, "{want}");

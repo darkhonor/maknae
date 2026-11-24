@@ -48,6 +48,8 @@ Each is converted by the change that next touches it, or filed as its own issue 
 
 **Amended 2026-10-12 (#512):** two rows are removed because that change touched them and converted them. `crates/maknae-llm/src/client.rs`'s reply body is a `Zeroizing<Vec<u8>>` sized to `max_body_bytes` once and filled through `take_capped`, so it never grows. `crates/maknae-llm/src/wire.rs`'s response DTOs (`RespMessage.content`, `reasoning_content`, `reasoning` and `RespToolFn.arguments`) deserialize straight into `SecretText`. What serde_json holds while parsing stays a decision-2 path.
 
+**Amended 2026-11-22 (#695):** the `encode_response_zeroizing` row gains a second caller. Every reply written through `Trail::respond` in `crates/maknae-kernel/src/run.rs`, among them board pages, task deliveries and task reports, is encoded by `encode_reply` into a zeroizing buffer sized by counting the reply first, so it never grows whatever the reply's size. Until this change those replies went through `encode_response` into a plain `Vec` that grew and was never wiped, a site no row listed; it is closed. The row's mis-sized-cap residual still applies to the prompt reply, which is sized by `reply_capacity`.
+
 ### 2. The residual — the authoritative list
 
 **Amended 2026-10-01 (#153):** the unwrap-leg row.

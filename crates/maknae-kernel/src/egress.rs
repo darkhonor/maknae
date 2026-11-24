@@ -1268,6 +1268,7 @@ mod tests {
                 task_id: None,
                 parent_task_id: None,
                 task_op: None,
+                board_op: None,
                 tasker: None,
                 bindings: Vec::new(),
                 reach: Vec::new(),
@@ -1276,6 +1277,7 @@ mod tests {
             object: Some("provider:openai".into()),
             object_requested: None,
             mutation: None,
+            board: None,
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "intent recorded".into(),

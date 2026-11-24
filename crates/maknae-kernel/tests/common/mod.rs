@@ -1295,6 +1295,8 @@ pub fn scripted_release_page() -> maknae_proto::ReleasePage {
             parent: None,
         }],
         next: Some(maknae_proto::TaskCursor::from_seq(42)),
+        posts_released: 0,
+        posts_held: 0,
     }
 }
 
@@ -1800,6 +1802,473 @@ impl<A: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for Counting<A> {
 }
 
 impl<A: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for Counting<A> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
+}
+
+/// Whether `req`'s resource bag holds `label`.
+fn holds(req: &Request, label: &str) -> bool {
+    req.resource.0.get(label).is_some()
+}
+
+/// Delegates every method to `inner`, then lets `adjust` replace each request's verdict.
+macro_rules! board_double {
+    ($name:ident) => {
+        impl<P: Authorizer> Authorizer for $name<P> {
+            fn decide(&self, req: &Request) -> Verdict {
+                self.adjust(req, self.inner.decide(req))
+            }
+            fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+                let (verdict, role) = self.inner.decide_reporting_role(req);
+                (self.adjust(req, verdict), role)
+            }
+            fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+                let mut d = self.inner.decide_cited(req);
+                d.verdict = self.adjust(req, d.verdict);
+                d
+            }
+            fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+                self.before_all(reqs);
+                self.inner
+                    .decide_cited_all(reqs)
+                    .into_iter()
+                    .zip(reqs)
+                    .map(|(mut d, r)| {
+                        d.verdict = self.adjust(r, d.verdict);
+                        d
+                    })
+                    .collect()
+            }
+            fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+                self.inner.subjects()
+            }
+            fn backend_name(&self) -> String {
+                self.inner.backend_name()
+            }
+        }
+
+        impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for $name<P> {
+            fn catalog_now(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Result<
+                std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+                maknae_authz_basic::catalog::CatalogError,
+            > {
+                self.inner.catalog_now(uid, forges)
+            }
+
+            fn catalog_stamp(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Option<maknae_proto::CatalogDigest> {
+                self.inner.catalog_stamp(uid, forges)
+            }
+        }
+
+        impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for $name<P> {
+            fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+                self.inner.sensitive_now()
+            }
+        }
+    };
+}
+
+/// Denies a request holding `label` to each agent in `readers`.
+pub struct DeniesLabel<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+    pub readers: std::collections::BTreeSet<String>,
+}
+
+impl<P> DeniesLabel<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        let reader = req.subject.0.str(maknae_security::SUBJECT_AGENT);
+        if holds(req, self.label) && reader.is_some_and(|r| self.readers.contains(r)) {
+            Verdict::Deny {
+                reason: "sentinel-695: label withheld".into(),
+            }
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(DeniesLabel);
+
+/// Turns a `Permit` on a request holding `label` into one whose obligation has no handler.
+pub struct PermitsWithObligation<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+}
+
+impl<P> PermitsWithObligation<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        match verdict {
+            Verdict::Permit { .. } if holds(req, self.label) => Verdict::Permit {
+                obligations: vec![Obligation {
+                    id: "sentinel-695-unhonourable".into(),
+                    params: maknae_security::Attributes::new(),
+                }],
+            },
+            other => other,
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(PermitsWithObligation);
+
+/// Answers `Indeterminate` for a request holding `label`, and only for that request.
+pub struct UndecidedOnLabel<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+}
+
+impl<P> UndecidedOnLabel<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        if holds(req, self.label) {
+            Verdict::Indeterminate
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(UndecidedOnLabel);
+
+/// Panics in a batch that holds a request carrying `label`.
+pub struct PanicsOnLabel<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+}
+
+impl<P> PanicsOnLabel<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.iter().any(|r| holds(r, self.label)) {
+            panic!("sentinel-695: the batch panics");
+        }
+    }
+}
+
+board_double!(PanicsOnLabel);
+
+/// Marks `board` under `view` once, inside the first batch of more than one request (that
+/// holds `label`, when one is given), as a containment installed while a read's posts are
+/// decided.
+pub struct MarksDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub board: Arc<maknae_kernel::BoardStore>,
+    pub view: maknae_kernel::Containing<maknae_kernel::FixedEnrollment>,
+    pub armed: std::sync::atomic::AtomicBool,
+    pub label: Option<&'static str>,
+}
+
+impl<P> MarksDuringBatch<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        use maknae_kernel::BoardSeam;
+        let holding = self
+            .label
+            .is_none_or(|label| reqs.iter().any(|r| holds(r, label)));
+        if reqs.len() > 1 && holding && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.board.mark(&self.view);
+        }
+    }
+}
+
+board_double!(MarksDuringBatch);
+
+/// Denies every request holding `label`, and inside each batch of more than one request
+/// appends to `board` a post carrying it, up to `limit` posts, as posts arriving while a
+/// read is decided. Counts the batches.
+pub struct AppendsDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub board: Arc<maknae_kernel::BoardStore>,
+    pub key: maknae_kernel::BoardKey,
+    pub label: &'static str,
+    pub labels: maknae_kernel::PostLabels,
+    pub limit: usize,
+    pub batches: std::sync::atomic::AtomicUsize,
+}
+
+impl<P> AppendsDuringBatch<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        if holds(req, self.label) {
+            Verdict::Deny {
+                reason: "sentinel-695: appended withheld".into(),
+            }
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() < 2 {
+            return;
+        }
+        let n = self
+            .batches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.limit {
+            self.board
+                .post(
+                    self.key,
+                    (maknae_proto::Author::Agent("hobi".into()), Some(12_101)),
+                    None,
+                    self.labels.clone(),
+                    maknae_proto::PostDraft {
+                        kind: maknae_proto::PostKind::Note,
+                        to: maknae_proto::Addressee::Board,
+                        in_reply_to: None,
+                        body: maknae_proto::SecretText(maknae_io::Zeroizing::new(
+                            "sentinel-695-appended".into(),
+                        )),
+                        attachments: Vec::new(),
+                    },
+                    &maknae_kernel::FixedEnrollment(Default::default()),
+                )
+                .unwrap();
+        }
+    }
+}
+
+board_double!(AppendsDuringBatch);
+
+/// Sets `clock` to `at` once, inside the first batch of more than one request, as time
+/// passing while a read's posts are decided.
+pub struct AdvancesClockDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub clock: Arc<maknae_kernel::ManualClock>,
+    pub at: i64,
+    pub armed: std::sync::atomic::AtomicBool,
+}
+
+impl<P> AdvancesClockDuringBatch<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() > 1 && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.clock.set(self.at);
+        }
+    }
+}
+
+board_double!(AdvancesClockDuringBatch);
+
+/// Lifts `lifted` from post `id` on `key`'s board once, inside the first batch that holds a
+/// request carrying `label`, as a release landing while a read's posts are decided.
+pub struct ReleasesDuringBatch<P> {
+    pub inner: Arc<P>,
+    pub board: Arc<maknae_kernel::BoardStore>,
+    pub key: maknae_kernel::BoardKey,
+    pub id: maknae_proto::PostId,
+    pub lifted: maknae_kernel::HeldFor,
+    pub label: &'static str,
+    pub armed: std::sync::atomic::AtomicBool,
+}
+
+impl<P> ReleasesDuringBatch<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        use maknae_kernel::BoardSeam;
+        if reqs.iter().any(|r| holds(r, self.label))
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.board
+                .release(
+                    self.key,
+                    self.id,
+                    self.lifted,
+                    &maknae_kernel::FixedEnrollment(Default::default()),
+                )
+                .unwrap();
+        }
+    }
+}
+
+board_double!(ReleasesDuringBatch);
+
+/// Counts the post-decision batches (a base request and at least one post) and the posts in
+/// them; decides through `inner`.
+pub struct CountsPostBatches<P> {
+    pub inner: Arc<P>,
+    pub batches: std::sync::atomic::AtomicUsize,
+    pub posts: std::sync::atomic::AtomicUsize,
+}
+
+impl<P> CountsPostBatches<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() > 1 {
+            self.batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.posts
+                .fetch_add(reqs.len() - 1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+board_double!(CountsPostBatches);
+
+/// Decides through `inner`, but refuses the verb's own request (the head of a batch) in every
+/// post-decision batch after the first, as a grant revoked once the first batch confirmed it.
+pub struct BaseOnlyInFirstBatch<P> {
+    pub inner: Arc<P>,
+    pub batches: std::sync::atomic::AtomicUsize,
+}
+
+impl<P: Authorizer> Authorizer for BaseOnlyInFirstBatch<P> {
+    fn decide(&self, req: &Request) -> Verdict {
+        self.inner.decide(req)
+    }
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        self.inner.decide_reporting_role(req)
+    }
+    fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+        self.inner.decide_cited(req)
+    }
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+        let mut all = self.inner.decide_cited_all(reqs);
+        let n = self
+            .batches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n > 0 {
+            if let Some(base) = all.first_mut() {
+                base.verdict = Verdict::Deny {
+                    reason: "sentinel-695: the grant is gone".into(),
+                };
+            }
+        }
+        all
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
+}
+
+impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for BaseOnlyInFirstBatch<P> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.inner.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.inner.catalog_stamp(uid, forges)
+    }
+}
+
+impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for BaseOnlyInFirstBatch<P> {
+    fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
+        self.inner.sensitive_now()
+    }
+}
+
+/// Stamps another person's board on a board request before the composition decides it.
+pub struct OtherBoard<P> {
+    pub inner: Arc<P>,
+    pub board: &'static str,
+}
+
+impl<P: Authorizer> OtherBoard<P> {
+    fn restamped(&self, req: &Request) -> Request {
+        let mut req = req.clone();
+        if req
+            .resource
+            .0
+            .get(maknae_security::RESOURCE_BOARD)
+            .is_some()
+        {
+            req.resource.0.insert(
+                maknae_security::RESOURCE_BOARD,
+                maknae_security::AttrValue::Str(self.board.into()),
+            );
+        }
+        req
+    }
+}
+
+impl<P: Authorizer> Authorizer for OtherBoard<P> {
+    fn decide(&self, req: &Request) -> Verdict {
+        self.inner.decide(&self.restamped(req))
+    }
+    fn decide_reporting_role(&self, req: &Request) -> (Verdict, Option<&'static str>) {
+        self.inner.decide_reporting_role(&self.restamped(req))
+    }
+    fn decide_cited(&self, req: &Request) -> maknae_security::Decided {
+        self.inner.decide_cited(&self.restamped(req))
+    }
+    fn decide_cited_all(&self, reqs: &[Request]) -> Vec<maknae_security::Decided> {
+        let reqs: Vec<Request> = reqs.iter().map(|r| self.restamped(r)).collect();
+        self.inner.decide_cited_all(&reqs)
+    }
+    fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+        self.inner.subjects()
+    }
+    fn backend_name(&self) -> String {
+        self.inner.backend_name()
+    }
+}
+
+impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for OtherBoard<P> {
+    fn catalog_now(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Result<
+        std::sync::Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+        maknae_authz_basic::catalog::CatalogError,
+    > {
+        self.inner.catalog_now(uid, forges)
+    }
+
+    fn catalog_stamp(
+        &self,
+        uid: u32,
+        forges: &maknae_config::ForgeSet,
+    ) -> Option<maknae_proto::CatalogDigest> {
+        self.inner.catalog_stamp(uid, forges)
+    }
+}
+
+impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for OtherBoard<P> {
     fn sensitive_now(&self) -> std::sync::Arc<maknae_config::SensitiveList> {
         self.inner.sensitive_now()
     }

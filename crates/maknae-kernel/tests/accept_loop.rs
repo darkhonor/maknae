@@ -1647,6 +1647,8 @@ fn agents(pairs: &[(&str, u32)]) -> maknae_kernel::AgentAdmission {
         signer: Arc::new(maknae_kernel::UnverifiedSigner),
         banner: Default::default(),
         reach: maknae_kernel::no_reach("no egress socket in this test"),
+        board: Arc::new(maknae_kernel::BoardStore::new()),
+        switches: Arc::new(maknae_kernel::SwitchesOff),
     }
 }
 

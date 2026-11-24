@@ -340,6 +340,7 @@ mod tests {
             ProtoErrCode::EgressUnavailable,
         ];
         codes.extend(maknae_proto::ReplyDefect::ALL.map(ProtoErrCode::ReplyUnusable));
+        codes.extend(maknae_proto::BoardDefect::ALL.map(ProtoErrCode::BoardRefused));
         codes
     }
 
@@ -457,6 +458,7 @@ mod tests {
             ProtoErrCode::TooLarge,
             ProtoErrCode::UnknownVerb,
             ProtoErrCode::NotImplemented,
+            ProtoErrCode::BoardRefused(maknae_proto::BoardDefect::TryAgain),
         ] {
             assert_eq!(refused(code.clone()), Err(PlaneError::Refused), "{code:?}");
         }

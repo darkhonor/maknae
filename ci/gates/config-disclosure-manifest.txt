@@ -195,3 +195,5 @@ always	held_release.outcomes.result	admin.release (#632): one release attempt: o
 always	held_release.outcomes.state	admin.release (#632): one release attempt: one fixed token naming the task's state after it, absent when the outcome is unknown
 always	held_release.outcomes.parent	admin.release (#632): one release attempt: the id of the held parent task that refused it, present only for that refusal
 always	held_release.next	admin.release (#632): the cursor to resume after: the store sequence of a task this page attempted, or the request's own cursor
+always	held_release.posts_released	admin.release (#695): how many holds on the subject's board posts this page lifted; a count, never a post's id or content, absent when zero
+always	held_release.posts_held	admin.release (#695): how many holds on board posts are still written for the subject after this page; a count, never a post's id or content, absent when zero

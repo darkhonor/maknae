@@ -989,6 +989,115 @@ mod tests {
         }
         out.push_str(&tool_invoke_decisions());
         out.push_str(&workspace_mount_decisions());
+        out.push_str(&board_decisions());
+        out
+    }
+
+    fn board_verbs() -> [maknae_proto::Verb; 2] {
+        [
+            maknae_proto::Verb::BoardPost {
+                post: maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new(
+                        "sentinel-695-body".into(),
+                    )),
+                    attachments: vec![],
+                },
+            },
+            maknae_proto::Verb::BoardRead { seen_through: None },
+        ]
+    }
+
+    fn board_task() -> crate::handler::TaskStamp {
+        crate::handler::TaskStamp {
+            id: maknae_proto::TaskId([0x95; 16]),
+            tasker: "uid:1000".into(),
+            root: "users/1000".into(),
+            start: 0,
+        }
+    }
+
+    fn board_decisions() -> String {
+        use crate::handler::{build_authz_request, Stamp};
+        let (_g, shipped) = crate::test_fixtures::shipped_composition();
+        let (_h, guests) = crate::test_fixtures::shipped_composition_with(
+            "",
+            Some("schema_version: 1\nbindings:\n  guest: [\"daemon\"]\n"),
+        );
+        let principal = nix::unistd::geteuid().as_raw();
+        let guest = nix::unistd::User::from_name("daemon")
+            .unwrap()
+            .expect("the daemon system account exists on every supported host")
+            .uid
+            .as_raw();
+        let task = board_task();
+        let ids: Vec<maknae_config::AgentId> = AGENTS
+            .iter()
+            .map(|(id, _, _)| maknae_config::AgentId::parse(id).unwrap())
+            .collect();
+        type Row<'a> = (String, u32, Stamp<'a>, Option<&'a str>);
+        let mut rows: Vec<Row> = vec![
+            ("principal".into(), principal, Stamp::Client, None),
+            ("unbound".into(), 4242, Stamp::Client, None),
+            ("guest".into(), guest, Stamp::Client, None),
+        ];
+        for (agent, (id, uid, _)) in ids.iter().zip(AGENTS) {
+            let tasked = Stamp::Agent {
+                agent,
+                task: Some(&task),
+            };
+            rows.push((format!("agent {id} tasked"), *uid, tasked, None));
+            rows.push((
+                format!("agent {id} tasked"),
+                *uid,
+                tasked,
+                Some("users/1002"),
+            ));
+            rows.push((
+                format!("agent {id}"),
+                *uid,
+                Stamp::Agent { agent, task: None },
+                None,
+            ));
+        }
+        let mut out = String::from(
+            "# board.post and board.read through the Composition, stamped by build_authz_request: the partition operand confines an agent to its task's root board and abstains for people.\n",
+        );
+        for (who, uid, stamp, overwrite) in &rows {
+            let c = if who == "guest" { &guests } else { &shipped };
+            for verb in &board_verbs() {
+                let mut r = build_authz_request(
+                    verb,
+                    *uid,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                    None,
+                    stamp,
+                );
+                if let Some(board) = overwrite {
+                    r.resource.0.insert(
+                        maknae_security::RESOURCE_BOARD,
+                        AttrValue::Str((*board).into()),
+                    );
+                }
+                let d = c.decide_cited(&r);
+                let rule = d.rule.map(|c| {
+                    let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                    format!("{} in #{section}", c.key)
+                });
+                let board = r.resource.0.get(maknae_security::RESOURCE_BOARD);
+                out.push_str(&format!(
+                    "{who} {} board={board:?} -> {:?} {:?} {rule:?} => {:?}\n",
+                    r.action.0,
+                    d.verdict,
+                    d.role,
+                    maknae_security::finalize(d.verdict.clone())
+                ));
+            }
+        }
         out
     }
 
@@ -1522,6 +1631,93 @@ mod tests {
             at_the_ceiling,
             "a task with no binding"
         );
+    }
+
+    #[test]
+    fn the_mandatory_operands_never_permit_a_board_action() {
+        use crate::handler::{build_authz_request, Stamp};
+        use maknae_security::{Authorizer, Verdict};
+        let task = board_task();
+        let agent_rooted = crate::handler::TaskStamp {
+            root: "agents/jin".into(),
+            ..board_task()
+        };
+        let agent = maknae_config::AgentId::parse("hobi").unwrap();
+        let host = maknae_config::SensitiveList::empty();
+        let ceiling = ceiling(Ceiling::baseline_for(US));
+        let sensitive = crate::sensitive_authz::SensitiveAuthorizer::new(&host);
+        let partition = crate::partition_authz::PartitionOperand;
+        let operands: [(&str, &dyn Authorizer); 3] = [
+            ("ceiling", &ceiling),
+            ("sensitive", &sensitive),
+            ("partition", &partition),
+        ];
+        let stamps = [
+            Stamp::Client,
+            Stamp::Agent {
+                agent: &agent,
+                task: None,
+            },
+            Stamp::Agent {
+                agent: &agent,
+                task: Some(&task),
+            },
+            Stamp::Agent {
+                agent: &agent,
+                task: Some(&agent_rooted),
+            },
+        ];
+        let mut denied = 0;
+        for stamp in &stamps {
+            for verb in &board_verbs() {
+                for overwrite in [None, Some("users/1002")] {
+                    let mut r = build_authz_request(
+                        verb,
+                        2001,
+                        Some(std::path::Path::new("/home/hobi-svc")),
+                        maknae_security::Lane::Local,
+                        None,
+                        None,
+                        stamp,
+                    );
+                    if let Some(board) = overwrite {
+                        r.resource.0.insert(
+                            maknae_security::RESOURCE_BOARD,
+                            AttrValue::Str(board.into()),
+                        );
+                    }
+                    for (name, operand) in operands {
+                        let v = operand.decide(&r);
+                        assert!(!matches!(v, Verdict::Permit { .. }), "{name}: {v:?}");
+                        denied += usize::from(matches!(v, Verdict::Deny { .. }));
+                    }
+                }
+            }
+        }
+        assert!(
+            denied > 0,
+            "premise: the partition operand decides board actions"
+        );
+        let (_g, shipped) = crate::test_fixtures::shipped_composition();
+        for verb in &board_verbs() {
+            let mut r = build_authz_request(
+                verb,
+                2001,
+                Some(std::path::Path::new("/home/hobi-svc")),
+                maknae_security::Lane::Local,
+                None,
+                None,
+                &stamps[3],
+            );
+            r.resource.0.insert(
+                maknae_security::RESOURCE_BOARD,
+                AttrValue::Str(agent_rooted.root.clone()),
+            );
+            let v = partition.decide(&r);
+            assert!(!matches!(v, Verdict::NotApplicable { .. }), "{v:?}");
+            let composed = shipped.decide(&r);
+            assert!(!matches!(composed, Verdict::Permit { .. }), "{composed:?}");
+        }
     }
 
     const TASKS_TARGETS: &[&str] = &[

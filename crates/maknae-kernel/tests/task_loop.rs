@@ -32,6 +32,7 @@ struct World {
     agents: AgentAdmission,
     clock: Arc<ManualClock>,
     blobs: MemTaskBlobs,
+    board_blobs: MemTaskBlobs,
     me: u32,
     user: String,
     cfg: maknae_config::TransportConfig,
@@ -235,12 +236,17 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
     let blobs = MemTaskBlobs::default();
     let tasks =
         Arc::new(TaskStore::open(Box::new(blobs.clone()), clock.clone()).expect("an empty store"));
+    let board_blobs = MemTaskBlobs::default();
+    let board = maknae_kernel::BoardStore::open(Box::new(board_blobs.clone()), clock.clone())
+        .expect("an empty board");
     let agents = AgentAdmission {
         view: Arc::new(maknae_kernel::SnapshotEnrollment(Arc::clone(&pdp))),
         tasks,
         signer: Arc::new(FixedSigner),
         banner: Default::default(),
         reach: maknae_kernel::no_reach("no egress socket in this test"),
+        board: Arc::new(board),
+        switches: Arc::new(maknae_kernel::SwitchesOff),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -250,6 +256,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         agents,
         clock,
         blobs,
+        board_blobs,
         me,
         user,
         cfg,
@@ -304,6 +311,14 @@ impl World {
         dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
         let _shared = STORE.read().await;
+        let (session, gate) = self.agent_session(agent);
+        self.serve(session, gate, verb, task, records, dir).await
+    }
+
+    fn agent_session(
+        &self,
+        agent: &str,
+    ) -> (maknae_kernel::SessionRecord, Arc<maknae_kernel::FactsGate>) {
         let uid = uid_of(agent);
         let mut session = maknae_kernel::SessionRecord::for_test(uid, Some(format!("{agent}-svc")))
             .with_session_id(629);
@@ -319,7 +334,108 @@ impl World {
             }),
             Duration::from_secs(5),
         );
-        self.serve(session, gate, verb, task, records, dir).await
+        (session, gate)
+    }
+
+    /// One request on the agent channel as `agent`, decided by `authorizer`.
+    async fn agent_as<P>(
+        &self,
+        authorizer: &Arc<P>,
+        agent: &str,
+        verb: Verb,
+        task: Option<TaskId>,
+        records: &Arc<Records>,
+    ) -> Option<RespResult>
+    where
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
+    {
+        let _shared = STORE.read().await;
+        let (session, gate) = self.agent_session(agent);
+        let raw = self
+            .serve_as(
+                Arc::clone(authorizer),
+                session,
+                gate,
+                verb,
+                task,
+                records,
+                None,
+                Wiring {
+                    live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                    egress: maknae_kernel::unavailable_egress(),
+                    conversations: common::conversations(),
+                },
+            )
+            .await;
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20).await.ok()?;
+        Some(maknae_proto::decode_response(&frame).unwrap().result)
+    }
+
+    /// One request on the agent channel whose reply is never read: the pipe holds one byte
+    /// and the write bound is 300 ms.
+    async fn serve_unread<P>(
+        &self,
+        authorizer: &Arc<P>,
+        agent: &str,
+        verb: Verb,
+        task: Option<TaskId>,
+        records: &Arc<Records>,
+    ) where
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
+    {
+        let _shared = STORE.read().await;
+        let (session, gate) = self.agent_session(agent);
+        let (mut client, server) = tokio::io::duplex(1);
+        let mut cfg = self.cfg.clone();
+        cfg.read_timeout_ms = 300;
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task,
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            verb,
+        })
+        .unwrap();
+        let writer = tokio::spawn(async move {
+            let _ = common::write_frame(&mut client, &body).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(client);
+        });
+        let served = maknae_kernel::handle_with_attempt_caps(
+            server,
+            Some("spiffe://d/plane/cli".into()),
+            Arc::new(session),
+            gate,
+            Arc::clone(records),
+            cfg,
+            serde_json::json!({}),
+            Arc::clone(authorizer),
+            Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+            Arc::new("basic+ceiling".into()),
+            Arc::new("US".into()),
+            Arc::new("ml-dsa-87".to_string()),
+            Arc::new(None),
+            maknae_kernel::unavailable_egress(),
+            Duration::from_secs(2),
+            maknae_io::DelegatedFds::new(4),
+            common::no_baseline(),
+            maknae_kernel::AttemptCaps::default(),
+            common::conversations(),
+            self.agents.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(4), served)
+            .await
+            .expect("the handler returns within the write bound");
+        writer.abort();
     }
 
     async fn agent_with(
@@ -408,9 +524,18 @@ impl World {
                 signer: self.agents.signer.clone(),
                 banner: self.agents.banner.clone(),
                 reach: self.agents.reach.clone(),
+                board: Arc::new(
+                    maknae_kernel::BoardStore::open(
+                        Box::new(self.board_blobs.clone()),
+                        self.clock.clone(),
+                    )
+                    .expect("the board reopens"),
+                ),
+                switches: self.agents.switches.clone(),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),
+            board_blobs: self.board_blobs.clone(),
             me: self.me,
             user: self.user.clone(),
             cfg: self.cfg.clone(),
@@ -458,6 +583,40 @@ impl World {
         dir: Option<&std::path::Path>,
         wiring: Wiring,
     ) -> Vec<u8> {
+        self.serve_as(
+            Arc::clone(&self.pdp),
+            session,
+            gate,
+            verb,
+            task,
+            records,
+            dir,
+            wiring,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_as<P, E>(
+        &self,
+        authorizer: Arc<P>,
+        session: maknae_kernel::SessionRecord,
+        gate: Arc<maknae_kernel::FactsGate>,
+        verb: Verb,
+        task: Option<TaskId>,
+        records: &Arc<E>,
+        dir: Option<&std::path::Path>,
+        wiring: Wiring,
+    ) -> Vec<u8>
+    where
+        P: maknae_security::Authorizer
+            + maknae_kernel::SensitiveNow
+            + maknae_kernel::CatalogNow
+            + Send
+            + Sync
+            + 'static,
+        E: maknae_audit_append::AuditEmit + Send + Sync + 'static,
+    {
         use tokio::io::AsyncReadExt;
         let delegated = maknae_io::DelegatedFds::new(4);
         if let Some(dir) = dir {
@@ -472,7 +631,7 @@ impl World {
             Arc::clone(records),
             self.cfg.clone(),
             serde_json::json!({}),
-            Arc::clone(&self.pdp),
+            authorizer,
             wiring.live,
             Arc::new("basic+ceiling".into()),
             Arc::new("US".into()),
@@ -1520,6 +1679,57 @@ async fn an_agent_fetches_the_catalog_its_claim_stamped() {
         maknae_proto::CatalogDigest(maknae_crypto::sha256(&view.graph.0)),
         view.digest
     );
+}
+
+#[tokio::test]
+async fn a_board_request_is_refused_board_off_site() {
+    let w = world_in(
+        "board-off",
+        "user",
+        "roles:\n  user:\n    allow: [\"session.task\", \"board.post\", \"board.read\"]\n",
+        PLAIN,
+        PLAIN,
+    );
+    let id = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    let records = Records::new(0);
+    let post = Verb::BoardPost {
+        post: maknae_proto::PostDraft {
+            kind: maknae_proto::PostKind::Note,
+            to: maknae_proto::Addressee::Board,
+            in_reply_to: None,
+            body: secret("sentinel-695-board-off"),
+            attachments: vec![],
+        },
+    };
+    let read = Verb::BoardRead { seen_through: None };
+    for (verb, action) in [(post, "board.post"), (read, "board.read")] {
+        let answer = w
+            .agent_with("hobi", verb, Some(id), &records)
+            .await
+            .expect("an answer");
+        assert!(unauthorized(&answer), "{action}: {answer:?}");
+        let trail: Vec<_> = records
+            .snapshot()
+            .into_iter()
+            .filter(|r| r.action == action)
+            .map(|r| (r.outcome.result, r.outcome.reason, r.outcome.posture))
+            .collect();
+        assert_eq!(
+            trail,
+            [(
+                "deny".to_string(),
+                "board off: site".to_string(),
+                "unavailable".to_string()
+            )],
+            "{action}"
+        );
+    }
+    assert!(records
+        .snapshot()
+        .iter()
+        .all(|r| !format!("{r:?}").contains("sentinel-695-board-off")));
+    assert_eq!(w.store().hot(&id).unwrap().actions, 2);
 }
 
 #[tokio::test]
@@ -4446,4 +4656,1875 @@ async fn a_claim_that_loses_the_race_to_a_reload_is_idle_and_stamped() {
     );
     assert_eq!(w.store().record(&queued).unwrap().state, TaskState::Queued);
     assert_eq!(resp.catalog_digest, Some(w.catalog_digest(HOBI_UID)));
+}
+
+mod board {
+    use super::*;
+    use maknae_audit_append::AuditRecord;
+    use maknae_kernel::{
+        BoardKey, BoardSeam, BoardStore, Caps, Fail, FixedSwitches, LabelValue, PostLabels,
+        Settings,
+    };
+    use maknae_proto::{
+        Addressee, Author, BoardDefect, BoardPage, Labels, PostDraft, PostId, PostKind,
+    };
+
+    const BOARD_ROLES: &str =
+        "roles:\n  user:\n    allow: [\"session.task\", \"board.post\", \"board.read\"]\n";
+    const LABEL: &str = "post.sentinel-695.level";
+
+    type Pdp = maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>;
+
+    fn board_world(tag: &str) -> World {
+        let mut w = world_of(
+            tag,
+            "user",
+            BOARD_ROLES,
+            &[
+                ("hobi", HOBI_UID, PLAIN),
+                ("suga", SUGA_UID, PLAIN),
+                ("jin", JIN_UID, PLAIN),
+            ],
+        );
+        w.switch(true, &["hobi", "suga", "jin"]);
+        w.enable(w.me, true);
+        w.enable(OTHER, true);
+        w
+    }
+
+    impl World {
+        fn switch(&mut self, site: bool, agents: &[&str]) {
+            self.agents.switches = Arc::new(FixedSwitches {
+                site,
+                agents: agents
+                    .iter()
+                    .map(|a| maknae_config::AgentId::parse(a).unwrap())
+                    .collect(),
+            });
+        }
+
+        fn enable(&self, uid: u32, on: bool) {
+            self.agents
+                .board
+                .set_settings(
+                    BoardKey(uid),
+                    Settings {
+                        enabled: on,
+                        ..Settings::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        fn key(&self) -> BoardKey {
+            BoardKey(self.me)
+        }
+
+        fn at_work(&self, agent: &str) -> TaskId {
+            let id = self.mine(agent);
+            self.working(&id);
+            id
+        }
+
+        async fn board(
+            &self,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+        ) -> (RespResult, Vec<AuditRecord>) {
+            let pdp = Arc::clone(&self.pdp);
+            self.board_as(&pdp, agent, verb, task).await
+        }
+
+        async fn board_as<P>(
+            &self,
+            authorizer: &Arc<P>,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+        ) -> (RespResult, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
+            let records = Records::new(0);
+            let answer = self
+                .agent_as(authorizer, agent, verb, Some(task), &records)
+                .await
+                .unwrap_or_else(|| panic!("no answer: {:?}", records.snapshot()));
+            let records = records
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.action.starts_with("board."))
+                .collect();
+            (answer, records)
+        }
+
+        /// A post written through the store, as the kernel writes one from `author`.
+        fn stored(&self, author: &str, body: &str, labels: PostLabels) -> PostId {
+            self.agents
+                .board
+                .post(
+                    self.key(),
+                    (Author::Agent(author.into()), Some(uid_of(author))),
+                    None,
+                    labels,
+                    note(body),
+                    &*self.agents.view,
+                )
+                .unwrap()
+                .post
+                .id
+        }
+
+        fn seq(&self, id: PostId) -> u64 {
+            self.agents.board.get(self.key(), id).unwrap().seq
+        }
+
+        fn cursor(&self, agent: &str) -> u64 {
+            let agent = maknae_config::AgentId::parse(agent).unwrap();
+            self.agents.board.plan_read(self.key(), &agent, None).cursor
+        }
+    }
+
+    fn note(body: &str) -> PostDraft {
+        PostDraft {
+            kind: PostKind::Note,
+            to: Addressee::Board,
+            in_reply_to: None,
+            body: secret(body),
+            attachments: vec![],
+        }
+    }
+
+    fn reply(body: &str, to: PostId) -> PostDraft {
+        PostDraft {
+            kind: PostKind::Answer,
+            in_reply_to: Some(to),
+            ..note(body)
+        }
+    }
+
+    fn post(draft: PostDraft) -> Verb {
+        Verb::BoardPost { post: draft }
+    }
+
+    fn read(seen_through: Option<PostId>) -> Verb {
+        Verb::BoardRead { seen_through }
+    }
+
+    fn labelled() -> PostLabels {
+        PostLabels(
+            [(
+                "sentinel-695.level".to_string(),
+                LabelValue::Str("x".into()),
+            )]
+            .into(),
+        )
+    }
+
+    fn posted(r: RespResult) -> PostId {
+        match r {
+            RespResult::Ok(Payload::BoardPosted(id)) => id,
+            other => panic!("not posted: {other:?}"),
+        }
+    }
+
+    fn page_of(r: RespResult) -> BoardPage {
+        match r {
+            RespResult::Ok(Payload::BoardPage(p)) => p,
+            other => panic!("not a page: {other:?}"),
+        }
+    }
+
+    fn bodies(page: &BoardPage) -> Vec<String> {
+        page.posts
+            .iter()
+            .map(|p| p.draft.body.0.to_string())
+            .collect()
+    }
+
+    fn refused(r: &RespResult) -> Option<BoardDefect> {
+        match r {
+            RespResult::Err(e) => match e.code {
+                ProtoErrCode::BoardRefused(d) => Some(d),
+                _ => None,
+            },
+            RespResult::Ok(_) => None,
+        }
+    }
+
+    fn said(records: &[AuditRecord]) -> Vec<(String, String, String)> {
+        records
+            .iter()
+            .map(|r| {
+                (
+                    r.outcome.result.clone(),
+                    r.outcome.reason.clone(),
+                    r.outcome.posture.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn one(result: &str, reason: &str, posture: &str) -> Vec<(String, String, String)> {
+        vec![(result.into(), reason.into(), posture.into())]
+    }
+
+    fn read_outcome(records: &[AuditRecord]) -> maknae_audit_append::BoardAudit {
+        records
+            .iter()
+            .find(|r| r.action == "board.read" && r.outcome.reason == "done")
+            .and_then(|r| r.board.clone())
+            .unwrap_or_else(|| panic!("no read outcome: {records:?}"))
+    }
+
+    fn denies(w: &World, readers: &[&str]) -> Arc<common::DeniesLabel<Pdp>> {
+        Arc::new(common::DeniesLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+            readers: readers.iter().map(|r| r.to_string()).collect(),
+        })
+    }
+
+    #[tokio::test]
+    async fn two_agents_of_one_person_post_and_read_each_other() {
+        let w = board_world("board-two");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let question = PostDraft {
+            kind: PostKind::Question,
+            to: Addressee::Agents(vec!["jin".into()]),
+            ..note("sentinel-695-question")
+        };
+        let q = posted(w.board("hobi", post(question), h).await.0);
+        let page = page_of(w.board("jin", read(None), j).await.0);
+        assert!(!page.more);
+        assert_eq!(page.posts.len(), 1);
+        let got = &page.posts[0];
+        assert_eq!(got.id, q);
+        assert_eq!(got.author, Author::Agent("hobi".into()));
+        assert_eq!(got.task, Some(h));
+        assert_eq!(got.at_secs, T0);
+        assert_eq!(got.labels, Labels {});
+        assert_eq!(got.draft.kind, PostKind::Question);
+        assert_eq!(got.draft.to, Addressee::Agents(vec!["jin".into()]));
+        assert_eq!(got.draft.body.0.as_str(), "sentinel-695-question");
+        assert_eq!(
+            bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+            ["sentinel-695-question"]
+        );
+        let a = posted(
+            w.board("jin", post(reply("sentinel-695-answer", q)), j)
+                .await
+                .0,
+        );
+        let page = page_of(w.board("hobi", read(Some(q)), h).await.0);
+        assert_eq!(w.cursor("hobi"), w.seq(q));
+        assert_eq!(bodies(&page), ["sentinel-695-answer"]);
+        let answer = &page.posts[0];
+        assert_eq!(answer.id, a);
+        assert_eq!(answer.author, Author::Agent("jin".into()));
+        assert_eq!(answer.task, Some(j));
+        assert_eq!(answer.draft.in_reply_to, Some(q));
+    }
+
+    #[tokio::test]
+    async fn an_agent_working_for_another_person_sees_only_its_own_board() {
+        let w = board_world("board-other");
+        let h = w.at_work("hobi");
+        let s = w.theirs("suga");
+        w.working(&s);
+        posted(w.board("hobi", post(note("sentinel-695-mine")), h).await.0);
+        let page = page_of(w.board("suga", read(None), s).await.0);
+        assert!(page.posts.is_empty(), "{page:?}");
+        posted(
+            w.board("suga", post(note("sentinel-695-theirs")), s)
+                .await
+                .0,
+        );
+        let page = page_of(w.board("hobi", read(None), h).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-mine"]);
+        let theirs = page_of(w.board("suga", read(None), s).await.0);
+        assert_eq!(bodies(&theirs), ["sentinel-695-theirs"]);
+    }
+
+    #[tokio::test]
+    async fn each_switch_off_refuses_with_its_reason() {
+        let mut w = board_world("board-switches");
+        let h = w.at_work("hobi");
+        let cases: [(&str, bool, &[&str], bool); 3] = [
+            ("board off: site", false, &["hobi"], true),
+            ("board off: agent", true, &["jin"], true),
+            ("board off: tasker", true, &["hobi"], false),
+        ];
+        for (reason, site, agents, enabled) in cases {
+            w.switch(site, agents);
+            w.enable(w.me, enabled);
+            for verb in [post(note("sentinel-695-off")), read(None)] {
+                let (answer, records) = w.board("hobi", verb, h).await;
+                assert!(unauthorized(&answer), "{reason}: {answer:?}");
+                assert_eq!(said(&records), one("deny", reason, "unavailable"));
+                assert_eq!(
+                    records[0].object.as_deref(),
+                    Some(&*format!("board:users/{}", w.me))
+                );
+            }
+        }
+        w.switch(true, &["hobi"]);
+        w.enable(w.me, true);
+        posted(w.board("hobi", post(note("sentinel-695-on")), h).await.0);
+        assert_eq!(
+            bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+            ["sentinel-695-on"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_rooted_chain_has_no_board() {
+        let w = board_world("board-rooted");
+        let j = w.insert(
+            "jin",
+            JIN_UID,
+            Tasker::Agent {
+                agent: "hobi".into(),
+                uid: HOBI_UID,
+            },
+        );
+        w.working(&j);
+        for verb in [post(note("sentinel-695-rooted")), read(None)] {
+            let (answer, records) = w.board("jin", verb, j).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                one("deny", "board off: the chain has no tasker", "unavailable")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_person_on_the_client_channel_is_refused_not_served() {
+        let w = board_world("board-client");
+        let h = w.at_work("hobi");
+        posted(
+            w.board("hobi", post(note("sentinel-695-client")), h)
+                .await
+                .0,
+        );
+        for verb in [post(note("sentinel-695-client")), read(None)] {
+            let records = Records::new(0);
+            let answer = w.ask_with(verb, &records).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            let records: Vec<_> = records
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.action.starts_with("board."))
+                .collect();
+            assert_eq!(
+                said(&records),
+                one(
+                    "deny",
+                    "board: not served on the client channel",
+                    "unavailable"
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_addressee_is_a_bad_request_before_the_gate() {
+        let w = world_in("board-pregate", "user", BOARD_ROLES, PLAIN, PLAIN);
+        let h = w.at_work("hobi");
+        let draft = PostDraft {
+            to: Addressee::Agents(vec!["Not An Agent".into()]),
+            ..note("sentinel-695-pregate")
+        };
+        let (answer, records) = w.board("hobi", post(draft), h).await;
+        assert!(
+            matches!(&answer, RespResult::Err(e) if e.code == ProtoErrCode::BadRequest),
+            "{answer:?}"
+        );
+        assert_eq!(
+            said(&records),
+            one(
+                "deny",
+                "board.post fails operand pre-gate: addressee not an agent id",
+                "unauthorized"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_post_and_a_read_are_audited_without_the_body() {
+        let w = board_world("board-audit");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let draft = PostDraft {
+            attachments: vec![maknae_proto::Attachment {
+                label: "sentinel-695-label".into(),
+                media: maknae_proto::Media::TextPlain,
+                content: secret("sentinel-695-attachment"),
+            }],
+            to: Addressee::Agents(vec!["jin".into(), "suga".into()]),
+            ..note("sentinel-695-body")
+        };
+        let (answer, posting) = w.board("hobi", post(draft), h).await;
+        let id = posted(answer);
+        assert_eq!(
+            said(&posting),
+            [
+                (
+                    "permit".into(),
+                    "intent recorded".into(),
+                    "authorized".into()
+                ),
+                ("permit".into(), "done".into(), "authorized".into())
+            ]
+        );
+        let object = format!("board:users/{}", w.me);
+        for r in &posting {
+            assert_eq!(r.object.as_deref(), Some(&*object));
+            assert_eq!(r.subject.agent.as_deref(), Some("hobi"));
+            assert_eq!(r.subject.task_id, Some(h.to_string()));
+            assert_eq!(r.subject.role.as_deref(), Some("user"));
+            let b = r.board.as_ref().expect("a board block");
+            assert_eq!(b.kind.as_deref(), Some("note"));
+            assert_eq!(b.to.as_deref(), Some("agents:jin,suga"));
+            assert_eq!(b.attachments, Some(1));
+            assert_eq!(b.body_bytes, Some("sentinel-695-body".len() as u32));
+            assert_eq!(
+                b.attachment_bytes,
+                Some("sentinel-695-attachment".len() as u32)
+            );
+            let digest = b.digest.as_deref().expect("a digest");
+            assert_eq!(digest.len(), 64);
+            assert!(digest
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+        }
+        let outcome = posting[1].board.as_ref().unwrap();
+        assert_eq!(outcome.post_id, Some(id.to_string()));
+        assert_eq!(outcome.seq, Some(w.seq(id)));
+        assert_eq!(posting[0].board.as_ref().unwrap().post_id, None);
+        let (answer, reading) = w.board("jin", read(None), j).await;
+        assert_eq!(page_of(answer).posts.len(), 1);
+        assert_eq!(
+            said(&reading),
+            [
+                (
+                    "permit".into(),
+                    "intent recorded".into(),
+                    "authorized".into()
+                ),
+                ("permit".into(), "done".into(), "authorized".into())
+            ]
+        );
+        assert_eq!(reading[0].board.as_ref().unwrap().cursor, Some(0));
+        let b = read_outcome(&reading);
+        let seq = w.seq(id);
+        assert_eq!(
+            (b.first_seq, b.last_seq, b.returned, b.withheld, b.cursor),
+            (Some(seq), Some(seq), Some(1), Some(0), Some(0))
+        );
+        for r in posting.iter().chain(&reading) {
+            let json = maknae_audit_append::canonical_json(r).unwrap();
+            assert!(!json.contains("sentinel-695-body"), "{json}");
+            assert!(!json.contains("sentinel-695-attachment"), "{json}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_post_is_not_redelivered_and_an_unacknowledged_one_is() {
+        let w = board_world("board-ack");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let p1 = posted(w.board("hobi", post(note("p1")), h).await.0);
+        let p2 = posted(w.board("hobi", post(note("p2")), h).await.0);
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["p1", "p2"]
+        );
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(Some(p1)), j).await.0)),
+            ["p2"]
+        );
+        assert_eq!(w.cursor("jin"), w.seq(p1));
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["p2"],
+            "an unacknowledged post comes again"
+        );
+        let w = w.restarted();
+        assert_eq!(w.cursor("jin"), w.seq(p1), "the cursor is durable");
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
+            ["p2"],
+            "after a restart nothing was sent, so the acknowledgement moves nothing"
+        );
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
+            Vec::<String>::new()
+        );
+        assert_eq!(w.cursor("jin"), w.seq(p2));
+        let w = w.restarted();
+        assert!(page_of(w.board("jin", read(None), j).await.0)
+            .posts
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_labelled_post_is_withheld_from_one_reader_and_returned_to_another() {
+        let w = board_world("board-withheld");
+        let (j, s) = (w.at_work("jin"), w.at_work("suga"));
+        w.stored("hobi", "sentinel-695-labelled", labelled());
+        w.stored("hobi", "p2", PostLabels::default());
+        w.stored("hobi", "p3", PostLabels::default());
+        let pdp = denies(&w, &["jin"]);
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert_eq!(bodies(&page), ["p2", "p3"]);
+        assert!(!page.more);
+        let b = read_outcome(&records);
+        assert_eq!((b.returned, b.withheld), (Some(2), Some(1)));
+        let theirs = page_of(w.board_as(&pdp, "suga", read(None), s).await.0);
+        assert_eq!(bodies(&theirs), ["sentinel-695-labelled", "p2", "p3"]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_to_a_post_withheld_below_the_cursor_arrives_without_its_target() {
+        let w = board_world("board-reply-below");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let a = w.stored("hobi", "sentinel-695-labelled", labelled());
+        let b = w.stored("hobi", "b", PostLabels::default());
+        let pdp = denies(&w, &["jin"]);
+        assert_eq!(
+            bodies(&page_of(w.board_as(&pdp, "jin", read(None), j).await.0)),
+            ["b"]
+        );
+        assert!(page_of(w.board_as(&pdp, "jin", read(Some(b)), j).await.0)
+            .posts
+            .is_empty());
+        assert_eq!(w.cursor("jin"), w.seq(b));
+        let r = posted(w.board_as(&pdp, "hobi", post(reply("r", a)), h).await.0);
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["r"]);
+        assert_eq!(page.posts[0].id, r);
+        assert_eq!(page.posts[0].draft.in_reply_to, None);
+        let theirs = page_of(w.board_as(&pdp, "hobi", read(None), h).await.0);
+        let got = theirs.posts.iter().find(|p| p.id == r).unwrap();
+        assert_eq!(got.draft.in_reply_to, Some(a), "visible to its author");
+    }
+
+    #[tokio::test]
+    async fn a_reply_naming_a_withheld_post_is_refused_as_a_reply_to_no_post() {
+        let w = board_world("board-reply-withheld");
+        let j = w.at_work("jin");
+        let a = w.stored("hobi", "sentinel-695-labelled", labelled());
+        let pdp = denies(&w, &["jin"]);
+        let (withheld, withheld_said) = w.board_as(&pdp, "jin", post(reply("x", a)), j).await;
+        let (missing, missing_said) = w
+            .board_as(&pdp, "jin", post(reply("x", PostId([0x69; 16]))), j)
+            .await;
+        assert_eq!(refused(&withheld), Some(BoardDefect::NoSuchPost));
+        assert_eq!(withheld, missing);
+        assert_eq!(said(&withheld_said), said(&missing_said));
+        assert_eq!(
+            said(&withheld_said),
+            one(
+                "deny",
+                "in_reply_to names no post on the board",
+                "unauthorized"
+            )
+        );
+        assert_eq!(w.agents.board.candidates(w.key(), 0, 10).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reader_behind_only_withheld_posts_gets_an_empty_page_and_its_cursor_stays() {
+        let w = board_world("board-behind");
+        let j = w.at_work("jin");
+        let posted: Vec<PostId> = (0..40)
+            .map(|n| w.stored("hobi", &format!("sentinel-695-l{n}"), labelled()))
+            .collect();
+        let last = posted[39];
+        let pdp = denies(&w, &["jin"]);
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert!(page.posts.is_empty());
+        assert!(!page.more);
+        assert_eq!(
+            w.cursor("jin"),
+            0,
+            "only an acknowledgement moves the cursor"
+        );
+        assert!(!w.board_blobs.has(&format!("cursor.{}.jin", w.me)));
+        assert!(w.seq(last) > 0);
+        let b = read_outcome(&records);
+        assert_eq!(
+            (b.returned, b.withheld, b.cursor),
+            (Some(0), Some(40), Some(0))
+        );
+        w.stored("hobi", "p", PostLabels::default());
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        assert_eq!(bodies(&page_of(answer)), ["p"]);
+        assert_eq!(
+            read_outcome(&records).withheld,
+            Some(40),
+            "the next read decides them again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permit_with_an_obligation_the_kernel_cannot_honour_is_undecided() {
+        let w = board_world("board-obligation");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-labelled", labelled());
+        w.stored("hobi", "p", PostLabels::default());
+        let pdp = Arc::new(common::PermitsWithObligation {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0, "neither delivered nor skipped");
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["sentinel-695-labelled", "p"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undecided_post_is_never_skipped_and_refuses_the_read() {
+        let w = board_world("board-undecided");
+        let j = w.at_work("jin");
+        for n in 0..3 {
+            w.stored("hobi", &format!("l{n}"), labelled());
+        }
+        let pdp = Arc::new(common::PanicsOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0);
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["l0", "l1", "l2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_walk_returns_what_it_kept_and_says_more() {
+        let w = board_world("board-stalled");
+        let j = w.at_work("jin");
+        w.stored("hobi", "p1", PostLabels::default());
+        let p2 = w.stored("hobi", "p2", PostLabels::default());
+        w.stored("hobi", "l", labelled());
+        w.stored("hobi", "p4", PostLabels::default());
+        let own = posted(w.board("jin", post(note("j")), j).await.0);
+        let pdp = Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert_eq!(bodies(&page), ["p1", "p2"]);
+        assert!(page.more);
+        let b = read_outcome(&records);
+        assert_eq!((b.returned, b.withheld), (Some(2), Some(0)));
+        assert_eq!(w.cursor("jin"), 0);
+        let again = page_of(w.board_as(&pdp, "jin", read(Some(own)), j).await.0);
+        assert_eq!(bodies(&again), ["p1", "p2"]);
+        assert_eq!(
+            w.cursor("jin"),
+            0,
+            "a post past what was sent is not acknowledged"
+        );
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(Some(p2)), j).await.0)),
+            ["l", "p4", "j"]
+        );
+        assert_eq!(w.cursor("jin"), w.seq(p2));
+    }
+
+    #[tokio::test]
+    async fn an_unwritten_reply_lets_no_acknowledgement_pass_unsent_posts() {
+        let w = board_world("board-unwritten");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        for body in ["p1", "p2", "p3"] {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        let own = posted(w.board("jin", post(note("j")), j).await.0);
+        let records = Records::new(0);
+        let pdp = Arc::clone(&w.pdp);
+        w.serve_unread(&pdp, "jin", read(None), Some(j), &records)
+            .await;
+        let undelivered: Vec<_> = records
+            .snapshot()
+            .into_iter()
+            .filter(|r| r.action == "board.read")
+            .map(|r| (r.outcome.result, r.outcome.reason, r.outcome.posture))
+            .collect();
+        assert!(
+            undelivered.contains(&(
+                "permit".into(),
+                "delivery failed: response not written".into(),
+                "undelivered".into()
+            )),
+            "{undelivered:?}"
+        );
+        assert_eq!(w.cursor("jin"), 0);
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(Some(own)), j).await.0)),
+            ["p1", "p2", "p3", "j"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_post_names_its_defect_on_the_wire() {
+        let mut w = board_world("board-refused");
+        w.agents.board = Arc::new(
+            BoardStore::open_with(
+                Box::new(w.board_blobs.clone()),
+                w.clock.clone(),
+                Caps {
+                    board: 4,
+                    author: 2,
+                },
+            )
+            .unwrap(),
+        );
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let ask = |agent: &'static str, task: TaskId, draft: PostDraft| {
+            let w = &w;
+            async move { w.board(agent, post(draft), task).await }
+        };
+        let (answer, records) = ask("hobi", h, reply("x", PostId([0x69; 16]))).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::NoSuchPost));
+        assert_eq!(
+            said(&records),
+            one(
+                "deny",
+                "in_reply_to names no post on the board",
+                "unauthorized"
+            )
+        );
+
+        w.board_blobs.fail(Some(Fail::Every));
+        let (answer, records) = ask("hobi", h, note("x")).await;
+        w.board_blobs.fail(None);
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain));
+        assert_eq!(records[1].outcome.result, "permit");
+        assert!(
+            records[1].outcome.reason.starts_with("store: "),
+            "{records:?}"
+        );
+
+        let armed = w.board_blobs.clone();
+        w.board_blobs
+            .after_save(move || armed.fail(Some(Fail::Unsynced)));
+        let (answer, records) = ask("hobi", h, note("x")).await;
+        w.board_blobs.fail(None);
+        assert_eq!(refused(&answer), Some(BoardDefect::OutcomeUnknown));
+        assert!(
+            records[1].outcome.reason.starts_with("outcome unknown: "),
+            "{records:?}"
+        );
+        assert_eq!(records[1].outcome.posture, "unavailable");
+
+        for body in ["h1", "h2"] {
+            posted(ask("hobi", h, note(body)).await.0);
+        }
+        let (answer, records) = ask("hobi", h, note("h3")).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::AuthorAtCap));
+        assert_eq!(records[1].outcome.reason, "author at cap");
+        for body in ["j1", "j2"] {
+            posted(ask("jin", j, note(body)).await.0);
+        }
+        let (answer, records) = ask("jin", j, note("j3")).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::Full));
+        assert_eq!(records[1].outcome.reason, "board full");
+
+        let other = Arc::new(common::OtherBoard {
+            inner: Arc::clone(&w.pdp),
+            board: "users/31337",
+        });
+        let (answer, records) = w.board_as(&other, "hobi", read(None), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+        assert_eq!(
+            said(&records),
+            one(
+                "deny",
+                "partition: the board is outside the task's partition",
+                "unauthorized"
+            )
+        );
+
+        w.switch(false, &["hobi", "jin"]);
+        let (answer, _) = w.board("hobi", read(None), h).await;
+        assert!(unauthorized(&answer), "{answer:?}");
+    }
+
+    #[tokio::test]
+    async fn a_switch_turned_off_refuses_the_next_request() {
+        let mut w = board_world("board-switch-off");
+        let h = w.at_work("hobi");
+        posted(w.board("hobi", post(note("a")), h).await.0);
+        w.switch(false, &["hobi"]);
+        let (answer, records) = w.board("hobi", post(note("b")), h).await;
+        assert!(unauthorized(&answer));
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: site", "unavailable")
+        );
+        w.switch(true, &["hobi"]);
+        w.enable(w.me, false);
+        let (answer, records) = w.board("hobi", read(None), h).await;
+        assert!(unauthorized(&answer));
+        assert_eq!(
+            said(&records),
+            one("deny", "board off: tasker", "unavailable")
+        );
+        assert_eq!(w.agents.board.candidates(w.key(), 0, 10).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn board_requests_renew_the_lease_and_count_as_actions() {
+        let w = board_world("board-lease");
+        let h = w.at_work("hobi");
+        let lease = CLAIM_LEASE.as_secs() as i64;
+        w.clock.set(T0 + 50);
+        posted(w.board("hobi", post(note("a")), h).await.0);
+        let hot = w.store().hot(&h).unwrap();
+        assert_eq!(
+            (hot.actions, hot.last_action, hot.lease_until),
+            (1, Some(T0 + 50), T0 + 50 + lease)
+        );
+        w.clock.set(T0 + 80);
+        page_of(w.board("hobi", read(None), h).await.0);
+        let hot = w.store().hot(&h).unwrap();
+        assert_eq!(
+            (hot.actions, hot.last_action, hot.lease_until),
+            (2, Some(T0 + 80), T0 + 80 + lease)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_contained_agents_posts_disappear_from_reads_and_return_on_release() {
+        let w = board_world("board-held-release");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        for body in ["sentinel-695-held-a", "sentinel-695-held-b"] {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        posted(w.board("jin", post(note("sentinel-695-free")), j).await.0);
+        let all = [
+            "sentinel-695-held-a",
+            "sentinel-695-held-b",
+            "sentinel-695-free",
+        ];
+        let jin_reads = || async { bodies(&page_of(w.board("jin", read(None), j).await.0)) };
+        assert_eq!(jin_reads().await, all);
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let board = &w.agents.board;
+        board.mark(&maknae_kernel::Containing(
+            everyone.clone(),
+            [HOBI_UID].into_iter().collect(),
+        ));
+        let due = board.due(100);
+        assert_eq!(board.perform(&due, &*w.agents.view), 2);
+        assert_eq!(jin_reads().await, ["sentinel-695-free"]);
+        assert_eq!(w.cursor("jin"), 0);
+        board.mark(&everyone);
+        assert_eq!(
+            jin_reads().await,
+            ["sentinel-695-free"],
+            "a written hold outlives the containment"
+        );
+        let held = board.held_for(HOBI_UID, maknae_proto::HELD_PAGE_MAX);
+        assert_eq!(held.len(), 2);
+        for (key, id, _, lifted) in held {
+            assert_eq!(
+                board.release(key, id, lifted, &everyone),
+                Ok(maknae_kernel::Lifted::Done)
+            );
+        }
+        assert_eq!(jin_reads().await, all);
+        assert_eq!(w.cursor("jin"), 0);
+        assert_eq!(board.held_count(HOBI_UID), 0);
+    }
+
+    /// Runs `then` once, while the trail appends `action`'s intent record.
+    struct OnIntent {
+        inner: Arc<Records>,
+        action: &'static str,
+        then: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl maknae_audit_append::AuditEmit for OnIntent {
+        fn emit(
+            &self,
+            record: &AuditRecord,
+        ) -> impl std::future::Future<Output = Result<(), maknae_audit_append::AuditError>> + Send
+        {
+            if record.action == self.action && record.outcome.reason == "intent recorded" {
+                if let Some(then) = self.then.lock().unwrap().take() {
+                    then();
+                }
+            }
+            self.inner.emit(record)
+        }
+    }
+
+    impl World {
+        /// `verb` from `agent`, with `then` run while its intent record is appended.
+        async fn board_during_intent(
+            &self,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+            then: impl FnOnce() + Send + 'static,
+        ) -> (RespResult, Vec<AuditRecord>) {
+            let pdp = Arc::clone(&self.pdp);
+            self.board_during_intent_as(&pdp, agent, verb, task, then)
+                .await
+        }
+
+        /// [`Self::board_during_intent`], decided by `authorizer`.
+        async fn board_during_intent_as<P>(
+            &self,
+            authorizer: &Arc<P>,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+            then: impl FnOnce() + Send + 'static,
+        ) -> (RespResult, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
+            let action = match verb {
+                Verb::BoardPost { .. } => "board.post",
+                _ => "board.read",
+            };
+            let records = Records::new(0);
+            let emit = Arc::new(OnIntent {
+                inner: Arc::clone(&records),
+                action,
+                then: std::sync::Mutex::new(Some(Box::new(then))),
+            });
+            let raw = {
+                let _shared = STORE.read().await;
+                let (session, gate) = self.agent_session(agent);
+                self.serve_as(
+                    Arc::clone(authorizer),
+                    session,
+                    gate,
+                    verb,
+                    Some(task),
+                    &emit,
+                    None,
+                    Wiring {
+                        live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                        egress: maknae_kernel::unavailable_egress(),
+                        conversations: common::conversations(),
+                    },
+                )
+                .await
+            };
+            let mut cursor = &raw[..];
+            let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+            let answer = maknae_proto::decode_response(&frame).unwrap().result;
+            let records = records
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.action.starts_with("board."))
+                .collect();
+            (answer, records)
+        }
+
+        /// Rewrites the bindings and reloads the policy, as an admin's edit installs it.
+        fn rebind(&self, bindings: &str) -> impl Fn() + Send + Sync + 'static {
+            let path = maknae_authz_basic::PolicyPaths::in_dir(&self.root).bindings;
+            self.reload(path, format!("schema_version: 1\nbindings:\n{bindings}"))
+        }
+
+        /// Rewrites the role grants and reloads the policy.
+        fn regrant(&self, roles: &str) -> impl Fn() + Send + Sync + 'static {
+            let path = maknae_authz_basic::PolicyPaths::in_dir(&self.root).authz;
+            self.reload(
+                path,
+                format!("schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{roles}"),
+            )
+        }
+
+        fn reload(&self, path: PathBuf, text: String) -> impl Fn() + Send + Sync + 'static {
+            let pdp = Arc::clone(&self.pdp);
+            move || {
+                common::write_0640(&path, &text);
+                pdp.baseline().reload_from_file().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_post_written_after_its_board_is_contained_is_withheld() {
+        let w = board_world("board-post-contained");
+        let h = w.at_work("hobi");
+        let contain = w.rebind(&format!(
+            "  adversary: [\"{}\"]\n  user: [\"nobody\"]\n",
+            w.user
+        ));
+        let (board, view) = (Arc::clone(&w.agents.board), w.agents.view.clone());
+        let (answer, records) = w
+            .board_during_intent(
+                "hobi",
+                post(note("sentinel-695-after-contain")),
+                h,
+                move || {
+                    contain();
+                    board.mark(&*view);
+                },
+            )
+            .await;
+        let id = posted(answer);
+        assert_eq!(
+            said(&records)
+                .iter()
+                .map(|(_, reason, _)| reason.as_str())
+                .collect::<Vec<_>>(),
+            ["intent recorded", "done"],
+            "the post was accepted and stored"
+        );
+        assert!(w.agents.view.contained(w.me));
+        let board = &w.agents.board;
+        assert!(board.get(w.key(), id).is_none());
+        assert!(board.candidates(w.key(), 0, 10).is_empty());
+        let due = board.due(10);
+        assert_eq!(due.iter().map(|d| d.post).collect::<Vec<_>>(), [Some(id)]);
+        assert_eq!(board.perform(&due, &*w.agents.view), 1);
+        let held: Vec<_> = board
+            .held_for(w.me, 10)
+            .into_iter()
+            .map(|(key, id, _, lifted)| (key, id, lifted))
+            .collect();
+        assert_eq!(held, [(w.key(), id, maknae_kernel::HeldFor::Person)]);
+    }
+
+    #[tokio::test]
+    async fn a_reader_contained_mid_read_is_refused_and_keeps_every_post() {
+        let w = board_world("board-read-contained");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let all = ["sentinel-695-mid-a", "sentinel-695-mid-b"];
+        for body in all {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        let bound = format!("  user: [\"{}\", \"nobody\"]\n", w.user);
+        let contain = w.rebind(&format!("{bound}  adversary: [{{uid: {JIN_UID}}}]\n"));
+        let (answer, records) = w.board_during_intent("jin", read(None), j, contain).await;
+        assert!(w.agents.view.contained(JIN_UID));
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0, "the cursor did not move");
+        w.rebind(&bound)();
+        assert!(!w.agents.view.contained(JIN_UID));
+        assert_eq!(bodies(&page_of(w.board("jin", read(None), j).await.0)), all);
+    }
+
+    #[tokio::test]
+    async fn a_reader_whose_grant_is_removed_mid_read_is_refused_and_keeps_every_post() {
+        let w = board_world("board-read-ungranted");
+        let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+        let all = ["sentinel-695-grant-a", "sentinel-695-grant-b"];
+        for body in all {
+            posted(w.board("hobi", post(note(body)), h).await.0);
+        }
+        let ungrant = w.regrant("roles:\n  user:\n    allow: [\"session.task\", \"board.post\"]\n");
+        let (answer, records) = w.board_during_intent("jin", read(None), j, ungrant).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(
+            said(&records)[1..],
+            one(
+                "deny",
+                "board: the decision did not complete",
+                "unavailable"
+            )
+        );
+        assert_eq!(w.cursor("jin"), 0, "the cursor did not move");
+        w.regrant(BOARD_ROLES)();
+        assert_eq!(bodies(&page_of(w.board("jin", read(None), j).await.0)), all);
+    }
+
+    #[tokio::test]
+    async fn a_post_marked_while_its_read_is_decided_is_not_delivered() {
+        let w = board_world("board-marked-mid-read");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-a", PostLabels::default());
+        w.stored("suga", "sentinel-695-b", PostLabels::default());
+        w.stored("hobi", "sentinel-695-c", PostLabels::default());
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone.clone(), [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: None,
+        });
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert_eq!(bodies(&page), ["sentinel-695-a", "sentinel-695-c"]);
+        assert!(!page.more);
+        assert_eq!(read_outcome(&records).returned, Some(2));
+        assert_eq!(w.cursor("jin"), 0);
+        w.agents.board.mark(&everyone);
+        assert_eq!(
+            bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ["sentinel-695-a", "sentinel-695-b", "sentinel-695-c"],
+            "the post was not acknowledged over"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_acknowledgement_of_a_post_never_sent_is_ignored() {
+        let w = board_world("board-ack-unsent");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-a", PostLabels::default());
+        let b = w.stored("hobi", "sentinel-695-b", labelled());
+        let c = w.stored("hobi", "sentinel-695-c", PostLabels::default());
+        w.stored("hobi", "sentinel-695-d", PostLabels::default());
+        let pdp = denies(&w, &["jin"]);
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(
+            bodies(&page),
+            ["sentinel-695-a", "sentinel-695-c", "sentinel-695-d"]
+        );
+        let unknown = page_of(
+            w.board_as(&pdp, "jin", read(Some(PostId([0x5e; 16]))), j)
+                .await
+                .0,
+        );
+        assert_eq!(w.cursor("jin"), 0);
+        let withheld = page_of(w.board_as(&pdp, "jin", read(Some(b)), j).await.0);
+        assert_eq!(w.cursor("jin"), 0, "the withheld id moves nothing");
+        assert_eq!(bodies(&withheld), bodies(&unknown));
+        page_of(w.board_as(&pdp, "jin", read(Some(c)), j).await.0);
+        assert_eq!(w.cursor("jin"), w.seq(c));
+    }
+
+    /// Reads as jin while suga is contained inside the batch that decides suga's labelled post.
+    async fn read_while_suga_is_contained(w: &World, j: TaskId) -> BoardPage {
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone, [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: Some(LABEL),
+        });
+        page_of(w.board_as(&pdp, "jin", read(None), j).await.0)
+    }
+
+    fn hobi_posts(w: &World, range: std::ops::Range<usize>) -> Vec<String> {
+        range
+            .map(|n| {
+                let body = format!("sentinel-695-h{n}");
+                w.stored("hobi", &body, PostLabels::default());
+                body
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_lookahead_contained_while_its_read_is_decided_does_not_set_more() {
+        let w = board_world("board-lookahead-alone");
+        let j = w.at_work("jin");
+        let page_posts = hobi_posts(&w, 0..maknae_proto::BOARD_READ_PAGE_POSTS);
+        w.stored("suga", "sentinel-695-lookahead", labelled());
+        let page = read_while_suga_is_contained(&w, j).await;
+        assert_eq!(bodies(&page), page_posts);
+        assert!(!page.more, "as if the lookahead were not there");
+    }
+
+    #[tokio::test]
+    async fn a_lookahead_contained_while_its_read_is_decided_looks_further() {
+        let w = board_world("board-lookahead-further");
+        let j = w.at_work("jin");
+        let page_posts = hobi_posts(&w, 0..maknae_proto::BOARD_READ_PAGE_POSTS);
+        w.stored("suga", "sentinel-695-lookahead", labelled());
+        w.stored("hobi", "sentinel-695-after", PostLabels::default());
+        let page = read_while_suga_is_contained(&w, j).await;
+        assert_eq!(bodies(&page), page_posts);
+        assert!(page.more, "the next live post beyond it is still more");
+    }
+
+    #[tokio::test]
+    async fn a_post_dropped_at_delivery_leaves_its_room_to_the_next_post() {
+        let w = board_world("board-dropped-room");
+        let j = w.at_work("jin");
+        w.stored("suga", "sentinel-695-dropped", labelled());
+        let want = hobi_posts(&w, 0..maknae_proto::BOARD_READ_PAGE_POSTS);
+        let page = read_while_suga_is_contained(&w, j).await;
+        assert_eq!(
+            bodies(&page),
+            want,
+            "the page the read would give without it"
+        );
+        assert!(!page.more);
+    }
+
+    #[tokio::test]
+    async fn a_read_behind_withheld_posts_writes_no_cursor_even_when_the_disk_refuses() {
+        let w = board_world("board-no-skip-refused");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-withheld", labelled());
+        let pdp = denies(&w, &["jin"]);
+        w.board_blobs.fail(Some(Fail::Every));
+        let (answer, records) = w.board_as(&pdp, "jin", read(None), j).await;
+        w.board_blobs.fail(None);
+        let page = page_of(answer);
+        assert!(
+            page.posts.is_empty() && !page.more,
+            "the page of an empty board"
+        );
+        assert_eq!(
+            said(&records)[1..],
+            one("permit", "done", "authorized"),
+            "nothing is written after the reply"
+        );
+        page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(w.cursor("jin"), 0, "and nothing on the next read either");
+    }
+
+    #[tokio::test]
+    async fn a_read_never_walks_past_the_posts_there_when_it_was_admitted() {
+        let w = board_world("board-upper-bound");
+        let j = w.at_work("jin");
+        let first = w.stored("hobi", "sentinel-695-first", labelled());
+        let pdp = Arc::new(common::AppendsDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            key: w.key(),
+            label: LABEL,
+            labels: labelled(),
+            limit: 5,
+            batches: 0.into(),
+        });
+        let (answer, _) = w.board_as(&pdp, "jin", read(None), j).await;
+        let page = page_of(answer);
+        assert!(page.posts.is_empty() && !page.more);
+        assert_eq!(
+            pdp.batches.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a post appended during the read is for the next read"
+        );
+        assert_eq!(w.cursor("jin"), 0);
+        assert!(w.seq(first) > 0);
+    }
+
+    #[tokio::test]
+    async fn a_reader_ungranted_mid_read_gets_the_same_answer_from_an_empty_board_and_a_withheld_one(
+    ) {
+        let ungranted = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\"]\n";
+        let mut answers = Vec::new();
+        for withheld in [false, true] {
+            let w = board_world(&format!("board-base-{withheld}"));
+            let j = w.at_work("jin");
+            if withheld {
+                w.stored("hobi", "sentinel-695-withheld", labelled());
+            }
+            let pdp = denies(&w, &["jin"]);
+            let (answer, records) = w
+                .board_during_intent_as(&pdp, "jin", read(None), j, w.regrant(ungranted))
+                .await;
+            answers.push((
+                refused(&answer),
+                said(&records)[1..].to_vec(),
+                w.cursor("jin"),
+            ));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(
+            answers[0],
+            (
+                Some(BoardDefect::TryAgain),
+                one(
+                    "deny",
+                    "board: the decision did not complete",
+                    "unavailable"
+                ),
+                0
+            )
+        );
+    }
+
+    /// Reads as jin while suga's labelled post is undecided and suga is contained inside the
+    /// batch that decides it.
+    async fn read_while_the_stop_is_contained(w: &World, j: TaskId) -> RespResult {
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let undecided = Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: undecided,
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone, [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: Some(LABEL),
+        });
+        w.board_as(&pdp, "jin", read(None), j).await.0
+    }
+
+    #[tokio::test]
+    async fn an_undecided_stop_contained_mid_decision_answers_as_an_empty_board() {
+        let w = board_world("board-stop-alone");
+        let j = w.at_work("jin");
+        w.stored("suga", "sentinel-695-stop", labelled());
+        let page = page_of(read_while_the_stop_is_contained(&w, j).await);
+        assert!(page.posts.is_empty());
+        assert!(!page.more, "the page of an empty board");
+        assert_eq!(w.cursor("jin"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_undecided_stop_contained_mid_decision_lets_the_walk_go_past_it() {
+        let w = board_world("board-stop-between");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-p1", PostLabels::default());
+        w.stored("suga", "sentinel-695-stop", labelled());
+        w.stored("hobi", "sentinel-695-p2", PostLabels::default());
+        let page = page_of(read_while_the_stop_is_contained(&w, j).await);
+        assert_eq!(bodies(&page), ["sentinel-695-p1", "sentinel-695-p2"]);
+        assert!(!page.more);
+    }
+
+    #[tokio::test]
+    async fn a_reply_target_contained_while_it_is_decided_loses_the_link() {
+        let w = board_world("board-target-contained");
+        let j = w.at_work("jin");
+        let t = w.stored("suga", "sentinel-695-target", labelled());
+        page_of(w.board("jin", read(None), j).await.0);
+        page_of(w.board("jin", read(Some(t)), j).await.0);
+        assert_eq!(w.cursor("jin"), w.seq(t));
+        w.agents
+            .board
+            .post(
+                w.key(),
+                (Author::Agent("hobi".into()), Some(HOBI_UID)),
+                None,
+                PostLabels::default(),
+                reply("sentinel-695-reply", t),
+                &*w.agents.view,
+            )
+            .unwrap();
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let pdp = Arc::new(common::MarksDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(&w.agents.board),
+            view: maknae_kernel::Containing(everyone, [SUGA_UID].into_iter().collect()),
+            armed: true.into(),
+            label: Some(LABEL),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-reply"]);
+        assert_eq!(
+            page.posts[0].draft.in_reply_to, None,
+            "as for a target that is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_stop_is_never_decided_again_and_the_read_ends() {
+        let w = board_world("board-stop-dead-ends");
+        let j = w.at_work("jin");
+        w.stored("suga", "sentinel-695-stop", labelled());
+        w.stored("hobi", "sentinel-695-undecided-too", labelled());
+        let bound = format!("  user: [\"{}\", \"nobody\"]\n", w.user);
+        w.rebind(&format!("{bound}  adversary: [{{uid: {SUGA_UID}}}]\n"))();
+        let pdp = Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        });
+        let read = tokio::time::timeout(
+            Duration::from_secs(20),
+            w.board_as(&pdp, "jin", read(None), j),
+        )
+        .await
+        .expect("the read ends");
+        assert_eq!(
+            refused(&read.0),
+            Some(BoardDefect::TryAgain),
+            "the live undecided post after it stops the read, as on a board without the dead one"
+        );
+    }
+
+    /// jin's read behind one post denied to it, with the board's disk in `disk`'s state while
+    /// the read's skip is written; the answer.
+    async fn read_behind_a_withheld_post(
+        tag: &str,
+        disk: impl FnOnce(&MemTaskBlobs),
+    ) -> RespResult {
+        let w = board_world(tag);
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-withheld", labelled());
+        let pdp = denies(&w, &["jin"]);
+        let _alone = STORE.write().await;
+        disk(&w.board_blobs);
+        let (session, gate) = w.agent_session("jin");
+        let records = Records::new(0);
+        let raw = w
+            .serve_as(
+                pdp,
+                session,
+                gate,
+                read(None),
+                Some(j),
+                &records,
+                None,
+                Wiring {
+                    live: Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                    egress: maknae_kernel::unavailable_egress(),
+                    conversations: common::conversations(),
+                },
+            )
+            .await;
+        w.board_blobs.slow(None);
+        w.board_blobs.fail(None);
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+        maknae_proto::decode_response(&frame).unwrap().result
+    }
+
+    #[tokio::test]
+    async fn the_reply_behind_a_withheld_post_is_the_same_whatever_the_disk_does() {
+        let stored = read_behind_a_withheld_post("board-skip-stored", |_| {}).await;
+        let refused =
+            read_behind_a_withheld_post("board-skip-refused", |b| b.fail(Some(Fail::Every))).await;
+        let timed_out = read_behind_a_withheld_post("board-skip-timed-out", |b| {
+            b.slow(Some(Duration::from_millis(2500)))
+        })
+        .await;
+        let page = page_of(stored);
+        assert!(page.posts.is_empty() && !page.more);
+        for other in [refused, timed_out] {
+            assert_eq!(page_of(other), page);
+        }
+    }
+
+    const UNGRANTED: &str = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\"]\n";
+
+    fn expired_at() -> i64 {
+        T0 + maknae_kernel::BOARD_RETENTION.as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn a_reader_revoked_before_its_batch_whose_candidate_expires_meanwhile_gets_try_again() {
+        let mut answers = Vec::new();
+        for expired_at_admission in [false, true] {
+            let w = board_world(&format!("board-base-observed-{expired_at_admission}"));
+            let j = w.at_work("jin");
+            w.stored("hobi", "sentinel-695-only", PostLabels::default());
+            if expired_at_admission {
+                w.clock.set(expired_at());
+            }
+            let pdp = Arc::new(common::AdvancesClockDuringBatch {
+                inner: Arc::clone(&w.pdp),
+                clock: Arc::clone(&w.clock),
+                at: expired_at(),
+                armed: true.into(),
+            });
+            let (answer, records) = w
+                .board_during_intent_as(&pdp, "jin", read(None), j, w.regrant(UNGRANTED))
+                .await;
+            answers.push((
+                refused(&answer),
+                said(&records)[1..].to_vec(),
+                w.cursor("jin"),
+            ));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(
+            answers[0],
+            (
+                Some(BoardDefect::TryAgain),
+                one(
+                    "deny",
+                    "board: the decision did not complete",
+                    "unavailable"
+                ),
+                0
+            )
+        );
+    }
+
+    impl World {
+        /// `verb` from `agent`, decided by `authorizer`: how long the first frame took, the
+        /// frame, and the board records once the handler has returned.
+        async fn first_frame<P>(
+            &self,
+            authorizer: &Arc<P>,
+            agent: &str,
+            verb: Verb,
+            task: TaskId,
+        ) -> (Duration, Vec<u8>, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
+            let (session, gate) = self.agent_session(agent);
+            let records = Records::new(0);
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let served = maknae_kernel::handle_with_attempt_caps(
+                server,
+                Some("spiffe://d/plane/cli".into()),
+                Arc::new(session),
+                gate,
+                Arc::clone(&records),
+                self.cfg.clone(),
+                serde_json::json!({}),
+                Arc::clone(authorizer),
+                Arc::new(maknae_kernel::LiveConfig::new(Default::default(), None)),
+                Arc::new("basic+ceiling".into()),
+                Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
+                Arc::new(None),
+                maknae_kernel::unavailable_egress(),
+                Duration::from_secs(2),
+                maknae_io::DelegatedFds::new(4),
+                common::no_baseline(),
+                maknae_kernel::AttemptCaps::default(),
+                common::conversations(),
+                self.agents.clone(),
+            );
+            let serving = tokio::spawn(served);
+            let body = maknae_proto::encode_request(&maknae_proto::Request {
+                task: Some(task),
+                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                verb,
+            })
+            .unwrap();
+            let started = std::time::Instant::now();
+            common::write_frame(&mut client, &body).await.unwrap();
+            let frame = common::read_frame(&mut client, 1 << 20).await.unwrap();
+            let took = started.elapsed();
+            tokio::time::timeout(Duration::from_secs(10), serving)
+                .await
+                .unwrap()
+                .unwrap();
+            let records = records
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.action.starts_with("board."))
+                .collect();
+            (took, frame, records)
+        }
+    }
+
+    /// jin's read behind one post denied to it, with the board's disk set by `disk` before it.
+    async fn skip_behind_a_withheld_post(
+        tag: &str,
+        disk: impl FnOnce(&MemTaskBlobs),
+    ) -> (Duration, Vec<u8>, Vec<AuditRecord>) {
+        let w = board_world(tag);
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-withheld", labelled());
+        let pdp = denies(&w, &["jin"]);
+        let _alone = STORE.write().await;
+        disk(&w.board_blobs);
+        let got = w.first_frame(&pdp, "jin", read(None), j).await;
+        w.board_blobs.slow(None);
+        w.board_blobs.fail(None);
+        got
+    }
+
+    #[tokio::test]
+    async fn a_read_behind_a_withheld_post_records_nothing_after_its_reply() {
+        let (_, written, done) = skip_behind_a_withheld_post("board-skip-after-ok", |_| {}).await;
+        let outcome = |records: &[AuditRecord]| {
+            records
+                .iter()
+                .find(|r| r.outcome.reason == "done")
+                .map(|r| {
+                    (
+                        r.outcome.result.clone(),
+                        r.outcome.posture.clone(),
+                        r.board.clone(),
+                    )
+                })
+                .unwrap_or_else(|| panic!("no outcome: {records:?}"))
+        };
+        for (tag, slow) in [
+            ("board-skip-after-stalled", true),
+            ("board-skip-after-refused", false),
+        ] {
+            let (took, frame, records) = skip_behind_a_withheld_post(tag, |b| match slow {
+                true => b.slow(Some(Duration::from_millis(2500))),
+                false => b.fail(Some(Fail::Every)),
+            })
+            .await;
+            assert_eq!(frame, written, "{tag}: the reply, byte for byte");
+            assert_eq!(
+                outcome(&records),
+                outcome(&done),
+                "{tag}: the outcome record"
+            );
+            assert_eq!(
+                records.len(),
+                2,
+                "{tag}: intent and outcome only: {records:?}"
+            );
+            if slow {
+                assert!(
+                    took < Duration::from_millis(1500),
+                    "the reply does not wait on the disk: {took:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_post_released_while_a_later_post_is_decided_is_delivered_before_it() {
+        let w = board_world("board-released-mid-read");
+        let j = w.at_work("jin");
+        let p = w.stored("suga", "sentinel-695-held-p", PostLabels::default());
+        w.stored("hobi", "sentinel-695-q", labelled());
+        let everyone = only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]);
+        let board = &w.agents.board;
+        board.mark(&maknae_kernel::Containing(
+            everyone.clone(),
+            [SUGA_UID].into_iter().collect(),
+        ));
+        assert_eq!(board.perform(&board.due(10), &everyone), 1);
+        board.mark(&everyone);
+        let pdp = Arc::new(common::ReleasesDuringBatch {
+            inner: Arc::clone(&w.pdp),
+            board: Arc::clone(board),
+            key: w.key(),
+            id: p,
+            lifted: maknae_kernel::HeldFor::Author,
+            label: LABEL,
+            armed: true.into(),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(
+            bodies(&page),
+            ["sentinel-695-held-p", "sentinel-695-q"],
+            "never the later post without the one released below it"
+        );
+    }
+
+    fn counted<P>(inner: Arc<P>) -> Arc<common::CountsPostBatches<P>> {
+        Arc::new(common::CountsPostBatches {
+            inner,
+            batches: 0.into(),
+            posts: 0.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_read_decides_only_the_chunks_its_page_needs() {
+        let w = board_world("board-read-bound");
+        let j = w.at_work("jin");
+        let page = maknae_proto::BOARD_READ_PAGE_POSTS;
+        for n in 0..3 * page + 4 {
+            w.stored("hobi", &format!("sentinel-695-n{n}"), PostLabels::default());
+        }
+        let pdp = counted(Arc::clone(&w.pdp));
+        let got = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(got.posts.len(), page);
+        assert!(got.more);
+        let ord = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(
+            (pdp.batches.load(ord), pdp.posts.load(ord)),
+            (2, 2 * page),
+            "the first chunk fills the page and the second finds the lookahead; no more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_stopped_at_an_undecided_post_decides_no_later_chunk() {
+        let w = board_world("board-read-bound-stopped");
+        let j = w.at_work("jin");
+        let page = maknae_proto::BOARD_READ_PAGE_POSTS;
+        w.stored("hobi", "sentinel-695-undecided", labelled());
+        for n in 0..2 * page {
+            w.stored("hobi", &format!("sentinel-695-n{n}"), PostLabels::default());
+        }
+        let pdp = counted(Arc::new(common::UndecidedOnLabel {
+            inner: Arc::clone(&w.pdp),
+            label: LABEL,
+        }));
+        let answer = w.board_as(&pdp, "jin", read(None), j).await.0;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        let ord = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(
+            (pdp.batches.load(ord), pdp.posts.load(ord)),
+            (1, page),
+            "only the chunk holding the undecided post is decided"
+        );
+    }
+
+    /// The installed view, except that its `contained_among` call number k (from 0) contains
+    /// the uid `base + k`, for the first `drops` calls: one more post dies at each pass.
+    struct OneDeathPerPass {
+        inner: Arc<dyn maknae_kernel::EnrollmentView>,
+        calls: std::sync::atomic::AtomicUsize,
+        drops: usize,
+        base: u32,
+    }
+
+    impl maknae_kernel::EnrollmentView for OneDeathPerPass {
+        fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+            self.inner.agent_uid(id)
+        }
+        fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+            self.inner.agents()
+        }
+        fn is_enrolled(&self, uid: u32) -> bool {
+            self.inner.is_enrolled(uid)
+        }
+        fn contained(&self, uid: u32) -> bool {
+            self.inner.contained(uid)
+        }
+        fn contained_among(
+            &self,
+            uids: &std::collections::BTreeSet<u32>,
+        ) -> std::collections::BTreeSet<u32> {
+            let k = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match k < self.drops {
+                true => uids
+                    .iter()
+                    .copied()
+                    .filter(|uid| *uid == self.base + k as u32)
+                    .collect(),
+                false => self.inner.contained_among(uids),
+            }
+        }
+        fn unresolved(&self, uid: u32) -> bool {
+            self.inner.unresolved(uid)
+        }
+        fn load(&self) -> maknae_kernel::Load {
+            self.inner.load()
+        }
+    }
+
+    /// A read over a board on which one more post dies at each of the first `drops` passes.
+    async fn read_with_one_death_per_pass(tag: &str, drops: usize) -> (RespResult, World) {
+        const BASE: u32 = 40_000;
+        let mut w = board_world(tag);
+        let j = w.at_work("jin");
+        for n in 0..drops + maknae_proto::BOARD_READ_PAGE_POSTS + 2 {
+            w.agents
+                .board
+                .post(
+                    w.key(),
+                    (Author::Agent("hobi".into()), Some(BASE + n as u32)),
+                    None,
+                    PostLabels::default(),
+                    note(&format!("sentinel-695-n{n}")),
+                    &FixedEnrollment(Default::default()),
+                )
+                .unwrap();
+        }
+        w.agents.view = Arc::new(OneDeathPerPass {
+            inner: w.agents.view.clone(),
+            calls: 0.into(),
+            drops,
+            base: BASE,
+        });
+        let answer = w.board("jin", read(None), j).await.0;
+        (answer, w)
+    }
+
+    #[tokio::test]
+    async fn a_read_changed_under_it_at_every_pass_short_of_the_bound_still_answers() {
+        let drops = maknae_kernel::READ_ROUNDS - 1;
+        let (answer, _) = read_with_one_death_per_pass("board-rounds-under", drops).await;
+        let page = page_of(answer);
+        assert_eq!(page.posts.len(), maknae_proto::BOARD_READ_PAGE_POSTS);
+        assert_eq!(bodies(&page)[0], format!("sentinel-695-n{drops}"));
+    }
+
+    #[tokio::test]
+    async fn a_read_changed_under_it_at_every_pass_to_the_bound_is_stalled_and_sends_nothing() {
+        let drops = maknae_kernel::READ_ROUNDS;
+        let (answer, w) = read_with_one_death_per_pass("board-rounds-over", drops).await;
+        assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+        assert_eq!(w.cursor("jin"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_read_whose_page_batch_alone_confirmed_its_request_is_answered() {
+        let w = board_world("board-base-page-only");
+        let j = w.at_work("jin");
+        w.stored("hobi", "sentinel-695-a", PostLabels::default());
+        let pdp = Arc::new(common::BaseOnlyInFirstBatch {
+            inner: Arc::clone(&w.pdp),
+            batches: 0.into(),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-a"]);
+    }
+
+    #[tokio::test]
+    async fn a_read_whose_reply_target_batch_did_not_confirm_its_request_is_still_answered() {
+        let w = board_world("board-base-target-unconfirmed");
+        let j = w.at_work("jin");
+        let t = w.stored("suga", "sentinel-695-target", PostLabels::default());
+        page_of(w.board("jin", read(None), j).await.0);
+        page_of(w.board("jin", read(Some(t)), j).await.0);
+        w.agents
+            .board
+            .post(
+                w.key(),
+                (Author::Agent("hobi".into()), Some(HOBI_UID)),
+                None,
+                PostLabels::default(),
+                reply("sentinel-695-reply", t),
+                &FixedEnrollment(Default::default()),
+            )
+            .unwrap();
+        let pdp = Arc::new(common::BaseOnlyInFirstBatch {
+            inner: Arc::clone(&w.pdp),
+            batches: 0.into(),
+        });
+        let page = page_of(w.board_as(&pdp, "jin", read(None), j).await.0);
+        assert_eq!(bodies(&page), ["sentinel-695-reply"]);
+        assert_eq!(
+            page.posts[0].draft.in_reply_to, None,
+            "the target batch did not confirm, so the link is not kept"
+        );
+        assert_eq!(pdp.batches.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 }

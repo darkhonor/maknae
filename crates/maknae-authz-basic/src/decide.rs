@@ -192,11 +192,11 @@ impl DestinationGrants {
 /// [`crate::USER_GRANTABLE`] may be granted to `user`; `admin.baseline.accept` changes state.
 // One line: the drift gate's extractor reads only the matched line.
 #[rustfmt::skip]
-pub(crate) const GRANTABLE_ACTIONS: [&str; 14] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog"];
+pub(crate) const GRANTABLE_ACTIONS: [&str; 16] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read"];
 
 /// The terms a `subjects:` action list or a family wildcard can name.
 #[rustfmt::skip]
-pub(crate) const ACTION_VOCABULARY: [&str; 18] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
+pub(crate) const ACTION_VOCABULARY: [&str; 20] = ["admin.status", "admin.config.show", "admin.subject.list", "admin.baseline.show", "admin.baseline.accept", "admin.contain", "admin.release", "session.prompt", "session.new", "session.close", "session.list", "session.delete", "session.task", "tool.catalog", "board.post", "board.read", "fs.read", "fs.write", "fs.delete", "fs.mkdir"];
 
 /// Decided as `fs.read` wherever an action is limited, and never named by a list (#161 M15).
 pub(crate) const DECIDED_AS_READ: [&str; 2] = ["fs.stat", "fs.list"];
@@ -271,7 +271,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// demands the fourth assertion, which is the failure mode an unrolled check
 /// would otherwise have had.
 const _: () = {
-    let [a, b, c, d, e, f, g, h, i, j, k, l, m, n] = GRANTABLE_ACTIONS;
+    let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = GRANTABLE_ACTIONS;
     const WHY: &str = "admin.whoami is unconditional for admins and must not be grantable";
     assert!(!str_eq(a, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(b, "admin.whoami"), "{}", WHY);
@@ -287,6 +287,8 @@ const _: () = {
     assert!(!str_eq(l, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(m, "admin.whoami"), "{}", WHY);
     assert!(!str_eq(n, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(o, "admin.whoami"), "{}", WHY);
+    assert!(!str_eq(p, "admin.whoami"), "{}", WHY);
 };
 
 /// One expanded grant: the term and the entry it was written as.
@@ -346,6 +348,7 @@ pub(crate) enum Class {
     Mcp,
     Kernel,
     Tool,
+    Board,
 }
 
 /// Exact-segment class match (spec §5): `a == c` or `a.starts_with(c + ".")`,
@@ -373,6 +376,8 @@ pub(crate) fn class_of(action: &str) -> Option<Class> {
         Some(Class::Kernel)
     } else if in_class(action, "tool") {
         Some(Class::Tool)
+    } else if in_class(action, "board") {
+        Some(Class::Board)
     } else {
         None
     }
@@ -943,6 +948,14 @@ pub(crate) fn decide_loaded_cited(
                 Err(decision) => decision,
             }
         }
+        Role::Admin | Role::User
+            if matches!(req.action.0.as_str(), "board.post" | "board.read") =>
+        {
+            match granted(lp, role.key(), &req.action.0) {
+                Ok(source) => grant_permit(role.key(), source),
+                Err(decision) => decision,
+            }
+        }
         Role::Admin | Role::User if req.action.0 == "session.task" => {
             decide_task(lp, req, role.key(), uid, principal.uid)
         }
@@ -1040,6 +1053,7 @@ pub(crate) fn decide_loaded_cited(
             | Some(Class::Mcp)
             | Some(Class::Kernel)
             | Some(Class::Tool)
+            | Some(Class::Board)
             | None => (
                 Verdict::NotApplicable {
                     note: Some(format!(
@@ -1147,7 +1161,8 @@ fn agent_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Opti
             | Class::Terminal
             | Class::Mcp
             | Class::Kernel
-            | Class::Tool,
+            | Class::Tool
+            | Class::Board,
         )
         | None => None,
     }
@@ -1172,7 +1187,13 @@ fn action_limit(
         Some(Class::Admin) if action == "admin.whoami" => return None,
         Some(Class::Fs) if right_decides(lp, entry, req) => return None,
         Some(
-            Class::Admin | Class::Session | Class::Fs | Class::Terminal | Class::Mcp | Class::Tool,
+            Class::Admin
+            | Class::Session
+            | Class::Fs
+            | Class::Terminal
+            | Class::Mcp
+            | Class::Tool
+            | Class::Board,
         ) => {}
     }
     let (name, section) = (&entry.name, entry.section());
