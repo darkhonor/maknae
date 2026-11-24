@@ -4,7 +4,9 @@
 use crate::binding::Resolution;
 use crate::decide::{LoadedPolicy, SubjectEntry};
 use crate::role::Role;
-use maknae_config::{ArgPattern, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolsCatalog};
+use maknae_config::{
+    ArgPattern, CommandForm, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolsCatalog,
+};
 use maknae_graph::catalog::{CatalogEntry, CatalogForge, CatalogInput, CatalogOutput};
 use maknae_proto::{CatalogDigest, CredentialRef, TOOL_CATALOG_MAX_BYTES};
 use std::collections::BTreeSet;
@@ -163,8 +165,11 @@ fn granted(entry: &ToolEntry, stages: &[&Stage<'_>]) -> Option<CatalogEntry> {
         .commands
         .iter()
         .filter_map(|(program, command)| {
-            let kept: Vec<String> = command
-                .subcommands
+            let ceilings: &[ArgPattern] = match &command.form {
+                CommandForm::Positional(patterns) => patterns,
+                CommandForm::Grammar { .. } | CommandForm::Open => &[],
+            };
+            let kept: Vec<String> = ceilings
                 .iter()
                 .filter(|ceiling| {
                     stages
@@ -297,6 +302,37 @@ mod tests {
 
     const APP_CLASS: &str = "  sentinel-674-app-class:\n    kind: github-app-installation\n    source: minted-per-task\n    narrowing: provider\n    minting: trust-plane\n    app: sentinel-674-app-a\n";
     const PAT_CLASS: &str = "  sentinel-674-pat-class:\n    kind: github-machine-user\n";
+
+    #[test]
+    fn grammar_and_open_commands_add_no_positional_patterns() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+        );
+        let tools = format!("schema_version: 1\ntools:\n  sentinel-674-mixed:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    commands:\n      sh: {{ open: true }}\n      gh: {{ grammar: gh, shapes: [pr.view] }}\n      cargo: {{ subcommands: [\"build *\"] }}\n");
+        let catalog = ToolsCatalog::parse_with(&tools, &grammars).unwrap();
+        assert!(catalog.disabled().is_empty(), "{:?}", catalog.disabled());
+        let authz = site(
+            &[
+                "Tool(sentinel-674-mixed sh -c *)",
+                "Tool(sentinel-674-mixed gh pr *)",
+                "Tool(sentinel-674-mixed cargo build *)",
+            ],
+            &[],
+        );
+        let src = try_source(&authz, Some(BINDINGS), &UIDS, AgentsLoad::default())
+            .unwrap()
+            .with_tools(catalog);
+        let alice = graph(&compiled(&src), ALICE);
+        assert_eq!(cat::entries(&alice), ["sentinel-674-mixed"]);
+        assert_eq!(
+            cat::patterns(&alice, "sentinel-674-mixed", "cargo"),
+            ["build *"]
+        );
+        assert!(cat::patterns(&alice, "sentinel-674-mixed", "sh").is_empty());
+        assert!(cat::patterns(&alice, "sentinel-674-mixed", "gh").is_empty());
+    }
 
     #[test]
     fn a_replacing_list_replaces_the_site_list() {

@@ -1,12 +1,15 @@
 //! `tools.yaml` (#674): the catalog of tools a subject may be granted, bounded here.
 
 use crate::argpattern::{ArgPattern, DenyArg};
+use crate::grammar::{ArgvToken, ForgeNeed, GrammarSet, Shape};
 use crate::{ConfigError, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 pub const TOOLS_FILE: &str = "tools.yaml";
+pub const TOOLS_DROPIN_DIR: &str = "tools.d";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CredentialKind {
@@ -162,8 +165,19 @@ pub struct ToolResources {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandForm {
+    Positional(Vec<ArgPattern>),
+    Grammar {
+        grammar: String,
+        grammar_sha256: String,
+        shapes: BTreeMap<String, Arc<Shape>>,
+    },
+    Open,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolCommand {
-    pub subcommands: Vec<ArgPattern>,
+    pub form: CommandForm,
     pub deny_args: Vec<DenyArg>,
     pub timeout: Option<String>,
     pub output: Option<String>,
@@ -218,40 +232,118 @@ impl fmt::Display for ToolsError {
 
 impl std::error::Error for ToolsError {}
 
+struct Doc {
+    top: Vec<(String, Value)>,
+    classes: Vec<(String, Value)>,
+    tools: Vec<(String, Value)>,
+}
+
+enum DropIn {
+    Read { file: String, text: String },
+    Unreadable { file: String, reason: String },
+}
+
+struct CommandContext<'a> {
+    credential: bool,
+    network: bool,
+    binds: &'a BTreeSet<String>,
+    grammars: &'a GrammarSet,
+}
+
 impl ToolsCatalog {
     pub fn empty() -> Self {
         Self::default()
     }
 
     pub fn parse(text: &str) -> Result<Self, ToolsError> {
-        let invalid = |reason: &str| ToolsError::Invalid(reason.to_string());
-        let Value::Map(top) = crate::load_str(text).map_err(ToolsError::Config)? else {
-            return Err(invalid("the document must be a mapping"));
-        };
-        crate::reject_unknown_keys(
-            TOOLS_FILE,
-            &top,
-            &["schema_version", "credential_classes", "tools"],
-        )
-        .map_err(ToolsError::Config)?;
-        if !matches!(get(&top, "schema_version"), Some(Value::Int(1))) {
-            return Err(invalid("schema_version must be 1"));
+        Self::parse_with(text, &GrammarSet::empty())
+    }
+
+    pub fn parse_with(text: &str, grammars: &GrammarSet) -> Result<Self, ToolsError> {
+        Self::assemble(Some(text), Vec::new(), Vec::new(), grammars)
+    }
+
+    pub fn load(config_dir: &Path, grammars: &GrammarSet) -> Result<Self, ToolsError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (config_dir, grammars);
+            Err(ToolsError::Config(ConfigError::PermissionsUnsupported))
         }
-        let section = |key: &str| match get(&top, key) {
-            None => Ok(&[][..]),
-            Some(Value::Map(items)) => Ok(items.as_slice()),
-            Some(_) => Err(ToolsError::Invalid(format!("`{key}` must be a mapping"))),
-        };
+        #[cfg(unix)]
+        {
+            load_required(config_dir, host_tools_required(), grammars)
+        }
+    }
+
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub fn load_with_requirement(
+        config_dir: &Path,
+        req: maknae_io::TargetRequired,
+        grammars: &GrammarSet,
+    ) -> Result<Self, ToolsError> {
+        load_required(config_dir, req, grammars)
+    }
+
+    fn assemble(
+        main: Option<&str>,
+        dropins: Vec<DropIn>,
+        skipped: Vec<Disabled>,
+        grammars: &GrammarSet,
+    ) -> Result<Self, ToolsError> {
+        let main = main.map(parse_top).transpose()?;
         let mut catalog = Self::empty();
-        catalog.canonical = crate::canonical_json(&Value::Map(top.clone()));
-        let mut classes: BTreeMap<&str, Result<CredentialClass, String>> = BTreeMap::new();
-        for (name, body) in section("credential_classes")? {
-            if name == "none" {
-                return Err(invalid(
-                    "`none` is reserved and cannot name a credential class",
-                ));
+        catalog.disabled = skipped;
+        let mut dropin_canonical = Vec::new();
+        let mut docs: Vec<(String, Doc)> = Vec::new();
+        for dropin in dropins {
+            match dropin {
+                DropIn::Read { file, text } => match parse_top(&text) {
+                    Ok(doc) => {
+                        dropin_canonical.push((file.clone(), Value::Map(doc.top.clone())));
+                        docs.push((file, doc));
+                    }
+                    Err(e) => {
+                        dropin_canonical.push((file.clone(), Value::Str(text)));
+                        catalog.disabled.push(Disabled {
+                            entry: file,
+                            reason: e.reason(),
+                        });
+                    }
+                },
+                DropIn::Unreadable { file, reason } => {
+                    dropin_canonical.push((file.clone(), Value::Str(reason.clone())));
+                    catalog.disabled.push(Disabled {
+                        entry: file,
+                        reason,
+                    });
+                }
             }
-            classes.insert(name, parse_class(name, body));
+        }
+        let sources: Vec<(&str, &Doc)> = main
+            .iter()
+            .map(|doc| (TOOLS_FILE, doc))
+            .chain(docs.iter().map(|(file, doc)| (file.as_str(), doc)))
+            .collect();
+        let defined = |pick: fn(&Doc) -> &[(String, Value)]| {
+            let mut files: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for (file, doc) in &sources {
+                for (name, _) in pick(doc) {
+                    files.entry(name.as_str()).or_default().push(file);
+                }
+            }
+            files
+        };
+        let class_files = defined(|d| &d.classes);
+        let tool_files = defined(|d| &d.tools);
+        let mut classes: BTreeMap<&str, Result<CredentialClass, String>> = BTreeMap::new();
+        for (file, doc) in &sources {
+            for (name, body) in &doc.classes {
+                let parsed = match class_files.get(name.as_str()).map(Vec::as_slice) {
+                    Some([_]) | None => parse_class(name, body).map_err(|r| in_file(file, r)),
+                    Some(several) => Err(defined_in(several)),
+                };
+                classes.insert(name, parsed);
+            }
         }
         for (name, class) in &classes {
             if let Err(reason) = class {
@@ -261,23 +353,68 @@ impl ToolsCatalog {
                 });
             }
         }
-        for (name, body) in section("tools")? {
-            let parsed = parse_entry(name, body, &classes);
-            match parsed {
-                Ok((true, entry)) => {
-                    catalog.entries.insert(name.clone(), entry);
+        let mut reported: BTreeSet<&str> = BTreeSet::new();
+        for (file, doc) in &sources {
+            for (name, body) in &doc.tools {
+                let parsed = match tool_files.get(name.as_str()).map(Vec::as_slice) {
+                    Some([_]) | None => {
+                        parse_entry(name, body, &classes, grammars).map_err(|r| in_file(file, r))
+                    }
+                    Some(several) => {
+                        if !reported.insert(name) {
+                            continue;
+                        }
+                        Err(defined_in(several))
+                    }
+                };
+                match parsed {
+                    Ok((true, entry)) => {
+                        catalog.entries.insert(name.clone(), entry);
+                    }
+                    Ok((false, _)) => {}
+                    Err(reason) => catalog.disabled.push(Disabled {
+                        entry: name.clone(),
+                        reason,
+                    }),
                 }
-                Ok((false, _)) => {}
-                Err(reason) => catalog.disabled.push(Disabled {
-                    entry: name.clone(),
-                    reason,
-                }),
             }
         }
         catalog.classes = classes
             .into_iter()
             .filter_map(|(name, class)| Some((name.to_string(), class.ok()?)))
             .collect();
+        let named: BTreeMap<&str, Value> = catalog
+            .entries
+            .values()
+            .flat_map(|e| e.commands.values())
+            .filter_map(|c| match &c.form {
+                CommandForm::Grammar { grammar, .. } => grammars
+                    .grammars
+                    .get(grammar)
+                    .map(|g| (grammar.as_str(), Value::Str(g.canonical.clone()))),
+                CommandForm::Positional(_) | CommandForm::Open => None,
+            })
+            .collect();
+        catalog.canonical = match (main, dropin_canonical.is_empty() && named.is_empty()) {
+            (None, true) => String::new(),
+            (Some(doc), true) => crate::canonical_json(&Value::Map(doc.top)),
+            (main, false) => crate::canonical_json(&Value::Map(vec![
+                (
+                    "grammars".to_string(),
+                    Value::Map(
+                        named
+                            .into_iter()
+                            .map(|(name, canonical)| (name.to_string(), canonical))
+                            .collect(),
+                    ),
+                ),
+                (TOOLS_DROPIN_DIR.to_string(), Value::Map(dropin_canonical)),
+                (
+                    TOOLS_FILE.to_string(),
+                    Value::Map(main.map(|doc| doc.top).unwrap_or_default()),
+                ),
+            ])),
+        };
         Ok(catalog)
     }
 
@@ -310,16 +447,58 @@ impl ToolsCatalog {
     }
 }
 
-pub fn load_host_tools(config_dir: &Path) -> Result<ToolsCatalog, ToolsError> {
-    #[cfg(not(unix))]
-    {
-        let _ = config_dir;
-        Err(ToolsError::Config(ConfigError::PermissionsUnsupported))
+impl ToolsError {
+    fn reason(self) -> String {
+        match self {
+            Self::Config(e) => e.to_string(),
+            Self::Invalid(reason) => reason,
+        }
     }
-    #[cfg(unix)]
-    {
-        load_required(config_dir, host_tools_required())
+}
+
+fn in_file(file: &str, reason: String) -> String {
+    if file == TOOLS_FILE {
+        reason
+    } else {
+        format!("{file}: {reason}")
     }
+}
+
+fn defined_in(files: &[&str]) -> String {
+    format!("defined in more than one file: {}", files.join(", "))
+}
+
+fn parse_top(text: &str) -> Result<Doc, ToolsError> {
+    let invalid = |reason: &str| ToolsError::Invalid(reason.to_string());
+    let Value::Map(top) = crate::load_str(text).map_err(ToolsError::Config)? else {
+        return Err(invalid("the document must be a mapping"));
+    };
+    crate::reject_unknown_keys(
+        TOOLS_FILE,
+        &top,
+        &["schema_version", "credential_classes", "tools"],
+    )
+    .map_err(ToolsError::Config)?;
+    if !matches!(get(&top, "schema_version"), Some(Value::Int(1))) {
+        return Err(invalid("schema_version must be 1"));
+    }
+    let section = |key: &str| match get(&top, key) {
+        None => Ok(Vec::new()),
+        Some(Value::Map(items)) => Ok(items.clone()),
+        Some(_) => Err(ToolsError::Invalid(format!("`{key}` must be a mapping"))),
+    };
+    let classes = section("credential_classes")?;
+    if classes.iter().any(|(name, _)| name == "none") {
+        return Err(invalid(
+            "`none` is reserved and cannot name a credential class",
+        ));
+    }
+    let tools = section("tools")?;
+    Ok(Doc {
+        top,
+        classes,
+        tools,
+    })
 }
 
 #[cfg(unix)]
@@ -327,19 +506,22 @@ fn host_tools_required() -> maknae_io::TargetRequired {
     crate::authz::root_policy_file_required()
 }
 
-#[cfg(all(unix, feature = "hermetic-test-seam"))]
-pub fn load_tools_with_requirement(
-    config_dir: &Path,
-    req: maknae_io::TargetRequired,
-) -> Result<ToolsCatalog, ToolsError> {
-    load_required(config_dir, req)
-}
-
 #[cfg(unix)]
 fn load_required(
     config_dir: &Path,
     target: maknae_io::TargetRequired,
+    grammars: &GrammarSet,
 ) -> Result<ToolsCatalog, ToolsError> {
+    let main = read_main(config_dir, target.clone())?;
+    let (dropins, skipped) = read_dropins(config_dir, target)?;
+    ToolsCatalog::assemble(main.as_deref(), dropins, skipped, grammars)
+}
+
+#[cfg(unix)]
+fn read_main(
+    config_dir: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<Option<String>, ToolsError> {
     use crate::authz::RootReadError;
     let absolute = std::path::absolute(config_dir.join(TOOLS_FILE))
         .map_err(|e| ToolsError::Config(ConfigError::Io(e.to_string())))?;
@@ -348,7 +530,7 @@ fn load_required(
         Err(RootReadError::Io(maknae_io::IoError::Io {
             kind: maknae_io::IoKind::NotFound,
             path: missing,
-        })) if missing == absolute => return Ok(ToolsCatalog::empty()),
+        })) if missing == absolute => return Ok(None),
         Err(RootReadError::Directory(d)) => {
             return Err(ToolsError::Config(ConfigError::Io(
                 crate::authz::insecure_directory(&d.display().to_string(), TOOLS_FILE),
@@ -362,7 +544,76 @@ fn load_required(
             absolute.display()
         )))
     })?;
-    ToolsCatalog::parse(body)
+    Ok(Some(body.to_string()))
+}
+
+#[cfg(unix)]
+fn read_dropins(
+    config_dir: &Path,
+    target: maknae_io::TargetRequired,
+) -> Result<(Vec<DropIn>, Vec<Disabled>), ToolsError> {
+    use maknae_io::{IoError, IoKind, Kind, StrategyPref};
+    let dir = std::path::absolute(config_dir.join(TOOLS_DROPIN_DIR))
+        .map_err(|e| ToolsError::Config(ConfigError::Io(e.to_string())))?;
+    let required = maknae_io::AnchorRequired {
+        owner: target.owner,
+        mode_mask: Some(0o022),
+    };
+    let anchor = match maknae_io::open_anchor(&dir, required, StrategyPref::Auto) {
+        Ok(anchor) => anchor,
+        Err(IoError::Io {
+            kind: IoKind::NotFound,
+            ..
+        }) => return Ok((Vec::new(), Vec::new())),
+        Err(IoError::InsecurePermissions { .. } | IoError::NotOwned { .. }) => {
+            return Err(ToolsError::Config(ConfigError::Io(format!(
+                "the drop-in directory {} must be owned by root (uid 0) and not group- or other-writable",
+                dir.display()
+            ))))
+        }
+        Err(other) => return Err(ToolsError::Config(crate::loader::map_io(other))),
+    };
+    let mut entries = anchor
+        .enumerate(Path::new(""), None)
+        .map_err(|e| ToolsError::Config(crate::loader::map_io(e)))?
+        .value;
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut read = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in entries {
+        let name = entry.name.to_string_lossy().into_owned();
+        if name.starts_with('.') || !name.ends_with(".yaml") {
+            continue;
+        }
+        let file = format!("{TOOLS_DROPIN_DIR}/{name}");
+        if entry.kind != Kind::File {
+            let what = if entry.kind == Kind::Symlink {
+                "a symlink"
+            } else if entry.kind == Kind::Dir {
+                "a directory"
+            } else {
+                "not a regular file"
+            };
+            skipped.push(Disabled {
+                entry: file,
+                reason: format!("skipped: the drop-in is {what}, and drop-ins are regular files"),
+            });
+            continue;
+        }
+        let got = anchor
+            .read(Path::new(&entry.name), None, target.clone())
+            .map_err(|e| e.to_string())
+            .and_then(|outcome| {
+                std::str::from_utf8(&outcome.value)
+                    .map(str::to_string)
+                    .map_err(|e| format!("invalid UTF-8: {e}"))
+            });
+        read.push(match got {
+            Ok(text) => DropIn::Read { file, text },
+            Err(reason) => DropIn::Unreadable { file, reason },
+        });
+    }
+    Ok((read, skipped))
 }
 
 type Fields = [(String, Value)];
@@ -650,6 +901,7 @@ fn parse_entry(
     name: &str,
     v: &Value,
     classes: &BTreeMap<&str, Result<CredentialClass, String>>,
+    grammars: &GrammarSet,
 ) -> Result<(bool, ToolEntry), String> {
     if !tool_entry_name_ok(name) {
         return Err(
@@ -770,7 +1022,17 @@ fn parse_entry(
         })
         .transpose()?;
     let binds = get(map, "binds").map_or(Ok(BTreeSet::new()), parse_binds)?;
-    let commands = get(map, "commands").map_or(Ok(BTreeMap::new()), parse_commands)?;
+    let context = CommandContext {
+        credential: credential.is_some(),
+        network: match network {
+            ToolNetwork::None => false,
+            ToolNetwork::Proxy { .. } => true,
+        },
+        binds: &binds,
+        grammars,
+    };
+    let commands =
+        get(map, "commands").map_or(Ok(BTreeMap::new()), |v| parse_commands(v, &context))?;
     if enabled && image.is_none() {
         return Err("an enabled entry needs an image".to_string());
     }
@@ -913,7 +1175,10 @@ fn parse_binds(v: &Value) -> Result<BTreeSet<String>, String> {
         .collect()
 }
 
-fn parse_commands(v: &Value) -> Result<BTreeMap<String, ToolCommand>, String> {
+fn parse_commands(
+    v: &Value,
+    context: &CommandContext<'_>,
+) -> Result<BTreeMap<String, ToolCommand>, String> {
     let Value::Map(items) = v else {
         return Err("commands must be a mapping".to_string());
     };
@@ -928,18 +1193,17 @@ fn parse_commands(v: &Value) -> Result<BTreeMap<String, ToolCommand>, String> {
             let m = fields(
                 body,
                 &format!("command `{program}`"),
-                &["subcommands", "deny_args", "timeout", "output"],
+                &[
+                    "subcommands",
+                    "grammar",
+                    "shapes",
+                    "open",
+                    "deny_args",
+                    "timeout",
+                    "output",
+                ],
             )?;
-            let subcommands = match get(m, "subcommands") {
-                None => Vec::new(),
-                Some(v) => strings(v, "subcommands")?
-                    .into_iter()
-                    .map(|p| {
-                        ArgPattern::parse(p)
-                            .map_err(|e| format!("command `{program}` subcommand `{p}`: {e}"))
-                    })
-                    .collect::<Result<_, _>>()?,
-            };
+            let form = parse_form(program, m, context)?;
             let deny_args = match get(m, "deny_args") {
                 None => Vec::new(),
                 Some(v) => strings(v, "deny_args")?
@@ -953,7 +1217,7 @@ fn parse_commands(v: &Value) -> Result<BTreeMap<String, ToolCommand>, String> {
             Ok((
                 program.clone(),
                 ToolCommand {
-                    subcommands,
+                    form,
                     deny_args,
                     timeout: get(m, "timeout")
                         .map(|v| duration(v, "timeout"))
@@ -963,6 +1227,118 @@ fn parse_commands(v: &Value) -> Result<BTreeMap<String, ToolCommand>, String> {
             ))
         })
         .collect()
+}
+
+fn parse_form(
+    program: &str,
+    m: &Fields,
+    context: &CommandContext<'_>,
+) -> Result<CommandForm, String> {
+    let named = match (get(m, "grammar"), get(m, "shapes")) {
+        (None, None) => None,
+        (Some(grammar), Some(shapes)) => Some((grammar, shapes)),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(format!(
+                "command `{program}` needs both `grammar` and `shapes`"
+            ))
+        }
+    };
+    match (get(m, "subcommands"), named, get(m, "open")) {
+        (Some(patterns), None, None) => Ok(CommandForm::Positional(
+            strings(patterns, "subcommands")?
+                .into_iter()
+                .map(|p| {
+                    ArgPattern::parse(p)
+                        .map_err(|e| format!("command `{program}` subcommand `{p}`: {e}"))
+                })
+                .collect::<Result<_, _>>()?,
+        )),
+        (None, Some((grammar, shapes)), None) => resolve_shapes(
+            program,
+            text(grammar, "grammar")?,
+            &strings(shapes, "shapes")?,
+            context,
+        ),
+        (None, None, Some(open)) => {
+            if !flag(open, "open")? {
+                return Err(format!("command `{program}`: `open` must be true when given"));
+            }
+            if context.credential || context.network {
+                return Err(format!(
+                    "command `{program}` is open, but a tool holding a credential or network access needs a grammar"
+                ));
+            }
+            Ok(CommandForm::Open)
+        }
+        (None, None, None)
+        | (Some(_), Some(_), _)
+        | (Some(_), None, Some(_))
+        | (None, Some(_), Some(_)) => Err(format!(
+            "command `{program}` needs exactly one of `grammar` with `shapes`, `open: true` or `subcommands`"
+        )),
+    }
+}
+
+fn resolve_shapes(
+    program: &str,
+    grammar: &str,
+    names: &[&str],
+    context: &CommandContext<'_>,
+) -> Result<CommandForm, String> {
+    if grammar != program {
+        return Err(format!(
+            "command `{program}` names grammar `{grammar}`; a grammar serves only its own program"
+        ));
+    }
+    if names.is_empty() {
+        return Err(format!("command `{program}`: shapes must not be empty"));
+    }
+    let Some(g) = context.grammars.grammars.get(grammar) else {
+        let file = format!("{grammar}.yaml");
+        return Err(
+            match context.grammars.disabled.iter().find(|d| d.file == file) {
+                Some(d) => format!("grammar `{grammar}` is disabled: {}", d.reason),
+                None => format!("grammar `{grammar}` is not enabled"),
+            },
+        );
+    };
+    let mut shapes = BTreeMap::new();
+    for name in names {
+        if let Some((_, why)) = g.disabled.iter().find(|(n, _)| n == name) {
+            return Err(format!(
+                "shape `{name}` of grammar `{grammar}` is disabled: {why}"
+            ));
+        }
+        let Some(shape) = g.shapes.get(*name) else {
+            return Err(format!("shape `{name}` is not in grammar `{grammar}`"));
+        };
+        let uncovered = shape.argv.iter().find_map(|token| match token {
+            ArgvToken::Bound { kind, .. } if !context.binds.contains(kind) => Some(kind),
+            ArgvToken::Bound { .. }
+            | ArgvToken::Literal(_)
+            | ArgvToken::Slot(_)
+            | ArgvToken::OptionSlot { .. } => None,
+        });
+        if let Some(kind) = uncovered {
+            return Err(format!(
+                "shape `{name}` uses bound kind `{kind}`, which the entry's binds do not cover"
+            ));
+        }
+        if context.credential && shape.forge == ForgeNeed::default() {
+            return Err(format!(
+                "shape `{name}` declares no forge, and the entry holds a credential"
+            ));
+        }
+        shapes.insert((*name).to_string(), Arc::new(shape.clone()));
+    }
+    Ok(CommandForm::Grammar {
+        grammar: grammar.to_string(),
+        grammar_sha256: maknae_crypto::sha256(g.canonical.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        shapes,
+    })
 }
 
 #[cfg(test)]
@@ -1080,7 +1456,7 @@ mod tests {
         assert_eq!(e.name, "good");
         assert_eq!(e.credential, None);
         assert!(
-            e.commands["echo"].subcommands[0].matches(&argv(&["hi", "x"]), &crate::Bound::empty())
+            positional(&e.commands["echo"])[0].matches(&argv(&["hi", "x"]), &crate::Bound::empty())
         );
         assert_eq!(c.class("app-class").unwrap().app.as_deref(), Some("my-app"));
     }
@@ -1232,9 +1608,9 @@ mod tests {
             "resources: { cpus: 0 }",
             "lifetime: { max: soon }",
             "commands: { echo: { subcommands: [\"* x\"] } }",
-            "commands: { echo: { deny_args: [\"a*b\"] } }",
-            "commands: { echo: { timeout: \"\" } }",
-            "commands: { echo: { output: 16 } }",
+            "commands: { echo: { subcommands: [x], deny_args: [\"a*b\"] } }",
+            "commands: { echo: { subcommands: [x], timeout: \"\" } }",
+            "commands: { echo: { subcommands: [x], output: 16 } }",
         ] {
             let c = catalog(&doc(
                 "  {}\n",
@@ -1480,7 +1856,7 @@ mod tests {
         std::fs::write(&p, "schema_version: 1\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
         crate::tests::test_owner::hand_to_nobody_when_root(&[&d, &p]);
-        let got = load_host_tools(&d);
+        let got = ToolsCatalog::load(&d, &GrammarSet::empty());
         let _ = std::fs::remove_dir_all(&d);
         assert_eq!(
             got,
@@ -1504,10 +1880,10 @@ mod tests {
             }
         );
         let src = include_str!("tools.rs");
-        let door = &src[src.find("pub fn load_host_tools(").unwrap()..];
-        let door = &door[..door.find("\n}\n").unwrap()];
+        let door = &src[src.find("    pub fn load(config_dir").unwrap()..];
+        let door = &door[..door.find("\n    }\n").unwrap()];
         assert_eq!(door.matches("load_required(").count(), 1, "{door}");
-        assert!(door.contains("load_required(config_dir, host_tools_required())"));
+        assert!(door.contains("load_required(config_dir, host_tools_required(), grammars)"));
     }
 
     #[test]
@@ -1639,7 +2015,7 @@ mod tests {
                 "  {}\n",
                 &sound(
                     SENTINEL,
-                    &format!("    commands: {{ \"{program}\": {{}} }}\n"),
+                    &format!("    commands: {{ \"{program}\": {{ subcommands: [x] }} }}\n"),
                 ),
             ));
             assert!(c.entry(SENTINEL).is_some(), "{program}: {:?}", c.disabled());
@@ -1649,7 +2025,7 @@ mod tests {
                 "  {}\n",
                 &sound(
                     SENTINEL,
-                    &format!("    commands: {{ \"{program}\": {{}} }}\n"),
+                    &format!("    commands: {{ \"{program}\": {{ subcommands: [x] }} }}\n"),
                 ),
             ));
             assert!(c.entry(SENTINEL).is_none(), "{program}");
@@ -1672,7 +2048,10 @@ mod tests {
         for (entry, program) in names {
             let c = catalog(&doc(
                 "  {}\n",
-                &sound(entry, &format!("    commands: {{ \"{program}\": {{}} }}\n")),
+                &sound(
+                    entry,
+                    &format!("    commands: {{ \"{program}\": {{ subcommands: [x] }} }}\n"),
+                ),
             ));
             let granted = crate::parse_authz(&format!(
                 "schema_version: 1\npermissions:\n  allow: [\"Tool({entry} {program} x)\"]\n"
@@ -1820,7 +2199,7 @@ mod tests {
             &["pr", "comment", "345", "-R", "o/r", "-b", "x"],
         ] {
             let args = argv(refused);
-            let allowed = gh.subcommands.iter().any(|p| p.matches(&args, &bound));
+            let allowed = positional(gh).iter().any(|p| p.matches(&args, &bound));
             assert!(
                 !allowed || first_denied(&gh.deny_args, &args).is_some(),
                 "{refused:?}"
@@ -1846,7 +2225,7 @@ mod tests {
         let gh = &c.entry("github-post").unwrap().commands["gh"];
         let bound = post_bound();
         let ok = argv(&["pr", "comment", "345", "-R", "o/r", "--body-file", "-"]);
-        assert!(gh.subcommands.iter().any(|p| p.matches(&ok, &bound)));
+        assert!(positional(gh).iter().any(|p| p.matches(&ok, &bound)));
         assert_eq!(first_denied(&gh.deny_args, &ok), None);
         let review = argv(&[
             "pr",
@@ -1858,7 +2237,7 @@ mod tests {
             "--body-file",
             "-",
         ]);
-        assert!(gh.subcommands.iter().any(|p| p.matches(&review, &bound)));
+        assert!(positional(gh).iter().any(|p| p.matches(&review, &bound)));
         let approve = argv(&[
             "pr",
             "review",
@@ -1869,10 +2248,9 @@ mod tests {
             "--body-file",
             "-",
         ]);
-        assert!(gh.subcommands.iter().any(|p| p.matches(&approve, &bound)));
+        assert!(positional(gh).iter().any(|p| p.matches(&approve, &bound)));
         assert_eq!(first_denied(&gh.deny_args, &approve), None);
-        assert!(!gh
-            .subcommands
+        assert!(!positional(gh)
             .iter()
             .any(|p| p.matches(&ok, &crate::Bound::empty())));
     }
@@ -1887,6 +2265,253 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    fn positional(c: &ToolCommand) -> &[ArgPattern] {
+        match &c.form {
+            CommandForm::Positional(patterns) => patterns,
+            CommandForm::Grammar { .. } | CommandForm::Open => panic!("{:?}", c.form),
+        }
+    }
+
+    const GH_GRAMMAR: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2.105.0\", date: 2026-11-24 }\nshapes:\n  issue.list:\n    description: List issues.\n    class: read\n    forge: { base: [read] }\n    argv: [issue, list, -R, \"{git.base}\"]\n  pr.view:\n    description: View a pull request.\n    class: read\n    argv: [pr, view]\n  pr.broken:\n    description: Broken.\n    class: sentinel-674-class\n    argv: [pr]\n";
+
+    fn gh_grammars() -> GrammarSet {
+        let mut set = GrammarSet::empty();
+        set.grammars.insert(
+            "gh".to_string(),
+            crate::Grammar::parse("gh", GH_GRAMMAR).unwrap(),
+        );
+        set
+    }
+
+    const CRED: &str = "  c:\n    kind: github-machine-user\n";
+
+    fn with_command(extra: &str, command: &str) -> String {
+        format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}{extra}    commands:\n      gh: {command}\n")
+    }
+
+    fn formed(extra: &str, command: &str) -> ToolsCatalog {
+        ToolsCatalog::parse_with(&doc(CRED, &with_command(extra, command)), &gh_grammars()).unwrap()
+    }
+
+    #[test]
+    fn command_with_two_forms_disables_entry() {
+        for command in [
+            "{ subcommands: [x], open: true }",
+            "{ subcommands: [x], grammar: gh, shapes: [pr.view] }",
+            "{ open: true, grammar: gh, shapes: [pr.view] }",
+            "{ subcommands: [x], open: true, grammar: gh, shapes: [pr.view] }",
+            "{}",
+            "{ deny_args: [x] }",
+        ] {
+            let c = formed("", command);
+            assert!(c.entry(SENTINEL).is_none(), "{command}");
+            assert!(reason(&c, SENTINEL).contains("exactly one of"), "{command}");
+            assert!(c.entry("good").is_some());
+        }
+        for command in ["{ grammar: gh }", "{ shapes: [pr.view] }"] {
+            let c = formed("", command);
+            assert!(
+                reason(&c, SENTINEL).contains("both `grammar` and `shapes`"),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_with_credential_disables_entry() {
+        let c = formed("    credential: c\n", "{ open: true }");
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("needs a grammar"));
+    }
+
+    #[test]
+    fn open_with_network_disables_entry() {
+        let c = formed(
+            "    network: { via: maknae-proxy, sites: [github.com] }\n",
+            "{ open: true }",
+        );
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("needs a grammar"));
+    }
+
+    #[test]
+    fn open_without_either_loads() {
+        for extra in ["", "    credential: none\n    network: none\n"] {
+            let c = formed(extra, "{ open: true, deny_args: [\"--x*\"] }");
+            assert!(c.disabled().is_empty(), "{:?}", c.disabled());
+            let gh = &c.entry(SENTINEL).unwrap().commands["gh"];
+            assert_eq!(gh.form, CommandForm::Open);
+            assert_eq!(gh.deny_args.len(), 1);
+        }
+        let c = formed("", "{ open: false }");
+        assert!(reason(&c, SENTINEL).contains("`open` must be true"));
+        let c = formed("", "{ open: yes-please }");
+        assert!(reason(&c, SENTINEL).contains("open must be true or false"));
+    }
+
+    #[test]
+    fn grammar_command_holds_the_resolved_shapes() {
+        let c = formed(
+            "    credential: c\n    binds: { git: { resolver: git } }\n",
+            "{ grammar: gh, shapes: [issue.list] }",
+        );
+        assert!(c.disabled().is_empty(), "{:?}", c.disabled());
+        let set = gh_grammars();
+        let grammar = &set.grammars["gh"];
+        let CommandForm::Grammar {
+            grammar: name,
+            grammar_sha256,
+            shapes,
+        } = &c.entry(SENTINEL).unwrap().commands["gh"].form
+        else {
+            panic!("not a grammar command");
+        };
+        assert_eq!(name, "gh");
+        let want: String = maknae_crypto::sha256(grammar.canonical.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(grammar_sha256, &want);
+        assert_eq!(grammar_sha256.len(), 64);
+        assert_eq!(shapes.keys().collect::<Vec<_>>(), ["issue.list"]);
+        assert_eq!(*shapes["issue.list"], grammar.shapes["issue.list"]);
+    }
+
+    #[test]
+    fn without_grammars_a_grammar_command_disables_its_entry() {
+        let text = doc(
+            CRED,
+            &with_command("", "{ grammar: gh, shapes: [pr.view] }"),
+        );
+        let c = ToolsCatalog::parse(&text).unwrap();
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("grammar `gh` is not enabled"));
+        assert_eq!(
+            c,
+            ToolsCatalog::parse_with(&text, &GrammarSet::empty()).unwrap()
+        );
+        assert!(c.entry("good").is_some());
+    }
+
+    #[test]
+    fn a_disabled_grammar_is_named_with_its_reason() {
+        let mut set = GrammarSet::empty();
+        set.disabled.push(crate::DisabledGrammar {
+            file: "gh.yaml".to_string(),
+            reason: "sentinel-674-why".to_string(),
+        });
+        let text = doc(
+            CRED,
+            &with_command("", "{ grammar: gh, shapes: [pr.view] }"),
+        );
+        let c = ToolsCatalog::parse_with(&text, &set).unwrap();
+        let why = reason(&c, SENTINEL);
+        assert!(why.contains("grammar `gh` is disabled"), "{why}");
+        assert!(why.contains("sentinel-674-why"), "{why}");
+    }
+
+    #[test]
+    fn a_grammar_serves_only_its_own_program() {
+        let c = ToolsCatalog::parse_with(
+            &doc(
+                CRED,
+                &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    commands:\n      glab: {{ grammar: gh, shapes: [pr.view] }}\n"),
+            ),
+            &gh_grammars(),
+        )
+        .unwrap();
+        assert!(reason(&c, SENTINEL).contains("only its own program"));
+    }
+
+    #[test]
+    fn unknown_shape_disables_entry() {
+        let c = formed("", "{ grammar: gh, shapes: [pr.view, sentinel-674-shape] }");
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("shape `sentinel-674-shape` is not in grammar `gh`"));
+        let c = formed("", "{ grammar: gh, shapes: [] }");
+        assert!(reason(&c, SENTINEL).contains("shapes must not be empty"));
+    }
+
+    #[test]
+    fn disabled_shape_disables_entry() {
+        assert!(gh_grammars().grammars["gh"]
+            .disabled
+            .iter()
+            .any(|(n, _)| n == "pr.broken"));
+        let c = formed("", "{ grammar: gh, shapes: [pr.view, pr.broken] }");
+        assert!(c.entry(SENTINEL).is_none());
+        let why = reason(&c, SENTINEL);
+        assert!(
+            why.contains("shape `pr.broken` of grammar `gh` is disabled"),
+            "{why}"
+        );
+        assert!(why.contains("sentinel-674-class"), "{why}");
+    }
+
+    #[test]
+    fn binds_not_covering_shape_disables_entry() {
+        let c = formed(
+            "    credential: c\n",
+            "{ grammar: gh, shapes: [issue.list] }",
+        );
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("bound kind `git`"));
+        let c = formed("", "{ grammar: gh, shapes: [pr.view] }");
+        assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
+    }
+
+    #[test]
+    fn credential_shape_without_forge_disables_entry() {
+        let c = formed("    credential: c\n", "{ grammar: gh, shapes: [pr.view] }");
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("shape `pr.view` declares no forge"));
+        let c = formed(
+            "    credential: none\n",
+            "{ grammar: gh, shapes: [pr.view] }",
+        );
+        assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
+    }
+
+    #[test]
+    fn canonical_covers_the_grammars_enabled_entries_name() {
+        let plain = doc(CRED, "");
+        let grammar_entry = doc(
+            CRED,
+            &with_command("", "{ grammar: gh, shapes: [pr.view] }"),
+        );
+        let set = gh_grammars();
+        assert_eq!(
+            ToolsCatalog::parse_with(&plain, &set).unwrap().canonical(),
+            ToolsCatalog::parse(&plain).unwrap().canonical()
+        );
+        let named = ToolsCatalog::parse_with(&grammar_entry, &set).unwrap();
+        assert!(named.entry(SENTINEL).is_some());
+        let canonical = named.canonical();
+        assert!(
+            canonical.starts_with("{\"grammars\":{\"gh\":"),
+            "{canonical}"
+        );
+        assert!(canonical.contains(&crate::canonical_json(&Value::Str(
+            set.grammars["gh"].canonical.clone()
+        ))));
+        assert!(canonical.contains("\"tools.d\":{}"), "{canonical}");
+        let mut edited = gh_grammars();
+        edited.grammars.get_mut("gh").unwrap().canonical.push(' ');
+        assert_ne!(
+            ToolsCatalog::parse_with(&grammar_entry, &edited)
+                .unwrap()
+                .canonical(),
+            canonical
+        );
+        let off = grammar_entry.replace(
+            &format!("  {SENTINEL}:\n"),
+            &format!("  {SENTINEL}:\n    enabled: false\n"),
+        );
+        let off = ToolsCatalog::parse_with(&off, &set).unwrap();
+        assert!(off.entry(SENTINEL).is_none());
+        assert!(!off.canonical().contains("grammars"), "{}", off.canonical());
     }
 
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
@@ -1915,10 +2540,273 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
         }
 
+        fn dropin(d: &Path, name: &str, body: &str) -> std::path::PathBuf {
+            let dir = d.join(TOOLS_DROPIN_DIR);
+            if !dir.exists() {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+            p
+        }
+
+        fn load(d: &Path) -> Result<ToolsCatalog, ToolsError> {
+            ToolsCatalog::load_with_requirement(d, own(), &GrammarSet::empty())
+        }
+
+        fn loaded(tag: &str, main: Option<&str>, dropins: &[(&str, &str)]) -> ToolsCatalog {
+            let d = dir(tag);
+            if let Some(main) = main {
+                write(&d, main.as_bytes(), 0o640);
+            }
+            for (name, body) in dropins {
+                dropin(&d, name, body);
+            }
+            let got = load(&d);
+            let _ = std::fs::remove_dir_all(&d);
+            got.unwrap()
+        }
+
+        fn entry_doc(name: &str, extra: &str) -> String {
+            format!("schema_version: 1\ntools:\n{}", sound(name, extra))
+        }
+
+        const ECHO: &str = "    commands:\n      echo: { subcommands: [\"hi *\"] }\n";
+
+        #[test]
+        fn dropin_entry_loads_beside_tools_yaml() {
+            let c = loaded(
+                "dropin_beside",
+                Some(HOMELAB),
+                &[("50-extra.yaml", &entry_doc("sentinel-674-extra", ECHO))],
+            );
+            assert!(c.disabled().is_empty(), "{:?}", c.disabled());
+            assert!(c.entry("sentinel-674-extra").is_some());
+            assert!(c.entry("rust-build").is_some());
+            let alone = loaded(
+                "dropin_alone",
+                None,
+                &[("50-extra.yaml", &entry_doc("sentinel-674-extra", ECHO))],
+            );
+            assert!(alone.entry("sentinel-674-extra").is_some());
+            let ignored = loaded(
+                "dropin_ignored",
+                None,
+                &[
+                    ("notes.txt", &entry_doc("sentinel-674-txt", ECHO)),
+                    (".hidden.yaml", &entry_doc("sentinel-674-dot", ECHO)),
+                ],
+            );
+            assert!(ignored.is_empty(), "{ignored:?}");
+            assert_eq!(ignored.canonical(), "{}");
+        }
+
+        #[test]
+        fn dropin_entry_uses_class_from_tools_yaml() {
+            let main = "schema_version: 1\ncredential_classes:\n  sentinel-674-class:\n    kind: github-machine-user\n";
+            let c = loaded(
+                "dropin_class",
+                Some(main),
+                &[(
+                    "a.yaml",
+                    &entry_doc(
+                        "sentinel-674-user",
+                        &format!("    credential: sentinel-674-class\n{ECHO}"),
+                    ),
+                )],
+            );
+            assert!(c.disabled().is_empty(), "{:?}", c.disabled());
+            assert_eq!(
+                c.entry("sentinel-674-user").unwrap().credential.as_deref(),
+                Some("sentinel-674-class")
+            );
+        }
+
+        #[test]
+        fn duplicate_entry_across_files_disables_it_everywhere() {
+            let main = entry_doc("sentinel-674-dup", ECHO);
+            let c = loaded(
+                "dropin_dup_entry",
+                Some(&main),
+                &[
+                    ("a.yaml", &entry_doc("sentinel-674-dup", ECHO)),
+                    ("b.yaml", &entry_doc("sentinel-674-other", ECHO)),
+                ],
+            );
+            assert!(c.entry("sentinel-674-dup").is_none());
+            assert!(c.entry("sentinel-674-other").is_some());
+            assert_eq!(c.disabled().len(), 1, "{:?}", c.disabled());
+            assert_eq!(
+                reason(&c, "sentinel-674-dup"),
+                "defined in more than one file: tools.yaml, tools.d/a.yaml"
+            );
+            let c = loaded(
+                "dropin_dup_two",
+                None,
+                &[
+                    ("a.yaml", &entry_doc("sentinel-674-dup", ECHO)),
+                    ("b.yaml", &entry_doc("sentinel-674-dup", ECHO)),
+                    ("c.yaml", &entry_doc("sentinel-674-dup", ECHO)),
+                ],
+            );
+            assert_eq!(c.disabled().len(), 1, "{:?}", c.disabled());
+            assert_eq!(
+                reason(&c, "sentinel-674-dup"),
+                "defined in more than one file: tools.d/a.yaml, tools.d/b.yaml, tools.d/c.yaml"
+            );
+        }
+
+        #[test]
+        fn duplicate_class_across_files_disables_it() {
+            let class = "schema_version: 1\ncredential_classes:\n  sentinel-674-class:\n    kind: github-machine-user\n";
+            let user = entry_doc(
+                "sentinel-674-user",
+                &format!("    credential: sentinel-674-class\n{ECHO}"),
+            );
+            let c = loaded(
+                "dropin_dup_class",
+                Some(class),
+                &[("a.yaml", class), ("b.yaml", &user)],
+            );
+            assert!(c.class("sentinel-674-class").is_none());
+            assert_eq!(
+                reason(&c, "credential_classes.sentinel-674-class"),
+                "defined in more than one file: tools.yaml, tools.d/a.yaml"
+            );
+            assert!(c.entry("sentinel-674-user").is_none());
+            assert!(reason(&c, "sentinel-674-user").contains("tools.d/b.yaml: "));
+            assert!(reason(&c, "sentinel-674-user").contains("more than one file"));
+        }
+
+        #[test]
+        fn unparseable_dropin_disables_only_its_names() {
+            for bad in [
+                "schema_version: 1\ntools: [\n".to_string(),
+                entry_doc("sentinel-674-mine", ECHO)
+                    .replace("schema_version: 1", "schema_version: 2"),
+                format!(
+                    "{}sentinel-674-key: 1\n",
+                    entry_doc("sentinel-674-mine", ECHO)
+                ),
+                "schema_version: 1\ncredential_classes:\n  none:\n    kind: github-machine-user\n"
+                    .to_string(),
+            ] {
+                let c = loaded(
+                    "dropin_bad",
+                    Some(&entry_doc("sentinel-674-main", ECHO)),
+                    &[
+                        ("a.yaml", &bad),
+                        ("b.yaml", &entry_doc("sentinel-674-other", ECHO)),
+                    ],
+                );
+                assert!(c.entry("sentinel-674-main").is_some(), "{bad}");
+                assert!(c.entry("sentinel-674-other").is_some(), "{bad}");
+                assert!(c.entry("sentinel-674-mine").is_none(), "{bad}");
+                assert_eq!(c.disabled().len(), 1, "{bad}: {:?}", c.disabled());
+                let why = reason(&c, "tools.d/a.yaml");
+                let want = match ToolsCatalog::parse(&bad).unwrap_err() {
+                    ToolsError::Config(e) => e.to_string(),
+                    ToolsError::Invalid(r) => r,
+                };
+                assert_eq!(why, want, "{bad}");
+                assert!(!why.starts_with(TOOLS_FILE), "{why}");
+            }
+            let d = dir("dropin_badbytes");
+            dropin(&d, "a.yaml", "x");
+            std::fs::write(d.join(TOOLS_DROPIN_DIR).join("a.yaml"), [0xff, 0xfe]).unwrap();
+            dropin(&d, "b.yaml", &entry_doc("sentinel-674-other", ECHO));
+            let p = dropin(&d, "c.yaml", &entry_doc("sentinel-674-loose", ECHO));
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let c = load(&d).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(c.entry("sentinel-674-other").is_some());
+            assert!(c.entry("sentinel-674-loose").is_none());
+            assert!(reason(&c, "tools.d/a.yaml").contains("UTF-8"));
+            assert!(!reason(&c, "tools.d/c.yaml").is_empty());
+        }
+
+        #[test]
+        fn symlinked_dropin_is_skipped_with_warning() {
+            let d = dir("dropin_link");
+            let target = dropin(&d, "real.yaml", &entry_doc("sentinel-674-real", ECHO));
+            let dropins = d.join(TOOLS_DROPIN_DIR);
+            std::os::unix::fs::symlink(&target, dropins.join("link.yaml")).unwrap();
+            std::fs::create_dir(dropins.join("sub.yaml")).unwrap();
+            let c = load(&d).unwrap();
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(c.entry("sentinel-674-real").is_some());
+            assert_eq!(c.disabled().len(), 2, "{:?}", c.disabled());
+            assert!(reason(&c, "tools.d/link.yaml").contains("a symlink"));
+            assert!(reason(&c, "tools.d/sub.yaml").contains("a directory"));
+            assert!(!c.canonical().contains("link.yaml"));
+        }
+
+        #[test]
+        fn an_insecure_dropin_directory_fails_the_load() {
+            let d = dir("dropin_wdir");
+            dropin(&d, "a.yaml", &entry_doc("sentinel-674-a", ECHO));
+            std::fs::set_permissions(
+                d.join(TOOLS_DROPIN_DIR),
+                std::fs::Permissions::from_mode(0o770),
+            )
+            .unwrap();
+            let got = load(&d);
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(
+                matches!(&got, Err(ToolsError::Config(ConfigError::Io(m))) if m.contains("drop-in directory")),
+                "{got:?}"
+            );
+        }
+
+        #[test]
+        fn canonical_covers_every_dropin_in_name_order() {
+            let main = entry_doc("sentinel-674-main", ECHO);
+            let base = loaded("canon_base", Some(&main), &[]);
+            assert_eq!(
+                base.canonical(),
+                ToolsCatalog::parse(&main).unwrap().canonical()
+            );
+            let one = loaded(
+                "canon_one",
+                Some(&main),
+                &[("b.yaml", &entry_doc("sentinel-674-b", ECHO))],
+            );
+            assert_ne!(one.canonical(), base.canonical());
+            assert!(one.canonical().contains("\"tools.d\":{\"tools.d/b.yaml\":"));
+            let two = loaded(
+                "canon_two",
+                Some(&main),
+                &[
+                    ("b.yaml", &entry_doc("sentinel-674-b", ECHO)),
+                    ("a.yaml", "schema_version: 1\n"),
+                ],
+            );
+            let canonical = two.canonical();
+            let a = canonical.find("tools.d/a.yaml").unwrap();
+            let b = canonical.find("tools.d/b.yaml").unwrap();
+            assert!(a < b, "{canonical}");
+            let bad = loaded(
+                "canon_bad",
+                Some(&main),
+                &[("a.yaml", "schema_version: 1\ntools: [\n")],
+            );
+            assert!(bad.canonical().contains("tools: ["), "{}", bad.canonical());
+        }
+
+        #[test]
+        fn a_missing_config_dir_is_refused() {
+            let d = dir("missing_parent");
+            let got = load(&d.join("sentinel-674-absent"));
+            let _ = std::fs::remove_dir_all(&d);
+            assert!(matches!(got, Err(ToolsError::Config(_))), "{got:?}");
+        }
+
         #[test]
         fn absent_file_is_empty_catalog() {
             let d = dir("absent");
-            let got = load_tools_with_requirement(&d, own());
+            let got = ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty());
             let _ = std::fs::remove_dir_all(&d);
             assert_eq!(got, Ok(ToolsCatalog::empty()));
         }
@@ -1927,7 +2815,7 @@ mod tests {
         fn a_sound_file_loads() {
             let d = dir("ok");
             write(&d, HOMELAB.as_bytes(), 0o640);
-            let got = load_tools_with_requirement(&d, own());
+            let got = ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty());
             let _ = std::fs::remove_dir_all(&d);
             assert_eq!(got, ToolsCatalog::parse(HOMELAB));
             assert!(got.unwrap().entry("rust-build").is_some());
@@ -1938,16 +2826,16 @@ mod tests {
             let d = dir("bad");
             write(&d, b"schema_version: 2\n", 0o640);
             assert!(matches!(
-                load_tools_with_requirement(&d, own()),
+                ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty()),
                 Err(ToolsError::Invalid(_))
             ));
             write(&d, &[0xff, 0xfe], 0o640);
             assert!(matches!(
-                load_tools_with_requirement(&d, own()),
+                ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty()),
                 Err(ToolsError::Config(ConfigError::Io(ref m))) if m.contains("UTF-8")
             ));
             write(&d, HOMELAB.as_bytes(), 0o644);
-            let got = load_tools_with_requirement(&d, own());
+            let got = ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty());
             let _ = std::fs::remove_dir_all(&d);
             assert!(matches!(
                 got,
@@ -1960,7 +2848,7 @@ mod tests {
             let d = dir("wdir");
             write(&d, HOMELAB.as_bytes(), 0o640);
             std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o770)).unwrap();
-            let got = load_tools_with_requirement(&d, own());
+            let got = ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty());
             let _ = std::fs::remove_dir_all(&d);
             assert!(
                 matches!(&got, Err(ToolsError::Config(ConfigError::Io(m))) if m.contains("must be owned by root") && m.contains(TOOLS_FILE)),

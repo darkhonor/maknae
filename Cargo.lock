@@ -1167,6 +1167,7 @@ version = "0.0.0"
 dependencies = [
  "icu_casemap",
  "icu_normalizer",
+ "maknae-crypto",
  "maknae-io",
  "maknae-proto",
  "maknae-security",

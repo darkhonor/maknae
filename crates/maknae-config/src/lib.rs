@@ -173,14 +173,12 @@ pub use sensitive::{
     SENSITIVE_FILE,
 };
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
-#[cfg(all(unix, feature = "hermetic-test-seam"))]
-pub use tools::load_tools_with_requirement;
 pub use tools::{
-    load_host_tools, ClassLifetime, CredentialClass, CredentialKind, CredentialMinting,
+    ClassLifetime, CommandForm, CredentialClass, CredentialKind, CredentialMinting,
     CredentialNarrowing, CredentialRevokeOn, CredentialSource, Disabled, OutputToModel,
     ToolCommand, ToolEntry, ToolImage, ToolIsolation, ToolNetwork, ToolResources, ToolVerify,
     ToolVolume, ToolVolumeAccess, ToolVolumeScope, ToolWorkspaceAccess, ToolsCatalog, ToolsError,
-    TOOLS_FILE,
+    TOOLS_DROPIN_DIR, TOOLS_FILE,
 };
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,

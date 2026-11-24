@@ -1615,11 +1615,15 @@ fn tool_ceiling(
     let Some(command) = entry.commands.get(program) else {
         return deny(&format!("tool: program not in entry {name}"));
     };
-    if !command
-        .subcommands
-        .iter()
-        .any(|p| p.matches_any(argv, &bound))
-    {
+    let positional = match &command.form {
+        maknae_config::CommandForm::Positional(patterns) => patterns,
+        maknae_config::CommandForm::Grammar { .. } | maknae_config::CommandForm::Open => {
+            return deny(&format!(
+                "tool: {name}/{program} is not a positional command"
+            ))
+        }
+    };
+    if !positional.iter().any(|p| p.matches_any(argv, &bound)) {
         return deny(&format!(
             "tool: arguments outside entry {name}'s subcommands"
         ));
@@ -6395,6 +6399,36 @@ mod tests {
                 tool_decided(&lp, &build(TOOL_USER, argv)).verdict,
                 deny("tool: arguments outside entry sentinel-674-build's subcommands"),
                 "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn grammar_and_open_commands_are_never_matched_positionally() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+        );
+        let tools = "schema_version: 1\ntools:\n  sentinel-674-open:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      sh: { open: true }\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n";
+        let mut lp = lp_tool(
+            "permissions:\n  allow: [\"Tool(sentinel-674-open sh -c *)\", \"Tool(sentinel-674-shape gh pr *)\"]\n",
+            &["user"],
+            &[],
+        );
+        lp.tools =
+            std::sync::Arc::new(maknae_config::ToolsCatalog::parse_with(tools, &grammars).unwrap());
+        assert!(lp.tools.disabled().is_empty(), "{:?}", lp.tools.disabled());
+        for (entry, program, argv) in [
+            ("sentinel-674-open", "sh", &["-c", "x"][..]),
+            ("sentinel-674-shape", "gh", &["pr", "view"]),
+        ] {
+            assert_eq!(
+                tool_decided(&lp, &tool_req(TOOL_USER, entry, program, argv)).verdict,
+                deny(&format!(
+                    "tool: {entry}/{program} is not a positional command"
+                )),
+                "{entry}"
             );
         }
     }

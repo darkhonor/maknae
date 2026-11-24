@@ -458,10 +458,19 @@ pub struct DisabledGrammar {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrammarSet {
     pub grammars: BTreeMap<String, Grammar>,
     pub disabled: Vec<DisabledGrammar>,
+}
+
+impl GrammarSet {
+    pub fn empty() -> Self {
+        Self {
+            grammars: BTreeMap::new(),
+            disabled: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -555,7 +564,7 @@ fn load_required(
         Err(IoError::Io {
             kind: IoKind::NotFound,
             path,
-        }) if path == dir => return Ok(GrammarSet::default()),
+        }) if path == dir => return Ok(GrammarSet::empty()),
         Err(IoError::InsecurePermissions { .. } | IoError::NotOwned { .. }) => {
             return Err(GrammarLoadError::Directory(dir))
         }
@@ -569,7 +578,7 @@ fn load_required(
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let vendor =
         maknae_io::open_anchor_resolved(&vendor_path, req.vendor.clone(), StrategyPref::Auto);
-    let mut set = GrammarSet::default();
+    let mut set = GrammarSet::empty();
     for entry in entries {
         let file = entry.name.to_string_lossy().into_owned();
         let Some(stem) = entry
@@ -1322,7 +1331,7 @@ mod load_tests {
     #[test]
     fn absent_grammar_dir_is_empty() {
         let f = Fixture::new("absent");
-        assert_eq!(f.load(), Ok(GrammarSet::default()));
+        assert_eq!(f.load(), Ok(GrammarSet::empty()));
     }
 
     #[test]
@@ -1357,7 +1366,7 @@ mod load_tests {
         f.local("gh.yaml.bak", "not: [a grammar");
         f.local("README", "x");
         f.local("gh.yml", "x");
-        assert_eq!(f.load(), Ok(GrammarSet::default()));
+        assert_eq!(f.load(), Ok(GrammarSet::empty()));
     }
 
     #[test]

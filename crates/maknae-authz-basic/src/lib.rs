@@ -538,6 +538,7 @@ struct Parts {
     bindings: maknae_config::Bindings,
     sensitive: Arc<maknae_config::SensitiveList>,
     tools: Arc<maknae_config::ToolsCatalog>,
+    grammars: Arc<maknae_config::GrammarSet>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -559,6 +560,7 @@ pub struct PolicySource {
     bindings: maknae_config::Bindings,
     sensitive: Arc<maknae_config::SensitiveList>,
     tools: Arc<maknae_config::ToolsCatalog>,
+    grammars: Arc<maknae_config::GrammarSet>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -591,12 +593,16 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let sensitive = maknae_config::load_host_sensitive(&paths.sensitive)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let tools = maknae_config::load_host_tools(&paths.config_dir).map_err(tools_load_error)?;
+        let grammars = maknae_config::load_grammars(&paths.config_dir, &paths.grammar_vendor)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let tools = maknae_config::ToolsCatalog::load(&paths.config_dir, &grammars)
+            .map_err(tools_load_error)?;
         Self::resolved_from(
             policy,
             bindings,
             sensitive,
             tools,
+            grammars,
             agents,
             lookup_uid,
             HostLookups::HOST,
@@ -635,10 +641,18 @@ impl PolicySource {
         let sensitive =
             maknae_config::load_host_sensitive_with_requirement(&paths.sensitive, req.clone())
                 .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let tools = maknae_config::load_tools_with_requirement(&paths.config_dir, req)
-            .map_err(tools_load_error)?;
+        let grammars = maknae_config::load_grammars_with_requirement(
+            &paths.config_dir,
+            &paths.grammar_vendor,
+            maknae_config::GrammarRequirement::from_member(req.clone()),
+        )
+        .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let tools =
+            maknae_config::ToolsCatalog::load_with_requirement(&paths.config_dir, req, &grammars)
+                .map_err(tools_load_error)?;
         Self::resolved_from(
-            policy, bindings, sensitive, tools, agents, lookup_uid, hosts, principal, paths,
+            policy, bindings, sensitive, tools, grammars, agents, lookup_uid, hosts, principal,
+            paths,
         )
     }
 
@@ -648,6 +662,7 @@ impl PolicySource {
         bindings: maknae_config::Bindings,
         sensitive: maknae_config::SensitiveList,
         tools: maknae_config::ToolsCatalog,
+        grammars: maknae_config::GrammarSet,
         agents: maknae_config::AgentsLoad,
         lookup: NssLookup,
         hosts: HostLookups,
@@ -661,6 +676,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::new(sensitive),
             tools: Arc::new(tools),
+            grammars: Arc::new(grammars),
             lookups,
             lookup,
             hosts,
@@ -720,6 +736,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::new(maknae_config::SensitiveList::empty()),
             tools: Arc::new(maknae_config::ToolsCatalog::empty()),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             lookups,
             lookup: lookup_uid,
             hosts,
@@ -749,7 +766,12 @@ impl PolicySource {
             .iter()
             .chain(&self.agents.problems)
             .cloned()
-            .chain(tool_problems(&self.policy, &self.agents, &self.tools))
+            .chain(tool_problems(
+                &self.policy,
+                &self.agents,
+                &self.tools,
+                &self.grammars,
+            ))
             .collect()
     }
 
@@ -759,6 +781,7 @@ impl PolicySource {
             bindings,
             sensitive,
             tools,
+            grammars,
             lookups,
             lookup,
             hosts,
@@ -788,13 +811,14 @@ impl PolicySource {
             .iter()
             .chain(&agents.problems)
             .cloned()
-            .chain(tool_problems(&policy, &agents, &tools))
+            .chain(tool_problems(&policy, &agents, &tools, &grammars))
             .collect();
         Ok(Self {
             policy,
             bindings,
             sensitive,
             tools,
+            grammars,
             lookups,
             lookup,
             hosts,
@@ -825,6 +849,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::clone(&self.sensitive),
             tools: Arc::clone(&self.tools),
+            grammars: Arc::clone(&self.grammars),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -866,6 +891,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::clone(&self.sensitive),
             tools: Arc::clone(&self.tools),
+            grammars: Arc::clone(&self.grammars),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -905,6 +931,10 @@ impl PolicySource {
 
     pub fn tools(&self) -> &Arc<maknae_config::ToolsCatalog> {
         &self.tools
+    }
+
+    pub fn grammars(&self) -> &maknae_config::GrammarSet {
+        &self.grammars
     }
 
     pub fn principal(&self) -> &maknae_config::Principal {
@@ -1034,8 +1064,9 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml` (its
-    /// authored document, disabled entries included), `"agents.<id>"` for each enrolled
+    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml`, its `tools.d/`
+    /// drop-ins and the grammars its enabled entries name (authored documents, disabled
+    /// entries included), `"agents.<id>"` for each enrolled
     /// agent's `policy.yaml` and `"agents.<id>#tasks-right"` for every enrolled agent,
     /// each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
@@ -1074,14 +1105,34 @@ fn tool_problems(
     policy: &maknae_config::AuthzPolicy,
     agents: &AgentOutcome,
     tools: &maknae_config::ToolsCatalog,
+    grammars: &maknae_config::GrammarSet,
 ) -> Vec<IdentityProblem> {
-    let disabled = tools
-        .disabled()
+    let grammar_files = grammars
+        .disabled
         .iter()
         .map(|d| IdentityProblem::ToolEntryDisabled {
-            entry: d.entry.clone(),
+            entry: format!("{}/{}", maknae_config::GRAMMARS_DIR, d.file),
             reason: d.reason.clone(),
         });
+    let grammar_shapes = grammars.grammars.iter().flat_map(|(program, g)| {
+        g.disabled
+            .iter()
+            .map(move |(shape, reason)| IdentityProblem::ToolEntryDisabled {
+                entry: format!("{}/{program}.yaml#{shape}", maknae_config::GRAMMARS_DIR),
+                reason: reason.clone(),
+            })
+    });
+    let disabled = grammar_files
+        .chain(grammar_shapes)
+        .chain(
+            tools
+                .disabled()
+                .iter()
+                .map(|d| IdentityProblem::ToolEntryDisabled {
+                    entry: d.entry.clone(),
+                    reason: d.reason.clone(),
+                }),
+        );
     let subjects = policy.subjects.iter().filter_map(|(name, s)| {
         Some((
             format!("subjects.{name}.permissions"),
@@ -2729,6 +2780,7 @@ mod tests {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
             tools: Default::default(),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             policy,
             bindings,
             lookups,
@@ -2844,6 +2896,7 @@ mod tests {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
             tools: Default::default(),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             policy: parse(EMPTY),
             bindings: bound(
                 "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
@@ -4929,6 +4982,7 @@ mod tests {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
             tools: Default::default(),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             policy,
             bindings,
             lookups,
@@ -6149,7 +6203,7 @@ mod tests {
             }
 
             fn paths(&self) -> PolicyPaths {
-                PolicyPaths::in_dir(&self.0)
+                PolicyPaths::in_dir(&self.0).with_grammar_vendor(self.0.join("vendor"))
             }
 
             fn bind(&self, role: &str) {
@@ -6179,6 +6233,158 @@ mod tests {
 
         fn write_tools(fx: &Fixture, body: &str) {
             write(&fx.0.join(maknae_config::TOOLS_FILE), body);
+        }
+
+        const GH_GRAMMAR: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2.105.0\", date: 2026-11-24 }\nshapes:\n  pr.view:\n    description: View a pull request.\n    class: read\n    argv: [pr, view]\n";
+        const GH_ENTRY: &str = "schema_version: 1\ntools:\n  sentinel-674-gh:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n";
+
+        fn write_grammar(fx: &Fixture, name: &str, body: &str) {
+            let dir = fx.0.join(maknae_config::GRAMMARS_DIR);
+            if !dir.exists() {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
+            write(&dir.join(name), body);
+        }
+
+        fn write_dropin(fx: &Fixture, name: &str, body: &str) {
+            let dir = fx.0.join(maknae_config::TOOLS_DROPIN_DIR);
+            if !dir.exists() {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
+            write(&dir.join(name), body);
+        }
+
+        fn loaded(fx: &Fixture) -> PolicySource {
+            PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req()).unwrap()
+        }
+
+        fn tools_digest(fx: &Fixture) -> [u8; 32] {
+            loaded(fx).section_digests(super::stand_in_digest)["tools"]
+        }
+
+        fn policy_fixture(tag: &str) -> Fixture {
+            let fx = Fixture::new(tag);
+            write(&fx.policy(), EMPTY);
+            fx.bind("admin");
+            fx
+        }
+
+        #[test]
+        fn tools_digest_changes_with_a_dropin() {
+            let fx = policy_fixture("digest_dropin");
+            write_tools(&fx, TOOLS_ONE);
+            let alone = tools_digest(&fx);
+            write_dropin(&fx, "a.yaml", "schema_version: 1\n");
+            let empty_dropin = tools_digest(&fx);
+            assert_ne!(alone, empty_dropin);
+            write_dropin(&fx, "a.yaml", "schema_version:    1\n\n");
+            assert_eq!(tools_digest(&fx), empty_dropin);
+            write_dropin(
+                &fx,
+                "a.yaml",
+                &TOOLS_ONE.replace("sentinel-674-one", "sentinel-674-two"),
+            );
+            let with_entry = tools_digest(&fx);
+            assert_ne!(with_entry, empty_dropin);
+            let src = loaded(&fx);
+            assert!(src.tools().entry("sentinel-674-two").is_some());
+            assert!(src.tools().entry("sentinel-674-one").is_some());
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert!(auth.snapshot().tools().entry("sentinel-674-two").is_some());
+        }
+
+        #[test]
+        fn tools_digest_changes_with_an_enabled_grammar() {
+            let fx = policy_fixture("digest_grammar");
+            write_tools(&fx, GH_ENTRY);
+            let without = loaded(&fx);
+            assert!(without.tools().entry("sentinel-674-gh").is_none());
+            write_grammar(&fx, "gh.yaml", GH_GRAMMAR);
+            let src = loaded(&fx);
+            assert!(src.grammars().grammars.contains_key("gh"));
+            assert!(src.tools().entry("sentinel-674-gh").is_some());
+            let first = tools_digest(&fx);
+            assert_ne!(
+                first,
+                without.section_digests(super::stand_in_digest)["tools"]
+            );
+            write_grammar(
+                &fx,
+                "gh.yaml",
+                &GH_GRAMMAR.replace("View a pull request.", "Show a pull request."),
+            );
+            assert_ne!(tools_digest(&fx), first);
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert!(auth.snapshot().tools().entry("sentinel-674-gh").is_some());
+        }
+
+        #[test]
+        fn tools_digest_ignores_a_grammar_no_entry_names() {
+            let fx = policy_fixture("digest_unnamed");
+            write_tools(&fx, TOOLS_ONE);
+            let before = tools_digest(&fx);
+            write_grammar(&fx, "gh.yaml", GH_GRAMMAR);
+            assert!(loaded(&fx).grammars().grammars.contains_key("gh"));
+            assert_eq!(tools_digest(&fx), before);
+            let off = GH_ENTRY.replace(
+                "  sentinel-674-gh:\n",
+                "  sentinel-674-gh:\n    enabled: false\n",
+            );
+            write_tools(&fx, &off);
+            let off_digest = tools_digest(&fx);
+            write_grammar(
+                &fx,
+                "gh.yaml",
+                &GH_GRAMMAR.replace("View a pull request.", "Show a pull request."),
+            );
+            assert_eq!(tools_digest(&fx), off_digest);
+        }
+
+        #[test]
+        fn disabled_grammars_and_shapes_are_identity_problems() {
+            let fx = policy_fixture("grammar_problems");
+            write_grammar(
+                &fx,
+                "gh.yaml",
+                "schema_version: 1\nprogram: sentinel-674-other\n",
+            );
+            write_grammar(
+                &fx,
+                "git.yaml",
+                "schema_version: 1\nprogram: git\ntested: { version: \"1\", date: d }\nshapes:\n  st:\n    description: Status.\n    class: read\n    argv: [status]\n  sentinel-674-bad:\n    description: Bad.\n    class: sentinel-674-nope\n    argv: [x]\n",
+            );
+            write_tools(&fx, GH_ENTRY);
+            let src = loaded(&fx);
+            let problems: Vec<(String, String)> = src
+                .identity_problems()
+                .iter()
+                .map(|p| match p {
+                    IdentityProblem::ToolEntryDisabled { entry, reason } => {
+                        (entry.clone(), reason.clone())
+                    }
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(problems.len(), 3, "{problems:?}");
+            assert_eq!(problems[0].0, "grammars/gh.yaml");
+            assert!(problems[0].1.contains("sentinel-674-other"), "{problems:?}");
+            assert_eq!(problems[1].0, "grammars/git.yaml#sentinel-674-bad");
+            assert!(problems[1].1.contains("sentinel-674-nope"), "{problems:?}");
+            assert_eq!(problems[2].0, "sentinel-674-gh");
+            assert!(
+                problems[2].1.contains("grammar `gh` is disabled"),
+                "{problems:?}"
+            );
+            assert_eq!(
+                src.grammars().disabled[0].file,
+                "gh.yaml",
+                "{:?}",
+                src.grammars()
+            );
         }
 
         #[test]
