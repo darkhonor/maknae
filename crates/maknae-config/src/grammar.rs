@@ -572,7 +572,22 @@ fn load_required(
     let mut set = GrammarSet::default();
     for entry in entries {
         let file = entry.name.to_string_lossy().into_owned();
-        let stem = file.trim_end_matches(GRAMMAR_SUFFIX);
+        let Some(stem) = entry
+            .name
+            .to_str()
+            .and_then(|name| name.strip_suffix(GRAMMAR_SUFFIX))
+        else {
+            set.disabled.push(DisabledGrammar {
+                file,
+                reason: "the file name is not valid UTF-8".to_string(),
+            });
+            continue;
+        };
+        if !crate::tools::tool_program_name_ok(stem) || stem.ends_with(GRAMMAR_SUFFIX) {
+            let reason = format!("`{stem}` is not a program name");
+            set.disabled.push(DisabledGrammar { file, reason });
+            continue;
+        }
         let read = match &vendor {
             Ok(vendor) => anchor
                 .read_enabled_member(&file, vendor, &vendor_path, req.member.clone())
@@ -1343,6 +1358,60 @@ mod load_tests {
         f.local("README", "x");
         f.local("gh.yml", "x");
         assert_eq!(f.load(), Ok(GrammarSet::default()));
+    }
+
+    #[test]
+    fn doubled_suffix_member_cannot_shadow_a_grammar() {
+        let f = Fixture::new("doubled");
+        f.local("gh.yaml", GH);
+        f.local("gh.yaml.yaml", GH);
+        let set = f.load().unwrap();
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["gh"]);
+        assert_eq!(
+            set.grammars["gh"].shapes["issue.list"].description,
+            "List issues."
+        );
+        let d = only_disabled(&set);
+        assert_eq!(d.file, "gh.yaml.yaml");
+        assert!(d.reason.contains("not a program name"), "{}", d.reason);
+    }
+
+    #[test]
+    fn doubled_suffix_member_alone_loads_nothing() {
+        let f = Fixture::new("doubled_alone");
+        f.local("gh.yaml.yaml", GH);
+        let set = f.load().unwrap();
+        assert!(set.grammars.is_empty());
+        assert_eq!(only_disabled(&set).file, "gh.yaml.yaml");
+    }
+
+    #[test]
+    fn bare_suffix_member_is_disabled() {
+        let f = Fixture::new("bare");
+        f.local(".yaml", GH);
+        let set = f.load().unwrap();
+        assert!(set.grammars.is_empty());
+        let d = only_disabled(&set);
+        assert_eq!(d.file, ".yaml");
+        assert!(d.reason.contains("not a program name"), "{}", d.reason);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_member_name_is_disabled_with_its_own_reason() {
+        use std::os::unix::ffi::OsStrExt;
+        let f = Fixture::new("badname");
+        let p = f
+            .grammars()
+            .join(std::ffi::OsStr::from_bytes(b"g\xffh.yaml"));
+        std::fs::write(&p, GH).unwrap();
+        set_mode(&p, 0o640);
+        let set = f.load().unwrap();
+        assert!(set.grammars.is_empty());
+        assert_eq!(
+            only_disabled(&set).reason,
+            "the file name is not valid UTF-8"
+        );
     }
 
     #[test]
