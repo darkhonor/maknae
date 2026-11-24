@@ -2643,6 +2643,10 @@ mod tests {
         fn unresolved(&self, _: u32) -> bool {
             false
         }
+
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
     }
 
     /// Answers each `contained` call from the next snapshot in turn, as if one were installed
@@ -2682,6 +2686,10 @@ mod tests {
         }
 
         fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+
+        fn board(&self, _: &AgentId) -> bool {
             false
         }
     }
@@ -3449,6 +3457,9 @@ mod tests {
             self.0.swap(true, std::sync::atomic::Ordering::SeqCst)
         }
         fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+        fn board(&self, _: &AgentId) -> bool {
             false
         }
     }

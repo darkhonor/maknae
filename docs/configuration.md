@@ -501,7 +501,7 @@ The kernel keeps one message board for each person who gives an agent a task, in
 
 **At start.** A record that does not decode, is larger than 40 KiB or is misnamed is recorded in the trail, then renamed `<name>.board.quarantine`, never over an earlier one, and is never read again. A board record that is missing, or behind a stored post's or cursor's sequence, refuses the start.
 
-**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. The site switch is `board: { enabled: <bool> }` in `maknae.yaml` (§6.7); it is off when the section is absent. The agent and person switches cannot be set yet, so no `board.post` or `board.read` from an agent working a task a person gave is served, and nothing is stored. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
+**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. The site switch is `board: { enabled: <bool> }` in `maknae.yaml` (§6.7); it is off when the section is absent. The agent's switch is `board: <bool>` in its `policy.yaml` (§6.4), off when absent; the person switch cannot be set yet, so no `board.post` or `board.read` from an agent working a task a person gave is served, and nothing is stored. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
 
 **Actions and grants.** The actions are `board.post` and `board.read`. The shipped `authz.yaml` grants both to `admin` and `user`; `guest` holds neither. An enrolled agent holds both in its built-in tasks right (§6.4), so its `policy.yaml` cannot deny them, and its role still decides them: a site `authz.yaml` that withholds either from `user` refuses agents too. An agent never reads or posts to a board other than its cited task's.
 
@@ -1201,7 +1201,7 @@ When an entry cannot be written or does not read back, the agent is enrolled but
 
 Each agent accepted is recorded as `agent '<id>' (uid <n>) is enrolled`, and one that is gone as `agent '<id>' (uid <n>) is no longer enrolled` (both `graph.identity`, `graph.anchor:"enrolling"`). A directory with no `enrollment.yaml`, a name that is not an agent id, or an entry that is not a directory is skipped and recorded as `agents/<entry> is skipped: <why>`. An `enrollment.yaml` or `policy.yaml` that does not parse, or an `enrollment.yaml` whose `agent_id` is not its directory's name, refuses the reload. A `policy.yaml` without an `enrollment.yaml` beside it is not read. `maknae status` counts these problems, and `maknae subject-list` lists each enrolled agent with its id; when `bindings.yaml` has no `bindings:` key it also lists the principal as `admin`, marked as the principal.
 
-**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is a commented starter that enroll writes when the file is absent, and root edits it from there. It holds this agent's grants and limits beyond its built-in tasks right (below); they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) and `taskers`:
+**The agent's policy (`policy.yaml`).** `/etc/maknae/agents/<id>/policy.yaml` is a commented starter that enroll writes when the file is absent, and root edits it from there. It holds this agent's grants and limits beyond its built-in tasks right (below); they never live in `authz.yaml`, and an `authz.yaml` `subjects:` entry that names an enrolled agent's account refuses the reload. Its keys are `schema_version: 1` and, each optional, the three keys of an `authz.yaml` `subjects:` entry (`permissions`, `actions` and `models`, with the grammar and rules of the runbook's Chapter 3 §7 and ADR-0032: the site `deny` is a floor, deny beats allow, and a limit never grants) `taskers` and `board`:
 
 ```yaml
 schema_version: 1
@@ -1221,6 +1221,7 @@ taskers:
   - "alice"
   - "uid:1001"
   - "agent:hobi"
+board: true
 ```
 
 - Every agent holds a built-in tasks right whatever its `policy.yaml` says or whether it has one. Files: `Read(~/tasks/**)`, `Write(~/tasks)` and `Write(~/tasks/**)`, decided after the site `deny` and before the agent's own `permissions`, cited `rule:agents.<id>.tasks-right:allow:<i>` in the section `agents.<id>.tasks-right`. Actions: `session.new`, `session.prompt`, `session.close`, `tool.catalog`, `board.post` and `board.read`, added to an `actions.allow` the agent writes. The agent's `actions:` limit never refuses a file request the right decides; the role decides these actions, and the packaged `user` role holds all six.
@@ -1229,6 +1230,7 @@ taskers:
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
+- `board` is the agent's own switch for the message board (§2.9). It is off when the key is absent or `false`; only the YAML booleans `true` and `false` are accepted, and any other value (`yes`, `"true"`, `1`, `{}`, an empty `board:`) refuses the reload. Changing it changes the agent's `agents.<id>` section digest.
 - Unknown keys, and any `schema_version` other than `1`, refuse the reload.
 
 **De-enrolling.**

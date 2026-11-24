@@ -102,6 +102,8 @@ schema_version: 1
 #   allow: [\"anthropic/claude-sonnet\"]
 
 # taskers: [\"alice\", \"agent:jin\"]
+
+# board: true
 ";
 
 fn tasks_right_value() -> Value {
@@ -170,6 +172,7 @@ pub struct AgentPolicy {
     pub entry: SubjectPolicy,
     pub canonical: String,
     pub taskers: Option<Vec<TaskerRef>>,
+    pub board: bool,
 }
 
 fn field<'a>(map: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
@@ -289,6 +292,7 @@ pub fn parse_agent_policy(id: &AgentId, text: &str) -> Result<AgentPolicy, Authz
             "actions",
             "models",
             "taskers",
+            "board",
         ],
     )
     .map_err(AuthzError::Config)?;
@@ -309,6 +313,15 @@ pub fn parse_agent_policy(id: &AgentId, text: &str) -> Result<AgentPolicy, Authz
         entry,
         canonical: crate::value::canonical_json(&root),
         taskers: field(map, "taskers").map(taskers).transpose()?,
+        board: match field(map, "board") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => {
+                return Err(AuthzError::Config(ConfigError::InvalidBoard(
+                    "board: not a boolean".into(),
+                )))
+            }
+        },
     })
 }
 
@@ -1051,6 +1064,7 @@ mod tests {
         assert_eq!(policy.entry.actions, None);
         assert_eq!(policy.entry.models, None);
         assert_eq!(policy.taskers, None);
+        assert!(!policy.board);
         for held in TASKS_RIGHT_PATHS.iter().chain(TASKS_RIGHT_ACTIONS.iter()) {
             assert!(STARTER_POLICY.contains(held), "{held}");
         }
@@ -1058,7 +1072,7 @@ mod tests {
             STARTER_POLICY.contains("# permissions:")
                 && STARTER_POLICY.contains("Read(~/persona.md)")
         );
-        for section in ["permissions:", "actions:", "models:", "taskers:"] {
+        for section in ["permissions:", "actions:", "models:", "taskers:", "board:"] {
             assert!(
                 STARTER_POLICY.contains(&format!("# {section}")),
                 "{section}"
@@ -1080,6 +1094,7 @@ mod tests {
         assert!(policy.entry.actions.is_some(), "{uncommented}");
         assert!(policy.entry.models.is_some(), "{uncommented}");
         assert_eq!(policy.taskers.map(|t| t.len()), Some(2), "{uncommented}");
+        assert!(policy.board, "{uncommented}");
     }
 
     #[test]
@@ -1874,6 +1889,37 @@ mod tests {
             assert!(parse_agent_policy(&hobi(), &text).is_err(), "{bad}");
         }
         assert!(parse_agent_policy(&hobi(), "schema_version: 1\ntaskers: ann\n").is_err());
+    }
+
+    fn board_of(text: &str) -> Result<bool, AuthzError> {
+        parse_agent_policy(&hobi(), &format!("schema_version: 1\n{text}")).map(|p| p.board)
+    }
+
+    #[test]
+    fn the_board_switch_is_carried_and_defaults_off() {
+        assert_eq!(board_of("board: true\n"), Ok(true));
+        assert_eq!(board_of("board: false\n"), Ok(false));
+        assert_eq!(board_of(""), Ok(false));
+    }
+
+    #[test]
+    fn a_board_value_that_is_not_a_boolean_refuses_the_load() {
+        for bad in ["yes", "\"true\"", "1", "{}", "~", "", "[true]", "on"] {
+            let err = board_of(&format!("board: {bad}\n")).unwrap_err();
+            assert_eq!(
+                err,
+                AuthzError::Config(ConfigError::InvalidBoard("board: not a boolean".into())),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_board_key_moves_the_canonical_text() {
+        let on = parse_agent_policy(&hobi(), "schema_version: 1\nboard: true\n").unwrap();
+        let off = parse_agent_policy(&hobi(), "schema_version: 1\nboard: false\n").unwrap();
+        assert_ne!(on.canonical, off.canonical);
+        assert!(on.canonical.contains("\"board\":true"), "{}", on.canonical);
     }
 
     fn bindings(body: &str) -> Bindings {

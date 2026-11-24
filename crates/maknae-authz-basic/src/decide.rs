@@ -45,6 +45,7 @@ pub(crate) struct LoadedPolicy {
     pub(crate) subjects: SubjectGrants,
     pub(crate) agents: AgentUids,
     pub(crate) taskers: AgentTaskers,
+    pub(crate) boards: AgentBoards,
     pub(crate) sensitive: std::sync::Arc<maknae_config::SensitiveList>,
     pub(crate) tools: std::sync::Arc<maknae_config::ToolsCatalog>,
     pub(crate) fold: maknae_config::Fold,
@@ -64,6 +65,10 @@ impl AgentUids {
 pub(crate) struct AgentTaskers(
     pub(crate) std::collections::BTreeMap<String, Option<std::collections::BTreeSet<u32>>>,
 );
+
+/// The enrolled agents whose `board:` switch is on.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) struct AgentBoards(pub(crate) std::collections::BTreeSet<String>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SubjectOrigin {
@@ -1718,6 +1723,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
             fold: maknae_config::Fold::None,
@@ -3155,6 +3161,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -3940,6 +3947,7 @@ mod tests {
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -4493,6 +4501,7 @@ mod tests {
             subjects: SubjectGrants::default(),
             agents: AgentUids::default(),
             taskers: AgentTaskers::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -5034,6 +5043,7 @@ mod tests {
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
             agents: AgentUids::default(),
             taskers: AgentTaskers::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -5093,6 +5103,7 @@ mod tests {
                 .into(),
                 problems: Vec::new(),
                 taskers: Default::default(),
+                boards: Default::default(),
             };
             crate::agent_subjects(&outcome, &mut subjects).unwrap();
             agents.0.insert(HOBI_UID, "hobi".into());
@@ -5104,6 +5115,7 @@ mod tests {
             subjects,
             agents,
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -5587,6 +5599,7 @@ mod tests {
                 .collect(),
             problems: Vec::new(),
             taskers: Default::default(),
+            boards: Default::default(),
         };
         crate::agent_subjects(&outcome, &mut subjects).unwrap();
         let mut agents = AgentUids::default();
@@ -5606,6 +5619,7 @@ mod tests {
             subjects,
             agents,
             taskers,
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),
@@ -6183,6 +6197,7 @@ mod tests {
             subjects: crate::validate_subjects(&policy, &lookups).unwrap(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap()),

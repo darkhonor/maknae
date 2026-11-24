@@ -4621,6 +4621,9 @@ impl maknae_kernel::EnrollmentView for LoadChangesAfter {
     fn unresolved(&self, uid: u32) -> bool {
         self.inner.unresolved(uid)
     }
+    fn board(&self, agent: &maknae_config::AgentId) -> bool {
+        self.inner.board(agent)
+    }
     fn load(&self) -> maknae_kernel::Load {
         let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n < self.stable {
@@ -6433,6 +6436,9 @@ mod board {
         }
         fn unresolved(&self, uid: u32) -> bool {
             self.inner.unresolved(uid)
+        }
+        fn board(&self, agent: &maknae_config::AgentId) -> bool {
+            self.inner.board(agent)
         }
         fn load(&self) -> maknae_kernel::Load {
             self.inner.load()

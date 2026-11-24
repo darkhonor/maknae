@@ -29846,6 +29846,9 @@ mod task_sweep_tests {
         fn unresolved(&self, _uid: u32) -> bool {
             self.unresolves && self.swapped()
         }
+        fn board(&self, agent: &maknae_config::AgentId) -> bool {
+            self.view.board(agent)
+        }
         fn load(&self) -> crate::enrollment::Load {
             crate::enrollment::Load::installed(self.loads[usize::from(self.swapped())].clone())
         }

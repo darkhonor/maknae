@@ -25,6 +25,8 @@ pub trait EnrollmentView: Send + Sync {
     }
     /// Whether `uid`'s lack of a role may only be a name the load could not resolve.
     fn unresolved(&self, uid: u32) -> bool;
+    /// Whether the enrolled agent's own `board:` switch is on.
+    fn board(&self, agent: &AgentId) -> bool;
     /// The load these answers are read from.
     fn load(&self) -> Load {
         Load::fixed()
@@ -127,6 +129,10 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
             .unresolved(uid, baseline.principal().uid)
     }
 
+    fn board(&self, agent: &AgentId) -> bool {
+        self.0.baseline().snapshot().agent_board(agent.as_str())
+    }
+
     fn load(&self) -> Load {
         Load::installed(self.0.baseline().snapshot())
     }
@@ -157,6 +163,10 @@ impl EnrollmentView for FixedEnrollment {
     fn unresolved(&self, _uid: u32) -> bool {
         false
     }
+
+    fn board(&self, _agent: &AgentId) -> bool {
+        false
+    }
 }
 
 /// `view`, in which the uids named have no role only because a name did not resolve.
@@ -184,6 +194,10 @@ impl<V: EnrollmentView> EnrollmentView for Unresolving<V> {
     fn unresolved(&self, uid: u32) -> bool {
         self.1.contains(&uid)
     }
+
+    fn board(&self, agent: &AgentId) -> bool {
+        self.0.board(agent)
+    }
 }
 
 /// `view`, with `contained` contained.
@@ -210,6 +224,42 @@ impl<V: EnrollmentView> EnrollmentView for Containing<V> {
 
     fn unresolved(&self, uid: u32) -> bool {
         self.0.unresolved(uid)
+    }
+
+    fn board(&self, agent: &AgentId) -> bool {
+        self.0.board(agent)
+    }
+}
+
+/// `view`, in which the agents named have their `board:` switch on.
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+#[derive(Clone)]
+pub struct Boarding<V>(pub V, pub std::collections::BTreeSet<AgentId>);
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+impl<V: EnrollmentView> EnrollmentView for Boarding<V> {
+    fn agent_uid(&self, id: &AgentId) -> Option<u32> {
+        self.0.agent_uid(id)
+    }
+
+    fn agents(&self) -> Vec<(AgentId, u32)> {
+        self.0.agents()
+    }
+
+    fn is_enrolled(&self, uid: u32) -> bool {
+        self.0.is_enrolled(uid)
+    }
+
+    fn contained(&self, uid: u32) -> bool {
+        self.0.contained(uid)
+    }
+
+    fn unresolved(&self, uid: u32) -> bool {
+        self.0.unresolved(uid)
+    }
+
+    fn board(&self, agent: &AgentId) -> bool {
+        self.1.contains(agent)
     }
 }
 
@@ -312,5 +362,40 @@ mod tests {
         assert!(view.is_enrolled(2001));
         assert!(!view.is_enrolled(2002));
         assert_eq!(view.agents(), [(id("hobi"), 2001)]);
+    }
+
+    #[test]
+    fn the_snapshot_view_reads_an_agents_board_switch_and_a_reinstall_changes_it() {
+        let (g, basic) = crate::test_fixtures::fixture(
+            "enrollment-view-board",
+            crate::test_fixtures::READ_POLICY,
+            None,
+        );
+        basic.set_hosts(crate::test_fixtures::HOBI_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        crate::test_fixtures::write_agent_policy(&g.0, "hobi", "schema_version: 1\nboard: true\n");
+        basic.reload_from_file().unwrap();
+        let view = SnapshotEnrollment(Arc::new(Composition::new(
+            basic,
+            crate::CeilingAuthorizer::new(
+                maknae_config::Ceiling::baseline_for(&maknae_config::BasicPolicy),
+                &maknae_config::BasicPolicy,
+            ),
+        )));
+        assert!(view.board(&id("hobi")));
+        assert!(!view.board(&id("jin")), "an unknown agent is off");
+        crate::test_fixtures::write_agent_policy(&g.0, "hobi", "schema_version: 1\nboard: false\n");
+        view.0.baseline().reload_from_file().unwrap();
+        assert!(!view.board(&id("hobi")), "the reinstalled snapshot answers");
+    }
+
+    #[test]
+    fn a_view_with_no_policy_answers_off_and_a_wrapper_delegates() {
+        let fixed = FixedEnrollment([(id("hobi"), 2001)].into());
+        assert!(!fixed.board(&id("hobi")));
+        let on = Boarding(fixed, [id("hobi")].into());
+        assert!(on.board(&id("hobi")) && !on.board(&id("jin")));
+        assert!(Containing(on.clone(), [].into()).board(&id("hobi")));
+        assert!(Unresolving(on, [].into()).board(&id("hobi")));
     }
 }

@@ -89,7 +89,7 @@ pub use egress_socket::{
     ReachOutcome, SocketEgress, Unanswered,
 };
 #[cfg(any(test, feature = "hermetic-test-seam"))]
-pub use enrollment::{Containing, FixedEnrollment, Unresolving};
+pub use enrollment::{Boarding, Containing, FixedEnrollment, Unresolving};
 pub use enrollment::{EnrollmentView, Load, SnapshotEnrollment};
 pub use groupres::*;
 pub use handler::{

@@ -524,6 +524,7 @@ struct AgentOutcome {
         std::collections::BTreeMap<maknae_config::AgentId, (u32, String, maknae_config::AgentRole)>,
     problems: Vec<IdentityProblem>,
     taskers: decide::AgentTaskers,
+    boards: decide::AgentBoards,
 }
 
 struct Parts {
@@ -773,6 +774,7 @@ impl PolicySource {
         };
         let agents = AgentOutcome {
             taskers: resolve_taskers(&agents.load, &lookups, &agents.enrolled),
+            boards: resolve_boards(&agents.load, &agents.enrolled),
             ..agents
         };
         agent_subjects(&agents, &mut subjects)?;
@@ -936,6 +938,10 @@ impl PolicySource {
 
     pub(crate) fn agent_taskers(&self) -> &decide::AgentTaskers {
         &self.agents.taskers
+    }
+
+    pub(crate) fn agent_boards(&self) -> &decide::AgentBoards {
+        &self.agents.boards
     }
 
     pub(crate) fn agent_policies(
@@ -1345,6 +1351,22 @@ fn resolve_taskers(
                 });
                 (id.as_str().to_string(), listed)
             })
+            .collect(),
+    )
+}
+
+fn resolve_boards(
+    load: &maknae_config::AgentsLoad,
+    enrolled: &std::collections::BTreeMap<
+        maknae_config::AgentId,
+        (u32, String, maknae_config::AgentRole),
+    >,
+) -> decide::AgentBoards {
+    decide::AgentBoards(
+        load.policies
+            .iter()
+            .filter(|p| p.board && enrolled.contains_key(&p.id))
+            .map(|p| p.id.as_str().to_string())
             .collect(),
     )
 }
@@ -2445,6 +2467,7 @@ mod tests {
                 subjects: subjects(src).map_err(Refused::Other)?,
                 agents: src.agent_uids(),
                 taskers: src.agent_taskers().clone(),
+                boards: src.agent_boards().clone(),
                 sensitive: std::sync::Arc::clone(src.sensitive()),
                 tools: std::sync::Arc::clone(src.tools()),
                 fold: maknae_config::native_fold(),
@@ -3090,6 +3113,7 @@ mod tests {
             subjects: l.subjects.clone(),
             agents: l.agents.clone(),
             taskers: l.taskers.clone(),
+            boards: l.boards.clone(),
             sensitive: Arc::clone(&l.sensitive),
             tools: Arc::clone(&l.tools),
             fold: l.fold,
@@ -3147,6 +3171,7 @@ mod tests {
             subjects: decide::SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             sensitive: Default::default(),
             tools: Default::default(),
             fold: maknae_config::Fold::None,
@@ -9286,6 +9311,56 @@ mod tests {
             assert_eq!(snap.taskers("hobi"), Some(Some(&want)));
             assert_eq!(snap.taskers("suga"), Some(None));
             assert_eq!(snap.taskers("ghost"), None);
+        }
+
+        #[test]
+        fn an_enrolled_agents_board_switch_is_compiled_and_only_enrolled_agents_count() {
+            let suga = enrollment("suga", "suga-svc", SUGA, AgentRole::User);
+            let src = source(
+                None,
+                &[],
+                load(
+                    vec![hobi(), suga],
+                    &[
+                        ("hobi", "schema_version: 1\nboard: true\n"),
+                        ("suga", "schema_version: 1\nboard: false\n"),
+                        ("ghost", "schema_version: 1\nboard: true\n"),
+                    ],
+                ),
+            );
+            let snap = compiled(&src);
+            assert!(snap.agent_board("hobi"));
+            assert!(!snap.agent_board("suga"));
+            assert!(!snap.agent_board("ghost"), "not enrolled");
+            assert!(!snap.agent_board("nobody"));
+            let bare = source(None, &[], load(vec![hobi()], &[]));
+            assert!(
+                !compiled(&bare).agent_board("hobi"),
+                "no policy.yaml is off"
+            );
+        }
+
+        #[test]
+        fn flipping_an_agents_board_switch_moves_its_digest_and_the_policy_digest() {
+            let with = |board: &str| {
+                source(
+                    None,
+                    &[],
+                    load(
+                        vec![hobi()],
+                        &[("hobi", &format!("schema_version: 1\nboard: {board}\n"))],
+                    ),
+                )
+            };
+            let (on, off) = (with("true"), with("false"));
+            assert_ne!(
+                on.section_digests(test_digest)["agents.hobi"],
+                off.section_digests(test_digest)["agents.hobi"]
+            );
+            assert_ne!(
+                compiled(&on).policy_sha256(test_digest),
+                compiled(&off).policy_sha256(test_digest)
+            );
         }
 
         #[test]

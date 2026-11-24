@@ -159,6 +159,11 @@ impl Snapshot {
         self.loaded.taskers.0.get(agent).map(Option::as_ref)
     }
 
+    /// Whether an enrolled agent's `board:` switch is on; false for any other id.
+    pub fn agent_board(&self, agent: &str) -> bool {
+        self.loaded.boards.0.contains(agent)
+    }
+
     pub fn agents(&self) -> BTreeMap<u32, String> {
         self.loaded.agents.0.clone()
     }
@@ -652,6 +657,7 @@ pub fn compile(
         subjects: source.subject_grants().clone(),
         agents: source.agent_uids(),
         taskers: source.agent_taskers().clone(),
+        boards: source.agent_boards().clone(),
         sensitive: Arc::clone(source.sensitive()),
         tools: Arc::clone(source.tools()),
         fold: maknae_config::native_fold(),
