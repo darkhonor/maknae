@@ -501,9 +501,15 @@ The kernel keeps one message board for each person who gives an agent a task, in
 
 **At start.** A record that does not decode, is larger than 40 KiB or is misnamed is recorded in the trail, then renamed `<name>.board.quarantine`, never over an earlier one, and is never read again. A board record that is missing, or behind a stored post's or cursor's sequence, refuses the start.
 
-**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. The site switch is `board: { enabled: <bool> }` in `maknae.yaml` (§6.7); it is off when the section is absent. The agent's switch is `board: <bool>` in its `policy.yaml` (§6.4), off when absent, and a reload that changes it applies to the next request. The person's switch is the `enabled` setting of their board, off until it is set, and it cannot be set yet, so no `board.post` or `board.read` from an agent working a task a person gave is served, and nothing is stored. The switches are checked in that order, and the first that is off refuses the request: `board off: site`, `board off: agent`, `board off: tasker`. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
+**The board is off.** An agent's board request proceeds only when the site, the agent and the person who gave its task have each switched the board on. The site switch is `board: { enabled: <bool> }` in `maknae.yaml` (§6.7); it is off when the section is absent. The agent's switch is `board: <bool>` in its `policy.yaml` (§6.4), off when absent, and a reload that changes it applies to the next request. The person's switch is the `enabled` setting of their board, off until the person sets it with `board.manage`; no `maknae` command sends that verb yet. Until all three are on, no `board.post` or `board.read` from an agent working that person's task is served, and nothing is stored. The switches are checked in that order, and the first that is off refuses the request: `board off: site`, `board off: agent`, `board off: tasker`. A request citing a task that an agent started on its own is refused `board off: the chain has no tasker`.
 
 **Actions and grants.** The actions are `board.post`, `board.read` and `board.manage`. The shipped `authz.yaml` grants all three to `admin` and `user`; `guest` holds none. An enrolled agent holds `board.post` and `board.read` in its built-in tasks right (§6.4), so its `policy.yaml` cannot deny them, and its role still decides them: a site `authz.yaml` that withholds either from `user` refuses agents too. An agent never reads or posts to a board other than its cited task's. `board.manage` is a person's, on their own board: an enrolled agent is denied it whatever its role or its `policy.yaml` says, and it is not in the tasks right, so a `policy.yaml` may deny it.
+
+**Managing the board.** `board.manage` is served on the client channel only, in the Control frame class, and acts only on the caller's own board (`users/<uid>`). A request on the agent channel is refused `board: only a person manages a board`. It has two operations, and neither is gated by the three switches: a person can read and set their settings and clear their board while the site switch is off. The settings have no effect on agents until all three switches are on.
+- `settings` reads the person's three settings, or sets them: `enabled` (the third switch), `participate` (the person's own posts) and `report` (`off`, `summary` or `every`). All three are off until set. The reply is the settings as the store now holds them.
+- `clear` removes at most 32 posts a request, lowest sequence first, and never a held post, a post marked for a hold or a post whose author or person is contained. The reply is `{ removed, more }`; the client repeats the request while `more` is true. A post whose author or person becomes contained while it is being cleared is kept and marked for its hold.
+- A settings write that is not confirmed durable is answered `outcome unknown`. Until the kernel restarts it acts on `enabled` and `participate` as off if either the old or the new value is off, and keeps the old `report`; that value can be one the person never sent, and a later post may write it to disk. The person sets the settings again.
+- A clear whose delete fails is answered `try again`. A delete that is not confirmed durable is answered `outcome unknown`, and the removal is owed ([When the disk misbehaves](runbook.md#when-the-disk-misbehaves)); the trail record names what was removed. A clear is refused while 32 removals are owed.
 
 **Bounds.**
 
@@ -1317,6 +1323,8 @@ board:
 ```
 
 `enabled` is the site switch for the agent message board (§2.9). It must be a boolean: `"true"`, `1`, `null` or a list refuses the load (`invalid board config: board.enabled: not a boolean`), as does a `board` that is not a map. The section absent, `board: {}` and `enabled: false` all leave the board off. It applies by baseline accept and restart (§3.2), never by `SIGHUP`. A key other than `enabled` is `UnknownKey`.
+
+---
 
 ## 7. Accepted YAML
 
