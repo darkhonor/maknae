@@ -381,6 +381,14 @@ pub enum BoardOp {
     Clear,
 }
 
+/// What one `board.manage` clear removed, and whether posts that are not held remain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardCleared {
+    pub removed: u32,
+    pub more: bool,
+}
+
 pub fn board_refused_message(d: BoardDefect) -> &'static str {
     match d {
         BoardDefect::TryAgain => "try again",
@@ -515,6 +523,29 @@ mod tests {
         ] {
             assert_eq!(dec::<BoardOp>(&enc(&op)), Ok(op));
         }
+    }
+
+    #[test]
+    fn board_cleared_has_its_wire_spelling_and_refuses_an_unknown_key() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let cleared = BoardCleared {
+            removed: 32,
+            more: true,
+        };
+        let fields = vec![
+            (text("removed"), Value::Integer(32.into())),
+            (text("more"), Value::Bool(true)),
+        ];
+        assert_eq!(
+            ciborium::from_reader::<Value, _>(enc(&cleared).as_slice()).unwrap(),
+            Value::Map(fields.clone())
+        );
+        assert_eq!(dec::<BoardCleared>(&enc(&cleared)), Ok(cleared));
+        let mut extra = fields;
+        extra.push((text("ids"), Value::Array(vec![])));
+        let refused = dec::<BoardCleared>(&enc(&Value::Map(extra))).unwrap_err();
+        assert!(refused.contains("unknown field `ids`"), "{refused}");
     }
 
     #[test]

@@ -6616,4 +6616,647 @@ mod board {
         );
         assert_eq!(pdp.batches.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
+
+    mod manage {
+        use super::*;
+        use maknae_audit_append::BoardAudit;
+        use maknae_proto::{BoardCleared, BoardOp, BoardReport, BoardSettings};
+
+        const MANAGE_ROLES: &str = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\", \"board.read\", \"board.manage\"]\n";
+        const ALLOWS_MANAGE: &str =
+            "schema_version: 1\nactions:\n  allow: [\"session.task\", \"board.manage\"]\n";
+
+        fn manage_world(tag: &str, role: &str) -> World {
+            world_of(
+                tag,
+                role,
+                MANAGE_ROLES,
+                &[
+                    ("hobi", HOBI_UID, PLAIN),
+                    ("suga", SUGA_UID, PLAIN),
+                    ("jin", JIN_UID, ALLOWS_MANAGE),
+                ],
+            )
+        }
+
+        fn read_settings() -> Verb {
+            Verb::BoardManage {
+                op: BoardOp::Settings { set: None },
+            }
+        }
+
+        fn set(enabled: bool, participate: bool, report: BoardReport) -> Verb {
+            Verb::BoardManage {
+                op: BoardOp::Settings {
+                    set: Some(BoardSettings {
+                        enabled,
+                        participate,
+                        report,
+                    }),
+                },
+            }
+        }
+
+        fn clear() -> Verb {
+            Verb::BoardManage { op: BoardOp::Clear }
+        }
+
+        type Said = (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<BoardAudit>,
+        );
+
+        fn trail(records: &[AuditRecord]) -> Vec<Said> {
+            records
+                .iter()
+                .map(|r| {
+                    (
+                        r.action.clone(),
+                        r.subject.board_op.clone(),
+                        r.outcome.result.clone(),
+                        r.outcome.reason.clone(),
+                        r.outcome.posture.clone(),
+                        r.object.clone(),
+                        r.board.clone(),
+                    )
+                })
+                .collect()
+        }
+
+        fn rec(
+            op: &str,
+            (result, reason, posture): (&str, &str, &str),
+            object: Option<String>,
+            board: Option<BoardAudit>,
+        ) -> Said {
+            (
+                "board.manage".into(),
+                Some(op.into()),
+                result.into(),
+                reason.into(),
+                posture.into(),
+                object,
+                board,
+            )
+        }
+
+        fn settings_said(before: Option<&str>, after: Option<&str>) -> Option<BoardAudit> {
+            Some(BoardAudit {
+                settings_before: before.map(str::to_owned),
+                settings_after: after.map(str::to_owned),
+                ..BoardAudit::default()
+            })
+        }
+
+        fn removed_said(ids: &[PostId]) -> Option<BoardAudit> {
+            Some(BoardAudit {
+                removed: Some(ids.iter().map(PostId::to_string).collect()),
+                ..BoardAudit::default()
+            })
+        }
+
+        const DONE: (&str, &str, &str) = ("permit", "done", "authorized");
+        const INTENT: (&str, &str, &str) = ("permit", "intent recorded", "authorized");
+        const OFF: &str = "enabled=false participate=false report=off";
+
+        impl World {
+            fn own_board(&self) -> Option<String> {
+                Some(format!("board:users/{}", self.me))
+            }
+
+            async fn manage(&self, verb: Verb) -> (RespResult, Vec<AuditRecord>) {
+                let records = Records::new(0);
+                let answer = self.ask_with(verb, &records).await;
+                let records = records
+                    .snapshot()
+                    .into_iter()
+                    .filter(|r| r.action.starts_with("board."))
+                    .collect();
+                (answer, records)
+            }
+
+            fn settings_of(&self, uid: u32) -> Settings {
+                self.agents.board.settings(BoardKey(uid))
+            }
+
+            fn posts(&self) -> Vec<PostId> {
+                self.agents
+                    .board
+                    .candidates(self.key(), 0, 1024)
+                    .iter()
+                    .map(|s| s.post.id)
+                    .collect()
+            }
+        }
+
+        fn settings_reply(r: RespResult) -> BoardSettings {
+            match r {
+                RespResult::Ok(Payload::BoardSettings(s)) => s,
+                other => panic!("not settings: {other:?}"),
+            }
+        }
+
+        fn cleared_reply(r: RespResult) -> BoardCleared {
+            match r {
+                RespResult::Ok(Payload::BoardCleared(c)) => c,
+                other => panic!("not a clear: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_person_reads_and_sets_their_own_board_settings() {
+            let w = manage_world("manage-settings", "user");
+            let (answer, records) = w.manage(read_settings()).await;
+            assert_eq!(settings_reply(answer), BoardSettings::default());
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    "settings",
+                    DONE,
+                    w.own_board(),
+                    settings_said(Some(OFF), None)
+                )]
+            );
+
+            let (answer, records) = w.manage(set(true, true, BoardReport::Every)).await;
+            let every = BoardSettings {
+                enabled: true,
+                participate: true,
+                report: BoardReport::Every,
+            };
+            assert_eq!(settings_reply(answer), every);
+            let on = "enabled=true participate=true report=every";
+            assert_eq!(
+                trail(&records),
+                [
+                    rec(
+                        "settings",
+                        INTENT,
+                        w.own_board(),
+                        settings_said(None, Some(on))
+                    ),
+                    rec(
+                        "settings",
+                        DONE,
+                        w.own_board(),
+                        settings_said(Some(OFF), Some(on))
+                    ),
+                ]
+            );
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: true,
+                    participate: true,
+                    report: maknae_kernel::Report::Every
+                }
+            );
+            assert_eq!(w.settings_of(OTHER), Settings::default());
+
+            let (answer, records) = w.manage(set(false, true, BoardReport::Summary)).await;
+            let summary = "enabled=false participate=true report=summary";
+            assert_eq!(
+                settings_reply(answer),
+                BoardSettings {
+                    enabled: false,
+                    participate: true,
+                    report: BoardReport::Summary
+                }
+            );
+            assert_eq!(
+                trail(&records)[1],
+                rec(
+                    "settings",
+                    DONE,
+                    w.own_board(),
+                    settings_said(Some(on), Some(summary))
+                )
+            );
+            let (answer, _) = w.manage(read_settings()).await;
+            assert_eq!(settings_reply(answer).report, BoardReport::Summary);
+        }
+
+        #[tokio::test]
+        async fn board_manage_is_served_while_every_switch_is_off() {
+            let mut w = manage_world("manage-switches-off", "user");
+            w.switch(false, &[]);
+            let h = w.at_work("hobi");
+            let (answer, _) = w.manage(set(true, true, BoardReport::Off)).await;
+            assert!(settings_reply(answer).enabled);
+            assert!(w.settings_of(w.me).enabled);
+            let (answer, records) = w.board("hobi", post(note("sentinel-698-off")), h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                one("deny", "board off: site", "unavailable")
+            );
+            assert!(w.posts().is_empty());
+            let (answer, records) = w.manage(clear()).await;
+            assert_eq!(
+                cleared_reply(answer),
+                BoardCleared {
+                    removed: 0,
+                    more: false
+                }
+            );
+            assert_eq!(
+                trail(&records),
+                [rec("clear", DONE, w.own_board(), removed_said(&[]))]
+            );
+        }
+
+        #[tokio::test]
+        async fn an_agent_is_denied_board_manage_even_when_its_actions_list_it() {
+            let mut w = manage_world("manage-agent", "user");
+            w.switch(true, &["hobi", "suga", "jin"]);
+            w.enable(w.me, true);
+            let j = w.at_work("jin");
+            let kept = w.stored("hobi", "sentinel-698-kept", PostLabels::default());
+            for (verb, op) in [
+                (read_settings(), "settings"),
+                (set(false, false, BoardReport::Off), "settings"),
+                (clear(), "clear"),
+            ] {
+                let (answer, records) = w.board("jin", verb, j).await;
+                assert!(unauthorized(&answer), "{answer:?}");
+                assert_eq!(
+                    trail(&records),
+                    [(
+                        "board.manage".to_string(),
+                        Some(op.to_string()),
+                        "deny".to_string(),
+                        "agent jin: board.manage is never permitted to an agent".to_string(),
+                        "unauthorized".to_string(),
+                        None,
+                        None
+                    )]
+                );
+            }
+            assert!(w.settings_of(w.me).enabled);
+            assert_eq!(w.settings_of(JIN_UID), Settings::default());
+            assert_eq!(w.posts(), [kept]);
+        }
+
+        /// Permits `board.manage` to anyone, so a request reaches the check after the permit.
+        struct PermitsManage(Arc<Pdp>);
+
+        impl PermitsManage {
+            fn permit(req: &maknae_security::Request) -> Option<maknae_security::Decided> {
+                (req.action.0 == "board.manage").then(|| maknae_security::Decided {
+                    verdict: maknae_security::Verdict::Permit {
+                        obligations: vec![maknae_security::Obligation {
+                            id: "audit".into(),
+                            params: maknae_security::Attributes::new(),
+                        }],
+                    },
+                    role: Some("user"),
+                    rule: None,
+                })
+            }
+        }
+
+        impl maknae_security::Authorizer for PermitsManage {
+            fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+                self.decide_cited(req).verdict
+            }
+            fn decide_reporting_role(
+                &self,
+                req: &maknae_security::Request,
+            ) -> (maknae_security::Verdict, Option<&'static str>) {
+                let d = self.decide_cited(req);
+                (d.verdict, d.role)
+            }
+            fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+                Self::permit(req).unwrap_or_else(|| self.0.decide_cited(req))
+            }
+            fn decide_cited_all(
+                &self,
+                reqs: &[maknae_security::Request],
+            ) -> Vec<maknae_security::Decided> {
+                reqs.iter().map(|r| self.decide_cited(r)).collect()
+            }
+            fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+                self.0.subjects()
+            }
+            fn backend_name(&self) -> String {
+                self.0.backend_name()
+            }
+        }
+
+        impl maknae_kernel::CatalogNow for PermitsManage {
+            fn catalog_now(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Result<
+                Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+                maknae_authz_basic::catalog::CatalogError,
+            > {
+                self.0.catalog_now(uid, forges)
+            }
+            fn catalog_stamp(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Option<maknae_proto::CatalogDigest> {
+                self.0.catalog_stamp(uid, forges)
+            }
+            fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+                self.0.forge_credentials(agent_uid)
+            }
+        }
+
+        impl maknae_kernel::SensitiveNow for PermitsManage {
+            fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+                self.0.sensitive_now()
+            }
+        }
+
+        #[tokio::test]
+        async fn a_permitted_board_manage_from_an_agent_touches_no_board() {
+            let mut w = manage_world("manage-structural", "user");
+            w.switch(true, &["hobi", "suga", "jin"]);
+            w.enable(w.me, true);
+            w.enable(HOBI_UID, true);
+            let h = w.at_work("hobi");
+            let kept = w.stored("suga", "sentinel-698-structural", PostLabels::default());
+            let permits = Arc::new(PermitsManage(Arc::clone(&w.pdp)));
+            for (verb, op) in [
+                (read_settings(), "settings"),
+                (set(false, true, BoardReport::Every), "settings"),
+                (clear(), "clear"),
+            ] {
+                let (answer, records) = w.board_as(&permits, "hobi", verb, h).await;
+                assert!(unauthorized(&answer), "{answer:?}");
+                assert_eq!(
+                    trail(&records),
+                    [(
+                        "board.manage".to_string(),
+                        Some(op.to_string()),
+                        "deny".to_string(),
+                        "board: only a person manages a board".to_string(),
+                        "unauthorized".to_string(),
+                        None,
+                        None
+                    )]
+                );
+            }
+            let enabled = Settings {
+                enabled: true,
+                ..Settings::default()
+            };
+            assert_eq!(w.settings_of(w.me), enabled);
+            assert_eq!(w.settings_of(HOBI_UID), enabled);
+            assert_eq!(w.posts(), [kept]);
+        }
+
+        #[tokio::test]
+        async fn a_contained_person_is_refused_board_manage() {
+            let w = manage_world("manage-contained", "adversary");
+            for (verb, op) in [(read_settings(), "settings"), (clear(), "clear")] {
+                let (answer, records) = w.manage(verb).await;
+                assert!(unauthorized(&answer), "{answer:?}");
+                let mut got = trail(&records);
+                assert_eq!(got.len(), 1);
+                let (action, board_op, result, reason, posture, object, board) = got.remove(0);
+                assert_eq!(
+                    (action.as_str(), board_op.as_deref(), result.as_str()),
+                    ("board.manage", Some(op), "deny")
+                );
+                assert_eq!(reason, "subject contained: role=adversary");
+                assert_eq!(
+                    (posture.as_str(), object, board),
+                    ("unauthorized", w.own_board(), None)
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_clear_removes_a_page_at_a_time_says_more_and_keeps_held_posts() {
+            let w = manage_world("manage-clear-pages", "user");
+            let held = w.stored("suga", "sentinel-698-held", PostLabels::default());
+            let live: Vec<PostId> = (0..40)
+                .map(|i| w.stored("hobi", &format!("sentinel-698-{i}"), PostLabels::default()))
+                .collect();
+            let board = &w.agents.board;
+            board.mark(&maknae_kernel::Containing(
+                only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]),
+                [SUGA_UID].into_iter().collect(),
+            ));
+            let due = board.due(100);
+            assert_eq!(board.perform(&due, &*w.agents.view), 1);
+            assert_eq!(board.held_count(SUGA_UID), 1);
+
+            let (answer, records) = w.manage(clear()).await;
+            assert_eq!(
+                cleared_reply(answer),
+                BoardCleared {
+                    removed: 32,
+                    more: true
+                }
+            );
+            assert_eq!(
+                trail(&records),
+                [
+                    rec("clear", INTENT, w.own_board(), removed_said(&live[..32])),
+                    rec("clear", DONE, w.own_board(), removed_said(&live[..32])),
+                ]
+            );
+            assert_eq!(w.posts(), &live[32..]);
+
+            let (answer, records) = w.manage(clear()).await;
+            assert_eq!(
+                cleared_reply(answer),
+                BoardCleared {
+                    removed: 8,
+                    more: false
+                }
+            );
+            assert_eq!(
+                trail(&records),
+                [
+                    rec("clear", INTENT, w.own_board(), removed_said(&live[32..])),
+                    rec("clear", DONE, w.own_board(), removed_said(&live[32..])),
+                ]
+            );
+            assert!(w.posts().is_empty());
+
+            let (answer, records) = w.manage(clear()).await;
+            assert_eq!(
+                cleared_reply(answer),
+                BoardCleared {
+                    removed: 0,
+                    more: false
+                }
+            );
+            assert_eq!(
+                trail(&records),
+                [rec("clear", DONE, w.own_board(), removed_said(&[]))]
+            );
+            assert_eq!(board.held_count(SUGA_UID), 1);
+            let written = board.held_for(SUGA_UID, 10);
+            assert_eq!(written.len(), 1);
+            assert_eq!((written[0].0, written[0].1), (w.key(), held));
+        }
+
+        #[tokio::test]
+        async fn a_clear_stopped_by_a_refused_delete_says_try_again_and_names_what_went() {
+            let w = manage_world("manage-clear-stuck", "user");
+            let posts: Vec<PostId> = (0..5)
+                .map(|i| w.stored("hobi", &format!("sentinel-698-{i}"), PostLabels::default()))
+                .collect();
+            w.board_blobs
+                .stick(Some(format!("post.{}.{}", w.me, posts[2])));
+            let (answer, records) = w.manage(clear()).await;
+            w.board_blobs.stick(None);
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain));
+            assert_eq!(
+                trail(&records),
+                [
+                    rec("clear", INTENT, w.own_board(), removed_said(&posts)),
+                    rec(
+                        "clear",
+                        ("permit", "store: sentinel-628-stuck", "unauthorized"),
+                        w.own_board(),
+                        removed_said(&posts[..2])
+                    ),
+                ]
+            );
+            assert_eq!(w.posts(), &posts[2..]);
+        }
+
+        #[tokio::test]
+        async fn a_clear_whose_deletes_do_not_sync_is_outcome_unknown_and_owes_at_most_the_bound() {
+            let w = manage_world("manage-clear-unsynced", "user");
+            let posts: Vec<PostId> = (0..40)
+                .map(|i| w.stored("hobi", &format!("sentinel-698-{i}"), PostLabels::default()))
+                .collect();
+            w.board_blobs.fail(Some(Fail::UnsyncedUnlinks));
+            for (i, id) in posts.iter().enumerate().take(32) {
+                let (answer, records) = w.manage(clear()).await;
+                assert_eq!(refused(&answer), Some(BoardDefect::OutcomeUnknown), "{i}");
+                assert_eq!(records.len(), 2, "{i}");
+                assert!(
+                    records[1].outcome.reason.starts_with("outcome unknown: "),
+                    "{records:?}"
+                );
+                assert_eq!(
+                    (
+                        records[1].outcome.result.as_str(),
+                        records[1].outcome.posture.as_str()
+                    ),
+                    ("permit", "unavailable")
+                );
+                assert_eq!(records[1].board, removed_said(&[*id]), "{i}");
+            }
+            let (answer, records) = w.manage(clear()).await;
+            w.board_blobs.fail(None);
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain));
+            assert_eq!(
+                trail(&records)[1],
+                rec(
+                    "clear",
+                    ("permit", "store: removals are owed", "unauthorized"),
+                    w.own_board(),
+                    removed_said(&[])
+                )
+            );
+            assert_eq!(w.posts(), &posts[32..]);
+        }
+
+        #[tokio::test]
+        async fn a_clear_that_meets_a_contained_author_keeps_and_marks_the_post() {
+            let mut w = manage_world("manage-clear-contained", "user");
+            let first = w.stored("hobi", "sentinel-698-a", PostLabels::default());
+            let free = w.stored("jin", "sentinel-698-b", PostLabels::default());
+            let second = w.stored("hobi", "sentinel-698-c", PostLabels::default());
+            w.agents.view = Arc::new(maknae_kernel::Containing(
+                only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)]),
+                [HOBI_UID].into_iter().collect(),
+            ));
+            let (answer, records) = w.manage(clear()).await;
+            assert_eq!(
+                cleared_reply(answer),
+                BoardCleared {
+                    removed: 1,
+                    more: false
+                }
+            );
+            assert_eq!(
+                trail(&records),
+                [
+                    rec(
+                        "clear",
+                        INTENT,
+                        w.own_board(),
+                        removed_said(&[first, free, second])
+                    ),
+                    rec("clear", DONE, w.own_board(), removed_said(&[free])),
+                ]
+            );
+            let marked: Vec<Option<PostId>> =
+                w.agents.board.due(100).iter().map(|d| d.post).collect();
+            assert_eq!(marked, [Some(first), Some(second)]);
+            let (answer, records) = w.manage(clear()).await;
+            assert_eq!(
+                cleared_reply(answer),
+                BoardCleared {
+                    removed: 0,
+                    more: false
+                }
+            );
+            assert_eq!(records.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_settings_write_the_disk_refuses_or_does_not_sync_is_never_done() {
+            let w = manage_world("manage-settings-disk", "user");
+            w.manage(set(true, true, BoardReport::Every)).await;
+            let on = "enabled=true participate=true report=every";
+            w.board_blobs.fail(Some(Fail::Every));
+            let (answer, records) = w.manage(set(false, false, BoardReport::Off)).await;
+            w.board_blobs.fail(None);
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain));
+            assert_eq!(records.len(), 2);
+            assert!(
+                records[1].outcome.reason.starts_with("store: "),
+                "{records:?}"
+            );
+            assert_eq!(records[1].outcome.posture, "unauthorized");
+            assert_eq!(records[1].board, settings_said(None, Some(on)));
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: true,
+                    participate: true,
+                    report: maknae_kernel::Report::Every
+                }
+            );
+
+            w.board_blobs.fail(Some(Fail::Unsynced));
+            let (answer, records) = w.manage(set(false, true, BoardReport::Summary)).await;
+            w.board_blobs.fail(None);
+            assert_eq!(refused(&answer), Some(BoardDefect::OutcomeUnknown));
+            assert!(
+                records[1].outcome.reason.starts_with("outcome unknown: "),
+                "{records:?}"
+            );
+            assert_eq!(records[1].outcome.posture, "unavailable");
+            let held = "enabled=false participate=true report=every";
+            assert_eq!(records[1].board, settings_said(None, Some(held)));
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: false,
+                    participate: true,
+                    report: maknae_kernel::Report::Every
+                }
+            );
+        }
+    }
 }

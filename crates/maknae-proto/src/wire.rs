@@ -834,6 +834,10 @@ pub enum Payload {
     ToolCatalog(ToolCatalogReply),
     BoardPosted(crate::PostId),
     BoardPage(crate::BoardPage),
+    /// A person's own board settings, after a permitted `board.manage` read or write.
+    BoardSettings(crate::BoardSettings),
+    /// What a permitted `board.manage` clear removed.
+    BoardCleared(crate::BoardCleared),
 }
 
 pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
@@ -4560,6 +4564,35 @@ mod tests {
             bytes.len()
         );
         assert_eq!(decode_response(&bytes).unwrap(), response);
+    }
+
+    #[test]
+    fn the_board_manage_replies_round_trip_under_the_control_response_cap() {
+        for payload in [
+            Payload::BoardSettings(crate::BoardSettings {
+                enabled: true,
+                participate: true,
+                report: crate::BoardReport::Summary,
+            }),
+            Payload::BoardSettings(crate::BoardSettings::default()),
+            Payload::BoardCleared(crate::BoardCleared {
+                removed: u32::MAX,
+                more: true,
+            }),
+            Payload::BoardCleared(crate::BoardCleared {
+                removed: 0,
+                more: false,
+            }),
+        ] {
+            let response = Response {
+                protocol_version: PROTOCOL_VERSION,
+                result: RespResult::Ok(payload),
+                catalog_digest: None,
+            };
+            let bytes = encode_response(&response).unwrap();
+            assert!(bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX);
+            assert_eq!(decode_response(&bytes).unwrap(), response);
+        }
     }
 
     #[test]

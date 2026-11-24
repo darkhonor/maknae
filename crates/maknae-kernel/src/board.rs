@@ -61,7 +61,6 @@ pub(crate) struct Observed {
 }
 
 /// What [`BoardStore::clear`] removed, and why it stopped early, if it did.
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Cleared {
     pub removed: Vec<PostId>,
@@ -202,7 +201,6 @@ impl Held {
 
     /// The post at `seq` when it is now marked, or `view` now contains its author or `key`'s
     /// person, in which case it is marked for those holds.
-    #[cfg(test)]
     fn contained_since(
         &mut self,
         key: BoardKey,
@@ -374,7 +372,6 @@ impl BoardStore {
 
     /// Writes `settings` and returns those before it. A write that does not sync leaves
     /// memory with each veto on only where both values have it on, and the old `report`.
-    #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub(crate) fn set_settings(
         &self,
         key: BoardKey,
@@ -798,7 +795,6 @@ impl BoardStore {
     }
 
     /// Writes back the record of a post kept in memory after its delete.
-    #[cfg(test)]
     fn restore(&self, key: BoardKey, kept: &Stored) -> Result<(), StoreError> {
         let plain = encode(&PostRecord {
             board: key.0,
@@ -810,7 +806,6 @@ impl BoardStore {
 
     /// Memory only: up to `BOARD_CLEAR_PAGE` posts of `key`'s board that are not withheld,
     /// lowest sequence first, and whether more remain.
-    #[cfg(test)]
     pub(crate) fn clearable(&self, key: BoardKey) -> (Vec<(u64, PostId)>, bool) {
         let held = self.held();
         let now = self.now();
@@ -835,7 +830,6 @@ impl BoardStore {
     /// `view` contains is marked for its holds instead. Takes at most `BOARD_CLEAR_PAGE`.
     /// A post found marked or contained after its delete is kept and its record written
     /// back. Stops at the first delete, or write-back, that fails.
-    #[cfg(test)]
     pub(crate) fn clear(
         &self,
         key: BoardKey,

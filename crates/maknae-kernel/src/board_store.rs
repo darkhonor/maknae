@@ -28,7 +28,6 @@ pub const FIRST_SEQ: u64 = 1;
 /// any write.
 pub const BOARD_OWED_MAX: usize = 32;
 /// The most posts one clear removes; equal to the read page.
-#[cfg(test)]
 pub const BOARD_CLEAR_PAGE: usize = 32;
 
 /// A board belongs to the person at the root of a task chain.

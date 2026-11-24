@@ -498,6 +498,8 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::ToolCatalog(_) => "tool catalog",
         Payload::BoardPosted(_) => "board post",
         Payload::BoardPage(_) => "board page",
+        Payload::BoardSettings(_) => "board settings",
+        Payload::BoardCleared(_) => "board cleared",
     }
 }
 
@@ -1409,7 +1411,9 @@ pub(crate) fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(),
         | (v, p @ Payload::HeldReleased(_))
         | (v, p @ Payload::ToolCatalog(_))
         | (v, p @ Payload::BoardPosted(_))
-        | (v, p @ Payload::BoardPage(_)) => Err(format!(
+        | (v, p @ Payload::BoardPage(_))
+        | (v, p @ Payload::BoardSettings(_))
+        | (v, p @ Payload::BoardCleared(_)) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -2722,6 +2726,17 @@ mod tests {
                 "task follow-ups",
             ),
             (Payload::TaskIdle, "task idle"),
+            (
+                Payload::BoardSettings(maknae_proto::BoardSettings::default()),
+                "board settings",
+            ),
+            (
+                Payload::BoardCleared(maknae_proto::BoardCleared {
+                    removed: 3,
+                    more: true,
+                }),
+                "board cleared",
+            ),
         ] {
             assert_eq!(
                 print_payload_for_verb(Verb::Ping, payload).unwrap_err(),

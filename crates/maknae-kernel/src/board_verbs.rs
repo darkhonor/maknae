@@ -12,7 +12,7 @@ use maknae_security::{AttrValue, Attributes, Authorizer, Decision, Verdict};
 
 use crate::blocking_guard::{admit_blocking, Offload};
 use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore};
-use crate::board_store::{BoardKey, HeldFor, LabelValue, Stored};
+use crate::board_store::{BoardKey, HeldFor, LabelValue, Report, Settings, Stored};
 use crate::boot::BootConfig;
 use crate::enrollment::EnrollmentView;
 use crate::task::CitedTask;
@@ -111,6 +111,60 @@ pub(crate) fn gate(
         return Err(Off::Tasker);
     }
     Ok(Some(key))
+}
+
+pub(crate) const ONLY_A_PERSON: &str = "board: only a person manages a board";
+
+/// The board a `board.manage` acts on: the caller's own, and only a person's.
+pub(crate) fn manage_key(channel_agent: Option<&AgentId>, uid: u32) -> Option<BoardKey> {
+    match channel_agent {
+        None => Some(BoardKey(uid)),
+        Some(_) => None,
+    }
+}
+
+pub(crate) fn wire_settings(s: Settings) -> maknae_proto::BoardSettings {
+    maknae_proto::BoardSettings {
+        enabled: s.enabled,
+        participate: s.participate,
+        report: match s.report {
+            Report::Off => maknae_proto::BoardReport::Off,
+            Report::Summary => maknae_proto::BoardReport::Summary,
+            Report::Every => maknae_proto::BoardReport::Every,
+        },
+    }
+}
+
+pub(crate) fn stored_settings(s: maknae_proto::BoardSettings) -> Settings {
+    Settings {
+        enabled: s.enabled,
+        participate: s.participate,
+        report: match s.report {
+            maknae_proto::BoardReport::Off => Report::Off,
+            maknae_proto::BoardReport::Summary => Report::Summary,
+            maknae_proto::BoardReport::Every => Report::Every,
+        },
+    }
+}
+
+/// `enabled=<bool> participate=<bool> report=<off|summary|every>`.
+pub(crate) fn settings_text(s: Settings) -> String {
+    let report = match s.report {
+        Report::Off => "off",
+        Report::Summary => "summary",
+        Report::Every => "every",
+    };
+    format!(
+        "enabled={} participate={} report={report}",
+        s.enabled, s.participate
+    )
+}
+
+pub(crate) fn removed_audit(ids: &[PostId]) -> BoardAudit {
+    BoardAudit {
+        removed: Some(ids.iter().map(PostId::to_string).collect()),
+        ..BoardAudit::default()
+    }
 }
 
 /// The read request `base` asked again of one post: its board and its labels.
@@ -777,6 +831,87 @@ pub(crate) fn cursor_audit(cursor: u64) -> BoardAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_manage_keys_the_callers_own_board_and_only_a_persons() {
+        assert_eq!(manage_key(None, 1000), Some(BoardKey(1000)));
+        assert_eq!(manage_key(None, 0), Some(BoardKey(0)));
+        let hobi = AgentId::parse("hobi").unwrap();
+        assert_eq!(manage_key(Some(&hobi), 1000), None);
+        assert_eq!(manage_key(Some(&hobi), 2001), None);
+        assert_eq!(ONLY_A_PERSON, "board: only a person manages a board");
+    }
+
+    #[test]
+    fn the_settings_convert_both_ways_and_read_as_pinned() {
+        use maknae_proto::{BoardReport as W, BoardSettings};
+        let mut seen = BTreeSet::new();
+        for (enabled, participate, stored, wire, said) in [
+            (
+                false,
+                false,
+                Report::Off,
+                W::Off,
+                "enabled=false participate=false report=off",
+            ),
+            (
+                true,
+                false,
+                Report::Summary,
+                W::Summary,
+                "enabled=true participate=false report=summary",
+            ),
+            (
+                false,
+                true,
+                Report::Every,
+                W::Every,
+                "enabled=false participate=true report=every",
+            ),
+            (
+                true,
+                true,
+                Report::Off,
+                W::Off,
+                "enabled=true participate=true report=off",
+            ),
+        ] {
+            let kernel = Settings {
+                enabled,
+                participate,
+                report: stored,
+            };
+            let on_wire = BoardSettings {
+                enabled,
+                participate,
+                report: wire,
+            };
+            assert_eq!(wire_settings(kernel), on_wire);
+            assert_eq!(stored_settings(on_wire), kernel);
+            assert_eq!(settings_text(kernel), said);
+            seen.insert(said);
+        }
+        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn a_clear_names_its_removed_posts_in_lowercase_hex() {
+        let ids = [PostId([0xab; 16]), PostId([0x01; 16])];
+        assert_eq!(
+            removed_audit(&ids),
+            BoardAudit {
+                removed: Some(vec!["ab".repeat(16), "01".repeat(16)]),
+                ..BoardAudit::default()
+            }
+        );
+        assert_eq!(
+            removed_audit(&[]),
+            BoardAudit {
+                removed: Some(Vec::new()),
+                ..BoardAudit::default()
+            }
+        );
+    }
     use crate::board::BoardStore;
     use crate::board_store::{LabelValue, PostLabels, Settings, Stored};
     use crate::task::{CitedTask, TaskObjectForTest};

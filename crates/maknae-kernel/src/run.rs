@@ -3748,6 +3748,52 @@ async fn serve_board_verb<S, E, P>(
 {
     use crate::board_verbs as bv;
     let action = verb_to_action(verb);
+    if let Verb::BoardManage { op } = verb {
+        let key = bv::manage_key(board.channel_agent, trail.uid);
+        let (_, _, generation) = live.admission();
+        let request = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
+        let (verdict, role, rule) =
+            decide_bounded(authorizer, live, request, generation, timeout).await;
+        let refused = |reason: &str| {
+            let mut rec = decision_record(
+                bv::on_board(trail.record(action, "deny", reason, "unauthorized"), key),
+                role,
+                rule.as_ref(),
+            );
+            rec.subject.board_op = crate::handler::board_op(verb).map(str::to_owned);
+            rec
+        };
+        match finalize(verdict) {
+            Decision::Deny { reason } => {
+                trail.unauthorized(stream, &refused(&reason)).await;
+                return;
+            }
+            Decision::Permit { obligations } => {
+                if let Err(unhonorable) = discharge_plan(&obligations) {
+                    let reason = format!("unhonorable obligation: {}", unhonorable.0);
+                    trail.unauthorized(stream, &refused(&reason)).await;
+                    return;
+                }
+            }
+        }
+        let Some(key) = key else {
+            trail
+                .unauthorized(stream, &refused(bv::ONLY_A_PERSON))
+                .await;
+            return;
+        };
+        let managed = Manage {
+            verb,
+            op: *op,
+            key,
+            agents: board.agents,
+            timeout,
+            role,
+            rule: rule.as_ref(),
+        };
+        serve_board_manage(stream, trail, managed).await;
+        return;
+    }
     let store = &board.agents.board;
     let known = board
         .cited
@@ -3950,6 +3996,155 @@ async fn serve_board_verb<S, E, P>(
     trail
         .unauthorized(stream, &decided("deny", "not a board verb", "unauthorized"))
         .await;
+}
+
+/// A permitted `board.manage` on the caller's own board.
+struct Manage<'a> {
+    verb: &'a Verb,
+    op: maknae_proto::BoardOp,
+    key: crate::board_store::BoardKey,
+    agents: &'a AgentAdmission,
+    timeout: Duration,
+    role: Option<&'static str>,
+    rule: Option<&'a RuleCitation>,
+}
+
+async fn serve_board_manage<S, E>(stream: &mut S, trail: &Trail<'_, E>, m: Manage<'_>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    use crate::board_verbs as bv;
+    use maknae_audit_append::BoardAudit;
+    use maknae_proto::BoardOp;
+    let action = verb_to_action(m.verb);
+    let (key, store) = (m.key, &m.agents.board);
+    let permitted = |reason: &str, audit: BoardAudit| {
+        let mut rec = decision_record(
+            bv::on_board(
+                trail.record(action, "permit", reason, "authorized"),
+                Some(key),
+            ),
+            m.role,
+            m.rule,
+        );
+        rec.subject.board_op = crate::handler::board_op(m.verb).map(str::to_owned);
+        rec.board = Some(audit);
+        rec
+    };
+    let deadline = tokio::time::Instant::now() + m.timeout;
+    match m.op {
+        BoardOp::Settings { set: None } => {
+            let now = store.settings(key);
+            let rec = permitted(
+                "done",
+                BoardAudit {
+                    settings_before: Some(bv::settings_text(now)),
+                    ..BoardAudit::default()
+                },
+            );
+            let payload = Payload::BoardSettings(bv::wire_settings(now));
+            trail
+                .deliver(stream, &rec, payload, m.role, m.rule, action)
+                .await;
+        }
+        BoardOp::Settings { set: Some(asked) } => {
+            let asked = bv::stored_settings(asked);
+            let intent = permitted(
+                "intent recorded",
+                BoardAudit {
+                    settings_after: Some(bv::settings_text(asked)),
+                    ..BoardAudit::default()
+                },
+            );
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let s = Arc::clone(store);
+            let done = bv::offload(trail.uid, deadline, move || s.set_settings(key, asked)).await;
+            let now = store.settings(key);
+            match done {
+                Ok(before) => {
+                    let mut outcome = trail.outcome(&intent, "done", "authorized");
+                    outcome.board = Some(BoardAudit {
+                        settings_before: Some(bv::settings_text(before)),
+                        settings_after: Some(bv::settings_text(now)),
+                        ..BoardAudit::default()
+                    });
+                    let payload = Payload::BoardSettings(bv::wire_settings(now));
+                    trail
+                        .deliver(stream, &outcome, payload, m.role, m.rule, action)
+                        .await;
+                }
+                Err(r) => {
+                    let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    outcome.board = Some(BoardAudit {
+                        settings_after: Some(bv::settings_text(now)),
+                        ..BoardAudit::default()
+                    });
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                }
+            }
+        }
+        BoardOp::Clear => {
+            let (page, _) = store.clearable(key);
+            if page.is_empty() {
+                let rec = permitted("done", bv::removed_audit(&[]));
+                let payload = Payload::BoardCleared(maknae_proto::BoardCleared {
+                    removed: 0,
+                    more: false,
+                });
+                trail
+                    .deliver(stream, &rec, payload, m.role, m.rule, action)
+                    .await;
+                return;
+            }
+            let named: Vec<maknae_proto::PostId> = page.iter().map(|(_, id)| *id).collect();
+            let intent = permitted("intent recorded", bv::removed_audit(&named));
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let (s, view) = (Arc::clone(store), Arc::clone(&m.agents.view));
+            let done =
+                bv::offload(trail.uid, deadline, move || Ok(s.clear(key, &page, &*view))).await;
+            match done {
+                Ok(crate::board::Cleared {
+                    removed,
+                    stopped: None,
+                }) => {
+                    let more = !store.clearable(key).0.is_empty();
+                    let mut outcome = trail.outcome(&intent, "done", "authorized");
+                    outcome.board = Some(bv::removed_audit(&removed));
+                    let payload = Payload::BoardCleared(maknae_proto::BoardCleared {
+                        removed: u32::try_from(removed.len()).unwrap_or(u32::MAX),
+                        more,
+                    });
+                    trail
+                        .deliver(stream, &outcome, payload, m.role, m.rule, action)
+                        .await;
+                }
+                Ok(crate::board::Cleared {
+                    removed,
+                    stopped: Some(r),
+                }) => {
+                    let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    outcome.board = Some(bv::removed_audit(&removed));
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                }
+                Err(r) => {
+                    let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    outcome.board = None;
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 type StoreChange = Box<
@@ -13010,6 +13205,243 @@ mod record_widths {
             }
             all
         }
+    }
+
+    impl Who {
+        fn manage_case(
+            &self,
+            verb: &Verb,
+            (result, reason, posture): (&str, &str, &str),
+            board: Option<maknae_audit_append::BoardAudit>,
+            tag: &str,
+        ) -> Case {
+            let (role, rule) = self.decided(verb);
+            let action = crate::handler::verb_to_action(verb);
+            let op = crate::handler::board_op(verb);
+            let key = self
+                .person
+                .then_some(crate::board_store::BoardKey(u32::MAX));
+            let mut rec = decision_record(
+                crate::board_verbs::on_board(
+                    request_outcome_record(
+                        &host(),
+                        self.socket(),
+                        u32::MAX,
+                        None,
+                        Some(&widest_user()),
+                        None,
+                        None,
+                        u64::MAX,
+                        u64::MAX,
+                        (action, None, None),
+                        (result, reason, posture),
+                        &serde_json::Value::Null,
+                    ),
+                    key,
+                ),
+                role,
+                rule.as_ref(),
+            );
+            rec.subject.board_op = op.map(str::to_owned);
+            rec.board = board;
+            self.session().stamp(&mut rec);
+            Case {
+                label: format!("{action} {}: {result} {reason}{tag}", op.unwrap_or("")),
+                rec,
+                tasker: (!self.person).then(held_tasker),
+                task: (!self.person).then(|| TASK.to_string()),
+                parent: None,
+                op,
+            }
+        }
+
+        fn manage_cases(&self) -> Vec<Case> {
+            use crate::board::BoardRefusal as R;
+            use crate::board_store::{Report, Settings};
+            use crate::board_verbs as bv;
+            use maknae_audit_append::BoardAudit;
+            let widest = bv::settings_text(Settings {
+                enabled: false,
+                participate: false,
+                report: Report::Summary,
+            });
+            let settings = |before: bool, after: bool| {
+                Some(BoardAudit {
+                    settings_before: before.then(|| widest.clone()),
+                    settings_after: after.then(|| widest.clone()),
+                    ..BoardAudit::default()
+                })
+            };
+            let page = vec![maknae_proto::PostId([0xff; 16]); crate::board_store::BOARD_CLEAR_PAGE];
+            let removed = |n: usize| Some(bv::removed_audit(&page[..n]));
+            let read = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None },
+            };
+            let write = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings {
+                    set: Some(maknae_proto::BoardSettings::default()),
+                },
+            };
+            let clear = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear,
+            };
+            let busy = R::Store("not done: the board store was busy".into());
+            let late = R::Unavailable(format!(
+                "{}the board store did not answer in time",
+                crate::task::OUTCOME_UNKNOWN
+            ));
+            let owed = R::Store("removals are owed".into());
+            let at = |r: &R| ("permit", r.to_string(), bv::posture(r));
+            let mut all = vec![
+                self.manage_case(
+                    &read,
+                    ("permit", "done", "authorized"),
+                    settings(true, false),
+                    " (read)",
+                ),
+                self.manage_case(
+                    &write,
+                    ("permit", "intent recorded", "authorized"),
+                    settings(false, true),
+                    "",
+                ),
+                self.manage_case(
+                    &write,
+                    ("permit", "done", "authorized"),
+                    settings(true, true),
+                    "",
+                ),
+                self.manage_case(
+                    &clear,
+                    ("permit", "intent recorded", "authorized"),
+                    removed(32),
+                    "",
+                ),
+                self.manage_case(
+                    &clear,
+                    ("permit", "done", "authorized"),
+                    removed(32),
+                    " (32 ids)",
+                ),
+                self.manage_case(
+                    &clear,
+                    ("permit", "done", "authorized"),
+                    removed(0),
+                    " (empty)",
+                ),
+            ];
+            for r in [&busy, &late] {
+                let (result, reason, posture) = at(r);
+                all.push(self.manage_case(
+                    &write,
+                    (result, &reason, posture),
+                    settings(false, true),
+                    "",
+                ));
+                all.push(self.manage_case(
+                    &clear,
+                    (result, &reason, posture),
+                    removed(32),
+                    " (32 ids)",
+                ));
+            }
+            let (result, reason, posture) = at(&owed);
+            all.push(self.manage_case(&clear, (result, &reason, posture), removed(0), ""));
+            for verb in [&write, &clear] {
+                all.push(self.manage_case(
+                    verb,
+                    ("deny", "subject contained: role=adversary", "unauthorized"),
+                    None,
+                    "",
+                ));
+            }
+            all
+        }
+
+        fn agent_manage_cases(&self) -> Vec<Case> {
+            let clear = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear,
+            };
+            let refused = format!(
+                "agent {}: board.manage is never permitted to an agent",
+                widest_agent_id()
+            );
+            vec![
+                self.manage_case(&clear, ("deny", &refused, "unauthorized"), None, ""),
+                self.manage_case(
+                    &clear,
+                    ("deny", crate::board_verbs::ONLY_A_PERSON, "unauthorized"),
+                    None,
+                    "",
+                ),
+            ]
+        }
+    }
+
+    #[test]
+    fn a_persons_board_manage_records_mirror_as_measured() {
+        let cases = Who::new(true).manage_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        let widest = format!(
+            "board.manage clear: permit {}the board store did not answer in time (32 ids)",
+            crate::task::OUTCOME_UNKNOWN
+        );
+        assert_eq!(widest_label(&cases), widest);
+        let c = cases
+            .iter()
+            .find(|c| c.label == widest)
+            .expect("the widest");
+        assert_eq!(macos_mirror(&c.rec).full_len, 2263);
+        let narrowest = cases
+            .iter()
+            .map(|c| macos_mirror(&c.rec).full_len)
+            .min()
+            .expect("cases");
+        assert_eq!(narrowest, 1092);
+    }
+
+    #[test]
+    fn an_agents_refused_board_manage_records_mirror_as_measured() {
+        let cases = Who::new(false).agent_manage_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        for c in &cases {
+            assert_eq!(c.rec.object, None, "{}", c.label);
+        }
+    }
+
+    #[test]
+    fn a_clear_naming_four_posts_mirrors_in_full_for_an_ordinary_person_and_five_do_not() {
+        let who = Who::new(true);
+        let clear = Verb::BoardManage {
+            op: maknae_proto::BoardOp::Clear,
+        };
+        let sized = |n: usize| {
+            let ids = vec![maknae_proto::PostId([0xff; 16]); n];
+            let mut c = who.manage_case(
+                &clear,
+                ("permit", "done", "authorized"),
+                Some(crate::board_verbs::removed_audit(&ids)),
+                "",
+            );
+            c.rec.subject.user = Some("alex".into());
+            c.rec.session_id = 42;
+            c.rec.seq = 1234;
+            c.rec.source.uid = 1000;
+            c.rec.object = Some("board:users/1000".into());
+            c.rec.where_.host = "maknaed-01".into();
+            c.rec.where_.socket = "/run/maknae/plane.sock".into();
+            macos_mirror(&c.rec)
+        };
+        let four = sized(4);
+        assert!(four.mirrored_in_full);
+        assert_eq!(four.full_len, 997);
+        assert!(four.full_line.contains(&"ff".repeat(16)));
+        let five = sized(5);
+        assert!(!five.mirrored_in_full);
+        assert!(five.full_len > MACOS_SYSLOG_MAX, "{}", five.full_len);
+        let page = sized(crate::board_store::BOARD_CLEAR_PAGE);
+        assert!(!page.mirrored_in_full);
+        assert_eq!(page.full_len, 1977);
     }
 
     #[test]

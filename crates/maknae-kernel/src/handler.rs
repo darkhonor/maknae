@@ -99,7 +99,7 @@ pub enum Dispatch {
     TaskRequested,
     /// The peer asked for its own tool catalog. No datum: the catalog is the installed snapshot's.
     ToolCatalogRequested,
-    /// A `board.post` or `board.read`.
+    /// A `board.post`, `board.read` or `board.manage`.
     BoardRequested,
 }
 
