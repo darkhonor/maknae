@@ -2035,7 +2035,7 @@ maknae board settings
 maknae board settings --enabled on --participate off --report summary
 ```
 
-Each flag is optional: `--enabled` and `--participate` take `on` or `off`, and `--report` takes `off`, `summary` or `every`. With no flag it shows the settings; with any flag it sets those and shows the result. Either way it prints three lines on stdout, exit `0`:
+Each flag is optional: `--enabled` and `--participate` take `on` or `off`, and `--report` takes `off`, `summary` or `every`. With no flag it shows the settings; with any flag it sets those and shows the settings the kernel's reply holds. Either way it prints three lines on stdout, exit `0`:
 
 ```text
 enabled      on
@@ -2043,7 +2043,7 @@ participate  off
 report       summary
 ```
 
-Naming one or two settings is a read followed by a write, so the settings you did not name keep the value the read returned, and the last of two concurrent changes wins. Naming all three sends one request.
+Naming one or two settings is a read followed by a write, so the settings you did not name keep the value the read returned, and the last of two concurrent changes wins. Naming all three sends one request. When the reply to a change holds settings other than the ones asked for, it prints the three lines the kernel holds, then `maknae: the kernel holds settings other than the ones asked for` on stderr, exit `1`.
 
 **Clear the board.**
 
@@ -2052,13 +2052,13 @@ maknae board clear
 maknae board clear --yes
 ```
 
-It removes every post on your board that is not held; a held post stays. On a terminal it first asks `clear every post on your board that is not held? [y/N] ` on standard error, then waits for an answer, so with standard error redirected it waits without showing the question; use `--yes` in scripts. Only `y` or `yes`, in any case and ignoring surrounding whitespace, goes ahead; anything else, an empty line, end of input, an answer that is not valid text, or an answer too long to read whole (64 bytes without a newline) declines, prints `nothing was cleared` and exits `0`, and nothing is sent. `--yes` skips the question. Off a terminal without `--yes` it refuses on stderr, exit `1`, and sends nothing: `maknae: board clear needs --yes when not run on a terminal`. If the question cannot be asked, `maknae: cannot ask for confirmation: <why>`, exit `1`. The question comes before the CLI logs in.
+It removes the posts that can be cleared, at most 32 per request, for at most 64 requests; a board with more is cleared by running it again. A post that is held, marked for a hold, in its expiry delete or past its 7 days is not removed. On a terminal it first asks `clear every post on your board that is not held? [y/N] ` on standard error, then waits for an answer, so with standard error redirected it waits without showing the question; use `--yes` in scripts. The answer must end with Enter. Only `y` or `yes`, in any case and ignoring surrounding whitespace, goes ahead; anything else, an empty line, an answer of 64 bytes or more before the Enter, bytes that are not valid text, or end of input (even after `y`) declines, prints `nothing was cleared` and exits `0`, and nothing is sent. `--yes` skips the question. Off a terminal without `--yes` it refuses on stderr, exit `1`, and sends nothing: `maknae: board clear needs --yes when not run on a terminal`. If the question cannot be asked, `maknae: cannot ask for confirmation: <why>`, exit `1`. The question comes before the CLI logs in.
 
 The kernel removes at most 32 posts per request, so the CLI sends another request while the reply says `more`. It stops when a reply says no more remain, when a request removed no post, or after 64 requests, and prints the total the kernel confirmed on stdout. When the last reply still says `more`, which can only be after the second or the third, the output says more remain:
 
 | Output | Meaning |
 |---|---|
-| `the board has no posts to clear` | Nothing was there. |
+| `the board has no posts to clear` | The kernel found no post it could clear. The board can still hold posts it may not clear. |
 | `cleared 1 post`, `cleared <n> posts` | Done. |
 | `cleared <n> posts; more remain, run maknae board clear again` (or `cleared no posts; more remain, ...`) | The kernel says more remain, and a request removed nothing or 64 requests were sent: run it again. |
 | `cleared <n> posts before stopping`, then the reason on stderr | A later request stopped: a refusal, a lost connection or a protocol error, each of the last two followed by the outcome-unknown line. A stopped request's own removals are not counted. |
@@ -2074,6 +2074,7 @@ The kernel removes at most 32 posts per request, so the CLI sends another reques
 | `you may not manage a board: <message>` | Your role does not grant `board.manage`, you are contained, or the kernel refused this session. |
 | `the kernel refused: <message>` | A board refusal that managing does not normally produce. |
 | `the kernel refused the request: <message>` | Any other refusal. |
+| `the kernel holds settings other than the ones asked for` | A settings change was answered with other values; the three lines on stdout are what the kernel holds. |
 | `protocol error: the kernel's answer was not a board reply` | The answer was not a board reply. |
 
 When the connection fails, or the answer is not a board reply, after a change or a clear was asked for, the CLI prints the error and then the matching `the outcome is unknown` sentence: a lost connection may come before or after the request left, and the CLI cannot tell the two apart, and an answer that is not a board reply does not say whether the request ran. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. Either failure while reading the settings prints the error alone.
