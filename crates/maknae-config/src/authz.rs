@@ -4222,7 +4222,7 @@ mod tests {
     #[test]
     fn lone_star_grant_matches_empty_and_long_argv() {
         let p = lone_tool();
-        let long: Vec<&str> = std::iter::repeat("x").take(64).collect();
+        let long: Vec<&str> = std::iter::repeat_n("x", 64).collect();
         for argv in [&[][..], &["build"], &long] {
             let call = tool_call("a", "cargo", argv);
             assert!(p.matches(&call, Side::Allow), "{argv:?}");
