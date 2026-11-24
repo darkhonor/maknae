@@ -6903,16 +6903,21 @@ mod board {
         }
 
         /// Permits `board.manage` to anyone, so a request reaches the check after the permit.
-        struct PermitsManage(Arc<Pdp>);
+        /// With `Some(id)`, the permit also carries an obligation named `id`.
+        struct PermitsManage(Arc<Pdp>, Option<&'static str>);
 
         impl PermitsManage {
-            fn permit(req: &maknae_security::Request) -> Option<maknae_security::Decided> {
+            fn permit(&self, req: &maknae_security::Request) -> Option<maknae_security::Decided> {
+                let obligation = |id: &str| maknae_security::Obligation {
+                    id: id.into(),
+                    params: maknae_security::Attributes::new(),
+                };
                 (req.action.0 == "board.manage").then(|| maknae_security::Decided {
                     verdict: maknae_security::Verdict::Permit {
-                        obligations: vec![maknae_security::Obligation {
-                            id: "audit".into(),
-                            params: maknae_security::Attributes::new(),
-                        }],
+                        obligations: std::iter::once("audit")
+                            .chain(self.1)
+                            .map(obligation)
+                            .collect(),
                     },
                     role: Some("user"),
                     rule: None,
@@ -6932,7 +6937,7 @@ mod board {
                 (d.verdict, d.role)
             }
             fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
-                Self::permit(req).unwrap_or_else(|| self.0.decide_cited(req))
+                self.permit(req).unwrap_or_else(|| self.0.decide_cited(req))
             }
             fn decide_cited_all(
                 &self,
@@ -6985,7 +6990,7 @@ mod board {
             w.enable(HOBI_UID, true);
             let h = w.at_work("hobi");
             let kept = w.stored("suga", "sentinel-698-structural", PostLabels::default());
-            let permits = Arc::new(PermitsManage(Arc::clone(&w.pdp)));
+            let permits = Arc::new(PermitsManage(Arc::clone(&w.pdp), None));
             for (verb, op) in [
                 (read_settings(), "settings"),
                 (set(false, true, BoardReport::Every), "settings"),
@@ -7015,11 +7020,315 @@ mod board {
             assert_eq!(w.posts(), [kept]);
         }
 
+        impl World {
+            /// One client-channel request decided by `authorizer`, as `raw_alone` serves it.
+            async fn manage_raw<P>(
+                &self,
+                authorizer: Arc<P>,
+                verb: Verb,
+                records: &Arc<Records>,
+            ) -> Vec<u8>
+            where
+                P: maknae_security::Authorizer
+                    + maknae_kernel::SensitiveNow
+                    + maknae_kernel::CatalogNow
+                    + Send
+                    + Sync
+                    + 'static,
+            {
+                let session =
+                    maknae_kernel::SessionRecord::for_test(self.me, Some(self.user.clone()))
+                        .with_session_id(698);
+                let gate = maknae_kernel::FactsGate::allow_as(
+                    Some(self.user.clone()),
+                    Some(PathBuf::from(&*self.root)),
+                );
+                let wiring = Wiring {
+                    live: Arc::new(maknae_kernel::LiveConfig::with_forges_for_test(
+                        Default::default(),
+                        None,
+                        self.forges.clone(),
+                    )),
+                    egress: maknae_kernel::unavailable_egress(),
+                    conversations: common::conversations(),
+                };
+                self.serve_as(authorizer, session, gate, verb, None, records, None, wiring)
+                    .await
+            }
+
+            /// The append at which this world's first `board.manage` record lands.
+            async fn first_manage_append(&self) -> usize {
+                let records = Records::new(0);
+                self.ask_with(read_settings(), &records).await;
+                records
+                    .snapshot()
+                    .iter()
+                    .position(|r| r.action == "board.manage")
+                    .expect("a board.manage record")
+                    + 1
+            }
+        }
+
+        async fn answered(raw: &[u8]) -> Option<RespResult> {
+            if raw.is_empty() {
+                return None;
+            }
+            let mut cursor = raw;
+            let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+            Some(maknae_proto::decode_response(&frame).unwrap().result)
+        }
+
+        async fn no_success(raw: &[u8]) {
+            match answered(raw).await {
+                None => {}
+                Some(r) => assert!(unauthorized(&r) || refused(&r).is_some(), "{r:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_failed_intent_append_stops_the_settings_write() {
+            let w = manage_world("manage-intent-fails-settings", "user");
+            let was = Settings {
+                enabled: true,
+                participate: false,
+                report: maknae_kernel::Report::Summary,
+            };
+            w.agents.board.set_settings(w.key(), was).unwrap();
+            let n = w.first_manage_append().await;
+            let records = Records::new(n);
+            let raw = w.raw(set(false, true, BoardReport::Every), &records).await;
+            no_success(&raw).await;
+            let snap = records.snapshot();
+            assert_eq!(snap[n - 1].action, "board.manage");
+            assert_eq!(snap[n - 1].outcome.reason, "intent recorded");
+            assert_eq!(snap.len(), n, "nothing after the failed intent: {snap:?}");
+            assert_eq!(w.settings_of(w.me), was);
+        }
+
+        #[tokio::test]
+        async fn a_failed_intent_append_stops_the_clear() {
+            let w = manage_world("manage-intent-fails-clear", "user");
+            let posts: Vec<PostId> = (0..3)
+                .map(|i| w.stored("hobi", &format!("sentinel-698-{i}"), PostLabels::default()))
+                .collect();
+            let n = w.first_manage_append().await;
+            let records = Records::new(n);
+            let raw = w.raw(clear(), &records).await;
+            no_success(&raw).await;
+            let snap = records.snapshot();
+            assert_eq!(snap[n - 1].outcome.reason, "intent recorded");
+            assert_eq!(snap[n - 1].board, removed_said(&posts));
+            assert_eq!(snap.len(), n, "nothing after the failed intent: {snap:?}");
+            assert_eq!(w.posts(), posts);
+        }
+
+        #[tokio::test]
+        async fn a_failed_single_record_sends_no_settings_and_no_cleared_reply() {
+            let w = manage_world("manage-record-fails", "user");
+            let n = w.first_manage_append().await;
+            for verb in [read_settings(), clear()] {
+                let records = Records::new(n);
+                let raw = w.raw(verb, &records).await;
+                no_success(&raw).await;
+                let snap = records.snapshot();
+                assert_eq!(snap.len(), n, "{snap:?}");
+                assert_eq!(snap[n - 1].outcome.reason, "done");
+            }
+            assert_eq!(w.settings_of(w.me), Settings::default());
+        }
+
+        async fn twice_while_the_store_stalls(
+            w: &World,
+            verbs: (Verb, Verb),
+        ) -> (
+            (RespResult, Vec<AuditRecord>),
+            (RespResult, Vec<AuditRecord>),
+        ) {
+            let _alone = STORE.write().await;
+            w.board_blobs.slow(Some(Duration::from_millis(3500)));
+            let (first, second) = (Records::new(0), Records::new(0));
+            let stalls = w.board_blobs.clone();
+            let (a, b) = tokio::join!(w.raw_alone(verbs.0, &first), async {
+                tokio::task::spawn_blocking(move || stalls.await_stalls(1))
+                    .await
+                    .unwrap();
+                w.raw_alone(verbs.1, &second).await
+            });
+            w.board_blobs.slow(None);
+            let of = |r: &Arc<Records>| -> Vec<AuditRecord> {
+                r.snapshot()
+                    .into_iter()
+                    .filter(|r| r.action == "board.manage")
+                    .collect()
+            };
+            (
+                (answered(&a).await.expect("an answer"), of(&first)),
+                (answered(&b).await.expect("an answer"), of(&second)),
+            )
+        }
+
+        #[tokio::test]
+        async fn a_settings_write_the_store_does_not_take_or_finish_in_time_is_refused() {
+            let w = manage_world("manage-settings-stalled", "user");
+            let ((late, late_records), (busy, busy_records)) = twice_while_the_store_stalls(
+                &w,
+                (
+                    set(true, true, BoardReport::Every),
+                    set(false, true, BoardReport::Summary),
+                ),
+            )
+            .await;
+            assert_eq!(refused(&late), Some(BoardDefect::OutcomeUnknown));
+            assert_eq!(
+                (
+                    late_records[1].outcome.result.as_str(),
+                    late_records[1].outcome.reason.as_str(),
+                    late_records[1].outcome.posture.as_str()
+                ),
+                (
+                    "permit",
+                    "outcome unknown: the board store did not answer in time",
+                    "unavailable"
+                )
+            );
+            assert_eq!(refused(&busy), Some(BoardDefect::TryAgain));
+            assert_eq!(
+                (
+                    busy_records[1].outcome.result.as_str(),
+                    busy_records[1].outcome.reason.as_str(),
+                    busy_records[1].outcome.posture.as_str()
+                ),
+                (
+                    "permit",
+                    "store: not done: the board store was busy",
+                    "unauthorized"
+                )
+            );
+            assert_eq!(busy_records.len(), 2);
+            let landed = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !w.settings_of(w.me).enabled {
+                assert!(
+                    tokio::time::Instant::now() < landed,
+                    "the late write never lands"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: true,
+                    participate: true,
+                    report: maknae_kernel::Report::Every
+                },
+                "the busy write never ran"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_clear_the_store_does_not_take_or_finish_in_time_names_nothing_removed() {
+            let w = manage_world("manage-clear-stalled", "user");
+            let posts: Vec<PostId> = (0..2)
+                .map(|i| w.stored("hobi", &format!("sentinel-698-{i}"), PostLabels::default()))
+                .collect();
+            let ((late, late_records), (busy, busy_records)) =
+                twice_while_the_store_stalls(&w, (clear(), clear())).await;
+            assert_eq!(refused(&late), Some(BoardDefect::OutcomeUnknown));
+            assert_eq!(refused(&busy), Some(BoardDefect::TryAgain));
+            for (records, page, reason, posture) in [
+                (
+                    &late_records,
+                    &posts[..],
+                    "outcome unknown: the board store did not answer in time",
+                    "unavailable",
+                ),
+                (
+                    &busy_records,
+                    &posts[1..],
+                    "store: not done: the board store was busy",
+                    "unauthorized",
+                ),
+            ] {
+                assert_eq!(records.len(), 2, "{records:?}");
+                assert_eq!(
+                    records[0].board,
+                    removed_said(page),
+                    "the intent names the page"
+                );
+                assert_eq!(
+                    (
+                        records[1].outcome.result.as_str(),
+                        records[1].outcome.reason.as_str(),
+                        records[1].outcome.posture.as_str()
+                    ),
+                    ("permit", reason, posture)
+                );
+                assert_eq!(records[1].board, None, "{reason}: nothing is named removed");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_permit_with_an_obligation_the_kernel_cannot_honour_touches_no_board() {
+            let w = manage_world("manage-unhonourable", "user");
+            let was = Settings {
+                enabled: true,
+                participate: false,
+                report: maknae_kernel::Report::Summary,
+            };
+            w.agents.board.set_settings(w.key(), was).unwrap();
+            let kept = w.stored("hobi", "sentinel-698-unhonourable", PostLabels::default());
+            let stub = Arc::new(PermitsManage(Arc::clone(&w.pdp), Some("sentinel-698-ob")));
+            for (verb, op) in [
+                (read_settings(), "settings"),
+                (set(false, true, BoardReport::Every), "settings"),
+                (clear(), "clear"),
+            ] {
+                let records = Records::new(0);
+                let raw = w.manage_raw(Arc::clone(&stub), verb, &records).await;
+                let answer = answered(&raw).await.expect("an answer");
+                assert!(unauthorized(&answer), "{answer:?}");
+                let records: Vec<AuditRecord> = records
+                    .snapshot()
+                    .into_iter()
+                    .filter(|r| r.action == "board.manage")
+                    .collect();
+                assert_eq!(
+                    trail(&records),
+                    [(
+                        "board.manage".to_string(),
+                        Some(op.to_string()),
+                        "deny".to_string(),
+                        "unhonorable obligation: sentinel-698-ob".to_string(),
+                        "unauthorized".to_string(),
+                        w.own_board(),
+                        None
+                    )]
+                );
+                assert_eq!(w.settings_of(w.me), was, "{op}");
+                assert_eq!(w.posts(), [kept], "{op}");
+            }
+        }
+
         #[tokio::test]
         async fn a_contained_person_is_refused_board_manage() {
             let w = manage_world("manage-contained", "adversary");
-            for (verb, op) in [(read_settings(), "settings"), (clear(), "clear")] {
+            let was = Settings {
+                enabled: true,
+                participate: false,
+                report: maknae_kernel::Report::Summary,
+            };
+            w.agents.board.set_settings(w.key(), was).unwrap();
+            let kept = w.stored("hobi", "sentinel-698-contained", PostLabels::default());
+            for (verb, op) in [
+                (read_settings(), "settings"),
+                (set(false, true, BoardReport::Every), "settings"),
+                (clear(), "clear"),
+            ] {
                 let (answer, records) = w.manage(verb).await;
+                assert_eq!(w.settings_of(w.me), was, "{op}");
+                assert!(
+                    w.board_blobs.has(&format!("post.{}.{kept}", w.me)),
+                    "{op}: the post is still written"
+                );
                 assert!(unauthorized(&answer), "{answer:?}");
                 let mut got = trail(&records);
                 assert_eq!(got.len(), 1);

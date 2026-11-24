@@ -831,6 +831,17 @@ pub(crate) fn cursor_audit(cursor: u64) -> BoardAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::BoardStore;
+    use crate::board_store::{LabelValue, PostLabels, Settings, Stored};
+    use crate::task::{CitedTask, TaskObjectForTest};
+    use crate::task_store::RootTasker;
+    use maknae_proto::{
+        Addressee, Attachment, Author, Labels, Media, Post, PostDraft, PostId, PostKind,
+        SecretText, BOARD_READ_PAGE_POSTS,
+    };
+    use maknae_security::{AttrValue, Attributes, RESOURCE_BOARD};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     #[test]
     fn board_manage_keys_the_callers_own_board_and_only_a_persons() {
@@ -912,17 +923,6 @@ mod tests {
             }
         );
     }
-    use crate::board::BoardStore;
-    use crate::board_store::{LabelValue, PostLabels, Settings, Stored};
-    use crate::task::{CitedTask, TaskObjectForTest};
-    use crate::task_store::RootTasker;
-    use maknae_proto::{
-        Addressee, Attachment, Author, Labels, Media, Post, PostDraft, PostId, PostKind,
-        SecretText, BOARD_READ_PAGE_POSTS,
-    };
-    use maknae_security::{AttrValue, Attributes, RESOURCE_BOARD};
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
 
     const BOB: BoardKey = BoardKey(1000);
 
