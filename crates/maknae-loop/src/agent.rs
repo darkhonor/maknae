@@ -1019,6 +1019,8 @@ mod tests {
                     output: CatalogOutput::Redacted,
                     binds: vec![],
                     programs: vec![],
+                    open: vec![],
+                    shapes: vec![],
                 }],
                 forges: vec![],
             })
@@ -1095,6 +1097,8 @@ mod tests {
                 output: CatalogOutput::Redacted,
                 binds: vec![],
                 programs: vec![],
+                open: vec![],
+                shapes: vec![],
             }],
             forges: vec![],
         })
@@ -1206,6 +1210,8 @@ mod tests {
                 output: CatalogOutput::Redacted,
                 binds: vec![],
                 programs: vec![],
+                open: vec![],
+                shapes: vec![],
             }],
             forges: vec![],
         })

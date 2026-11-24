@@ -30,6 +30,27 @@ fn lines(g: &Graph) -> Vec<String> {
                     terminal_safe(pattern)
                 ));
             }
+            if catalog::open_program(g, &entry.key, name) {
+                out.push(format!("  {}  (open)", terminal_safe(name)));
+            }
+            for shape in catalog::shapes(g, &entry.key, name) {
+                out.push(format!(
+                    "  {}:{}  {}  {}",
+                    terminal_safe(name),
+                    terminal_safe(&shape.name),
+                    terminal_safe(&shape.access),
+                    terminal_safe(&shape.description)
+                ));
+                for slot in &shape.slots {
+                    out.push(format!(
+                        "    {}  {}  {}  {}",
+                        terminal_safe(&slot.name),
+                        terminal_safe(&slot.at),
+                        terminal_safe(&slot.members.join("|")),
+                        terminal_safe(&slot.description)
+                    ));
+                }
+            }
         }
     }
     let forges: Vec<String> = g
@@ -71,6 +92,8 @@ mod tests {
                 output: CatalogOutput::Redacted,
                 binds: vec!["git".into()],
                 programs: vec![("git".into(), vec!["status".into(), "log *".into()])],
+                open: vec![],
+                shapes: vec![],
             }],
             forges: vec![CatalogForge {
                 name: "hub".into(),
@@ -101,6 +124,51 @@ mod tests {
         let mut bad = reply();
         bad.digest = CatalogDigest([0; 32]);
         assert!(catalog_lines(&bad).is_err());
+    }
+
+    #[test]
+    fn it_prints_open_programs_and_shapes_with_their_slots() {
+        use maknae_graph::catalog::{CatalogShape, CatalogSlot};
+        let bytes = catalog::encode(&CatalogInput {
+            entries: vec![CatalogEntry {
+                name: "gh".into(),
+                description: None,
+                executes_workspace: false,
+                output: CatalogOutput::Redacted,
+                binds: vec![],
+                programs: vec![],
+                open: vec!["sh".into()],
+                shapes: vec![(
+                    "gh".into(),
+                    vec![CatalogShape {
+                        name: "issue.list".into(),
+                        description: "List issues.".into(),
+                        access: "read".into(),
+                        slots: vec![CatalogSlot {
+                            name: "state".into(),
+                            at: "option".into(),
+                            members: vec!["all".into(), "open".into()],
+                            description: "Which.".into(),
+                        }],
+                    }],
+                )],
+            }],
+            forges: vec![],
+        })
+        .unwrap();
+        let reply = ToolCatalogReply {
+            digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
+            graph: maknae_proto::Bytes::new(zeroize::Zeroizing::new(bytes)),
+        };
+        assert_eq!(
+            catalog_lines(&reply).unwrap(),
+            [
+                "gh",
+                "  gh:issue.list  read  List issues.",
+                "    state  option  all|open  Which.",
+                "  sh  (open)",
+            ]
+        );
     }
 
     #[test]

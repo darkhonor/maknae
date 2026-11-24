@@ -5,10 +5,12 @@ use crate::binding::Resolution;
 use crate::decide::{role_stage, LoadedPolicy, SubjectEntry};
 use crate::role::Role;
 use maknae_config::{
-    ArgPattern, CommandForm, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolTarget,
-    ToolsCatalog,
+    ArgPattern, CommandForm, Constraint, ForgeSet, OutputToModel, Pattern, Shape, ShapeClass,
+    ShapePattern, Slot, SlotAt, Stage, ToolEntry, ToolTarget, ToolsCatalog,
 };
-use maknae_graph::catalog::{CatalogEntry, CatalogForge, CatalogInput, CatalogOutput};
+use maknae_graph::catalog::{
+    CatalogEntry, CatalogForge, CatalogInput, CatalogOutput, CatalogShape, CatalogSlot,
+};
 use maknae_proto::{CatalogDigest, CredentialRef, TOOL_CATALOG_MAX_BYTES};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -120,18 +122,32 @@ fn effective_lists<'a>(
     )
 }
 
-/// A lower bound on the bytes `entry` puts in the graph: each program and pattern key
-/// repeats the entry and program names, and each pattern carries its text again.
+/// A lower bound on the bytes `entry` puts in the graph: each program, pattern and shape
+/// key repeats the entry and program names, and each pattern and shape carries its text again.
 fn graph_text(entry: &CatalogEntry) -> usize {
-    entry
-        .programs
+    let patterns = entry.programs.iter().map(|(program, patterns)| {
+        let key = entry.name.len() + 1 + program.len();
+        patterns
+            .iter()
+            .fold(key, |n, text| n.saturating_add(key + 1 + 2 * text.len()))
+    });
+    let open = entry
+        .open
         .iter()
-        .map(|(program, patterns)| {
-            let key = entry.name.len() + 1 + program.len();
-            patterns
-                .iter()
-                .fold(key, |n, text| n.saturating_add(key + 1 + 2 * text.len()))
+        .map(|program| entry.name.len() + 1 + program.len());
+    let shapes = entry.shapes.iter().flat_map(|(program, shapes)| {
+        let key = entry.name.len() + 1 + program.len() + 1;
+        shapes.iter().map(move |shape| {
+            let slots = shape.slots.iter().fold(0usize, |n, slot| {
+                let members = slot.members.iter().map(String::len).sum::<usize>();
+                n.saturating_add(slot.name.len() + slot.at.len() + slot.description.len() + members)
+            });
+            key.saturating_add(shape.name.len() * 2 + shape.description.len() + slots)
         })
+    });
+    patterns
+        .chain(open)
+        .chain(shapes)
         .fold(0, usize::saturating_add)
 }
 
@@ -167,27 +183,47 @@ fn reach_checked(entry: &ToolEntry, tools: &ToolsCatalog) -> bool {
 }
 
 fn granted(entry: &ToolEntry, stages: &[&Stage<'_>]) -> Option<CatalogEntry> {
-    let programs: Vec<(String, Vec<String>)> = entry
-        .commands
-        .iter()
-        .filter_map(|(program, command)| {
-            let ceilings: &[ArgPattern] = match &command.form {
-                CommandForm::Positional(patterns) => patterns,
-                CommandForm::Grammar { .. } | CommandForm::Open => &[],
-            };
-            let kept: Vec<String> = ceilings
-                .iter()
-                .filter(|ceiling| {
-                    stages
-                        .iter()
-                        .any(|s| admits(s, &entry.name, program, ceiling))
-                })
-                .map(ArgPattern::canonical)
-                .collect();
-            (!kept.is_empty()).then(|| (program.clone(), kept))
-        })
-        .collect();
-    (!programs.is_empty()).then(|| CatalogEntry {
+    let mut programs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut open = Vec::new();
+    let mut shapes: Vec<(String, Vec<CatalogShape>)> = Vec::new();
+    for (program, command) in &entry.commands {
+        match &command.form {
+            CommandForm::Positional(ceilings) => {
+                let kept: Vec<String> = ceilings
+                    .iter()
+                    .filter(|ceiling| {
+                        stages
+                            .iter()
+                            .any(|s| admits(s, &entry.name, program, ceiling))
+                    })
+                    .map(ArgPattern::canonical)
+                    .collect();
+                if !kept.is_empty() {
+                    programs.push((program.clone(), kept));
+                }
+            }
+            CommandForm::Grammar { shapes: all, .. } => {
+                let kept: Vec<CatalogShape> = all
+                    .iter()
+                    .filter(|(name, _)| {
+                        stages
+                            .iter()
+                            .any(|s| admits_shape(s, &entry.name, program, name))
+                    })
+                    .map(|(name, shape)| catalog_shape(name, shape))
+                    .collect();
+                if !kept.is_empty() {
+                    shapes.push((program.clone(), kept));
+                }
+            }
+            CommandForm::Open => {
+                if stages.iter().any(|s| admits_open(s, &entry.name, program)) {
+                    open.push(program.clone());
+                }
+            }
+        }
+    }
+    (!(programs.is_empty() && open.is_empty() && shapes.is_empty())).then(|| CatalogEntry {
         name: entry.name.clone(),
         description: entry.description.clone(),
         executes_workspace: entry.executes_workspace,
@@ -197,7 +233,69 @@ fn granted(entry: &ToolEntry, stages: &[&Stage<'_>]) -> Option<CatalogEntry> {
         },
         binds: entry.binds.iter().cloned().collect(),
         programs,
+        open,
+        shapes,
     })
+}
+
+fn catalog_shape(name: &str, shape: &Shape) -> CatalogShape {
+    CatalogShape {
+        name: name.to_owned(),
+        description: shape.description.clone(),
+        access: match shape.class {
+            ShapeClass::Read => "read",
+            ShapeClass::Write => "write",
+        }
+        .into(),
+        slots: shape
+            .slots
+            .iter()
+            .map(|(slot, def)| catalog_slot(slot, def))
+            .collect(),
+    }
+}
+
+fn catalog_slot(name: &str, slot: &Slot) -> CatalogSlot {
+    CatalogSlot {
+        name: name.to_owned(),
+        at: match slot.at {
+            SlotAt::Token => "token",
+            SlotAt::Option => "option",
+            SlotAt::Stdin => "stdin",
+            SlotAt::File => "file",
+        }
+        .into(),
+        members: match &slot.constraint {
+            Some(Constraint::Enum(members)) => members.iter().cloned().collect(),
+            Some(Constraint::Pattern(_)) | None => Vec::new(),
+        },
+        description: slot.description.clone(),
+    }
+}
+
+fn admits_shape(stage: &Stage<'_>, entry: &str, program: &str, shape: &str) -> bool {
+    let ceiling = ShapePattern::Exact(shape.to_owned());
+    stage
+        .allow
+        .iter()
+        .flat_map(|l| l.iter())
+        .filter_map(|p| tool_shape(p, entry, program))
+        .any(|a| a.overlaps(&ceiling))
+        && !stage
+            .deny
+            .iter()
+            .flat_map(|l| l.iter())
+            .filter_map(|p| tool_shape(p, entry, program))
+            .any(|d| d.covers(&ceiling))
+}
+
+fn admits_open(stage: &Stage<'_>, entry: &str, program: &str) -> bool {
+    stage
+        .allow
+        .iter()
+        .flat_map(|l| l.iter())
+        .filter_map(|p| tool_args(p, entry, program))
+        .any(|granted| admits(stage, entry, program, granted))
 }
 
 fn admits(stage: &Stage<'_>, entry: &str, program: &str, ceiling: &ArgPattern) -> bool {
@@ -220,6 +318,16 @@ fn tool_args<'p>(p: &'p Pattern, entry: &str, program: &str) -> Option<&'p ArgPa
         Pattern::Tool(t) if t.entry == entry && t.program == program => match &t.target {
             ToolTarget::Args(args) => Some(args),
             ToolTarget::Shape(_) => None,
+        },
+        Pattern::Tool(_) | Pattern::Read(_) | Pattern::Write(_) => None,
+    }
+}
+
+fn tool_shape<'p>(p: &'p Pattern, entry: &str, program: &str) -> Option<&'p ShapePattern> {
+    match p {
+        Pattern::Tool(t) if t.entry == entry && t.program == program => match &t.target {
+            ToolTarget::Shape(shape) => Some(shape),
+            ToolTarget::Args(_) => None,
         },
         Pattern::Tool(_) | Pattern::Read(_) | Pattern::Write(_) => None,
     }
@@ -824,6 +932,8 @@ mod tests {
                 ("p".into(), vec!["ab".into(), "c".into()]),
                 ("qq".into(), vec![]),
             ],
+            open: vec![],
+            shapes: vec![],
         };
         assert_eq!(graph_text(&entry), 3 + (3 + 1 + 4) + (3 + 1 + 2) + 4);
     }
@@ -848,6 +958,281 @@ mod tests {
             test_digest,
             s,
         )
+    }
+
+    const GH_GRAMMAR: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  issue.list:\n    description: List issues.\n    class: read\n    forge: { base: [read] }\n    argv: [issue, list, \"--state={state}\"]\n    slots:\n      state: { at: option, enum: [open, closed, all], description: Which issues. }\n  issue.view:\n    description: View an issue.\n    class: read\n    forge: { base: [read] }\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"^sentinel-674-rx[0-9]+$\", description: The number. }\n  issue.delete:\n    description: Delete an issue.\n    class: write\n    forge: { base: [issue-write] }\n    argv: [issue, delete, sentinel-674-argv-lit]\n  pr.view:\n    description: View a PR.\n    class: read\n    forge: { base: [read] }\n    argv: [pr, view]\n  pr.create:\n    description: Open a PR.\n    class: write\n    forge: { base: [issue-write] }\n    argv: [pr, create]\n";
+    const GH_SHAPES: &str = "[issue.list, issue.view, issue.delete, pr.view, pr.create]";
+
+    fn gh_entry(name: &str) -> String {
+        format!("  {name}:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    credential: sentinel-674-app-class\n    binds: {{ git: {{ resolver: git }} }}\n    commands:\n      gh: {{ grammar: gh, shapes: {GH_SHAPES} }}\n")
+    }
+
+    fn grammar_catalog(entries: &str) -> ToolsCatalog {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", GH_GRAMMAR).unwrap(),
+        );
+        let tools = format!("schema_version: 1\ncredential_classes:\n{APP_CLASS}tools:\n{entries}");
+        let catalog = ToolsCatalog::parse_with(&tools, &grammars).unwrap();
+        assert!(catalog.disabled().is_empty(), "{:?}", catalog.disabled());
+        catalog
+    }
+
+    fn grammar_snap(authz: &str, entries: &str, agents: AgentsLoad) -> std::sync::Arc<Snapshot> {
+        let src = try_source(authz, Some(BINDINGS), &UIDS, agents)
+            .unwrap()
+            .with_tools(grammar_catalog(entries));
+        compiled(&src)
+    }
+
+    fn shape_names(g: &Graph, entry: &str, program: &str) -> Vec<String> {
+        let mut names: Vec<String> = cat::shapes(g, entry, program)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn user_role(allow: &[&str], deny: &[&str]) -> String {
+        let list = |l: &[&str]| {
+            l.iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "{}roles:\n  user:\n    permissions:\n      allow: [{}]\n      deny: [{}]\n",
+            site(&[], &[]),
+            list(allow),
+            list(deny)
+        )
+    }
+
+    #[test]
+    fn only_admitted_shapes_are_granted() {
+        let authz = user_role(
+            &["Tool(gh-tool gh:issue.*)"],
+            &["Tool(gh-tool gh:issue.delete)"],
+        );
+        let s = grammar_snap(&authz, &gh_entry("gh-tool"), AgentsLoad::default());
+        let g = graph(&s, BOB);
+        assert_eq!(cat::entries(&g), ["gh-tool"]);
+        assert_eq!(
+            shape_names(&g, "gh-tool", "gh"),
+            ["issue.list", "issue.view"]
+        );
+        assert!(cat::patterns(&g, "gh-tool", "gh").is_empty());
+        let list = cat::shapes(&g, "gh-tool", "gh")
+            .into_iter()
+            .find(|s| s.name == "issue.list")
+            .unwrap();
+        assert_eq!(list.access, "read");
+        assert_eq!(list.description, "List issues.");
+        assert_eq!(list.slots.len(), 1);
+        assert_eq!(list.slots[0].name, "state");
+        assert_eq!(list.slots[0].at, "option");
+        assert_eq!(list.slots[0].members, ["all", "closed", "open"]);
+    }
+
+    #[test]
+    fn ungranted_shapes_have_no_node() {
+        let authz = user_role(&["Tool(gh-tool gh:issue.view)"], &[]);
+        let s = grammar_snap(&authz, &gh_entry("gh-tool"), AgentsLoad::default());
+        let g = graph(&s, BOB);
+        let nodes: Vec<&str> = g
+            .nodes()
+            .iter()
+            .filter(|n| n.kind == cat::SHAPE)
+            .map(|n| n.key.as_str())
+            .collect();
+        assert_eq!(nodes, ["gh-tool/gh/issue.view"]);
+        let bytes = catalog(&s, BOB).bytes.clone();
+        for ungranted in [
+            "issue.list",
+            "issue.delete",
+            "pr.view",
+            "pr.create",
+            "Open a PR",
+        ] {
+            assert!(
+                !bytes
+                    .windows(ungranted.len())
+                    .any(|w| w == ungranted.as_bytes()),
+                "{ungranted}"
+            );
+        }
+        let none = grammar_snap(&site(&[], &[]), &gh_entry("gh-tool"), AgentsLoad::default());
+        assert!(cat::entries(&graph(&none, BOB)).is_empty());
+        let args_only = user_role(&["Tool(gh-tool gh issue *)"], &[]);
+        let s = grammar_snap(&args_only, &gh_entry("gh-tool"), AgentsLoad::default());
+        assert!(cat::entries(&graph(&s, BOB)).is_empty());
+    }
+
+    #[test]
+    fn a_wildcard_grant_reaches_every_shape_and_a_prefix_deny_removes_its_family() {
+        let authz = user_role(&["Tool(gh-tool gh:*)"], &["Tool(gh-tool gh:pr.*)"]);
+        let s = grammar_snap(&authz, &gh_entry("gh-tool"), AgentsLoad::default());
+        assert_eq!(
+            shape_names(&graph(&s, BOB), "gh-tool", "gh"),
+            ["issue.delete", "issue.list", "issue.view"]
+        );
+    }
+
+    const OPEN_ENTRY: &str = "  sentinel-674-open:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      sh: { open: true }\n";
+
+    #[test]
+    fn open_program_appears_when_granted() {
+        let tools = format!("schema_version: 1\ntools:\n{OPEN_ENTRY}");
+        let granted = snap(&site(&["Tool(sentinel-674-open sh -c *)"], &[]), &tools);
+        let g = graph(&granted, ALICE);
+        assert_eq!(cat::entries(&g), ["sentinel-674-open"]);
+        assert!(cat::open_program(&g, "sentinel-674-open", "sh"));
+        assert!(cat::patterns(&g, "sentinel-674-open", "sh").is_empty());
+
+        let ungranted = snap(&site(&[], &[]), &tools);
+        assert!(cat::entries(&graph(&ungranted, ALICE)).is_empty());
+
+        let narrow_deny = snap(
+            &site(
+                &["Tool(sentinel-674-open sh -c *)"],
+                &["Tool(sentinel-674-open sh -c ls)"],
+            ),
+            &tools,
+        );
+        assert!(cat::open_program(
+            &graph(&narrow_deny, ALICE),
+            "sentinel-674-open",
+            "sh"
+        ));
+
+        let covering_deny = snap(
+            &site(
+                &["Tool(sentinel-674-open sh -c *)"],
+                &["Tool(sentinel-674-open sh -c *)"],
+            ),
+            &tools,
+        );
+        assert!(cat::entries(&graph(&covering_deny, ALICE)).is_empty());
+    }
+
+    #[test]
+    fn forge_credentials_counts_a_shape_grant() {
+        let grants = ["Tool(gh-tool gh:pr.*)"];
+        let policy = agent_policy(&grants);
+        let s = grammar_snap(
+            &site(&grants, &[]),
+            &gh_entry("gh-tool"),
+            load(vec![hobi()], &[("hobi", &policy)]),
+        );
+        assert_eq!(
+            s.forge_credentials(HOBI, PRINCIPAL),
+            vec![maknae_proto::CredentialRef {
+                kind: "github-app-installation".into(),
+                name: "sentinel-674-app-a".into(),
+            }]
+        );
+        assert_eq!(
+            shape_names(&graph(&s, HOBI), "gh-tool", "gh"),
+            ["pr.create", "pr.view"]
+        );
+        let none = agent_policy(&["Tool(gh-tool gh:issue.*)"]);
+        let other = grammar_snap(
+            &site(&grants, &[]),
+            &gh_entry("gh-tool"),
+            load(vec![hobi()], &[("hobi", &none)]),
+        );
+        assert_eq!(other.forge_credentials(HOBI, PRINCIPAL).len(), 1);
+        let nothing = grammar_snap(
+            &site(&[], &[]),
+            &gh_entry("gh-tool"),
+            load(vec![hobi()], &[("hobi", &agent_policy(&[]))]),
+        );
+        assert!(nothing.forge_credentials(HOBI, PRINCIPAL).is_empty());
+    }
+
+    #[test]
+    fn catalog_never_carries_pattern_argv_or_digest() {
+        let authz = user_role(&["Tool(gh-tool gh:*)"], &[]);
+        let catalog_in = grammar_catalog(&gh_entry("gh-tool"));
+        let CommandForm::Grammar {
+            grammar_canonical, ..
+        } = &catalog_in.entry("gh-tool").unwrap().commands["gh"].form
+        else {
+            panic!("grammar form")
+        };
+        let canonical = grammar_canonical.to_string();
+        let s = grammar_snap(&authz, &gh_entry("gh-tool"), AgentsLoad::default());
+        let bytes = catalog(&s, BOB).bytes.clone();
+        let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(has("issue.view") && has("The number.") && has("closed"));
+        for fenced in [
+            "sentinel-674-rx",
+            "[0-9]",
+            "sentinel-674-argv-lit",
+            "sha256",
+            "sentinel-674-app",
+            "--state=",
+            canonical.as_str(),
+        ] {
+            assert!(!has(fenced), "{fenced} in the catalog");
+        }
+        let g = cat::decode(&bytes).unwrap();
+        for n in g.nodes().iter().filter(|n| n.kind == cat::SHAPE) {
+            for key in n.attrs.keys() {
+                for fence in ["pattern", "argv", "digest", "sha", "canonical", "image"] {
+                    assert!(!key.contains(fence), "{key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_thirty_shape_catalog_fits_the_cap_and_an_oversize_one_is_refused() {
+        let mut grammar = String::from(
+            "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n",
+        );
+        let mut names = Vec::new();
+        for i in 0..30 {
+            names.push(format!("fam{}.op{i}", i % 6));
+            grammar.push_str(&format!("  fam{}.op{i}:\n    description: Shape number {i} does one bounded thing against the repository this task is about.\n    class: read\n    argv: [thing, \"{{a}}\", \"--mode={{b}}\"]\n    slots:\n      a: {{ at: token, pattern: \"^[a-z]+$\", description: The first argument of shape {i}. }}\n      b: {{ at: option, enum: [one, two, three, four], description: The mode of shape {i}. }}\n", i % 6));
+        }
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", &grammar).unwrap(),
+        );
+        let tools = format!(
+            "schema_version: 1\ntools:\n  big:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    commands:\n      gh: {{ grammar: gh, shapes: [{}] }}\n",
+            names.join(", ")
+        );
+        let catalog_in = ToolsCatalog::parse_with(&tools, &grammars).unwrap();
+        assert!(
+            catalog_in.disabled().is_empty(),
+            "{:?}",
+            catalog_in.disabled()
+        );
+        let src = try_source(
+            &site(&["Tool(big gh:*)"], &[]),
+            Some(BINDINGS),
+            &UIDS,
+            AgentsLoad::default(),
+        )
+        .unwrap()
+        .with_tools(catalog_in);
+        let s = compiled(&src);
+        let c = catalog(&s, ALICE);
+        assert!(c.bytes.len() < TOOL_CATALOG_MAX_BYTES, "{}", c.bytes.len());
+        assert_eq!(
+            cat::shapes(&cat::decode(&c.bytes).unwrap(), "big", "gh").len(),
+            30
+        );
+        assert_eq!(
+            input(s.loaded(), ALICE, PRINCIPAL, &forges(), 1000),
+            Err(CatalogError::TooLarge),
+            "shape text counts against the pre-build budget"
+        );
     }
 
     #[test]
