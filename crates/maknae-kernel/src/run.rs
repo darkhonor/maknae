@@ -7848,11 +7848,7 @@ where
         }
     }
 
-    /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
-    /// marks every open task whose agent it no longer enrolls, and the board's posts to hold
-    /// and cursors to drop, without I/O. Called after the install's own locks are released:
-    /// `mark_unenrolled` and `mark` read the snapshot under their store's lock.
-    /// [`Reloader::settle_tasks`] follows once the turn is released.
+    /// The board installs and marks in one hold of its memory lock (ADR-0040 decision 3).
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
         let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer));
         match snapshot {
@@ -26912,6 +26908,135 @@ mod reload_tests {
         assert!(posts.iter().all(|p| !live(&fx, p)));
         let pages = follow(&fx, &target, 3).await;
         assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
+    }
+
+    /// The installed snapshot; at its second answer, a clear's re-check after its unlink,
+    /// it starts a kernel containment of hobi and polls up to 5 s for that install to show,
+    /// then answers what it read first. `landed` says whether the install showed meanwhile.
+    struct ContainDuringTheRecheck {
+        installed: crate::enrollment::SnapshotEnrollment<maknae_authz_basic::HermeticAuthorizer>,
+        reloader: Arc<
+            Reloader<maknae_authz_basic::HermeticAuthorizer, super::reload_fixture::ReloadSink>,
+        >,
+        runtime: tokio::runtime::Handle,
+        calls: std::sync::Mutex<usize>,
+        landed: std::sync::atomic::AtomicBool,
+        edit: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<LiveApplied, LiveRefusal>>>>,
+    }
+
+    impl crate::enrollment::EnrollmentView for ContainDuringTheRecheck {
+        fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+            self.installed.agent_uid(id)
+        }
+
+        fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+            self.installed.agents()
+        }
+
+        fn is_enrolled(&self, uid: u32) -> bool {
+            self.installed.is_enrolled(uid)
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.installed.contained(uid)
+        }
+
+        fn contained_among(
+            &self,
+            uids: &std::collections::BTreeSet<u32>,
+        ) -> std::collections::BTreeSet<u32> {
+            let answer = self.installed.contained_among(uids);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 2 {
+                let reloader = Arc::clone(&self.reloader);
+                *self.edit.lock().unwrap() = Some(self.runtime.spawn(async move {
+                    reloader
+                        .live_edit(LiveRequest {
+                            op: LiveOp::Edit(LiveEdit::Contain(BindingEntry::Uid(HOBI_UID))),
+                            who: LiveInitiator::Operator,
+                            check: LiveCheck::Contain {
+                                target: HOBI_UID,
+                                requester: 0,
+                            },
+                            note: LiveNote::none(),
+                            authorized: None,
+                        })
+                        .await
+                }));
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.installed.contained(HOBI_UID) && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                self.landed.store(
+                    self.installed.contained(HOBI_UID),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
+            answer
+        }
+
+        fn unresolved(&self, uid: u32) -> bool {
+            self.installed.unresolved(uid)
+        }
+
+        fn board(&self, agent: &maknae_config::AgentId) -> bool {
+            self.installed.board(agent)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reloads_install_waits_for_a_clear_holding_its_check() {
+        let fx = fixture_with(
+            "board-clear-install",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                board_blobs: Some(crate::task_store::MemTaskBlobs::default()),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let post = posted_by(&fx, 1002, HOBI);
+        let view = Arc::new(ContainDuringTheRecheck {
+            installed: crate::enrollment::SnapshotEnrollment(Arc::clone(&fx.reloader.authorizer)),
+            reloader: Arc::clone(&fx.reloader),
+            runtime: tokio::runtime::Handle::current(),
+            calls: std::sync::Mutex::new(0),
+            landed: false.into(),
+            edit: std::sync::Mutex::new(None),
+        });
+        let (board, clearing) = (Arc::clone(&fx.reloader.board), Arc::clone(&view));
+        let page = vec![(post.seq, post.id)];
+        let got = tokio::task::spawn_blocking(move || board.clear(post.key, &page, &*clearing))
+            .await
+            .unwrap();
+        let edit = view
+            .edit
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the re-check started the edit");
+        bounded(edit)
+            .await
+            .unwrap()
+            .expect("the containment is installed");
+        assert!(
+            !view.landed.load(std::sync::atomic::Ordering::SeqCst),
+            "the install landed while the clear held its check"
+        );
+        assert_eq!(got.removed, [post.id], "the clear came first");
+        assert!(crate::enrollment::EnrollmentView::contained(
+            &view.installed,
+            HOBI_UID
+        ));
+        assert!(!live(&fx, &post));
+        assert!(fx
+            .reloader
+            .board
+            .due(10)
+            .iter()
+            .all(|d| d.post != Some(post.id)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

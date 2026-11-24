@@ -4670,8 +4670,22 @@ mod tests {
     fn installs_and_every_board_call_run_together_without_a_deadlock() {
         use maknae_authz_basic::Baseline;
         let (_g, pdp) = crate::test_fixtures::shipped_composition();
+        let (_h, adversary) = crate::test_fixtures::shipped_composition_with(
+            "",
+            Some("schema_version: 1\nbindings:\n  adversary: [\"nobody\"]\n"),
+        );
+        let author = nix::unistd::User::from_name("nobody")
+            .unwrap()
+            .expect("the nobody account exists on every supported host")
+            .uid
+            .as_raw();
         let pdp = Arc::new(pdp);
         let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&pdp));
+        let snapshots = [pdp.baseline().snapshot(), adversary.baseline().snapshot()];
+        for (snapshot, contained) in snapshots.iter().zip([false, true]) {
+            pdp.baseline().install(Arc::clone(snapshot));
+            assert_eq!(view.contained(author), contained);
+        }
         let b = MemTaskBlobs::default();
         let (store, _) = wide(&b);
         let store = Arc::new(store);
@@ -4695,10 +4709,11 @@ mod tests {
                 Arc::clone(&pdp),
                 view.clone(),
             );
+            let snapshots = snapshots.clone();
             spawn(
                 "install",
-                Box::new(move |_| {
-                    let next = pdp.baseline().snapshot();
+                Box::new(move |i| {
+                    let next = Arc::clone(&snapshots[i % 2]);
                     store.install_and_mark(|| pdp.baseline().install(next), &view);
                     tasks.mark_unenrolled(&view);
                 }),
@@ -4711,7 +4726,7 @@ mod tests {
                 Box::new(move |i| {
                     let _ = store.post(
                         BOB,
-                        (hobi(), Some(2001)),
+                        (hobi(), Some(author)),
                         None,
                         PostLabels::default(),
                         draft("sentinel-698-load"),
@@ -4772,5 +4787,26 @@ mod tests {
         for w in workers {
             w.join().unwrap();
         }
+        assert!(
+            view.contained(author),
+            "the last install contains the author"
+        );
+        let left = store.held().boards[&BOB].posts.len();
+        assert!(left > 0);
+        assert!(
+            store.candidates(BOB, 0, 1024).is_empty(),
+            "every post left is marked"
+        );
+        store.install_and_mark(|| pdp.baseline().install(Arc::clone(&snapshots[0])), &view);
+        assert_eq!(
+            store.candidates(BOB, 0, 1024).len(),
+            left,
+            "every mark is dropped"
+        );
+        store.install_and_mark(|| pdp.baseline().install(Arc::clone(&snapshots[1])), &view);
+        assert!(
+            store.candidates(BOB, 0, 1024).is_empty(),
+            "every post is marked again"
+        );
     }
 }
