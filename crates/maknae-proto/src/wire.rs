@@ -4605,11 +4605,7 @@ mod tests {
                 more: false,
             }),
         ] {
-            let response = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(payload),
-                catalog_digest: None,
-            };
+            let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), None);
             let bytes = encode_response(&response).unwrap();
             assert!(bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX);
             assert_eq!(decode_response(&bytes).unwrap(), response);
