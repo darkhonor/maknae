@@ -181,6 +181,14 @@ pub(crate) fn link_grammar(config_dir: &Path, vendor_dir: &Path, name: &str) {
     .unwrap();
 }
 
+pub(crate) fn write_shipped_gh_grammar(dir: &Path) {
+    write_grammar(
+        dir,
+        "gh.yaml",
+        include_str!("../../../packaging/common/grammars/gh.yaml"),
+    );
+}
+
 pub(crate) fn write_tools_dropin(dir: &Path, name: &str, text: &str) {
     write_0640(
         &policy_subdir(dir, maknae_config::TOOLS_DROPIN_DIR, 0o750).join(name),

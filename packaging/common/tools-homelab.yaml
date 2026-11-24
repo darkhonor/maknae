@@ -11,24 +11,40 @@
 # Each credential class names an App defined in the Egress Daemon's config; the
 # `app:` values below are examples to replace with your own.
 #
-# An entry is only callable once policy grants it. Grants, per subject or agent:
-#   github-read:  Tool(github-read gh pr view *)  Tool(github-read gh pr diff *)
-#                 Tool(github-read gh pr checks *)  Tool(github-read git fetch *)
-#                 Tool(github-read git checkout *)
-#   github-post:  Tool(github-post gh pr review *)  Tool(github-post gh pr comment *)
-#                 (the entry's own patterns still bound every argument)
-#   rust-fetch:   Tool(rust-fetch cargo fetch --locked*)
-#   rust-build:   Tool(rust-build cargo build *)  Tool(rust-build cargo check *)
-#                 Tool(rust-build cargo clippy *)  Tool(rust-build cargo test *)
-#                 Tool(rust-build cargo fmt --check*)
+# An entry is only callable once policy grants it. The gh commands are shape
+# calls from the grammar in /usr/share/maknae/grammars/gh.yaml (enable it with
+# `ln -s /usr/share/maknae/grammars/gh.yaml /etc/maknae/grammars/gh.yaml`); a
+# grant names the entry and the shape: Tool(<entry> gh:<shape>), the shape exact
+# or a prefix ending in `*` at a segment boundary (gh:issue.*). Grants go in
+# permissions.allow of the site, of a role (roles.<role>.permissions) or of one
+# agent (agents/<id>/policy.yaml); an agent never inherits a role's grants:
+#   github-read:         Tool(github-read gh:pr.view)  Tool(github-read gh:pr.diff)
+#                        Tool(github-read gh:pr.checks)  Tool(github-read git fetch *)
+#                        Tool(github-read git checkout *)
+#   github-post:         Tool(github-post gh:pr.review.comment)
+#                        Tool(github-post gh:pr.review.request-changes)
+#                        Tool(github-post gh:pr.review.approve)  Tool(github-post gh:pr.comment)
+#   github-issues-read:  Tool(github-issues-read gh:issue.*)
+#   github-issues-write: Tool(github-issues-write gh:issue.create)
+#                        Tool(github-issues-write gh:issue.comment)
+#                        Tool(github-issues-write gh:issue.edit.*)  (and the other issue.* shapes)
+#   github-issues-admin: Tool(github-issues-admin gh:issue.transfer)
+#                        Tool(github-issues-admin gh:issue.delete)
+#   rust-fetch:          Tool(rust-fetch cargo fetch --locked*)
+#   rust-build:          Tool(rust-build cargo build *)  Tool(rust-build cargo check *)
+#                        Tool(rust-build cargo clippy *)  Tool(rust-build cargo test *)
+#                        Tool(rust-build cargo fmt --check*)
+#   rust-scratch:        Tool(rust-scratch cargo run *)  Tool(rust-scratch rustc --edition=2021 *)
+#                        (open mode: the model supplies the arguments, so the entry holds
+#                        no credential and no network; deny_args still applies)
 #
-# github-post is shaped as an exact allowlist (fixed argument shapes, no
-# trailing `*`) because gh's short-flag clustering (`-ca`, `-a=true`, `-ab x`)
-# defeats denylists; its deny_args are belt and braces.
-# The body comes on stdin (`--body-file -`), which the front end supplies from
-# the model's text, so posting never reads a file and no path can be steered
-# to a mounted credential.
-# Posting is a separate entry and credential class so it is a separate grant.
+# Each shape is an exact argv; the grammar bounds every value the model supplies.
+# Bodies come on stdin (`--body-file -`), which the front end supplies from the
+# model's text, so posting never reads a file and no path can be steered to a
+# mounted credential.
+# Posting and issue work are separate entries and credential classes so each is
+# a separate grant. Deleting or transferring an issue needs more of the App than
+# editing one, so github-issues-admin holds only those two shapes.
 schema_version: 1
 credential_classes:
   github-read:
@@ -47,6 +63,30 @@ credential_classes:
     minting: trust-plane
     delivery: [env:GH_TOKEN]
     app: maknae-github-post
+  github-issues-read:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-issues-read
+  github-issues-write:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-issues-write
+  github-issues-admin:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-issues-admin
 tools:
   github-read:
     enabled: true
@@ -65,7 +105,8 @@ tools:
     binds: { git: { resolver: git } }
     commands:
       gh:
-        subcommands: ["pr view *", "pr diff *", "pr checks *"]
+        grammar: gh
+        shapes: [pr.view, pr.diff, pr.checks]
         timeout: 5m
         output: 4MiB
       git:
@@ -90,12 +131,71 @@ tools:
     binds: { git: { resolver: git } }
     commands:
       gh:
-        subcommands:
-          - "pr review {git.change} -R {git.base} --comment --body-file -"
-          - "pr review {git.change} -R {git.base} --request-changes --body-file -"
-          - "pr review {git.change} -R {git.base} --approve --body-file -"
-          - "pr comment {git.change} -R {git.base} --body-file -"
-        deny_args: ["-a*"]
+        grammar: gh
+        shapes: [pr.review.comment, pr.review.request-changes, pr.review.approve, pr.comment]
+        timeout: 2m
+        output: 1MiB
+  github-issues-read:
+    enabled: true
+    description: "List and view issues."
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: none
+    credential: github-issues-read
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [issue.list, issue.status, issue.view]
+        timeout: 2m
+        output: 1MiB
+  github-issues-write:
+    enabled: true
+    description: "Create, comment on, edit and close issues."
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: none
+    credential: github-issues-write
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [issue.create, issue.comment, issue.edit.title, issue.edit.body, issue.edit.add-label, issue.edit.remove-label, issue.edit.add-assignee, issue.edit.remove-assignee, issue.close, issue.reopen, issue.lock, issue.unlock, issue.pin, issue.unpin, issue.develop]
+        timeout: 2m
+        output: 1MiB
+  github-issues-admin:
+    enabled: true
+    description: "Transfer or delete issues (needs a more privileged App)."
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: none
+    credential: github-issues-admin
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [issue.transfer, issue.delete]
         timeout: 2m
         output: 1MiB
   rust-fetch:
@@ -145,3 +245,26 @@ tools:
         deny_args: ["--config*", "-Z*", "+*"]
         timeout: 30m
         output: 16MiB
+  rust-scratch:
+    enabled: true
+    description: Run cargo or rustc with arguments of your choosing and no network.
+    image:
+      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: true
+    network: none
+    workspace: rw
+    output_to_model: redacted
+    resources: { cpus: 2, memory: 4Gi }
+    lifetime: { max: 15m }
+    commands:
+      cargo:
+        open: true
+        deny_args: ["--config*", "-Z*", "+*"]
+        timeout: 15m
+        output: 4MiB
+      rustc:
+        open: true
+        timeout: 15m
+        output: 4MiB

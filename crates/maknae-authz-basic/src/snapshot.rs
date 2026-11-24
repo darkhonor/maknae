@@ -1073,9 +1073,10 @@ mod tests {
 
     #[test]
     fn shipped_policy_never_permits_tool_invoke() {
-        let catalog = maknae_config::ToolsCatalog::parse(include_str!(
-            "../../../packaging/common/tools-homelab.yaml"
-        ))
+        let catalog = maknae_config::ToolsCatalog::parse_with(
+            include_str!("../../../packaging/common/tools-homelab.yaml"),
+            &maknae_config::shipped_grammars(),
+        )
         .unwrap();
         let s = source_with(SHIPPED, Some(BINDINGS)).with_tools(catalog);
         let snap = snap(&s);

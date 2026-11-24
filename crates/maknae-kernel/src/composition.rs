@@ -1170,7 +1170,7 @@ mod tests {
     const TOOL_SITE_POLICY: &str = concat!(
         "schema_version: 1\n",
         "permissions:\n",
-        "  allow: [\"Tool(github-read gh pr view *)\", \"Tool(rust-build cargo build *)\"]\n",
+        "  allow: [\"Tool(github-read gh:pr.view)\", \"Tool(rust-build cargo build *)\"]\n",
         "  deny: [\"Tool(rust-build cargo build --release *)\"]\n",
         "subjects:\n",
         "  operator:\n",
@@ -1203,6 +1203,7 @@ mod tests {
             &g.0,
             include_str!("../../../packaging/common/tools-homelab.yaml"),
         );
+        crate::test_fixtures::write_shipped_gh_grammar(&g.0);
         basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
         for (id, uid, policy) in [("hobi", 2001, Some(TOOL_AGENT_POLICY)), ("jin", 2002, None)] {
             crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), uid, "user");

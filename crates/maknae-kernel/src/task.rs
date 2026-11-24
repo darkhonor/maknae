@@ -10630,7 +10630,7 @@ mod tests {
             b"sentinel-168c-sealed-forge-token-".repeat(5)
         }
         const APP: &str = "maknae-github-read";
-        const GRANT: &str = "Tool(github-read gh pr view *)";
+        const GRANT: &str = "Tool(github-read gh:pr.view)";
 
         type Answer = Box<dyn Fn(&ReachRequest) -> (Duration, Option<EgressSocketReply>) + Send>;
 
@@ -10773,6 +10773,7 @@ mod tests {
                 &g.0,
                 include_str!("../../../packaging/common/tools-homelab.yaml"),
             );
+            crate::test_fixtures::write_shipped_gh_grammar(&g.0);
             let site = format!(
                 "schema_version: 1\npermissions:\n  allow: [\"{GRANT}\"]\n  deny: []\nroles:\n  user:\n    allow: [\"session.task\"]\n"
             );

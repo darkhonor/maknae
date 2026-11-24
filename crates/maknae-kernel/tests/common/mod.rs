@@ -312,6 +312,18 @@ pub fn write_0640(path: &std::path::Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
 }
 
+pub fn write_shipped_gh_grammar(config_dir: &std::path::Path) {
+    let dir = config_dir.join(maknae_config::GRAMMARS_DIR);
+    if !dir.exists() {
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+    }
+    write_0640(
+        &dir.join("gh.yaml"),
+        include_str!("../../../../packaging/common/grammars/gh.yaml"),
+    );
+}
+
 pub struct DirGuard(pub PathBuf);
 
 impl std::ops::Deref for DirGuard {

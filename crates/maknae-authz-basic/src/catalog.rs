@@ -366,7 +366,9 @@ mod tests {
     fn snap_with(authz: &str, tools: &str, agents: AgentsLoad) -> std::sync::Arc<Snapshot> {
         let src = try_source(authz, Some(BINDINGS), &UIDS, agents)
             .unwrap()
-            .with_tools(ToolsCatalog::parse(tools).unwrap());
+            .with_tools(
+                ToolsCatalog::parse_with(tools, &maknae_config::shipped_grammars()).unwrap(),
+            );
         compiled(&src)
     }
 
@@ -655,7 +657,7 @@ mod tests {
 
     #[test]
     fn an_agent_drops_a_missing_class_and_keeps_credential_none() {
-        let tools = ToolsCatalog::parse(HOMELAB).unwrap();
+        let tools = ToolsCatalog::parse_with(HOMELAB, &maknae_config::shipped_grammars()).unwrap();
         let none = tools.entry("rust-build").unwrap();
         assert_eq!(none.credential, None);
         assert!(reach_checked(none, &tools));
@@ -699,15 +701,15 @@ mod tests {
 
     #[test]
     fn ceiling_shapes_not_grant_text() {
-        let s = snap(&site(&["Tool(github-post gh pr review *)"], &[]), HOMELAB);
+        let s = snap(&site(&["Tool(github-post gh:pr.review.*)"], &[]), HOMELAB);
         let g = graph(&s, ALICE);
         assert_eq!(cat::entries(&g), ["github-post"]);
         assert_eq!(
-            sorted(cat::patterns(&g, "github-post", "gh")),
+            shape_names(&g, "github-post", "gh"),
             [
-                "pr review {git.change} -R {git.base} --approve --body-file -",
-                "pr review {git.change} -R {git.base} --comment --body-file -",
-                "pr review {git.change} -R {git.base} --request-changes --body-file -",
+                "pr.review.approve",
+                "pr.review.comment",
+                "pr.review.request-changes"
             ]
         );
     }
@@ -750,7 +752,7 @@ mod tests {
         let g = graph(&nothing, ALICE);
         assert!(cat::entries(&g).is_empty());
         assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
-        let bound = snap(&site(&["Tool(github-read gh pr view *)"], &[]), HOMELAB);
+        let bound = snap(&site(&["Tool(github-read gh:pr.view)"], &[]), HOMELAB);
         let g = graph(&bound, ALICE);
         assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
         assert_eq!(cat::entries_for_binding(&g, "git"), ["github-read"]);
@@ -795,20 +797,22 @@ mod tests {
         }
     }
 
-    const HOMELAB_GRANTS: [&str; 13] = [
-        "Tool(github-read gh pr view *)",
-        "Tool(github-read gh pr diff *)",
-        "Tool(github-read gh pr checks *)",
+    const HOMELAB_GRANTS: [&str; 15] = [
+        "Tool(github-read gh:pr.view)",
+        "Tool(github-read gh:pr.diff)",
+        "Tool(github-read gh:pr.checks)",
         "Tool(github-read git fetch *)",
         "Tool(github-read git checkout *)",
-        "Tool(github-post gh pr review *)",
-        "Tool(github-post gh pr comment *)",
+        "Tool(github-post gh:pr.review.*)",
+        "Tool(github-post gh:pr.comment)",
+        "Tool(github-issues-read gh:issue.*)",
         "Tool(rust-fetch cargo fetch --locked*)",
         "Tool(rust-build cargo build *)",
         "Tool(rust-build cargo check *)",
         "Tool(rust-build cargo clippy *)",
         "Tool(rust-build cargo test *)",
         "Tool(rust-build cargo fmt --check*)",
+        "Tool(rust-scratch cargo run *)",
     ];
 
     #[test]
@@ -817,21 +821,35 @@ mod tests {
         let g = graph(&s, ALICE);
         assert_eq!(
             cat::entries(&g),
-            ["github-post", "github-read", "rust-build", "rust-fetch"]
-        );
-        assert_eq!(
-            sorted(cat::patterns(&g, "github-post", "gh")),
             [
-                "pr comment {git.change} -R {git.base} --body-file -",
-                "pr review {git.change} -R {git.base} --approve --body-file -",
-                "pr review {git.change} -R {git.base} --comment --body-file -",
-                "pr review {git.change} -R {git.base} --request-changes --body-file -",
+                "github-issues-read",
+                "github-post",
+                "github-read",
+                "rust-build",
+                "rust-fetch",
+                "rust-scratch"
             ]
         );
         assert_eq!(
-            sorted(cat::patterns(&g, "github-read", "gh")),
-            ["pr checks *", "pr diff *", "pr view *"]
+            shape_names(&g, "github-post", "gh"),
+            [
+                "pr.comment",
+                "pr.review.approve",
+                "pr.review.comment",
+                "pr.review.request-changes"
+            ]
         );
+        assert!(cat::patterns(&g, "github-post", "gh").is_empty());
+        assert_eq!(
+            shape_names(&g, "github-read", "gh"),
+            ["pr.checks", "pr.diff", "pr.view"]
+        );
+        assert_eq!(
+            shape_names(&g, "github-issues-read", "gh"),
+            ["issue.list", "issue.status", "issue.view"]
+        );
+        assert!(cat::open_program(&g, "rust-scratch", "cargo"));
+        assert!(!cat::open_program(&g, "rust-scratch", "rustc"));
         assert_eq!(
             sorted(cat::patterns(&g, "github-read", "git")),
             ["checkout *", "fetch *"]
@@ -846,7 +864,7 @@ mod tests {
         );
         assert_eq!(
             sorted(cat::entries_for_binding(&g, "git")),
-            ["github-post", "github-read"]
+            ["github-issues-read", "github-post", "github-read"]
         );
         assert_eq!(cat::forges(&g, "git"), [(FORGE_HOST, "github")]);
         let read = g.lookup(cat::ENTRY, "github-read").unwrap();
@@ -880,7 +898,7 @@ mod tests {
             "output_to_model: status_only",
             1,
         );
-        let s = snap(&site(&["Tool(github-read gh pr view *)"], &[]), &tools);
+        let s = snap(&site(&["Tool(github-read gh:pr.view)"], &[]), &tools);
         assert_eq!(
             graph(&s, ALICE)
                 .lookup(cat::ENTRY, "github-read")
@@ -1325,6 +1343,42 @@ mod tests {
         assert_eq!(
             s.catalog_builds.load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+
+    #[test]
+    fn shipped_gh_catalog_fits_the_cap() {
+        let grammars = maknae_config::shipped_grammars();
+        let every: Vec<String> = grammars.grammars["gh"]
+            .shapes
+            .keys()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(every.len(), 27);
+        let tools = format!(
+            "schema_version: 1\ntools:\n  all-gh:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    binds: {{ git: {{ resolver: git }} }}\n    commands:\n      gh: {{ grammar: gh, shapes: [{}] }}\n",
+            every.join(", ")
+        );
+        let catalog_in = ToolsCatalog::parse_with(&tools, &grammars).unwrap();
+        assert!(
+            catalog_in.disabled().is_empty(),
+            "{:?}",
+            catalog_in.disabled()
+        );
+        let src = try_source(
+            &site(&["Tool(all-gh gh:*)"], &[]),
+            Some(BINDINGS),
+            &UIDS,
+            AgentsLoad::default(),
+        )
+        .unwrap()
+        .with_tools(catalog_in);
+        let s = compiled(&src);
+        let c = catalog(&s, ALICE);
+        assert!(c.bytes.len() < TOOL_CATALOG_MAX_BYTES, "{}", c.bytes.len());
+        assert_eq!(
+            cat::shapes(&cat::decode(&c.bytes).unwrap(), "all-gh", "gh").len(),
+            27
         );
     }
 

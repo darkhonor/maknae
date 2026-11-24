@@ -1362,7 +1362,7 @@ mod tests {
     const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
     fn catalog(text: &str) -> ToolsCatalog {
-        ToolsCatalog::parse(text).unwrap()
+        ToolsCatalog::parse_with(text, &crate::grammar::shipped_grammars()).unwrap()
     }
 
     fn argv(items: &[&str]) -> Vec<String> {
@@ -1394,7 +1394,16 @@ mod tests {
         let names: Vec<&str> = c.entries().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            ["github-post", "github-read", "rust-build", "rust-fetch"]
+            [
+                "github-issues-admin",
+                "github-issues-read",
+                "github-issues-write",
+                "github-post",
+                "github-read",
+                "rust-build",
+                "rust-fetch",
+                "rust-scratch"
+            ]
         );
         assert_eq!(
             c.entries()
@@ -1984,10 +1993,21 @@ mod tests {
     }
 
     #[test]
-    fn homelab_baseline_loads_with_every_entry_enabled() {
+    fn homelab_baseline_loads_with_the_gh_grammar_and_no_disabled_entries() {
         let c = catalog(HOMELAB);
         assert!(c.disabled().is_empty(), "{:?}", c.disabled());
-        for name in ["github-read", "github-post", "rust-fetch", "rust-build"] {
+        let without = ToolsCatalog::parse(HOMELAB).unwrap();
+        assert_eq!(without.disabled().len(), 5, "{:?}", without.disabled());
+        for name in [
+            "github-read",
+            "github-post",
+            "github-issues-read",
+            "github-issues-write",
+            "github-issues-admin",
+            "rust-fetch",
+            "rust-build",
+            "rust-scratch",
+        ] {
             assert!(c.entry(name).is_some(), "{name}");
         }
         assert_eq!(
@@ -2136,11 +2156,25 @@ mod tests {
         b
     }
 
+    fn grammar_shapes(c: &ToolCommand) -> &BTreeMap<String, Arc<crate::Shape>> {
+        match &c.form {
+            CommandForm::Grammar { shapes, .. } => shapes,
+            CommandForm::Positional(_) | CommandForm::Open => panic!("{:?}", c.form),
+        }
+    }
+
+    fn accepted(c: &ToolCommand, args: &[&str]) -> bool {
+        let args = argv(args);
+        grammar_shapes(c)
+            .values()
+            .any(|s| s.matches_argv(&args, &post_bound()))
+            && first_denied(&c.deny_args, &args).is_none()
+    }
+
     #[test]
     fn homelab_post_refuses_off_shape_forms() {
         let c = catalog(HOMELAB);
         let gh = &c.entry("github-post").unwrap().commands["gh"];
-        let bound = post_bound();
         for refused in [
             &[
                 "pr",
@@ -2208,25 +2242,10 @@ mod tests {
             &["pr", "comment", "345", "-R", "o/r", "--body", "x"],
             &["pr", "comment", "345", "-R", "o/r", "--body=x"],
             &["pr", "comment", "345", "-R", "o/r", "-b", "x"],
+            &["issue", "close", "7", "-R", "o/r"],
+            &["pr", "view", "345", "-R", "o/r"],
         ] {
-            let args = argv(refused);
-            let allowed = positional(gh).iter().any(|p| p.matches(&args, &bound));
-            assert!(
-                !allowed || first_denied(&gh.deny_args, &args).is_some(),
-                "{refused:?}"
-            );
-            assert!(!allowed, "{refused:?}");
-        }
-        for denied in [
-            "-a",
-            "-a=true",
-            "-ab",
-            "-ca-x",
-            "--approve",
-            "--approve=true",
-        ] {
-            let hit = first_denied(&gh.deny_args, &argv(&["pr", "review", denied]));
-            assert_eq!(hit.is_some(), denied.starts_with("-a"), "{denied}");
+            assert!(!accepted(gh, refused), "{refused:?}");
         }
     }
 
@@ -2234,36 +2253,114 @@ mod tests {
     fn homelab_post_allows_only_the_exact_shapes() {
         let c = catalog(HOMELAB);
         let gh = &c.entry("github-post").unwrap().commands["gh"];
-        let bound = post_bound();
+        assert_eq!(
+            grammar_shapes(gh)
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "pr.comment",
+                "pr.review.approve",
+                "pr.review.comment",
+                "pr.review.request-changes"
+            ]
+        );
+        for ok in [
+            &["pr", "comment", "345", "-R", "o/r", "--body-file", "-"][..],
+            &[
+                "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "--comment",
+                "--body-file",
+                "-",
+            ],
+            &[
+                "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "--request-changes",
+                "--body-file",
+                "-",
+            ],
+            &[
+                "pr",
+                "review",
+                "345",
+                "-R",
+                "o/r",
+                "--approve",
+                "--body-file",
+                "-",
+            ],
+        ] {
+            assert!(accepted(gh, ok), "{ok:?}");
+        }
         let ok = argv(&["pr", "comment", "345", "-R", "o/r", "--body-file", "-"]);
-        assert!(positional(gh).iter().any(|p| p.matches(&ok, &bound)));
-        assert_eq!(first_denied(&gh.deny_args, &ok), None);
-        let review = argv(&[
-            "pr",
-            "review",
-            "345",
-            "-R",
-            "o/r",
-            "--request-changes",
-            "--body-file",
-            "-",
-        ]);
-        assert!(positional(gh).iter().any(|p| p.matches(&review, &bound)));
-        let approve = argv(&[
-            "pr",
-            "review",
-            "345",
-            "-R",
-            "o/r",
-            "--approve",
-            "--body-file",
-            "-",
-        ]);
-        assert!(positional(gh).iter().any(|p| p.matches(&approve, &bound)));
-        assert_eq!(first_denied(&gh.deny_args, &approve), None);
-        assert!(!positional(gh)
-            .iter()
-            .any(|p| p.matches(&ok, &crate::Bound::empty())));
+        assert!(!grammar_shapes(gh)
+            .values()
+            .any(|s| s.matches_argv(&ok, &crate::Bound::empty())));
+    }
+
+    #[test]
+    fn homelab_issue_entries_split_the_shapes_by_credential_class() {
+        let c = catalog(HOMELAB);
+        let shapes = |entry: &str| -> Vec<String> {
+            grammar_shapes(&c.entry(entry).unwrap().commands["gh"])
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            shapes("github-issues-read"),
+            ["issue.list", "issue.status", "issue.view"]
+        );
+        assert_eq!(
+            shapes("github-issues-admin"),
+            ["issue.delete", "issue.transfer"]
+        );
+        assert_eq!(shapes("github-issues-write").len(), 15);
+        for (entry, app) in [
+            ("github-issues-read", "maknae-github-issues-read"),
+            ("github-issues-write", "maknae-github-issues-write"),
+            ("github-issues-admin", "maknae-github-issues-admin"),
+        ] {
+            let e = c.entry(entry).unwrap();
+            assert_eq!(e.credential.as_deref(), Some(entry));
+            assert!(e.binds.contains("git"), "{entry}");
+            assert!(e.network != ToolNetwork::None, "{entry}");
+            assert!(c.class(entry).unwrap().kind.has_reach_check(), "{entry}");
+            assert!(
+                format!("{:?}", c.class(entry).unwrap()).contains(app),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_scratch_is_open_mode() {
+        let c = catalog(HOMELAB);
+        let e = c.entry("rust-scratch").unwrap();
+        assert_eq!(e.credential, None);
+        assert_eq!(e.network, ToolNetwork::None);
+        assert_eq!(e.workspace, ToolWorkspaceAccess::Rw);
+        assert!(e.executes_workspace);
+        assert_eq!(
+            e.commands.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["cargo", "rustc"]
+        );
+        for command in e.commands.values() {
+            assert_eq!(command.form, CommandForm::Open);
+        }
+        assert_eq!(
+            e.image,
+            c.entry("rust-build").unwrap().image,
+            "the baseline's reference image"
+        );
     }
 
     #[test]
@@ -2593,7 +2690,7 @@ mod tests {
         }
 
         fn load(d: &Path) -> Result<ToolsCatalog, ToolsError> {
-            ToolsCatalog::load_with_requirement(d, own(), &GrammarSet::empty())
+            ToolsCatalog::load_with_requirement(d, own(), &crate::grammar::shipped_grammars())
         }
 
         fn loaded(tag: &str, main: Option<&str>, dropins: &[(&str, &str)]) -> ToolsCatalog {
@@ -2859,9 +2956,13 @@ mod tests {
         fn a_sound_file_loads() {
             let d = dir("ok");
             write(&d, HOMELAB.as_bytes(), 0o640);
-            let got = ToolsCatalog::load_with_requirement(&d, own(), &GrammarSet::empty());
+            let got =
+                ToolsCatalog::load_with_requirement(&d, own(), &crate::grammar::shipped_grammars());
             let _ = std::fs::remove_dir_all(&d);
-            assert_eq!(got, ToolsCatalog::parse(HOMELAB));
+            assert_eq!(
+                got,
+                ToolsCatalog::parse_with(HOMELAB, &crate::grammar::shipped_grammars())
+            );
             assert!(got.unwrap().entry("rust-build").is_some());
         }
 

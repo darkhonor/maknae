@@ -676,6 +676,15 @@ impl GrammarSet {
     }
 }
 
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+pub fn shipped_grammars() -> GrammarSet {
+    let text = include_str!("../../../packaging/common/grammars/gh.yaml");
+    let mut set = GrammarSet::empty();
+    set.grammars
+        .insert("gh".to_string(), Grammar::parse("gh", text).unwrap());
+    set
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GrammarLoadError {
     Directory(std::path::PathBuf),
@@ -2233,5 +2242,191 @@ mod load_tests {
         assert!(GrammarLoadError::Io("boom".into())
             .to_string()
             .contains("boom"));
+    }
+}
+
+#[cfg(test)]
+mod shipped_gh_tests {
+    use super::*;
+
+    const SHAPES: [&str; 27] = [
+        "pr.view",
+        "pr.diff",
+        "pr.checks",
+        "pr.review.comment",
+        "pr.review.request-changes",
+        "pr.review.approve",
+        "pr.comment",
+        "issue.list",
+        "issue.status",
+        "issue.view",
+        "issue.create",
+        "issue.comment",
+        "issue.edit.title",
+        "issue.edit.body",
+        "issue.edit.add-label",
+        "issue.edit.remove-label",
+        "issue.edit.add-assignee",
+        "issue.edit.remove-assignee",
+        "issue.close",
+        "issue.reopen",
+        "issue.lock",
+        "issue.unlock",
+        "issue.pin",
+        "issue.unpin",
+        "issue.develop",
+        "issue.transfer",
+        "issue.delete",
+    ];
+
+    fn gh() -> Grammar {
+        shipped_grammars().grammars.remove("gh").unwrap()
+    }
+
+    fn slots(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn bound() -> Bound {
+        let mut b = Bound::empty();
+        b.insert("git.change", "345");
+        b.insert("git.base", "o/r");
+        b
+    }
+
+    #[test]
+    fn shipped_gh_grammar_loads_with_no_disabled_shapes() {
+        let g = gh();
+        assert!(g.disabled.is_empty(), "{:?}", g.disabled);
+        assert_eq!(g.program, "gh");
+        assert_eq!(g.tested.version, "2.105.0");
+        assert_eq!(g.tested.date, "2026-11-24");
+    }
+
+    #[test]
+    fn shipped_gh_grammar_has_the_spec_shape_list() {
+        let want: BTreeSet<&str> = SHAPES.iter().copied().collect();
+        let got = gh();
+        let got: BTreeSet<&str> = got.shapes.keys().map(String::as_str).collect();
+        assert_eq!(got, want);
+        assert!(!got.contains("issue.artifact"));
+    }
+
+    #[test]
+    fn every_write_shape_declares_forge() {
+        for (name, shape) in &gh().shapes {
+            assert!(!shape.forge.base.is_empty(), "{name}");
+            assert!(shape.forge.head.is_empty(), "{name}");
+            let (want, class) = match name.as_str() {
+                n if n.starts_with("pr.review.") || n == "pr.comment" => {
+                    (ForgeOp::Review, ShapeClass::Write)
+                }
+                "pr.view" | "pr.diff" | "pr.checks" | "issue.list" | "issue.status"
+                | "issue.view" => (ForgeOp::Read, ShapeClass::Read),
+                _ => (ForgeOp::IssueWrite, ShapeClass::Write),
+            };
+            assert!(shape.forge.base.contains(want), "{name}");
+            assert_eq!(shape.class, class, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_pull_request_shape_targets_the_change_and_base() {
+        for (name, shape) in gh().shapes.iter().filter(|(n, _)| n.starts_with("pr.")) {
+            let r = shape
+                .render(
+                    &slots(&[("body", "x")][..usize::from(!shape.slots.is_empty())]),
+                    &bound(),
+                )
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(r.argv[0], "pr", "{name}");
+            assert_eq!(r.argv[2..5], ["345", "-R", "o/r"], "{name}");
+            assert_eq!(r.stdin.is_some(), !shape.slots.is_empty(), "{name}");
+            if r.stdin.is_some() {
+                assert_eq!(r.argv[r.argv.len() - 2..], ["--body-file", "-"], "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn issue_shapes_render_the_help_checked_argv() {
+        let g = gh();
+        let render = |shape: &str, pairs: &[(&str, &str)]| {
+            g.shapes[shape]
+                .render(&slots(pairs), &bound())
+                .unwrap()
+                .argv
+        };
+        assert_eq!(
+            render("issue.list", &[("state", "all")]),
+            ["issue", "list", "-R", "o/r", "--state=all"]
+        );
+        assert_eq!(
+            render("issue.create", &[("title", "-x"), ("body", "b")]),
+            [
+                "issue",
+                "create",
+                "-R",
+                "o/r",
+                "--title=-x",
+                "--body-file",
+                "-"
+            ]
+        );
+        assert_eq!(
+            render("issue.edit.add-label", &[("number", "7"), ("label", "bug")]),
+            ["issue", "edit", "7", "-R", "o/r", "--add-label", "bug"]
+        );
+        assert_eq!(
+            render("issue.develop", &[("number", "7"), ("branch", "fix/7")]),
+            ["issue", "develop", "7", "-R", "o/r", "--name", "fix/7"]
+        );
+        assert_eq!(
+            render("issue.transfer", &[("number", "7"), ("destination", "o/x")]),
+            ["issue", "transfer", "7", "o/x", "-R", "o/r"]
+        );
+        assert_eq!(
+            render("issue.delete", &[("number", "7")]),
+            ["issue", "delete", "7", "-R", "o/r", "--yes"]
+        );
+    }
+
+    #[test]
+    fn issue_slots_refuse_values_outside_their_patterns() {
+        let g = gh();
+        let refuses = |shape: &str, pairs: &[(&str, &str)]| {
+            g.shapes[shape].render(&slots(pairs), &bound()).is_err()
+        };
+        for number in ["0", "01", "-1", "12345678901", "7 ", "1e3", ""] {
+            assert!(refuses("issue.close", &[("number", number)]), "{number:?}");
+        }
+        assert!(refuses("issue.list", &[("state", "merged")]));
+        assert!(refuses(
+            "issue.edit.add-label",
+            &[("number", "1"), ("label", "-x")]
+        ));
+        assert!(refuses(
+            "issue.edit.add-assignee",
+            &[("number", "1"), ("login", "@me")]
+        ));
+        assert!(refuses(
+            "issue.transfer",
+            &[("number", "1"), ("destination", "no-slash")]
+        ));
+        assert!(refuses(
+            "issue.develop",
+            &[("number", "1"), ("branch", "-b")]
+        ));
+        assert!(refuses(
+            "issue.edit.title",
+            &[("number", "1"), ("title", "two\nlines")]
+        ));
+        assert!(!refuses(
+            "issue.edit.title",
+            &[("number", "1"), ("title", "--force")]
+        ));
     }
 }

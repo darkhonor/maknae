@@ -141,6 +141,8 @@ pub use forges::{
     forges_from_section, AuthorizedForge, ForgeKind, ForgeProvider, ForgeSet, FORGES_SECTION,
     FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
 };
+#[cfg(feature = "hermetic-test-seam")]
+pub use grammar::shipped_grammars;
 pub use grammar::{
     check_open_argv, load_grammars, shape_name_ok, ArgvToken, CallRefusal, Constraint,
     DisabledGrammar, ForgeNeed, Grammar, GrammarError, GrammarLoadError, GrammarSet, Rendered,

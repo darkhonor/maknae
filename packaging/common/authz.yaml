@@ -72,4 +72,4 @@ roles:
 #       allow:
 #         - "Tool(github-read gh:pr.*)"
 #       deny:
-#         - "Tool(github-read gh:pr.merge)"
+#         - "Tool(github-read gh:pr.checks)"
