@@ -23,8 +23,6 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 maknae-security = { path = "../maknae-security" }
 # The banner's wire types and their checks (`BannerSpec`, `check_banner`), one definition (#630).
 maknae-proto = { path = "../maknae-proto" }
-# `grammar_sha256` on a grammar command form (#674 PR 3a): hashing only through maknae_crypto.
-maknae-crypto = { path = "../maknae-crypto" }
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl"] }
 icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 icu_casemap = { version = "2.4.0", default-features = false, features = ["compiled_data"] }

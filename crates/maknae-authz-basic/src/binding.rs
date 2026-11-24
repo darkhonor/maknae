@@ -283,7 +283,7 @@ impl std::fmt::Display for IdentityProblem {
             }
             Self::ToolEntryDisabled { entry, reason } => write!(
                 f,
-                "tools.yaml entry '{}' is disabled: {}",
+                "tool policy '{}' is disabled: {}",
                 shown(entry),
                 shown(reason)
             ),
@@ -1043,7 +1043,7 @@ mod tests {
                 None,
                 vec!["sentinel-674-a,b"],
                 vec![],
-                "tools.yaml entry 'sentinel-674-a\\,b' is disabled: isolation is not a known mode",
+                "tool policy 'sentinel-674-a\\,b' is disabled: isolation is not a known mode",
             ),
             (
                 IdentityProblem::ToolGrantUnknownEntry {

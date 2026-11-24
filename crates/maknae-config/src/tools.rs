@@ -169,7 +169,7 @@ pub enum CommandForm {
     Positional(Vec<ArgPattern>),
     Grammar {
         grammar: String,
-        grammar_sha256: String,
+        grammar_canonical: Arc<str>,
         shapes: BTreeMap<String, Arc<Shape>>,
     },
     Open,
@@ -219,6 +219,7 @@ pub struct ToolsCatalog {
 pub enum ToolsError {
     Config(ConfigError),
     Invalid(String),
+    DropIns(String),
 }
 
 impl fmt::Display for ToolsError {
@@ -226,6 +227,7 @@ impl fmt::Display for ToolsError {
         match self {
             Self::Config(e) => write!(f, "{TOOLS_FILE}: {e}"),
             Self::Invalid(reason) => write!(f, "{TOOLS_FILE}: {reason}"),
+            Self::DropIns(reason) => write!(f, "{TOOLS_DROPIN_DIR}: {reason}"),
         }
     }
 }
@@ -290,14 +292,14 @@ impl ToolsCatalog {
         skipped: Vec<Disabled>,
         grammars: &GrammarSet,
     ) -> Result<Self, ToolsError> {
-        let main = main.map(parse_top).transpose()?;
+        let main = main.map(|text| parse_top(TOOLS_FILE, text)).transpose()?;
         let mut catalog = Self::empty();
         catalog.disabled = skipped;
         let mut dropin_canonical = Vec::new();
         let mut docs: Vec<(String, Doc)> = Vec::new();
         for dropin in dropins {
             match dropin {
-                DropIn::Read { file, text } => match parse_top(&text) {
+                DropIn::Read { file, text } => match parse_top(&file, &text) {
                     Ok(doc) => {
                         dropin_canonical.push((file.clone(), Value::Map(doc.top.clone())));
                         docs.push((file, doc));
@@ -451,7 +453,7 @@ impl ToolsError {
     fn reason(self) -> String {
         match self {
             Self::Config(e) => e.to_string(),
-            Self::Invalid(reason) => reason,
+            Self::Invalid(reason) | Self::DropIns(reason) => reason,
         }
     }
 }
@@ -468,13 +470,13 @@ fn defined_in(files: &[&str]) -> String {
     format!("defined in more than one file: {}", files.join(", "))
 }
 
-fn parse_top(text: &str) -> Result<Doc, ToolsError> {
+fn parse_top(file: &str, text: &str) -> Result<Doc, ToolsError> {
     let invalid = |reason: &str| ToolsError::Invalid(reason.to_string());
     let Value::Map(top) = crate::load_str(text).map_err(ToolsError::Config)? else {
         return Err(invalid("the document must be a mapping"));
     };
     crate::reject_unknown_keys(
-        TOOLS_FILE,
+        file,
         &top,
         &["schema_version", "credential_classes", "tools"],
     )
@@ -547,6 +549,14 @@ fn read_main(
     Ok(Some(body.to_string()))
 }
 
+fn dropin_dir_refusal(dir: &Path, owner: Option<u32>) -> String {
+    let need = match owner {
+        Some(uid) => format!("be owned by uid {uid} and not be group- or other-writable"),
+        None => "not be group- or other-writable".to_string(),
+    };
+    format!("the drop-in directory {} must {need}", dir.display())
+}
+
 #[cfg(unix)]
 fn read_dropins(
     config_dir: &Path,
@@ -554,7 +564,7 @@ fn read_dropins(
 ) -> Result<(Vec<DropIn>, Vec<Disabled>), ToolsError> {
     use maknae_io::{IoError, IoKind, Kind, StrategyPref};
     let dir = std::path::absolute(config_dir.join(TOOLS_DROPIN_DIR))
-        .map_err(|e| ToolsError::Config(ConfigError::Io(e.to_string())))?;
+        .map_err(|e| ToolsError::DropIns(e.to_string()))?;
     let required = maknae_io::AnchorRequired {
         owner: target.owner,
         mode_mask: Some(0o022),
@@ -566,16 +576,13 @@ fn read_dropins(
             ..
         }) => return Ok((Vec::new(), Vec::new())),
         Err(IoError::InsecurePermissions { .. } | IoError::NotOwned { .. }) => {
-            return Err(ToolsError::Config(ConfigError::Io(format!(
-                "the drop-in directory {} must be owned by root (uid 0) and not group- or other-writable",
-                dir.display()
-            ))))
+            return Err(ToolsError::DropIns(dropin_dir_refusal(&dir, target.owner)));
         }
-        Err(other) => return Err(ToolsError::Config(crate::loader::map_io(other))),
+        Err(other) => return Err(ToolsError::DropIns(other.to_string())),
     };
     let mut entries = anchor
         .enumerate(Path::new(""), None)
-        .map_err(|e| ToolsError::Config(crate::loader::map_io(e)))?
+        .map_err(|e| ToolsError::DropIns(e.to_string()))?
         .value;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let mut read = Vec::new();
@@ -626,7 +633,9 @@ fn fields<'a>(v: &'a Value, what: &str, allowed: &[&str]) -> Result<&'a Fields, 
     let Value::Map(map) = v else {
         return Err(format!("{what} must be a mapping"));
     };
-    crate::reject_unknown_keys(TOOLS_FILE, map, allowed).map_err(|e| format!("{what}: {e}"))?;
+    if let Some((key, _)) = map.iter().find(|(k, _)| !allowed.contains(&k.as_str())) {
+        return Err(format!("{what}: unknown key '{key}'"));
+    }
     Ok(map)
 }
 
@@ -1329,14 +1338,16 @@ fn resolve_shapes(
                 "shape `{name}` declares no forge, and the entry holds a credential"
             ));
         }
-        shapes.insert((*name).to_string(), Arc::new(shape.clone()));
+        if shapes
+            .insert((*name).to_string(), Arc::new(shape.clone()))
+            .is_some()
+        {
+            return Err(format!("shape `{name}` is listed more than once"));
+        }
     }
     Ok(CommandForm::Grammar {
         grammar: grammar.to_string(),
-        grammar_sha256: maknae_crypto::sha256(g.canonical.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect(),
+        grammar_canonical: Arc::from(g.canonical.as_str()),
         shapes,
     })
 }
@@ -2362,19 +2373,15 @@ mod tests {
         let grammar = &set.grammars["gh"];
         let CommandForm::Grammar {
             grammar: name,
-            grammar_sha256,
+            grammar_canonical,
             shapes,
         } = &c.entry(SENTINEL).unwrap().commands["gh"].form
         else {
             panic!("not a grammar command");
         };
         assert_eq!(name, "gh");
-        let want: String = maknae_crypto::sha256(grammar.canonical.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(grammar_sha256, &want);
-        assert_eq!(grammar_sha256.len(), 64);
+        assert_eq!(&**grammar_canonical, grammar.canonical.as_str());
+        assert!(grammar_canonical.starts_with('{'), "{grammar_canonical}");
         assert_eq!(shapes.keys().collect::<Vec<_>>(), ["issue.list"]);
         assert_eq!(*shapes["issue.list"], grammar.shapes["issue.list"]);
     }
@@ -2472,6 +2479,39 @@ mod tests {
             "{ grammar: gh, shapes: [pr.view] }",
         );
         assert!(c.entry(SENTINEL).is_some(), "{:?}", c.disabled());
+    }
+
+    #[test]
+    fn a_shape_listed_twice_disables_entry() {
+        let c = formed("", "{ grammar: gh, shapes: [pr.view, pr.view] }");
+        assert!(c.entry(SENTINEL).is_none());
+        assert!(reason(&c, SENTINEL).contains("shape `pr.view` is listed more than once"));
+    }
+
+    #[test]
+    fn the_dropin_directory_refusal_names_the_required_owner() {
+        let dir = Path::new("/etc/maknae/tools.d");
+        assert_eq!(
+            dropin_dir_refusal(dir, Some(0)),
+            "the drop-in directory /etc/maknae/tools.d must be owned by uid 0 and not be group- or other-writable"
+        );
+        assert_eq!(
+            dropin_dir_refusal(dir, None),
+            "the drop-in directory /etc/maknae/tools.d must not be group- or other-writable"
+        );
+        assert_eq!(
+            ToolsError::DropIns("x".to_string()).to_string(),
+            "tools.d: x"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_name_the_section_not_a_file() {
+        let c = catalog(&doc(
+            "  {}\n",
+            &format!("  {SENTINEL}:\n    executes_workspace: false\n{ESS}    nonsense: 1\n"),
+        ));
+        assert_eq!(reason(&c, SENTINEL), "the entry: unknown key 'nonsense'");
     }
 
     #[test]
@@ -2706,12 +2746,14 @@ mod tests {
                 assert!(c.entry("sentinel-674-mine").is_none(), "{bad}");
                 assert_eq!(c.disabled().len(), 1, "{bad}: {:?}", c.disabled());
                 let why = reason(&c, "tools.d/a.yaml");
-                let want = match ToolsCatalog::parse(&bad).unwrap_err() {
-                    ToolsError::Config(e) => e.to_string(),
-                    ToolsError::Invalid(r) => r,
-                };
-                assert_eq!(why, want, "{bad}");
-                assert!(!why.starts_with(TOOLS_FILE), "{why}");
+                let shown = ToolsCatalog::parse(&bad).unwrap_err().to_string();
+                let want = shown.strip_prefix("tools.yaml: ").unwrap().to_string();
+                assert_eq!(
+                    why,
+                    want.replace("'tools.yaml'", "'tools.d/a.yaml'"),
+                    "{bad}"
+                );
+                assert!(!why.contains(TOOLS_FILE), "{why}");
             }
             let d = dir("dropin_badbytes");
             dropin(&d, "a.yaml", "x");
@@ -2755,9 +2797,11 @@ mod tests {
             let got = load(&d);
             let _ = std::fs::remove_dir_all(&d);
             assert!(
-                matches!(&got, Err(ToolsError::Config(ConfigError::Io(m))) if m.contains("drop-in directory")),
+                matches!(&got, Err(ToolsError::DropIns(m)) if *m == dropin_dir_refusal(&d.join(TOOLS_DROPIN_DIR), None)),
                 "{got:?}"
             );
+            let shown = got.unwrap_err().to_string();
+            assert!(shown.starts_with("tools.d: "), "{shown}");
         }
 
         #[test]
