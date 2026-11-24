@@ -229,7 +229,10 @@ pub fn board_unknown_line(command: BoardCommand) -> &'static str {
 
 pub fn board_refused_line(defect: BoardDefect, command: BoardCommand) -> String {
     match defect {
-        BoardDefect::TryAgain => "the board store did not do it; try again".into(),
+        BoardDefect::TryAgain => match command {
+            BoardCommand::Settings => "the board store did not do it; try again".into(),
+            BoardCommand::Clear => "the clear stopped; run maknae board clear again".into(),
+        },
         BoardDefect::OutcomeUnknown => board_unknown_line(command).into(),
         BoardDefect::Full | BoardDefect::AuthorAtCap | BoardDefect::NoSuchPost => format!(
             "the kernel refused: {}",
@@ -445,11 +448,15 @@ mod tests {
     fn board_refusals_name_the_defect_and_the_command() {
         use BoardCommand::{Clear, Settings};
         use BoardDefect::*;
+        assert_eq!(
+            board_refused_line(TryAgain, Settings),
+            "the board store did not do it; try again"
+        );
+        assert_eq!(
+            board_refused_line(TryAgain, Clear),
+            "the clear stopped; run maknae board clear again"
+        );
         for command in [Settings, Clear] {
-            assert_eq!(
-                board_refused_line(TryAgain, command),
-                "the board store did not do it; try again"
-            );
             assert_eq!(
                 board_refused_line(Full, command),
                 "the kernel refused: board full"

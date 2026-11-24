@@ -83,16 +83,20 @@ fn answer(sent: Result<WireOutcome, String>, command: BoardCommand) -> Result<Pa
         Ok(WireOutcome::WriteDone { .. } | WireOutcome::ReadDone { .. }) => {
             Err(Stop::Answered(NOT_A_BOARD_REPLY.into()))
         }
-        Err(error) => Err(Stop::Lost(safe(&error))),
+        Err(error) => Err(Stop::Lost(one_line(&error))),
     }
 }
 
 fn refused_line(code: ProtoErrCode, message: &str, command: BoardCommand) -> String {
     match code {
         ProtoErrCode::BoardRefused(defect) => board_refused_line(defect, command),
-        ProtoErrCode::Unauthorized => format!("you may not manage a board: {}", safe(message)),
-        _ => format!("the kernel refused the request: {}", safe(message)),
+        ProtoErrCode::Unauthorized => format!("you may not manage a board: {}", one_line(message)),
+        _ => format!("the kernel refused the request: {}", one_line(message)),
     }
+}
+
+fn one_line(s: &str) -> String {
+    safe(&s.replace(['\n', '\r'], " "))
 }
 
 fn settings_reply(sent: Result<WireOutcome, String>) -> Result<BoardSettings, Stop> {
@@ -199,10 +203,11 @@ pub fn confirm(
     prompt.write_all(CONFIRM_PROMPT)?;
     prompt.flush()?;
     let mut line = String::new();
-    answer.take(CONFIRM_ANSWER_MAX_BYTES).read_line(&mut line)?;
+    let read = answer.take(CONFIRM_ANSWER_MAX_BYTES).read_line(&mut line)?;
+    let cut = read == CONFIRM_ANSWER_MAX_BYTES as usize && !line.ends_with('\n');
     let line = line.trim();
     Ok(
-        if line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes") {
+        if !cut && (line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes")) {
             Confirm::Go
         } else {
             Confirm::Declined
@@ -637,6 +642,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kernel_and_transport_text_is_one_line() {
+        let (said_, _) = run_settings(
+            SettingsChange::default(),
+            vec![refused(ProtoErrCode::Unauthorized, "x\nmaknae: done")],
+        )
+        .await;
+        assert_eq!(
+            said_,
+            said(&[], &["you may not manage a board: x maknae: done"], false)
+        );
+        let (said_, _) = run_settings(
+            SettingsChange::default(),
+            vec![refused(ProtoErrCode::Internal, "x\r\nmaknae: done")],
+        )
+        .await;
+        assert_eq!(
+            said_,
+            said(
+                &[],
+                &["the kernel refused the request: x  maknae: done"],
+                false
+            )
+        );
+        let (said_, _) = run_settings(
+            SettingsChange::default(),
+            vec![Err("reset\r\nmaknae: done\n".into())],
+        )
+        .await;
+        assert_eq!(said_, said(&[], &["reset  maknae: done "], false));
+        let (said_, _) = run_clear(vec![Err("reset\nmaknae: done".into())]).await;
+        assert_eq!(
+            said_,
+            said(&[], &["reset maknae: done", CLEAR_UNKNOWN], false)
+        );
+    }
+
+    #[tokio::test]
     async fn a_reply_that_is_not_board_settings_is_a_protocol_error() {
         for bad in [cleared(1, false), write_done(), read_done()] {
             let (said_, sent) = run_settings(SettingsChange::default(), vec![bad]).await;
@@ -737,7 +779,7 @@ mod tests {
             said_,
             said(
                 &["cleared 32 posts before stopping"],
-                &["the board store did not do it; try again"],
+                &["the clear stopped; run maknae board clear again"],
                 false
             )
         );
@@ -891,9 +933,30 @@ mod tests {
         let mut long = vec![b' '; 64];
         long.extend_from_slice(b"y\n");
         assert_eq!(ask(&long).0, Confirm::Declined);
-        let mut fits = vec![b' '; 63];
+        let mut fits = vec![b' '; 62];
         fits.extend_from_slice(b"y\n");
+        assert_eq!(fits.len(), 64);
         assert_eq!(ask(&fits).0, Confirm::Go);
+    }
+
+    #[test]
+    fn an_answer_cut_at_the_bound_declines() {
+        let mut y_then_n = b"y".to_vec();
+        y_then_n.extend_from_slice(&[b' '; 70]);
+        y_then_n.extend_from_slice(b"n\n");
+        assert_eq!(ask(&y_then_n).0, Confirm::Declined);
+        let mut yes_please = b"yes".to_vec();
+        yes_please.extend_from_slice(&[b' '; 61]);
+        yes_please.extend_from_slice(b"please\n");
+        assert_eq!(ask(&yes_please).0, Confirm::Declined);
+        let mut cut_before_newline = vec![b' '; 63];
+        cut_before_newline.extend_from_slice(b"y\n");
+        assert_eq!(ask(&cut_before_newline).0, Confirm::Declined);
+        let mut whole = b"y".to_vec();
+        whole.extend_from_slice(&[b' '; 62]);
+        whole.push(b'\n');
+        assert_eq!(whole.len(), 64);
+        assert_eq!(ask(&whole).0, Confirm::Go);
     }
 
     #[test]
