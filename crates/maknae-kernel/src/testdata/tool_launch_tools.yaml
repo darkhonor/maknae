@@ -1,0 +1,26 @@
+schema_version: 1
+credential_classes:
+  post:
+    kind: github-machine-user
+tools:
+  gh-post:
+    image: { ref: "{image}" }
+    isolation: vm
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: ro
+    credential: post
+    output_to_model: redacted
+    resources: { cpus: 2, memory: 1Gi }
+    lifetime: { max: 10m }
+    volumes: { tmp: { access: ro }, cache: { access: rw, scope: task } }
+    binds: { git: { resolver: git } }
+    commands:
+      gh: { grammar: gh, shapes: [pr.comment, issue.create], timeout: 2m, output: 1MiB }
+      git: { subcommands: ["fetch *"] }
+  scratch:
+    image: { ref: "{image}" }
+    executes_workspace: true
+    output_to_model: status_only
+    commands:
+      cargo: { open: true }

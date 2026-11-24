@@ -122,28 +122,6 @@ impl SubjectFacts<'_> {
     }
 }
 
-/// A [`DecidesPinned`] with no snapshot of its own to pin: each call decides on its own.
-#[cfg(test)]
-pub(crate) struct Unpinned<'a, P: DecidesPinned>(pub(crate) &'a P, pub(crate) &'a ToolsCatalog);
-
-#[cfg(test)]
-impl<P: DecidesPinned> PinnedPolicy for Unpinned<'_, P> {
-    fn tools(&self) -> &ToolsCatalog {
-        self.1
-    }
-
-    fn decide(&self, req: &Request) -> Decided {
-        self.0
-            .decide_all_pinned(std::slice::from_ref(req))
-            .0
-            .swap_remove(0)
-    }
-
-    fn mount(&self, subject: &SubjectFacts<'_>, root: &str, mode: MountMode) -> MountDecision {
-        subject.mount(self.0, root, mode)
-    }
-}
-
 const NOT_AUTHORIZED: &str = "not authorized";
 const UNEVALUATED: &str = "workspace: the decision could not be evaluated";
 
@@ -418,7 +396,7 @@ mod tests {
     use super::*;
     use crate::composition::Composition;
     use crate::handler::TaskStamp;
-    use crate::test_fixtures::{fixture, shipped_composition, write_sensitive, DirGuard};
+    use crate::test_fixtures::{fixture, shipped_composition, write_sensitive, DirGuard, Unpinned};
     use maknae_authz_basic::{Baseline, HermeticAuthorizer};
     use maknae_security::{Authorizer, Obligation, Request, Verdict};
 

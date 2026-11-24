@@ -5,11 +5,15 @@ use crate::baseline_check::Env;
 use maknae_authz_basic::HermeticAuthorizer;
 use maknae_config::{
     BaselineSections, BasicPolicy, Ceiling, ClassificationPolicy, Document, Principal,
-    ReaderAccount, ReaderLookup,
+    ReaderAccount, ReaderLookup, ToolsCatalog,
 };
-use maknae_security::{Action, AttrValue, Attributes, Context, Request, Resource, Subject};
+use maknae_security::{
+    Action, AttrValue, Attributes, Context, Decided, Request, Resource, Subject,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use crate::workspace::{DecidesPinned, MountDecision, MountMode, PinnedPolicy, SubjectFacts};
 
 const US: &BasicPolicy = &BasicPolicy;
 
@@ -675,4 +679,24 @@ pub(crate) fn homelab_launch_composition(
         g,
         crate::composition::Composition::with_us_baseline_ceiling(basic),
     )
+}
+
+/// A [`DecidesPinned`] with no snapshot of its own to pin: each call decides on its own.
+pub(crate) struct Unpinned<'a, P: DecidesPinned>(pub(crate) &'a P, pub(crate) &'a ToolsCatalog);
+
+impl<P: DecidesPinned> PinnedPolicy for Unpinned<'_, P> {
+    fn tools(&self) -> &ToolsCatalog {
+        self.1
+    }
+
+    fn decide(&self, req: &Request) -> Decided {
+        self.0
+            .decide_all_pinned(std::slice::from_ref(req))
+            .0
+            .swap_remove(0)
+    }
+
+    fn mount(&self, subject: &SubjectFacts<'_>, root: &str, mode: MountMode) -> MountDecision {
+        subject.mount(self.0, root, mode)
+    }
 }

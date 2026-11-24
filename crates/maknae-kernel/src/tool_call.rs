@@ -466,33 +466,7 @@ mod tests {
     const AGENT_ROOT: &str = "/var/lib/maknae-agents/hobi/tasks/users/1000";
     const IMAGE: &str = "registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-    const GRAMMAR: &str = r#"schema_version: 1
-program: gh
-tested: { version: "2.105.0", date: 2026-11-24 }
-shapes:
-  issue.list:
-    description: List issues.
-    class: read
-    forge: { base: [read] }
-    argv: [issue, list, -R, "{git.base}", "--state={state}"]
-    slots:
-      state: { at: option, enum: [open, closed, all], description: Which issues. }
-  pr.comment:
-    description: Comment on the pull request.
-    class: write
-    forge: { base: [review] }
-    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
-    slots:
-      body: { at: stdin, description: The comment. }
-  issue.note:
-    description: Comment on an issue from a file.
-    class: write
-    forge: { base: [issue-write], head: [read] }
-    argv: [issue, comment, "{number}", -R, "{git.base}", --body-file, "{body}"]
-    slots:
-      number: { at: token, pattern: "[1-9][0-9]{0,9}", description: The issue. }
-      body: { at: file, description: The comment. }
-"#;
+    const GRAMMAR: &str = include_str!("testdata/tool_call_grammar.yaml");
 
     fn tools() -> String {
         let entry = |name: &str, extra: &str, command: &str| {
@@ -809,7 +783,7 @@ shapes:
         }
 
         fn with_pinned<R>(&self, f: impl FnOnce(&dyn PinnedPolicy) -> R) -> R {
-            f(&crate::workspace::Unpinned(self, &self.tools))
+            f(&crate::test_fixtures::Unpinned(self, &self.tools))
         }
     }
 

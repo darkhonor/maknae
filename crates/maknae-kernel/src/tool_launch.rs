@@ -291,27 +291,7 @@ mod tests {
     use maknae_security::Attributes;
     use std::collections::{BTreeMap, BTreeSet};
 
-    const GRAMMAR: &str = r#"schema_version: 1
-program: gh
-tested: { version: "2.105.0", date: 2026-11-24 }
-shapes:
-  pr.comment:
-    description: Comment.
-    class: write
-    forge: { base: [read, review], head: [push-head] }
-    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
-    slots:
-      body: { at: stdin, description: b }
-  issue.create:
-    description: Create.
-    class: write
-    forge: { base: [issue-write] }
-    argv: [issue, create, "--title={title}", --notes, "{notes}", --body-file, "{body}"]
-    slots:
-      title: { at: option, description: t }
-      notes: { at: file, description: n }
-      body: { at: file, description: b }
-"#;
+    const GRAMMAR: &str = include_str!("testdata/tool_launch_grammar.yaml");
 
     const IMAGE: &str =
         "registry.example/gh@sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -319,35 +299,7 @@ shapes:
         "registry.example/gh@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
     fn tools(image: &str) -> String {
-        format!(
-            r#"schema_version: 1
-credential_classes:
-  post:
-    kind: github-machine-user
-tools:
-  gh-post:
-    image: {{ ref: "{image}" }}
-    isolation: vm
-    executes_workspace: false
-    network: {{ via: maknae-proxy, sites: [github.com, api.github.com] }}
-    workspace: ro
-    credential: post
-    output_to_model: redacted
-    resources: {{ cpus: 2, memory: 1Gi }}
-    lifetime: {{ max: 10m }}
-    volumes: {{ tmp: {{ access: ro }}, cache: {{ access: rw, scope: task }} }}
-    binds: {{ git: {{ resolver: git }} }}
-    commands:
-      gh: {{ grammar: gh, shapes: [pr.comment, issue.create], timeout: 2m, output: 1MiB }}
-      git: {{ subcommands: ["fetch *"] }}
-  scratch:
-    image: {{ ref: "{image}" }}
-    executes_workspace: true
-    output_to_model: status_only
-    commands:
-      cargo: {{ open: true }}
-"#
-        )
+        include_str!("testdata/tool_launch_tools.yaml").replace("{image}", image)
     }
 
     fn grammars(text: &str) -> GrammarSet {
