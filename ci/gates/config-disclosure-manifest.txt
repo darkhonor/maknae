@@ -56,6 +56,7 @@ disclose	transport.handshake_timeout_ms	transport shape
 disclose	transport.read_timeout_ms	transport shape
 disclose	deployment.mode	which kind of host the daemon runs on (#115); boot verifies it against the host
 disclose	deployment.account_source	whether this host checks account state (#115); a declared gap the operator must be able to see
+disclose	board.enabled	whether the agent message board is on for this site (#698); a boolean, off by default
 omit	vault.insecure_plaintext_secret_path	PRESENCE says this host keeps an AppRole SecretID in plaintext on disk
 omit	core.handling	PRESENCE says this deployment configured an above-baseline classification ceiling (prefix)
 omit	audit.au3_1	deployer-authored sub-key NAMES with no schema; a path allowlist cannot classify what it cannot enumerate (prefix)

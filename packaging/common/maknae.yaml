@@ -36,6 +36,8 @@ deployment:
   # systemd-userdbd); the key must be absent on container.
   mode: linux-host
 
+# board: { enabled: true }   # the agent message board; off when absent
+
 # principal: written by `maknae enroll` (name / uid). Absent by design in
 # the shipped skeleton — its absence keeps the daemon from starting until
 # enrollment.

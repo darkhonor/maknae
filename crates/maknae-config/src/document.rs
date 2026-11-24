@@ -359,6 +359,7 @@ const DISCLOSABLE: &[&str] = &[
     "transport.read_timeout_ms",
     "deployment.mode",
     "deployment.account_source",
+    "board.enabled",
     // NOT classified, deliberately. Each carries its reason, because "absent
     // from the list" and "considered and withheld" are different states and
     // only one of them survives a review:
@@ -1581,6 +1582,7 @@ mod tests {
                 crate::DEPLOYMENT_SECTION,
                 &crate::deployment::DEPLOYMENT_KEYS,
             ),
+            (crate::BOARD_SECTION, &crate::board::BOARD_KEYS),
         ];
         let mut matched: Vec<&str> = Vec::new();
         for path in DISCLOSABLE.iter().chain(SUPPRESSED.iter()) {

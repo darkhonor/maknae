@@ -48,6 +48,8 @@ SURFACE=(
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|2|config"
   "crates/maknae-config/src/deployment.rs|Deployment|deployment|2|config"
+  # The `board` section (#698): the site switch for the agent message board.
+  "crates/maknae-config/src/board.rs|BoardSite|board|1|config"
   # The `providers` section (#153): five disclosed leaves per authorized provider; keys are per user, never here.
   "crates/maknae-config/src/providers.rs|AuthorizedProvider|providers[]|5|config"
   # The `forges` section (#674): the git servers the site authorizes; link hosts, never a credential.
