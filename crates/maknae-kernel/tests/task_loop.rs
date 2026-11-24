@@ -6842,6 +6842,77 @@ mod board {
         }
 
         #[tokio::test]
+        async fn a_settings_write_reports_its_own_value_when_another_lands_before_its_record() {
+            use maknae_kernel::BoardSeam;
+            let w = manage_world("manage-settings-own", "user");
+            let me = BoardKey(w.me);
+            let other = Settings {
+                enabled: false,
+                participate: true,
+                report: maknae_kernel::Report::Summary,
+            };
+            w.agents.board.after_settings_write(move |store| {
+                BoardSeam::set_settings(store, me, other).unwrap()
+            });
+            let (answer, records) = w.manage(set(true, false, BoardReport::Every)).await;
+            let mine = "enabled=true participate=false report=every";
+            assert_eq!(
+                settings_reply(answer),
+                BoardSettings {
+                    enabled: true,
+                    participate: false,
+                    report: BoardReport::Every
+                }
+            );
+            assert_eq!(
+                trail(&records),
+                [
+                    rec(
+                        "settings",
+                        INTENT,
+                        w.own_board(),
+                        settings_said(None, Some(mine))
+                    ),
+                    rec(
+                        "settings",
+                        DONE,
+                        w.own_board(),
+                        settings_said(Some(OFF), Some(mine))
+                    ),
+                ]
+            );
+            assert_eq!(
+                w.settings_of(w.me),
+                other,
+                "the other write landed after this one"
+            );
+
+            let blobs = w.board_blobs.clone();
+            w.agents.board.after_settings_write(move |store| {
+                blobs.fail(None);
+                BoardSeam::set_settings(
+                    store,
+                    me,
+                    Settings {
+                        enabled: true,
+                        participate: true,
+                        report: maknae_kernel::Report::Every,
+                    },
+                )
+                .unwrap();
+            });
+            w.board_blobs.fail(Some(Fail::Unsynced));
+            let (answer, records) = w.manage(set(true, true, BoardReport::Off)).await;
+            w.board_blobs.fail(None);
+            assert_eq!(refused(&answer), Some(BoardDefect::OutcomeUnknown));
+            assert_eq!(
+                records[1].board,
+                settings_said(None, Some("enabled=false participate=true report=summary")),
+                "the merge this write left, not the write that landed after it"
+            );
+        }
+
+        #[tokio::test]
         async fn board_manage_is_served_while_every_switch_is_off() {
             let mut w = manage_world("manage-switches-off", "user");
             w.switch(false, &[]);

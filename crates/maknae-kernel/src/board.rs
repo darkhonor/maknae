@@ -60,6 +60,15 @@ pub(crate) struct Observed {
     pub in_range: BTreeSet<u64>,
 }
 
+/// What one [`BoardStore::write_settings`] did: the settings before it, those memory holds
+/// after it, and why it is not done, if it is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Written {
+    pub before: Settings,
+    pub now: Settings,
+    pub refused: Option<BoardRefusal>,
+}
+
 /// What [`BoardStore::clear`] removed, and why it stopped early, if it did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Cleared {
@@ -299,7 +308,12 @@ pub struct BoardStore {
     /// The highest time this store has read, so that its now never runs backwards.
     seen: std::sync::atomic::AtomicI64,
     caps: Caps,
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    after_settings: Mutex<Option<SettingsHook>>,
 }
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+type SettingsHook = Box<dyn FnOnce(&BoardStore) + Send>;
 
 impl BoardStore {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -342,6 +356,8 @@ impl BoardStore {
             clock,
             seen: std::sync::atomic::AtomicI64::new(i64::MIN),
             caps,
+            #[cfg(any(test, feature = "hermetic-test-seam"))]
+            after_settings: Mutex::new(None),
         })
     }
 
@@ -370,29 +386,78 @@ impl BoardStore {
             .map_or_else(Settings::default, |b| b.settings)
     }
 
-    /// Writes `settings` and returns those before it. A write that does not sync leaves
-    /// memory with each veto on only where both values have it on, and the old `report`.
-    pub(crate) fn set_settings(
-        &self,
-        key: BoardKey,
-        settings: Settings,
-    ) -> Result<Settings, BoardRefusal> {
+    /// Writes `settings`: the settings before, those memory holds after, and why the write
+    /// is not done, if it is not. A write that does not sync leaves memory with each veto on
+    /// only where both values have it on, and the old `report`.
+    pub(crate) fn write_settings(&self, key: BoardKey, settings: Settings) -> Written {
+        let written = self.write_settings_alone(key, settings);
+        #[cfg(any(test, feature = "hermetic-test-seam"))]
+        {
+            let then = self
+                .after_settings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(then) = then {
+                then(self);
+            }
+        }
+        written
+    }
+
+    fn write_settings_alone(&self, key: BoardKey, settings: Settings) -> Written {
         let _w = self.writing();
         let mut rec = self.board_record(key);
         let before = rec.settings;
         rec.settings = settings;
         match self.save_board(key, rec) {
-            Ok(()) => Ok(before),
+            Ok(()) => Written {
+                before,
+                now: settings,
+                refused: None,
+            },
             Err(StoreError::NotDurable(why)) => {
-                self.held().boards.entry(key).or_default().settings = Settings {
+                let now = Settings {
                     enabled: before.enabled && settings.enabled,
                     participate: before.participate && settings.participate,
                     report: before.report,
                 };
-                Err(BoardRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}")))
+                self.held().boards.entry(key).or_default().settings = now;
+                Written {
+                    before,
+                    now,
+                    refused: Some(BoardRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}"))),
+                }
             }
-            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => Err(store(e)),
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => Written {
+                before,
+                now: before,
+                refused: Some(store(e)),
+            },
         }
+    }
+
+    /// [`Self::write_settings`], answering the settings before it.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub(crate) fn set_settings(
+        &self,
+        key: BoardKey,
+        settings: Settings,
+    ) -> Result<Settings, BoardRefusal> {
+        let written = self.write_settings(key, settings);
+        match written.refused {
+            None => Ok(written.before),
+            Some(why) => Err(why),
+        }
+    }
+
+    /// Runs `then` once, after the next settings write has returned its writer.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn after_settings_write(&self, then: impl FnOnce(&BoardStore) + Send + 'static) {
+        *self
+            .after_settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(then));
     }
 
     /// `by` is the author and its uid. A post whose author uid or whose board's uid `view`

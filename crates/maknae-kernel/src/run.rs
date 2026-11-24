@@ -4061,10 +4061,18 @@ where
                 return;
             }
             let s = Arc::clone(store);
-            let done = bv::offload(trail.uid, deadline, move || s.set_settings(key, asked)).await;
-            let now = store.settings(key);
-            match done {
-                Ok(before) => {
+            let done = bv::offload(
+                trail.uid,
+                deadline,
+                move || Ok(s.write_settings(key, asked)),
+            )
+            .await;
+            let (now, r) = match done {
+                Ok(crate::board::Written {
+                    before,
+                    now,
+                    refused: None,
+                }) => {
                     let mut outcome = trail.outcome(&intent, "done", "authorized");
                     outcome.board = Some(BoardAudit {
                         settings_before: Some(bv::settings_text(before)),
@@ -4075,18 +4083,23 @@ where
                     trail
                         .deliver(stream, &outcome, payload, m.role, m.rule, action)
                         .await;
+                    return;
                 }
-                Err(r) => {
-                    let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
-                    outcome.board = Some(BoardAudit {
-                        settings_after: Some(bv::settings_text(now)),
-                        ..BoardAudit::default()
-                    });
-                    trail
-                        .refuse_board(stream, &outcome, bv::defect_of(&r))
-                        .await;
-                }
-            }
+                Ok(crate::board::Written {
+                    now,
+                    refused: Some(r),
+                    ..
+                }) => (now, r),
+                Err(r) => (store.settings(key), r),
+            };
+            let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+            outcome.board = Some(BoardAudit {
+                settings_after: Some(bv::settings_text(now)),
+                ..BoardAudit::default()
+            });
+            trail
+                .refuse_board(stream, &outcome, bv::defect_of(&r))
+                .await;
         }
         BoardOp::Clear => {
             let (page, _) = store.clearable(key);
