@@ -108,6 +108,17 @@ pub enum ToolVerify {
     Optional,
 }
 
+impl ToolVerify {
+    pub const ALL: [ToolVerify; 2] = [ToolVerify::Required, ToolVerify::Optional];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolVerify::Required => "required",
+            ToolVerify::Optional => "optional",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolImage {
     pub reference: String,
@@ -1164,16 +1175,7 @@ fn parse_image(v: &Value) -> Result<ToolImage, String> {
     }
     let verify = |m: &Fields, key: &str| {
         get(m, key)
-            .map(|v| {
-                choice(
-                    v,
-                    key,
-                    &[
-                        ("required", ToolVerify::Required),
-                        ("optional", ToolVerify::Optional),
-                    ],
-                )
-            })
+            .map(|v| choice(v, key, &ToolVerify::ALL.map(|t| (t.as_str(), t))))
             .transpose()
     };
     let (signature, sbom) = match get(m, "verify") {

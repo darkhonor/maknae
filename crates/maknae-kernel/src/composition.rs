@@ -1634,7 +1634,7 @@ mod tests {
                 SRV,
             ),
             (
-                "an agent citing another agent's task",
+                "a stamp whose task is not the cited task",
                 &hobi_who,
                 Some(&jin_task),
                 shape("github-post", "pr.comment", &body),

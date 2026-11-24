@@ -48,6 +48,8 @@ pub mod tool_launch {
     pub const MODE: &str = "mode";
     pub const SHAPE: &str = "shape";
     pub const IMAGE_REF: &str = "image.ref";
+    pub const IMAGE_VERIFY_SIGNATURE: &str = "image.verify.signature";
+    pub const IMAGE_VERIFY_SBOM: &str = "image.verify.sbom";
     pub const ISOLATION: &str = "isolation";
     pub const NETWORK_VIA: &str = "network.via";
     pub const NETWORK_SITES: &str = "network.sites";

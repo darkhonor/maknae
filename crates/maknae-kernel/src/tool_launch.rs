@@ -87,10 +87,16 @@ fn fixed(launch: &Launch) -> Result<Attributes, NoImage> {
         }
         LaunchCall::Open { .. } => p.insert(key::MODE, text(TOOL_MODE_OPEN)),
     }
-    p.insert(
-        key::IMAGE_REF,
-        text(&entry.image.as_ref().ok_or(NoImage)?.reference),
-    );
+    let image = entry.image.as_ref().ok_or(NoImage)?;
+    p.insert(key::IMAGE_REF, text(&image.reference));
+    for (key, verify) in [
+        (key::IMAGE_VERIFY_SIGNATURE, image.signature),
+        (key::IMAGE_VERIFY_SBOM, image.sbom),
+    ] {
+        if let Some(verify) = verify {
+            p.insert(key, text(verify.as_str()));
+        }
+    }
     p.insert(key::ISOLATION, text(entry.isolation.as_str()));
     let (via, sites) = match &entry.network {
         ToolNetwork::None => ("none", Default::default()),
@@ -592,6 +598,36 @@ tools:
     }
 
     #[test]
+    fn image_verification_is_in_the_recipe_and_the_digest() {
+        use maknae_config::ToolVerify;
+        let c = catalog();
+        let call = comment(&c, "b", "1");
+        let pc = per_call("/w", None, 1);
+        let bare = launch_obligation(&call, &pc).unwrap().params;
+        assert_eq!(bare.get("image.verify.signature"), None);
+        assert_eq!(bare.get("image.verify.sbom"), None);
+        let mut seen = vec![bare.str("shape.sha256").unwrap().to_string()];
+        for (k, signature, sbom) in [
+            ("image.verify.signature", Some(ToolVerify::Required), None),
+            ("image.verify.signature", Some(ToolVerify::Optional), None),
+            ("image.verify.sbom", None, Some(ToolVerify::Required)),
+            ("image.verify.sbom", None, Some(ToolVerify::Optional)),
+        ] {
+            let mut e = c.entry("gh-post").unwrap().clone();
+            let image = e.image.as_mut().unwrap();
+            image.signature = signature;
+            image.sbom = sbom;
+            let p = launch_obligation(&on(&call, &e), &pc).unwrap().params;
+            let want = signature.or(sbom).unwrap().as_str();
+            assert_eq!(p.str(k), Some(want), "{k}");
+            let digest = p.str("shape.sha256").unwrap().to_string();
+            assert_eq!(shape_sha256(&on(&call, &e)).unwrap(), digest);
+            assert!(!seen.contains(&digest), "{k} {want}");
+            seen.push(digest);
+        }
+    }
+
+    #[test]
     fn shape_digest_changes_with_image_template_or_shape() {
         let c = catalog();
         let entry = c.entry("gh-post").unwrap();
@@ -639,6 +675,10 @@ tools:
             each.push(shape_sha256(&on(&call, &e)).unwrap());
         };
         variant(&|e| e.isolation = maknae_config::ToolIsolation::Container);
+        for verify in maknae_config::ToolVerify::ALL {
+            variant(&|e| e.image.as_mut().unwrap().signature = Some(verify));
+            variant(&|e| e.image.as_mut().unwrap().sbom = Some(verify));
+        }
         variant(&|e| e.network = maknae_config::ToolNetwork::None);
         variant(&|e| {
             e.network = maknae_config::ToolNetwork::Proxy {
@@ -870,8 +910,10 @@ tools:
         "files.sha256",
     ];
 
-    const NOT_RENDERED: [&str; 17] = [
+    const NOT_RENDERED: [&str; 19] = [
         "entry",
+        "image.verify.signature",
+        "image.verify.sbom",
         "mode",
         "shape",
         "grammar.sha256",
