@@ -5,6 +5,7 @@
 - **Deciders:** Alex Ackerman (maintainer)
 - **Raised by:** [#420](https://github.com/darkhonor/maknae/issues/420) (decision 3, the tool model), [#477](https://github.com/darkhonor/maknae/issues/477)
 - **Amends:** [ADR-0005](ADR-0005-enforcement-locus-tcb-boundary.md) (the MVP collapse of the PDP and the sole PEP into one process); [ADR-0006](ADR-0006-client-authentication-model.md) decision 10 (the front ends' role)
+- **Amended:** 2026-11-25 by [#674](https://github.com/darkhonor/maknae/issues/674) PR 3a: the forward class is built as a tool-call-only discharge. See the banner at decision 3.
 
 ## Context
 
@@ -33,6 +34,8 @@ During the design session an identity scheme was proposed: a hash built into eac
 3. **A Permit may carry obligations, and a PEP that cannot carry one out must deny.** This is the obligation rule already in force inside the kernel, extended to PEPs outside it. The tool model's launch shape travels this way ([ADR-0036](ADR-0036-the-tool-model.md) decision 6). The `Obligation {id, params}` type in `crates/maknae-security/src/obligation.rs` is opaque and already sufficient, so the `Authorizer` contract and its types do not change for obligations (the tool model's workspace decision does add a filesystem operation, [ADR-0036](ADR-0036-the-tool-model.md) decision 5) ([ADR-0004](ADR-0004-modular-authorization-architecture.md)). Two kernel-side additions are needed, and neither is built:
    - carrying an obligation to the front end is a new, additive field on the wire (`maknae-proto`); obligations do not reach the wire today. `PROTOCOL_VERSION` does not change;
    - `maknaed`'s own discharge of obligations (`discharge_plan` in `crates/maknae-kernel/src/handler.rs`) today treats an obligation with no registered handler as unhonorable, and so denies. It gains a "forward to the requesting PEP" class for named obligation ids. It stays fail-closed: an id that is neither handled nor named for forwarding still denies.
+
+   **Amended 2026-11-25 ([#674](https://github.com/darkhonor/maknae/issues/674) PR 3a):** the second addition is built, and not where this decision placed it. `Response` carries the obligations in an optional field (`obligations`, skipped when absent, so a frame without it decodes through the pre-change type and `PROTOCOL_VERSION` does not change). The forward class is a separate discharge, `discharge_for_tool_call`, used only by the tool-call path: it forwards the two ids `tool.launch` and `workspace.mask` to the requesting PEP, still discharges `audit`, and denies any other id. `discharge_plan` is unchanged and stays strict, so every existing PEP still denies an obligation it has no handler for, and no new id can reach a PEP by way of a path that predates it. This departs from the design's wording that `discharge_plan` gains the class. The fail-closed rule above holds on both paths.
 
 4. **A PEP's identity is the kernel's observation of the peer, never what the message says.** A secret carried in the message or embedded in the binary proves nothing, for the reasons in the Context. What the kernel can observe, by platform:
 

@@ -7,6 +7,7 @@
 - **Amends:** [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decisions 3 and 5; [ADR-0029](ADR-0029-kernel-enforcement-state-graph.md) (the vocabulary seam); [ADR-0033](ADR-0033-agent-identity-admission-and-tasks.md) amendment 2026-11-17, statement 2 (the tasks right)
 - **Builds on:** [ADR-0036](ADR-0036-the-tool-model.md) (the tool model and `tools.yaml`); [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) (bindings, the filtered view, the reach check); [ADR-0029](ADR-0029-kernel-enforcement-state-graph.md) (`maknae-graph` and format v1); [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) (the `providers:` section, the precedent for `forges:`); [ADR-0032](ADR-0032-per-subject-restrictions.md) (per-subject lists)
 - **Amended:** 2026-11-22 by [#168](https://github.com/darkhonor/maknae/issues/168) slice 4 PR A: forges go in every catalog, and the person's tasker client consumes them. See the banners at decisions 6 and 9.
+- **Amended:** 2026-11-25 by [#674](https://github.com/darkhonor/maknae/issues/674) PR 3a: the catalog is compiled from enabled grammars and `tools.d` drop-ins as well, and `SHAPE` nodes are filled. See the banners at decisions 2 and 3.
 
 ## Context
 
@@ -22,12 +23,21 @@ The maintainer's framing of the purpose, 2026-11-21: *"helping to inform models 
 
 2. **The catalog is compiled from the site's `/etc/maknae/tools.yaml`, never from the `/usr/share/maknae` library** (maintainer, 2026-11-21), together with the subject's grants and `forges:` (decision 6). No client reads `tools.yaml`, `maknae.yaml` or policy to build a catalog or to recognize a binding. A client still reads its own enrollment, CA and agent files, as before.
 
+   **Amended 2026-11-25 ([#674](https://github.com/darkhonor/maknae/issues/674) PR 3a):** "the site's `tools.yaml`" reads as the site's tool configuration under `/etc/maknae`: `tools.yaml`, its `tools.d/*.yaml` drop-ins and the grammars enabled in `/etc/maknae/grammars/` ([ADR-0036](ADR-0036-the-tool-model.md) decision 7). The `/usr/share/maknae` library is still never read for a catalog: a vendor grammar that is not linked or copied into `/etc/maknae/grammars/` contributes nothing.
+
 3. **The catalog is a `maknae-graph` graph in a shared `catalog` vocabulary, and one crate serves the kernel and the clients** (maintainer, 2026-11-21). The kernel builds the graph and sends its format-v1 bytes; each client decodes them against the same schema with the same codec and walks them with the same functions. Nothing defines the schema twice.
    - **Nodes:** `ENTRY` (key: the entry name; attributes: `description` when present, `executes_workspace`, `output`), `PROGRAM` (key: `<entry>/<program>`), `PATTERN` (decision 7), `BINDING_KIND` (key: `git`), `FORGE` (key: the forge name; attributes: `host`, `provider`), and `SHAPE`, reserved for #674 PR 3 and emitted by nothing yet.
    - **Edges:** `ENTRY -runs-> PROGRAM`, `PROGRAM -granted-> PATTERN`, `ENTRY -binds-> BINDING_KIND`, `BINDING_KIND -served_by-> FORGE`.
    - **The fence is outside the vocabulary.** No node kind or attribute carries a credential class, an App name, an image, a volume, a network site, `deny_args`, resources, `lifetime_max` or `isolation`, and a test pins the node kinds and attribute names against an allowlist. An entry whose name happens to equal a credential class's name is emitted only as the entry's name.
    - The catalog is not kernel enforcement state and holds no secret, so it does not live in the kernel space.
    - **Rejected:** a typed `maknae-proto` payload from which each client builds its own graph, which defines the schema twice; and clients that derive the catalog from `/etc/maknae`, which is the read this decision removes.
+
+   **Amended 2026-11-25 ([#674](https://github.com/darkhonor/maknae/issues/674) PR 3a):** `SHAPE` is emitted, and the schema version is 2.
+   - **Only granted shapes.** A `SHAPE` node exists only for a shape the subject's lists admit, and the single edge to it is `PROGRAM -has-> SHAPE`. A shape the subject is not granted is absent, and so is its name.
+   - **Attributes.** A shape carries its `description`, its `access` (`read` or `write`) and, per slot, the slot's name, position (`at`), description and `enum` members. It never carries a `pattern`, the argv template, a digest, an image or a credential. The read/write attribute is named `access` and not `class`: the fence above reserves `class` for a credential class, and a test pins the attribute names against the allowlist.
+   - **Open programs** carry the attribute `open`; a program with a granted pattern appears as before.
+   - **Presentation.** `maknae tools` prints each entry, then its programs with their subcommands, shapes (with their slots) and open programs, then the forges.
+   - **Not built as the design wrote it.** The design also called for an `ENTRY -granted-> SHAPE` edge; the catalog does not carry it, because `PROGRAM -has-> SHAPE` already places each shape under the one program it belongs to.
 
 4. **Delivery is pull with a digest stamp** (maintainer, 2026-11-21).
    - A new verb, `tool.catalog`, returns `Payload::ToolCatalog { digest, graph }`: the subject's graph as format-v1 bytes and their SHA-256. The verb and payload are additive CBOR variants; `PROTOCOL_VERSION` is unchanged.

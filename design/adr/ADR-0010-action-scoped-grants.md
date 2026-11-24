@@ -113,6 +113,8 @@ Decision 3 says a role-independent grant is ungrammatical, and that is true of `
 
 **Operator ruling 2026-08-31: leave them separate.** A *universal* permission — one that holds for every role, by construction, with no per-role list to audit — is a solid use case in its own right, not merely the state we happen to be in. Folding path grants into `roles:` would lose that property and would change the meaning of every existing `permissions:` block. Revisitable; not now.
 
+*(Amended 2026-11-25, [#674](https://github.com/darkhonor/maknae/issues/674) PR 3a: tool grants are per role. `roles.<role>.permissions` holds `Tool(...)` grants and nothing else, and a person's role adds its allows and denies to the lists in force; an agent takes tool grants only from its own policy and inherits none from a role. Path grants (`Read(...)`, `Write(...)`) stay role-blind in `permissions:`, as ruled above, and a path capability inside a role's `permissions` is a load error for that role. The universal-grant property this decision protects is a property of paths; a tool grant is a grant to a role's holders by nature, so the two surfaces differ there. See [ADR-0036](ADR-0036-the-tool-model.md) decision 7.)*
+
 **15. `admin.config.show` discloses the FULL effective configuration, with secret VALUES masked** (operator ruling 2026-08-31). Not a curated subset: the effective composed settings as the daemon actually resolved them, which is what makes the term worth having for an operator debugging a deployment.
 
 Secret values are replaced by a presence marker — `<value set>` — so the disclosure says **that** a setting is configured without saying **what** it is.
