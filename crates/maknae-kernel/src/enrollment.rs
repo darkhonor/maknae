@@ -398,4 +398,52 @@ mod tests {
         assert!(Containing(on.clone(), [].into()).board(&id("hobi")));
         assert!(Unresolving(on, [].into()).board(&id("hobi")));
     }
+
+    #[test]
+    fn boarding_answers_board_from_its_set_and_every_other_question_from_its_view() {
+        let fixed = FixedEnrollment([(id("hobi"), 2001), (id("jin"), 2002)].into());
+        let inner = Unresolving(Containing(fixed, [2001].into()), [4001].into());
+        assert!(!inner.board(&id("hobi")));
+        let view = Boarding(inner, [id("hobi")].into());
+
+        assert_eq!(view.agent_uid(&id("hobi")), Some(2001));
+        assert_eq!(view.agent_uid(&id("jin")), Some(2002));
+        assert_eq!(view.agent_uid(&id("suga")), None);
+        assert_eq!(view.agents(), [(id("hobi"), 2001), (id("jin"), 2002)]);
+        assert!(view.is_enrolled(2002));
+        assert!(!view.is_enrolled(4001));
+        assert!(view.contained(2001));
+        assert!(!view.contained(2002));
+        assert!(view.unresolved(4001));
+        assert!(!view.unresolved(2001));
+        assert!(view.board(&id("hobi")));
+        assert!(
+            !view.board(&id("jin")),
+            "an enrolled agent outside the set is off"
+        );
+        assert!(!view.board(&id("suga")), "an unknown agent is off");
+    }
+
+    #[test]
+    fn containing_and_unresolving_answer_board_from_their_view() {
+        let boarding = || {
+            Boarding(
+                FixedEnrollment([(id("hobi"), 2001), (id("jin"), 2002)].into()),
+                [id("hobi")].into(),
+            )
+        };
+        let containing = Containing(boarding(), [2001, 2002].into());
+        let unresolving = Unresolving(boarding(), [2001, 2002].into());
+        for (wrapper, view) in [
+            ("Containing", &containing as &dyn EnrollmentView),
+            ("Unresolving", &unresolving),
+        ] {
+            assert!(view.board(&id("hobi")), "{wrapper}: in the set");
+            assert!(
+                !view.board(&id("jin")),
+                "{wrapper}: enrolled, not in the set"
+            );
+            assert!(!view.board(&id("suga")), "{wrapper}: unknown");
+        }
+    }
 }
