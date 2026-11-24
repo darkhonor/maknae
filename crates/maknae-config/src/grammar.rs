@@ -453,7 +453,7 @@ const OPEN_TOKEN_MAX: usize = 4096;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallRefusal {
     MissingSlot(String),
-    UnexpectedSlot(String),
+    UnexpectedSlot,
     Invariant { slot: String, rule: &'static str },
     Constraint { slot: String },
     UnresolvedBound(String),
@@ -475,10 +475,6 @@ pub struct Rendered {
     pub files: Vec<SlotFile>,
 }
 
-fn is_control_char(c: char) -> bool {
-    c.is_control()
-}
-
 fn check_value(name: &str, slot: &Slot, value: &str) -> Result<(), CallRefusal> {
     let refuse = |rule| {
         Err(CallRefusal::Invariant {
@@ -497,7 +493,7 @@ fn check_value(name: &str, slot: &Slot, value: &str) -> Result<(), CallRefusal> 
             if value.starts_with('-') {
                 return refuse("leading_dash");
             }
-            if value.chars().any(is_control_char) {
+            if value.chars().any(char::is_control) {
                 return refuse("control");
             }
         }
@@ -530,7 +526,7 @@ fn bound_value<'a>(kind: &str, field: &str, bound: &'a Bound) -> Result<&'a str,
     let value = bound
         .get(kind, field)
         .ok_or_else(|| CallRefusal::UnresolvedBound(key()))?;
-    if value.is_empty() || value.starts_with('-') || value.chars().any(is_control_char) {
+    if value.is_empty() || value.starts_with('-') || value.chars().any(char::is_control) {
         return Err(CallRefusal::BadBound(key()));
     }
     Ok(value)
@@ -546,14 +542,16 @@ impl Shape {
         slots: &BTreeMap<String, String>,
         bound: &Bound,
     ) -> Result<Rendered, CallRefusal> {
-        if let Some(extra) = slots.keys().find(|k| !self.slots.contains_key(*k)) {
-            return Err(CallRefusal::UnexpectedSlot(extra.clone()));
+        if slots.keys().any(|k| !self.slots.contains_key(k)) {
+            return Err(CallRefusal::UnexpectedSlot);
         }
-        for (name, slot) in &self.slots {
-            let value = slots
+        let given = |name: &str| {
+            slots
                 .get(name)
-                .ok_or_else(|| CallRefusal::MissingSlot(name.clone()))?;
-            check_value(name, slot, value)?;
+                .ok_or_else(|| CallRefusal::MissingSlot(name.to_string()))
+        };
+        for (name, slot) in &self.slots {
+            check_value(name, slot, given(name)?)?;
         }
         let position = |name: &str| CallRefusal::Invariant {
             slot: name.to_string(),
@@ -569,7 +567,7 @@ impl Shape {
                 ArgvToken::Slot(name) => {
                     let slot = self.slots.get(name).ok_or_else(|| position(name))?;
                     match slot.at {
-                        SlotAt::Token => argv.push(slots[name].clone()),
+                        SlotAt::Token => argv.push(given(name)?.clone()),
                         SlotAt::File => argv.push(slot_file_path(name)),
                         SlotAt::Option | SlotAt::Stdin => return Err(position(name)),
                     }
@@ -577,7 +575,7 @@ impl Shape {
                 ArgvToken::OptionSlot { prefix, slot: name } => {
                     let slot = self.slots.get(name).ok_or_else(|| position(name))?;
                     match slot.at {
-                        SlotAt::Option => argv.push(format!("{prefix}{}", slots[name])),
+                        SlotAt::Option => argv.push(format!("{prefix}{}", given(name)?)),
                         SlotAt::Token | SlotAt::File | SlotAt::Stdin => {
                             return Err(position(name));
                         }
@@ -589,10 +587,10 @@ impl Shape {
         let mut files = Vec::new();
         for (name, slot) in &self.slots {
             match slot.at {
-                SlotAt::Stdin => stdin = Some(slots[name].clone().into_bytes()),
+                SlotAt::Stdin => stdin = Some(given(name)?.clone().into_bytes()),
                 SlotAt::File => files.push(SlotFile {
                     path: slot_file_path(name),
-                    content: slots[name].clone().into_bytes(),
+                    content: given(name)?.clone().into_bytes(),
                 }),
                 SlotAt::Token | SlotAt::Option => {}
             }
@@ -638,7 +636,7 @@ pub fn check_open_argv(argv: &[String]) -> Result<(), CallRefusal> {
             "too_long"
         } else if token.contains('\0') {
             "nul"
-        } else if token.chars().any(|c| c != '\t' && is_control_char(c)) {
+        } else if token.chars().any(|c| c != '\t' && c.is_control()) {
             "control"
         } else {
             continue;
@@ -1651,7 +1649,7 @@ shapes:
         let e = shape("issue.list")
             .render(&slots(&[("state", "open"), ("extra", "x")]), &git_bound())
             .unwrap_err();
-        assert_eq!(e, CallRefusal::UnexpectedSlot("extra".into()));
+        assert_eq!(e, CallRefusal::UnexpectedSlot);
     }
 
     #[test]
@@ -1756,10 +1754,7 @@ shapes:
         assert_eq!(refusals.len(), 8);
         for r in &refusals {
             let shown = format!("{r:?}");
-            assert!(
-                !shown.contains(probe) || matches!(r, CallRefusal::UnexpectedSlot(_)),
-                "{shown}"
-            );
+            assert!(!shown.contains(probe), "{shown}");
         }
     }
 
