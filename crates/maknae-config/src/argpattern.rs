@@ -147,6 +147,13 @@ impl ArgPattern {
         Ok(Self(tokens))
     }
 
+    pub fn parse_grant(spec: &str) -> Result<Self, ArgPatternError> {
+        if spec == "*" {
+            return Ok(Self(vec![ArgToken::Rest]));
+        }
+        Self::parse(spec)
+    }
+
     pub fn canonical(&self) -> String {
         self.0
             .iter()

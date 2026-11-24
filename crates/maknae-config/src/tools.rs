@@ -1395,7 +1395,6 @@ mod tests {
         assert_eq!(
             names,
             [
-                "github-issues-admin",
                 "github-issues-read",
                 "github-issues-write",
                 "github-post",
@@ -1997,13 +1996,12 @@ mod tests {
         let c = catalog(HOMELAB);
         assert!(c.disabled().is_empty(), "{:?}", c.disabled());
         let without = ToolsCatalog::parse(HOMELAB).unwrap();
-        assert_eq!(without.disabled().len(), 5, "{:?}", without.disabled());
+        assert_eq!(without.disabled().len(), 4, "{:?}", without.disabled());
         for name in [
             "github-read",
             "github-post",
             "github-issues-read",
             "github-issues-write",
-            "github-issues-admin",
             "rust-fetch",
             "rust-build",
             "rust-scratch",
@@ -2319,15 +2317,10 @@ mod tests {
             shapes("github-issues-read"),
             ["issue.list", "issue.status", "issue.view"]
         );
-        assert_eq!(
-            shapes("github-issues-admin"),
-            ["issue.delete", "issue.transfer"]
-        );
         assert_eq!(shapes("github-issues-write").len(), 15);
         for (entry, app) in [
             ("github-issues-read", "maknae-github-issues-read"),
             ("github-issues-write", "maknae-github-issues-write"),
-            ("github-issues-admin", "maknae-github-issues-admin"),
         ] {
             let e = c.entry(entry).unwrap();
             assert_eq!(e.credential.as_deref(), Some(entry));
@@ -2339,6 +2332,14 @@ mod tests {
                 "{entry}"
             );
         }
+    }
+
+    #[test]
+    fn tools_yaml_subcommands_lone_star_still_refused() {
+        let c =
+            ToolsCatalog::parse(&doc(CRED, &with_command("", "{ subcommands: [\"*\"] }"))).unwrap();
+        assert!(reason(&c, SENTINEL).contains("subcommand `*`"));
+        assert!(DenyArg::parse("*").is_err());
     }
 
     #[test]

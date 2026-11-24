@@ -28,13 +28,11 @@
 #   github-issues-write: Tool(github-issues-write gh:issue.create)
 #                        Tool(github-issues-write gh:issue.comment)
 #                        Tool(github-issues-write gh:issue.edit.*)  (and the other issue.* shapes)
-#   github-issues-admin: Tool(github-issues-admin gh:issue.transfer)
-#                        Tool(github-issues-admin gh:issue.delete)
 #   rust-fetch:          Tool(rust-fetch cargo fetch --locked*)
 #   rust-build:          Tool(rust-build cargo build *)  Tool(rust-build cargo check *)
 #                        Tool(rust-build cargo clippy *)  Tool(rust-build cargo test *)
 #                        Tool(rust-build cargo fmt --check*)
-#   rust-scratch:        Tool(rust-scratch cargo run *)  Tool(rust-scratch rustc --edition=2021 *)
+#   rust-scratch:        Tool(rust-scratch cargo *)  Tool(rust-scratch rustc *)
 #                        (open mode: the model supplies the arguments, so the entry holds
 #                        no credential and no network; deny_args still applies)
 #
@@ -43,8 +41,8 @@
 # model's text, so posting never reads a file and no path can be steered to a
 # mounted credential.
 # Posting and issue work are separate entries and credential classes so each is
-# a separate grant. Deleting or transferring an issue needs more of the App than
-# editing one, so github-issues-admin holds only those two shapes.
+# a separate grant. Transferring or deleting an issue needs GitHub admin rights
+# that a task's reach cannot express, so the baseline has no shape for either.
 schema_version: 1
 credential_classes:
   github-read:
@@ -79,14 +77,6 @@ credential_classes:
     minting: trust-plane
     delivery: [env:GH_TOKEN]
     app: maknae-github-issues-write
-  github-issues-admin:
-    kind: github-app-installation
-    source: minted-per-task
-    narrowing: provider
-    lifetime: { expires: 1h, revoke_on: task-outcome }
-    minting: trust-plane
-    delivery: [env:GH_TOKEN]
-    app: maknae-github-issues-admin
 tools:
   github-read:
     enabled: true
@@ -177,27 +167,6 @@ tools:
         shapes: [issue.create, issue.comment, issue.edit.title, issue.edit.body, issue.edit.add-label, issue.edit.remove-label, issue.edit.add-assignee, issue.edit.remove-assignee, issue.close, issue.reopen, issue.lock, issue.unlock, issue.pin, issue.unpin, issue.develop]
         timeout: 2m
         output: 1MiB
-  github-issues-admin:
-    enabled: true
-    description: "Transfer or delete issues (needs a more privileged App)."
-    image:
-      ref: ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000
-      verify: { signature: required, sbom: required }
-    isolation: container
-    executes_workspace: false
-    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
-    workspace: none
-    credential: github-issues-admin
-    output_to_model: redacted
-    resources: { cpus: 1, memory: 512Mi }
-    lifetime: { max: 5m }
-    binds: { git: { resolver: git } }
-    commands:
-      gh:
-        grammar: gh
-        shapes: [issue.transfer, issue.delete]
-        timeout: 2m
-        output: 1MiB
   rust-fetch:
     enabled: true
     description: Fetch Cargo dependencies into the registry cache.
@@ -266,5 +235,6 @@ tools:
         output: 4MiB
       rustc:
         open: true
+        deny_args: ["+*", "-Z*"]
         timeout: 15m
         output: 4MiB

@@ -913,7 +913,7 @@ impl ToolPattern {
             }
             None => {
                 let rest = third.ok_or_else(bad)?;
-                let args = ArgPattern::parse(rest).map_err(|_| bad())?;
+                let args = ArgPattern::parse_grant(rest).map_err(|_| bad())?;
                 (second, ToolTarget::Args(args))
             }
         };
@@ -4185,7 +4185,6 @@ mod tests {
             "Tool(-x cargo test)",
             "Tool(a b/c test)",
             "Tool(a cargo  test)",
-            "Tool(a cargo *)",
         ] {
             assert_eq!(
                 parse_pattern(bad),
@@ -4193,6 +4192,61 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    fn lone() -> Pattern {
+        parse_pattern("Tool(a cargo *)").unwrap()
+    }
+
+    fn lone_tool() -> ToolPattern {
+        let Pattern::Tool(t) = lone() else {
+            panic!("expected a Tool pattern");
+        };
+        t
+    }
+
+    #[test]
+    fn lone_star_grant_loads_as_allow_and_deny() {
+        let Pattern::Tool(t) = lone() else {
+            panic!("expected a Tool pattern");
+        };
+        assert_eq!(t.entry, "a");
+        assert_eq!(t.program, "cargo");
+        assert!(matches!(t.target, ToolTarget::Args(ref a) if a.canonical() == "*"));
+        let doc = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(a cargo *)\"]\n  deny: [\"Tool(a cargo *)\"]\n",
+        );
+        assert!(doc.is_ok(), "{doc:?}");
+    }
+
+    #[test]
+    fn lone_star_grant_matches_empty_and_long_argv() {
+        let p = lone_tool();
+        let long: Vec<&str> = std::iter::repeat("x").take(64).collect();
+        for argv in [&[][..], &["build"], &long] {
+            let call = tool_call("a", "cargo", argv);
+            assert!(p.matches(&call, Side::Allow), "{argv:?}");
+            assert!(p.matches(&call, Side::Deny), "{argv:?}");
+        }
+        assert!(!p.matches(&tool_call("b", "cargo", &["x"]), Side::Allow));
+        assert!(!p.matches(&tool_call("a", "rustc", &["x"]), Side::Allow));
+    }
+
+    #[test]
+    fn lone_star_grant_stays_bounded_by_a_positional_ceiling() {
+        let tools = crate::ToolsCatalog::parse(
+            "schema_version: 1\ntools:\n  a:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n",
+        )
+        .unwrap();
+        let cmd = &tools.entry("a").unwrap().commands["cargo"];
+        let crate::CommandForm::Positional(patterns) = &cmd.form else {
+            panic!("{:?}", cmd.form);
+        };
+        let ok = ["build".to_string(), "x".to_string()];
+        let bad = ["publish".to_string()];
+        let b = crate::Bound::empty();
+        assert!(patterns.iter().any(|p| p.matches(&ok, &b)));
+        assert!(!patterns.iter().any(|p| p.matches(&bad, &b)));
     }
 
     fn shape_pattern(text: &str) -> ShapePattern {

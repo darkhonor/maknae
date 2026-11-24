@@ -797,7 +797,7 @@ mod tests {
         }
     }
 
-    const HOMELAB_GRANTS: [&str; 15] = [
+    const HOMELAB_GRANTS: [&str; 16] = [
         "Tool(github-read gh:pr.view)",
         "Tool(github-read gh:pr.diff)",
         "Tool(github-read gh:pr.checks)",
@@ -812,7 +812,8 @@ mod tests {
         "Tool(rust-build cargo clippy *)",
         "Tool(rust-build cargo test *)",
         "Tool(rust-build cargo fmt --check*)",
-        "Tool(rust-scratch cargo run *)",
+        "Tool(rust-scratch cargo *)",
+        "Tool(rust-scratch rustc *)",
     ];
 
     #[test]
@@ -849,7 +850,7 @@ mod tests {
             ["issue.list", "issue.status", "issue.view"]
         );
         assert!(cat::open_program(&g, "rust-scratch", "cargo"));
-        assert!(!cat::open_program(&g, "rust-scratch", "rustc"));
+        assert!(cat::open_program(&g, "rust-scratch", "rustc"));
         assert_eq!(
             sorted(cat::patterns(&g, "github-read", "git")),
             ["checkout *", "fetch *"]
@@ -1354,7 +1355,7 @@ mod tests {
             .keys()
             .map(|n| n.to_string())
             .collect();
-        assert_eq!(every.len(), 27);
+        assert_eq!(every.len(), 25);
         let tools = format!(
             "schema_version: 1\ntools:\n  all-gh:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    binds: {{ git: {{ resolver: git }} }}\n    commands:\n      gh: {{ grammar: gh, shapes: [{}] }}\n",
             every.join(", ")
@@ -1378,7 +1379,7 @@ mod tests {
         assert!(c.bytes.len() < TOOL_CATALOG_MAX_BYTES, "{}", c.bytes.len());
         assert_eq!(
             cat::shapes(&cat::decode(&c.bytes).unwrap(), "all-gh", "gh").len(),
-            27
+            25
         );
     }
 

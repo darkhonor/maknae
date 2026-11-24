@@ -184,19 +184,4 @@ shapes:
     argv: [issue, develop, "{number}", -R, "{git.base}", --name, "{branch}"]
     slots:
       number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
-      branch: { at: token, pattern: '[A-Za-z0-9][A-Za-z0-9._/-]{0,127}', description: "The branch name to create." }
-  issue.transfer:
-    description: "Transfer an issue to another repository."
-    class: write
-    forge: { base: [issue-write] }
-    argv: [issue, transfer, "{number}", "{destination}", -R, "{git.base}"]
-    slots:
-      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
-      destination: { at: token, pattern: '[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9._-]{1,100}', description: "The destination repository as OWNER/REPO." }
-  issue.delete:
-    description: "Delete an issue permanently."
-    class: write
-    forge: { base: [issue-write] }
-    argv: [issue, delete, "{number}", -R, "{git.base}", --yes]
-    slots:
-      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      branch: { at: token, pattern: '[A-Za-z0-9]([A-Za-z0-9_-]|[./][A-Za-z0-9_-]){0,127}', description: "The branch name to create." }

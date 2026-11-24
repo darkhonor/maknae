@@ -2249,7 +2249,7 @@ mod load_tests {
 mod shipped_gh_tests {
     use super::*;
 
-    const SHAPES: [&str; 27] = [
+    const SHAPES: [&str; 25] = [
         "pr.view",
         "pr.diff",
         "pr.checks",
@@ -2275,8 +2275,6 @@ mod shipped_gh_tests {
         "issue.pin",
         "issue.unpin",
         "issue.develop",
-        "issue.transfer",
-        "issue.delete",
     ];
 
     fn gh() -> Grammar {
@@ -2384,14 +2382,6 @@ mod shipped_gh_tests {
             render("issue.develop", &[("number", "7"), ("branch", "fix/7")]),
             ["issue", "develop", "7", "-R", "o/r", "--name", "fix/7"]
         );
-        assert_eq!(
-            render("issue.transfer", &[("number", "7"), ("destination", "o/x")]),
-            ["issue", "transfer", "7", "o/x", "-R", "o/r"]
-        );
-        assert_eq!(
-            render("issue.delete", &[("number", "7")]),
-            ["issue", "delete", "7", "-R", "o/r", "--yes"]
-        );
     }
 
     #[test]
@@ -2413,12 +2403,18 @@ mod shipped_gh_tests {
             &[("number", "1"), ("login", "@me")]
         ));
         assert!(refuses(
-            "issue.transfer",
-            &[("number", "1"), ("destination", "no-slash")]
-        ));
-        assert!(refuses(
             "issue.develop",
             &[("number", "1"), ("branch", "-b")]
+        ));
+        for branch in ["a..b", "a//b", "a/", "a.", "/a", "a b"] {
+            assert!(
+                refuses("issue.develop", &[("number", "1"), ("branch", branch)]),
+                "{branch}"
+            );
+        }
+        assert!(!refuses(
+            "issue.develop",
+            &[("number", "1"), ("branch", "fix/7-a.b_c")]
         ));
         assert!(refuses(
             "issue.edit.title",
