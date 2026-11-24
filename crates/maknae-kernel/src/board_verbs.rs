@@ -801,6 +801,7 @@ mod tests {
             }),
             root,
             start: 1,
+            addendum: None,
         }
     }
 

@@ -508,7 +508,7 @@ pub fn stamp_task_bindings(
     use maknae_security::{AttrValue, GitBoundValues};
     let mut kinds = std::collections::BTreeSet::new();
     let mut git = Vec::new();
-    for binding in &cited.signed.task.bindings {
+    for binding in cited.bound().bindings {
         match binding {
             maknae_proto::Binding::Git(b) => {
                 kinds.insert(maknae_config::ForgeKind::Git.as_str().to_owned());
@@ -859,6 +859,7 @@ mod tests {
             }),
             root: crate::task_store::RootTasker::Person { uid: 1000 },
             start: 0,
+            addendum: None,
         });
         let tasked = build_authz_request(
             &Verb::Whoami,
@@ -2333,10 +2334,13 @@ mod tests {
                     labels: maknae_proto::Labels {},
                     bindings: vec![],
                 },
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskAdd {
                 task: task_ref(),
                 text: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: task_ref() },
             Verb::TaskList {

@@ -138,9 +138,10 @@ pub fn validate(
         crate::deployment::Platform::of_build(),
     )
     .map_err(Invalid::Environment)?;
-    let egress_bounds = if boot.providers().is_empty() {
-        None
-    } else {
+    let reach_reads_bounds =
+        crate::reach::ReachSettings::of(boot.forges(), None, egress.reach_deadline_ms)
+            .observes_reach();
+    let egress_bounds = if !boot.providers().is_empty() {
         let bounds = env
             .egress_bounds()
             .map_err(|e| environment(crate::boot_gate::classify_bounds_load_error(e)))?;
@@ -159,6 +160,23 @@ pub fn validate(
             Err(e) => return Err(environment(crate::egress::EgressBootRefusal::Resolve(e))),
         }
         Some(bounds)
+    } else if reach_reads_bounds {
+        let refused = |e: &dyn std::fmt::Display| {
+            environment(format!(
+                "a forge observes reach but {} was refused: {e}",
+                maknae_config::EGRESS_BOUNDS_FILE
+            ))
+        };
+        match env.egress_bounds() {
+            Ok(bounds) => {
+                crate::boot_gate::key_prefixes_boot_gate(&bounds).map_err(|e| refused(&e))?;
+                Some(bounds)
+            }
+            Err(maknae_config::ConfigError::NotFound { .. }) => None,
+            Err(e) => return Err(refused(&e)),
+        }
+    } else {
+        None
     };
     crate::boot_gate::root_vault_boot_gate(boot.section(maknae_vault::VAULT_SECTION))
         .map_err(environment)?;
@@ -600,6 +618,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v.egress_bounds, FakeEnv::with_bounds().bounds);
+    }
+
+    #[test]
+    fn a_forge_that_observes_reach_loads_the_bounds_without_providers() {
+        const GITHUB: &str =
+            r#"[{"host":"github.com","kind":"git","name":"github","provider":"github"}]"#;
+        const GITLAB: &str =
+            r#"[{"host":"gitlab.example","kind":"git","name":"lab","provider":"gitlab"}]"#;
+        fn run(forges: &str, env: &FakeEnv) -> Result<Validated, Invalid> {
+            let mut p = minimal();
+            p.push(("forges", forges));
+            validate(doc(&p), Mode::Boot, Path::new("/e"), env)
+        }
+        let v = run(GITHUB, &FakeEnv::with_bounds()).unwrap();
+        assert_eq!(v.egress_bounds, FakeEnv::with_bounds().bounds);
+        assert_eq!(
+            run(GITHUB, &FakeEnv::default()).unwrap().egress_bounds,
+            None
+        );
+        assert_eq!(
+            run(GITLAB, &FakeEnv::with_bounds()).unwrap().egress_bounds,
+            None
+        );
+        let mut env = FakeEnv::with_bounds();
+        env.bounds.as_mut().unwrap().user_prefix = "a b".into();
+        assert!(
+            matches!(run(GITHUB, &env), Err(Invalid::Environment(ref m)) if m.contains("a forge observes reach") && m.contains("user_prefix"))
+        );
     }
 
     #[test]

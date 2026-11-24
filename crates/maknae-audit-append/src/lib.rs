@@ -31,7 +31,7 @@ pub use record::{
     MutationStatus, Outcome, PageAudit, ProvenanceAudit, RefusedToolCall, RuleAudit, Source,
     Subject, TierAudit, Where, NO_PEER_UID,
 };
-pub use record::{BindingKind, RecordBinding};
+pub use record::{BindingKind, ReachBasis, ReachWhy, RecordAgentReach, RecordBinding, RecordReach};
 pub use scan::ScanResult;
 pub use session::{Seq, SessionIds};
 pub use sink::{AuditEmit, AuditSink};

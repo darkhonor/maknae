@@ -662,6 +662,7 @@ mod tests {
                 board_op: None,
                 tasker: None,
                 bindings: Vec::new(),
+                reach: Vec::new(),
             },
             action: "fs.read".into(),
             object: Some("/home/alice/.ssh/id_rsa".into()),

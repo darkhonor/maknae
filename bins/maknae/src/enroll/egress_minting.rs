@@ -60,10 +60,12 @@ pub(crate) fn minting_path() -> PathBuf {
 
 /// `None` when minting is off.
 pub(crate) fn load(path: &Path) -> Result<Option<MintingConfig>, EnrollError> {
-    maknae_config::load_minting(path).map_err(|e| EnrollError::MintingConfig {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
-    })
+    maknae_config::load_minting(path)
+        .map(|f| f.and_then(maknae_config::MintingFile::into_minting))
+        .map_err(|e| EnrollError::MintingConfig {
+            path: path.to_path_buf(),
+            detail: e.to_string(),
+        })
 }
 
 /// The Egress Daemon must not log in on maknaed's or an agent's mount.

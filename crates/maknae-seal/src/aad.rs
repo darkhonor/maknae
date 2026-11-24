@@ -3,6 +3,7 @@ use std::fmt;
 
 pub const AAD_DOMAIN: &[u8] = b"maknae-seal-aad-v1";
 pub const CREDENTIAL_AAD_DOMAIN: &[u8] = b"maknae-seal-aad-credential-v1";
+pub const FORGE_AAD_DOMAIN: &[u8] = b"maknae-seal-aad-forge-v1";
 pub const MAX_AAD_FIELD_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,6 +19,28 @@ impl CredentialDirection {
             CredentialDirection::ToRevoke => "to-revoke",
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ForgePurpose {
+    TaskerReach,
+}
+
+impl ForgePurpose {
+    fn as_str(self) -> &'static str {
+        match self {
+            ForgePurpose::TaskerReach => "tasker-reach",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ForgeSealContext<'a> {
+    pub purpose: ForgePurpose,
+    pub nonce: &'a str,
+    pub server: &'a str,
+    pub expected_path: &'a str,
+    pub key_field: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -88,6 +111,20 @@ impl SealAad {
             return Err(SealError::AadField);
         }
         Ok(Self(encode(CREDENTIAL_AAD_DOMAIN, &fields)))
+    }
+
+    pub fn forge(ctx: &ForgeSealContext<'_>) -> Result<Self, SealError> {
+        let fields = [
+            ctx.purpose.as_str(),
+            ctx.nonce,
+            ctx.server,
+            ctx.expected_path,
+            ctx.key_field,
+        ];
+        if !fields.iter().all(|f| aad_field_ok(f.as_bytes())) {
+            return Err(SealError::AadField);
+        }
+        Ok(Self(encode(FORGE_AAD_DOMAIN, &fields)))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -350,6 +387,220 @@ mod tests {
         for (i, c) in bad.iter().enumerate() {
             assert_eq!(
                 SealAad::credential(c).unwrap_err(),
+                SealError::AadField,
+                "case {i}"
+            );
+        }
+    }
+
+    fn fctx() -> ForgeSealContext<'static> {
+        ForgeSealContext {
+            purpose: ForgePurpose::TaskerReach,
+            nonce: "0123456789abcdef0123456789abcdef",
+            server: "github.com",
+            expected_path: "maknae-kv/data/maknae/users/alice/forge/github.com",
+            key_field: "token",
+        }
+    }
+
+    #[test]
+    fn forge_encoding_is_its_domain_then_fields_in_fixed_order() {
+        let aad = SealAad::forge(&fctx()).unwrap();
+        let mut want = FORGE_AAD_DOMAIN.to_vec();
+        for f in [
+            "tasker-reach",
+            "0123456789abcdef0123456789abcdef",
+            "github.com",
+            "maknae-kv/data/maknae/users/alice/forge/github.com",
+            "token",
+        ] {
+            want.extend_from_slice(&(f.len() as u16).to_be_bytes());
+            want.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(aad.as_bytes(), &want[..]);
+        assert_eq!(aad.as_bytes().len(), aad.0.capacity());
+        assert_eq!(FORGE_AAD_DOMAIN, b"maknae-seal-aad-forge-v1");
+    }
+
+    #[test]
+    fn every_forge_field_changes_the_encoding() {
+        let base = SealAad::forge(&fctx()).unwrap();
+        let changed = [
+            ForgeSealContext {
+                nonce: "fedcba9876543210fedcba9876543210",
+                ..fctx()
+            },
+            ForgeSealContext {
+                server: "ghe.example.com",
+                ..fctx()
+            },
+            ForgeSealContext {
+                expected_path: "maknae-kv/data/maknae/users/bob/forge/github.com",
+                ..fctx()
+            },
+            ForgeSealContext {
+                key_field: "pat",
+                ..fctx()
+            },
+        ];
+        for (i, c) in changed.iter().enumerate() {
+            assert_ne!(SealAad::forge(c).unwrap(), base, "field {i}");
+        }
+        let shifted = SealAad::forge(&ForgeSealContext {
+            server: "github.co",
+            expected_path: "mmaknae-kv/data/maknae/users/alice/forge/github.com",
+            ..fctx()
+        })
+        .unwrap();
+        assert_ne!(shifted, base);
+    }
+
+    #[test]
+    fn the_three_domains_never_collide() {
+        let f = SealAad::forge(&fctx()).unwrap();
+        let c = SealAad::credential(&cctx()).unwrap();
+        let p = SealAad::new(&ctx()).unwrap();
+        assert_ne!(f, c);
+        assert_ne!(f, p);
+        assert_ne!(c, p);
+        let domains = [AAD_DOMAIN, CREDENTIAL_AAD_DOMAIN, FORGE_AAD_DOMAIN];
+        for (i, a) in domains.iter().enumerate() {
+            for (j, b) in domains.iter().enumerate() {
+                if i != j {
+                    assert!(!a.starts_with(b), "{i} starts with {j}");
+                }
+            }
+        }
+        let same_fields = SealAad::new(&SealContext {
+            conversation: "tasker-reach",
+            provider: fctx().nonce,
+            model: fctx().server,
+            expected_path: fctx().expected_path,
+            key_field: fctx().key_field,
+        })
+        .unwrap();
+        assert_ne!(f, same_fields);
+        assert_eq!(
+            &f.as_bytes()[FORGE_AAD_DOMAIN.len()..],
+            &same_fields.as_bytes()[AAD_DOMAIN.len()..]
+        );
+    }
+
+    #[test]
+    fn a_forge_blob_opens_only_under_the_exact_context() {
+        use crate::{open, seal, SealPrivateKey};
+        const TOKEN: &[u8] = b"github_pat_forgeSentinel0123456789";
+        let key = SealPrivateKey::generate().unwrap();
+        let aad = SealAad::forge(&fctx()).unwrap();
+        let blob = seal(key.public_key(), &aad, TOKEN).unwrap();
+        assert_eq!(open(&key, &aad, blob.as_bytes()).unwrap().as_slice(), TOKEN);
+        let changed = [
+            ForgeSealContext {
+                nonce: "fedcba9876543210fedcba9876543210",
+                ..fctx()
+            },
+            ForgeSealContext {
+                server: "ghe.example.com",
+                ..fctx()
+            },
+            ForgeSealContext {
+                expected_path: "maknae-kv/data/maknae/users/bob/forge/github.com",
+                ..fctx()
+            },
+            ForgeSealContext {
+                key_field: "pat",
+                ..fctx()
+            },
+        ];
+        for (i, c) in changed.iter().enumerate() {
+            let other = SealAad::forge(c).unwrap();
+            assert_eq!(
+                open(&key, &other, blob.as_bytes()).unwrap_err(),
+                SealError::Open,
+                "case {i}"
+            );
+        }
+        let f = fctx();
+        let provider = SealAad::new(&SealContext {
+            conversation: "tasker-reach",
+            provider: f.nonce,
+            model: f.server,
+            expected_path: f.expected_path,
+            key_field: f.key_field,
+        })
+        .unwrap();
+        assert_eq!(
+            open(&key, &provider, blob.as_bytes()).unwrap_err(),
+            SealError::Open
+        );
+        let pblob = seal(key.public_key(), &provider, TOKEN).unwrap();
+        assert_eq!(
+            open(&key, &aad, pblob.as_bytes()).unwrap_err(),
+            SealError::Open
+        );
+    }
+
+    #[test]
+    fn an_empty_or_oversized_forge_field_is_refused() {
+        let ok = "x".repeat(MAX_AAD_FIELD_BYTES);
+        let over = "x".repeat(MAX_AAD_FIELD_BYTES + 1);
+        for c in [
+            ForgeSealContext {
+                nonce: &ok,
+                ..fctx()
+            },
+            ForgeSealContext {
+                server: &ok,
+                ..fctx()
+            },
+            ForgeSealContext {
+                expected_path: &ok,
+                ..fctx()
+            },
+            ForgeSealContext {
+                key_field: &ok,
+                ..fctx()
+            },
+        ] {
+            assert!(SealAad::forge(&c).is_ok());
+        }
+        let bad = [
+            ForgeSealContext {
+                nonce: "",
+                ..fctx()
+            },
+            ForgeSealContext {
+                server: "",
+                ..fctx()
+            },
+            ForgeSealContext {
+                expected_path: "",
+                ..fctx()
+            },
+            ForgeSealContext {
+                key_field: "",
+                ..fctx()
+            },
+            ForgeSealContext {
+                nonce: &over,
+                ..fctx()
+            },
+            ForgeSealContext {
+                server: &over,
+                ..fctx()
+            },
+            ForgeSealContext {
+                expected_path: &over,
+                ..fctx()
+            },
+            ForgeSealContext {
+                key_field: &over,
+                ..fctx()
+            },
+        ];
+        for (i, c) in bad.iter().enumerate() {
+            assert_eq!(
+                SealAad::forge(c).unwrap_err(),
                 SealError::AadField,
                 "case {i}"
             );

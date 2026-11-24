@@ -4,13 +4,17 @@ use crate::transit::{
     TRANSIT_SIGN_INPUT_MAX_BYTES,
 };
 use crate::user_login::{login_path, Password, UserToken};
-use crate::wrap::{client_token, wrap_ttl_value, KvDataPath, WrappingToken};
+use crate::wrap::{
+    client_token, field_echo, kv_field_is_acceptable, wrap_ttl_value, KvDataPath, KvMetadataPath,
+    KvSecret, WrappingToken,
+};
 use crate::{UserAuth, VaultError};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use reqwest::{Body, Client, Method, Request, RequestBuilder};
-use serde::Serialize;
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -22,6 +26,7 @@ const LOGIN_BODY_OVERHEAD: usize = r#"{"password":""}"#.len();
 const LOOKUP_BODY_OVERHEAD: usize = r#"{"token":""}"#.len();
 const APPROLE_BODY_OVERHEAD: usize = r#"{"role_id":"","secret_id":""}"#.len();
 const SIGN_BODY_OVERHEAD: usize = r#"{"input":"","signature_algorithm":"pkcs1v15"}"#.len();
+const KV_WRITE_BODY_OVERHEAD: usize = r#"{"data":{"":""}}"#.len();
 const PKCS1V15: &str = "pkcs1v15";
 
 pub(crate) struct ApiBase(String);
@@ -73,6 +78,24 @@ struct SignBody<'a> {
     signature_algorithm: &'a str,
 }
 
+#[derive(Serialize)]
+struct KvWriteBody<'a> {
+    data: OneField<'a>,
+}
+
+struct OneField<'a> {
+    field: &'a str,
+    value: &'a str,
+}
+
+impl Serialize for OneField<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(1))?;
+        map.serialize_entry(self.field, self.value)?;
+        map.end()
+    }
+}
+
 fn json_body<T: Serialize>(capacity: usize, value: &T) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let mut body = Zeroizing::new(Vec::with_capacity(capacity));
     serde_json::to_writer(&mut *body, value).map_err(|e| VaultError::VaultBody {
@@ -104,6 +127,25 @@ pub(crate) fn approle_login_body(
     json_body(
         APPROLE_BODY_OVERHEAD + role_id.len() + secret_id.len(),
         &AppRoleBody { role_id, secret_id },
+    )
+}
+
+pub(crate) fn kv_write_body(
+    field: &str,
+    secret: &KvSecret,
+) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    if !kv_field_is_acceptable(field) {
+        return Err(VaultError::KvField {
+            field: field_echo(field).to_string(),
+            why: "malformed: empty, whitespace, or over 64 bytes",
+        });
+    }
+    let value = secret.expose();
+    json_body(
+        KV_WRITE_BODY_OVERHEAD + 6 * field.len() + value.len(),
+        &KvWriteBody {
+            data: OneField { field, value },
+        },
     )
 }
 
@@ -183,6 +225,33 @@ pub(crate) fn wrapped_read_request(
     finish(builder.header(X_VAULT_WRAP_TTL, ttl))
 }
 
+pub(crate) fn wrapped_write_request(
+    http: &Client,
+    base: &ApiBase,
+    token: &UserToken,
+    path: &KvDataPath,
+    wrap_ttl: Duration,
+    body: Zeroizing<Vec<u8>>,
+) -> Result<Request, VaultError> {
+    let ttl = wrap_ttl_value(wrap_ttl)?;
+    let token = client_token(VaultOp::WrappedWrite, Some(token), None, None)?;
+    let builder = authed(start(http, Method::POST, base.url(path.as_str())), token)?;
+    finish(body_request(builder.header(X_VAULT_WRAP_TTL, ttl), body))
+}
+
+pub(crate) fn delete_metadata_request(
+    http: &Client,
+    base: &ApiBase,
+    token: &UserToken,
+    path: &KvMetadataPath,
+) -> Result<Request, VaultError> {
+    let token = client_token(VaultOp::DeleteMetadata, Some(token), None, None)?;
+    finish(authed(
+        start(http, Method::DELETE, base.url(path.as_str())),
+        token,
+    )?)
+}
+
 pub(crate) fn lookup_request(
     http: &Client,
     base: &ApiBase,
@@ -249,7 +318,7 @@ pub(crate) fn transit_sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wrap::kv_data_path;
+    use crate::wrap::{kv_data_path, kv_metadata_path, KvSecret, FORGE_TOKEN_FIELD};
     use crate::{MAX_PASSWORD_BYTES, MAX_TOKEN_BYTES};
     use maknae_crypto::rcgen;
 
@@ -400,6 +469,76 @@ mod tests {
                 .unwrap(),
             "60s"
         );
+        assert!(req.body().is_none());
+    }
+
+    #[test]
+    fn the_wrapped_write_request_carries_the_wrap_ttl_and_a_zeroizing_body() {
+        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let path = kv_data_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
+        let secret = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
+        let body = kv_write_body(FORGE_TOKEN_FIELD, &secret).unwrap();
+        assert_eq!(
+            body.capacity(),
+            KV_WRITE_BODY_OVERHEAD + 6 * FORGE_TOKEN_FIELD.len() + secret.expose().len()
+        );
+        let passed = (body.as_ptr(), body.len());
+        let req = wrapped_write_request(
+            &http(),
+            &base(),
+            &token,
+            &path,
+            Duration::from_secs(60),
+            body,
+        )
+        .unwrap();
+        assert_eq!(*req.method(), Method::POST);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
+        assert_eq!(header(&req, "content-type"), JSON);
+        assert_eq!(
+            req.url().as_str(),
+            "https://vault.example:8200/v1/maknae-kv/data/maknae/users/alice/forges/github.com"
+        );
+        let t = req.headers().get(X_VAULT_TOKEN).unwrap();
+        assert!(t.to_str().unwrap() == "hvs.user" && t.is_sensitive());
+        assert_eq!(header(&req, X_VAULT_WRAP_TTL), "60s");
+        assert!(
+            body_json(&req) == serde_json::json!({ "data": { "token": "github_pat_SENTINEL" } })
+        );
+        assert_eq!(sent(&req), passed);
+        let body = kv_write_body(FORGE_TOKEN_FIELD, &secret).unwrap();
+        assert!(matches!(
+            wrapped_write_request(&http(), &base(), &token, &path, Duration::ZERO, body),
+            Err(VaultError::InvalidWrapTtl(_))
+        ));
+        for field in ["", "a b"] {
+            assert!(
+                matches!(
+                    kv_write_body(field, &secret),
+                    Err(VaultError::KvField { .. })
+                ),
+                "{field:?}"
+            );
+        }
+        let worst = "\u{1}".repeat(maknae_config::MAX_KEY_FIELD_BYTES);
+        let body = kv_write_body(&worst, &secret).unwrap();
+        assert_eq!(body.len(), body.capacity());
+    }
+
+    #[test]
+    fn the_delete_targets_the_metadata_path() {
+        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let path = kv_metadata_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
+        let req = delete_metadata_request(&http(), &base(), &token, &path).unwrap();
+        assert_eq!(*req.method(), Method::DELETE);
+        assert_eq!(header(&req, X_VAULT_REQUEST), "true");
+        assert_eq!(
+            req.url().as_str(),
+            "https://vault.example:8200/v1/maknae-kv/metadata/maknae/users/alice/forges/github.com"
+        );
+        let t = req.headers().get(X_VAULT_TOKEN).unwrap();
+        assert!(t.to_str().unwrap() == "hvs.user" && t.is_sensitive());
+        assert!(req.headers().get(X_VAULT_WRAP_TTL).is_none());
         assert!(req.body().is_none());
     }
 

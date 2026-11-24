@@ -1646,6 +1646,7 @@ fn agents(pairs: &[(&str, u32)]) -> maknae_kernel::AgentAdmission {
         tasks: Arc::new(maknae_kernel::TaskStore::new()),
         signer: Arc::new(maknae_kernel::UnverifiedSigner),
         banner: Default::default(),
+        reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::SwitchesOff),
     }
@@ -2546,6 +2547,10 @@ impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for Seen<P> {
         forges: &maknae_config::ForgeSet,
     ) -> Option<maknae_proto::CatalogDigest> {
         self.inner.catalog_stamp(uid, forges)
+    }
+
+    fn forge_credentials(&self, _agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Vec::new()
     }
 }
 

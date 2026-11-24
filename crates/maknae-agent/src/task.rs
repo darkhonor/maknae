@@ -2,7 +2,7 @@
 //! Pure, for the same reason as [`crate::wire`]: the client converts into
 //! [`WireOutcome`], and the decisions stay here, where they are mutation-tested.
 use crate::wire::WireOutcome;
-use maknae_proto::{Payload, ProtoErrCode, SecretText, TaskDelivery, TaskId, TaskView};
+use maknae_proto::{Bytes, Payload, ProtoErrCode, SecretText, TaskDelivery, TaskId, TaskView};
 
 /// The kernel answered, and the answer was no. Not a transport failure: the
 /// connection completed and the refusal is on the trail.
@@ -21,10 +21,12 @@ pub enum ClaimAnswer {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BeatAnswer {
+    /// `addendum` is the CBOR of a `SignedAddendum`, unverified.
     FollowUps {
         task: TaskId,
         from: u32,
         items: Vec<SecretText>,
+        addendum: Option<Bytes>,
     },
     State(TaskView),
     Idle,
@@ -69,6 +71,7 @@ pub fn beat_answer(sent: Result<WireOutcome, String>) -> Result<BeatAnswer, Stri
             task: f.task.to_id(),
             from: f.from,
             items: f.items,
+            addendum: f.addendum,
         }),
         WireOutcome::Payload(Payload::TaskState(v)) => Ok(BeatAnswer::State(v)),
         WireOutcome::Payload(Payload::TaskIdle) => Ok(BeatAnswer::Idle),
@@ -110,6 +113,7 @@ mod tests {
             last_action_secs: None,
             cursor: maknae_proto::TaskCursor::from_seq(1),
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -165,11 +169,13 @@ mod tests {
                 task: TaskRef::from_id(&TaskId([9; 16])),
                 from: 4,
                 items: vec![text("more")],
+                addendum: Some(maknae_proto::Bytes::new(zeroize::Zeroizing::new(vec![7]))),
             }))),
             Ok(BeatAnswer::FollowUps {
                 task: TaskId([9; 16]),
                 from: 4,
-                items: vec![text("more")]
+                items: vec![text("more")],
+                addendum: Some(maknae_proto::Bytes::new(zeroize::Zeroizing::new(vec![7]))),
             })
         );
         assert_eq!(

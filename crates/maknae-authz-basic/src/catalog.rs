@@ -6,8 +6,11 @@ use crate::decide::{LoadedPolicy, SubjectEntry};
 use crate::role::Role;
 use maknae_config::{ArgPattern, ForgeSet, OutputToModel, Pattern, Stage, ToolEntry, ToolsCatalog};
 use maknae_graph::catalog::{CatalogEntry, CatalogForge, CatalogInput, CatalogOutput};
-use maknae_proto::{CatalogDigest, TOOL_CATALOG_MAX_BYTES};
+use maknae_proto::{CatalogDigest, CredentialRef, TOOL_CATALOG_MAX_BYTES};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+const GIT_BINDING: &str = "git";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubjectCatalog {
@@ -39,11 +42,7 @@ pub(crate) fn input(
     ) {
         return Ok(CatalogInput::default());
     }
-    let subject = lp.subjects.get(uid);
-    let lists = lp.policy.effective_lists(
-        subject.and_then(SubjectEntry::agent_right).map(|(_, r)| r),
-        subject.and_then(|s| s.permissions.as_ref()),
-    );
+    let lists = effective_lists(lp, uid);
     let stages: Vec<&Stage<'_>> = lists.right.iter().chain([&lists.floored]).collect();
     let agent = lp.agents.get(uid).is_some();
     let mut spent = 0usize;
@@ -70,6 +69,47 @@ pub(crate) fn input(
         })
         .collect();
     Ok(CatalogInput { entries, forges })
+}
+
+/// The forge credentials of agent `uid`'s granted, enabled entries that bind `git`, as each
+/// class's kind and its App, or the class name for a kind that names no App.
+pub(crate) fn forge_credentials(
+    lp: &LoadedPolicy,
+    uid: u32,
+    principal_uid: u32,
+) -> Vec<CredentialRef> {
+    if lp.agents.get(uid).is_none()
+        || matches!(
+            lp.roles.role_for(uid, principal_uid),
+            Resolution::Role(Role::Adversary) | Resolution::NoRole
+        )
+    {
+        return Vec::new();
+    }
+    let lists = effective_lists(lp, uid);
+    let stages: Vec<&Stage<'_>> = lists.right.iter().chain([&lists.floored]).collect();
+    let refs: BTreeSet<(&str, &str)> = lp
+        .tools
+        .entries()
+        .filter(|e| e.binds.contains(GIT_BINDING))
+        .filter(|e| granted(e, &stages).is_some())
+        .filter_map(|e| lp.tools.class(e.credential.as_deref()?))
+        .map(|c| (c.kind.as_str(), c.app.as_deref().unwrap_or(&c.name)))
+        .collect();
+    refs.into_iter()
+        .map(|(kind, name)| CredentialRef {
+            kind: kind.into(),
+            name: name.into(),
+        })
+        .collect()
+}
+
+fn effective_lists(lp: &LoadedPolicy, uid: u32) -> maknae_config::EffectiveLists<'_> {
+    let subject = lp.subjects.get(uid);
+    lp.policy.effective_lists(
+        subject.and_then(SubjectEntry::agent_right).map(|(_, r)| r),
+        subject.and_then(|s| s.permissions.as_ref()),
+    )
 }
 
 /// A lower bound on the bytes `entry` puts in the graph: each program and pattern key
@@ -368,6 +408,58 @@ mod tests {
             cat::entries(&graph(&s, ALICE)),
             ["sentinel-674-app-entry", "sentinel-674-pat-entry"],
             "a user is not limited to reach-checked kinds"
+        );
+    }
+
+    fn git_entry(name: &str, credential: &str, enabled: bool) -> String {
+        tool_entry(name, Some(credential), "gh").replacen(
+            "    executes_workspace",
+            &format!("    enabled: {enabled}\n    binds: {{ git: {{ resolver: git }} }}\n    executes_workspace"),
+            1,
+        )
+    }
+
+    #[test]
+    fn the_agents_forge_credentials_are_those_of_its_granted_git_entries() {
+        const APP_B_CLASS: &str = "  sentinel-674-app-b-class:\n    kind: github-app-installation\n    source: minted-per-task\n    narrowing: provider\n    minting: trust-plane\n    app: sentinel-674-app-b\n";
+        let tools = format!(
+            "schema_version: 1\ncredential_classes:\n{APP_CLASS}{APP_B_CLASS}{PAT_CLASS}tools:\n{}{}{}{}{}{}",
+            git_entry("sentinel-674-app", "sentinel-674-app-class", true),
+            git_entry("sentinel-674-app-again", "sentinel-674-app-class", true),
+            git_entry("sentinel-674-pat", "sentinel-674-pat-class", true),
+            git_entry("sentinel-674-off", "sentinel-674-app-b-class", false),
+            git_entry("sentinel-674-ungranted", "sentinel-674-app-b-class", true),
+            tool_entry("sentinel-674-unbound", Some("sentinel-674-app-b-class"), "gh"),
+        );
+        let grants = [
+            "Tool(sentinel-674-app gh run *)",
+            "Tool(sentinel-674-app-again gh run *)",
+            "Tool(sentinel-674-pat gh run *)",
+            "Tool(sentinel-674-off gh run *)",
+            "Tool(sentinel-674-unbound gh run *)",
+        ];
+        let policy = agent_policy(&grants);
+        let s = snap_with(
+            &site(&grants, &[]),
+            &tools,
+            load(vec![hobi()], &[("hobi", &policy)]),
+        );
+        let cref = |kind: &str, name: &str| maknae_proto::CredentialRef {
+            kind: kind.into(),
+            name: name.into(),
+        };
+        let want = vec![
+            cref("github-app-installation", "sentinel-674-app-a"),
+            cref("github-machine-user", "sentinel-674-pat-class"),
+        ];
+        assert_eq!(s.forge_credentials(HOBI, PRINCIPAL), want);
+        assert!(
+            s.forge_credentials(ALICE, PRINCIPAL).is_empty(),
+            "not an agent"
+        );
+        assert_eq!(
+            Baseline::forge_credentials(&authorizer(s.clone()), HOBI, PRINCIPAL),
+            want
         );
     }
 

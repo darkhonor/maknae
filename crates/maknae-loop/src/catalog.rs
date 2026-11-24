@@ -1,6 +1,7 @@
 //! The subject's tool catalog as the loop holds it: a hint fetched when the kernel's
 //! stamp changes, never an input to a decision.
-use maknae_agent::hints::{Forge, Provider};
+use maknae_agent::hints::Forge;
+use maknae_config::ForgeProvider;
 use maknae_graph::catalog;
 use maknae_graph::graph::Graph;
 use maknae_proto::{CatalogDigest, ToolCatalogReply};
@@ -67,7 +68,7 @@ pub fn forges(g: &Graph) -> Vec<Forge> {
         .filter_map(|(host, provider)| {
             Some(Forge {
                 host: host.to_owned(),
-                provider: Provider::parse(provider)?,
+                provider: ForgeProvider::parse(provider)?,
             })
         })
         .collect()

@@ -131,19 +131,48 @@ pub(crate) fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
+pub(crate) trait HiddenLine {
+    fn feed(&mut self, byte: u8) -> PasswordFeed;
+}
+
+impl HiddenLine for PasswordLine {
+    fn feed(&mut self, byte: u8) -> PasswordFeed {
+        PasswordLine::feed(self, byte)
+    }
+}
+
 pub(crate) fn read_password(prompt: &str) -> Result<Password, PromptError> {
+    let mut line = PasswordLine::new();
+    read_hidden(prompt, &mut line)?;
+    line.finish().map_err(PromptError::Password)
+}
+
+/// Reads one hidden line from stdin into `line`; `Ok` only when the line was completed.
+pub(crate) fn read_hidden(prompt: &str, line: &mut impl HiddenLine) -> Result<(), PromptError> {
     if !stdin_is_terminal() {
         return Err(PromptError::NotATerminal);
     }
     let stdin = std::io::stdin();
-    read_password_on(stdin.as_fd(), &mut std::io::stderr(), prompt)
+    read_hidden_on(stdin.as_fd(), &mut std::io::stderr(), prompt, line)
 }
 
+#[cfg(test)]
 pub(crate) fn read_password_on(
     fd: BorrowedFd<'_>,
     out: &mut impl Write,
     prompt: &str,
 ) -> Result<Password, PromptError> {
+    let mut line = PasswordLine::new();
+    read_hidden_on(fd, out, prompt, &mut line)?;
+    line.finish().map_err(PromptError::Password)
+}
+
+fn read_hidden_on(
+    fd: BorrowedFd<'_>,
+    out: &mut impl Write,
+    prompt: &str,
+    line: &mut impl HiddenLine,
+) -> Result<(), PromptError> {
     let saved = tcgetattr(fd).map_err(PromptError::Terminal)?;
     let unblock = Unblock(
         prompt_signals()
@@ -157,13 +186,12 @@ pub(crate) fn read_password_on(
         return Err(PromptError::EchoStillOn);
     }
     let _ = write!(out, "{prompt}").and_then(|()| out.flush());
-    let mut line = PasswordLine::new();
-    let fed = feed_until_end(fd, &mut line);
+    let fed = feed_until_end(fd, line);
     drop(restore);
     let _ = writeln!(out);
     drop(unblock);
     match fed? {
-        Ended::Done => line.finish().map_err(PromptError::Password),
+        Ended::Done => Ok(()),
         Ended::Interrupted => Err(PromptError::Interrupted),
         Ended::TooLong => Err(PromptError::TooLong),
         Ended::Eof => Err(PromptError::NoPassword),
@@ -177,7 +205,7 @@ enum Ended {
     Eof,
 }
 
-fn feed_until_end(fd: BorrowedFd<'_>, line: &mut PasswordLine) -> Result<Ended, PromptError> {
+fn feed_until_end(fd: BorrowedFd<'_>, line: &mut impl HiddenLine) -> Result<Ended, PromptError> {
     let mut byte = Zeroizing::new([0u8; 1]);
     loop {
         match nix::unistd::read(fd, &mut byte[..]) {

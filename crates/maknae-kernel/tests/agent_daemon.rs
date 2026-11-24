@@ -66,6 +66,13 @@ impl maknae_kernel::TaskSigner for CaSigner {
         maknae_vault::task_sig::sign_task(&self.identity, task)
             .map_err(|e| TaskRefusal::Unavailable(e.to_string()))
     }
+    fn sign_addendum(
+        &self,
+        addendum: maknae_proto::TaskAddendum,
+    ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+        maknae_vault::task_sig::sign_addendum(&self.identity, addendum)
+            .map_err(|e| TaskRefusal::Unavailable(e.to_string()))
+    }
     fn current_leaf(&self) -> Option<[u8; 32]> {
         let skip = self
             .unsigned
@@ -435,6 +442,7 @@ fn admission(
             unsigned: Arc::clone(unsigned),
         }),
         banner: Default::default(),
+        reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::SwitchesOff),
     }
@@ -533,6 +541,7 @@ impl World {
                 labels: maknae_proto::Labels {},
                 bindings: vec![],
             },
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         };
         match self.ask(verb).await {
             RespResult::Ok(Payload::TaskAccepted(v)) => v.task.to_id(),

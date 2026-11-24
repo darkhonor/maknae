@@ -115,6 +115,7 @@ pub enum EgressFrame {
     Prompt(EgressFrameRequest),
     Mint(MintRequest),
     Revoke(RevokeRequest),
+    Reach(ReachRequest),
 }
 
 /// One reply on the deputy → kernel socket.
@@ -124,6 +125,7 @@ pub enum EgressSocketReply {
     Prompt(EgressFrameReply),
     Mint(MintReply),
     Revoke(RevokeReply),
+    Reach(ReachReply),
     /// The deputy had no free slot: the frame was read and discarded, and nothing left the host.
     AtCapacity,
     /// Refused before any provider or forge I/O.
@@ -314,6 +316,361 @@ pub enum RevokeReply {
     Revoked,
     AlreadyGone,
     Refused(MintRefusal),
+}
+
+pub const REACH_ASKS_MAX: usize = 8;
+pub const REACH_CREDENTIALS_MAX: usize = 8;
+/// The most any text field of a reach frame may be, its seal's AAD field bound.
+pub const REACH_FIELD_MAX_BYTES: usize = 1024;
+
+/// One binding's repositories, asked of one side. `head` is the change's head repository when known.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoAsk {
+    pub base: String,
+    pub change: Option<u64>,
+    pub head: Option<String>,
+}
+
+/// An agent's forge credential, as `maknae_config::CredentialKind`'s spelling and its entry's name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialRef {
+    pub kind: String,
+    pub name: String,
+}
+
+/// Whose reach a frame observes: the tasker's, through their sealed token, or the agent's.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReachSide {
+    Tasker {
+        tasker: String,
+        expected_path: String,
+        key_field: String,
+        nonce: String,
+        sealed: crate::SealedKey,
+    },
+    Agent {
+        agent: String,
+        credentials: Vec<CredentialRef>,
+    },
+}
+
+impl std::fmt::Debug for ReachSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tasker {
+                tasker,
+                expected_path: _,
+                key_field: _,
+                nonce: _,
+                sealed,
+            } => f
+                .debug_struct("Tasker")
+                .field("tasker", tasker)
+                .field("expected_path", &"<omitted>")
+                .field("key_field", &"<omitted>")
+                .field("nonce", &"<omitted>")
+                .field("sealed", sealed)
+                .finish(),
+            Self::Agent { agent, credentials } => f
+                .debug_struct("Agent")
+                .field("agent", agent)
+                .field("credentials", credentials)
+                .finish(),
+        }
+    }
+}
+
+/// A request to observe one side's reach on `server` for 1..=[`REACH_ASKS_MAX`] bindings.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "ReachRequestWire")]
+pub struct ReachRequest {
+    server: String,
+    provider: String,
+    deadline_ms: u64,
+    side: ReachSide,
+    asks: Vec<RepoAsk>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReachRequestWire {
+    server: String,
+    provider: String,
+    deadline_ms: u64,
+    side: ReachSide,
+    asks: Vec<RepoAsk>,
+}
+
+impl TryFrom<ReachRequestWire> for ReachRequest {
+    type Error = crate::ProtoCodecError;
+    fn try_from(w: ReachRequestWire) -> Result<Self, crate::ProtoCodecError> {
+        Self::new(w.server, w.provider, w.deadline_ms, w.side, w.asks)
+    }
+}
+
+fn reach_text_is_acceptable(s: &str) -> bool {
+    !s.is_empty() && s.len() <= REACH_FIELD_MAX_BYTES
+}
+
+fn reach_request_refusal(
+    server: &str,
+    provider: &str,
+    deadline_ms: u64,
+    side: &ReachSide,
+    asks: &[RepoAsk],
+) -> Result<(), &'static str> {
+    if !crate::server_is_acceptable(server) {
+        return Err("reach `server` is not a lowercase host[:port]");
+    }
+    if !reach_text_is_acceptable(provider) {
+        return Err("reach `provider` is empty or too long");
+    }
+    if deadline_ms == 0 {
+        return Err("reach `deadline_ms` is zero");
+    }
+    if !(1..=REACH_ASKS_MAX).contains(&asks.len()) {
+        return Err("reach `asks` is not 1..=8 entries");
+    }
+    if asks.iter().enumerate().any(|(i, a)| asks[..i].contains(a)) {
+        return Err("a duplicate reach ask");
+    }
+    let path = crate::repository_path_is_acceptable;
+    if asks.iter().any(|a| {
+        !path(&a.base) || a.head.as_deref().is_some_and(|h| !path(h)) || a.change == Some(0)
+    }) {
+        return Err("a reach ask is not a repository path and positive change");
+    }
+    match side {
+        ReachSide::Tasker {
+            tasker,
+            expected_path,
+            key_field,
+            nonce,
+            sealed: _,
+        } => {
+            if ![tasker, expected_path, key_field]
+                .iter()
+                .all(|s| reach_text_is_acceptable(s))
+            {
+                return Err("a reach tasker field is empty or too long");
+            }
+            if !crate::sealed::forge_nonce_is_acceptable(nonce) {
+                return Err("reach `nonce` is not 32 lowercase hex digits");
+            }
+        }
+        ReachSide::Agent { agent, credentials } => {
+            if !reach_text_is_acceptable(agent) {
+                return Err("reach `agent` is empty or too long");
+            }
+            if !(1..=REACH_CREDENTIALS_MAX).contains(&credentials.len()) {
+                return Err("reach `credentials` is not 1..=8 entries");
+            }
+            if credentials
+                .iter()
+                .any(|c| !reach_text_is_acceptable(&c.kind) || !reach_text_is_acceptable(&c.name))
+            {
+                return Err("a reach credential field is empty or too long");
+            }
+            if credentials
+                .iter()
+                .enumerate()
+                .any(|(i, c)| credentials[..i].contains(c))
+            {
+                return Err("a duplicate reach credential");
+            }
+        }
+    }
+    Ok(())
+}
+
+impl ReachRequest {
+    pub fn new(
+        server: String,
+        provider: String,
+        deadline_ms: u64,
+        side: ReachSide,
+        asks: Vec<RepoAsk>,
+    ) -> Result<Self, crate::ProtoCodecError> {
+        reach_request_refusal(&server, &provider, deadline_ms, &side, &asks)
+            .map_err(|why| crate::ProtoCodecError::Encode(why.into()))?;
+        Ok(Self {
+            server,
+            provider,
+            deadline_ms,
+            side,
+            asks,
+        })
+    }
+
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn deadline_ms(&self) -> u64 {
+        self.deadline_ms
+    }
+
+    pub fn side(&self) -> &ReachSide {
+        &self.side
+    }
+
+    pub fn asks(&self) -> &[RepoAsk] {
+        &self.asks
+    }
+}
+
+impl std::fmt::Debug for ReachRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReachRequest")
+            .field("server", &self.server)
+            .field("provider", &self.provider)
+            .field("deadline_ms", &self.deadline_ms)
+            .field("side", &self.side)
+            .field("asks", &self.asks)
+            .finish()
+    }
+}
+
+/// What one side was observed able to do for one ask, index-aligned with the request's asks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "RepoObservationWire")]
+pub struct RepoObservation {
+    base: crate::ForgeOps,
+    head_path: Option<String>,
+    head: crate::ForgeOps,
+    head_gone: bool,
+    covered: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoObservationWire {
+    base: crate::ForgeOps,
+    head_path: Option<String>,
+    head: crate::ForgeOps,
+    head_gone: bool,
+    covered: bool,
+}
+
+impl TryFrom<RepoObservationWire> for RepoObservation {
+    type Error = crate::ProtoCodecError;
+    fn try_from(w: RepoObservationWire) -> Result<Self, crate::ProtoCodecError> {
+        Self::new(w.base, w.head_path, w.head, w.head_gone, w.covered)
+    }
+}
+
+impl RepoObservation {
+    pub fn new(
+        base: crate::ForgeOps,
+        head_path: Option<String>,
+        head: crate::ForgeOps,
+        head_gone: bool,
+        covered: bool,
+    ) -> Result<Self, crate::ProtoCodecError> {
+        let refuse = |why: &str| Err(crate::ProtoCodecError::Encode(why.into()));
+        if base.contains(crate::ForgeOp::PushHead) {
+            return refuse("an observation's base ops hold `PushHead`");
+        }
+        if head_path
+            .as_deref()
+            .is_some_and(|h| !crate::repository_path_is_acceptable(h))
+        {
+            return refuse("an observation's `head_path` is not a repository path");
+        }
+        if head_path.is_none() && !head.is_empty() {
+            return refuse("an observation has head ops without a `head_path`");
+        }
+        if head_gone && head_path.is_some() {
+            return refuse("an observation's head is both gone and named");
+        }
+        Ok(Self {
+            base,
+            head_path,
+            head,
+            head_gone,
+            covered,
+        })
+    }
+
+    pub fn base(&self) -> crate::ForgeOps {
+        self.base
+    }
+
+    pub fn head_path(&self) -> Option<&str> {
+        self.head_path.as_deref()
+    }
+
+    pub fn head(&self) -> crate::ForgeOps {
+        self.head
+    }
+
+    pub fn head_gone(&self) -> bool {
+        self.head_gone
+    }
+
+    pub fn covered(&self) -> bool {
+        self.covered
+    }
+}
+
+/// 1..=[`REACH_ASKS_MAX`] observations, checked at construction and at decode.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct Observations(Vec<RepoObservation>);
+
+impl Observations {
+    pub fn new(list: Vec<RepoObservation>) -> Result<Self, crate::ProtoCodecError> {
+        if !(1..=REACH_ASKS_MAX).contains(&list.len()) {
+            return Err(crate::ProtoCodecError::Encode(format!(
+                "reach observations are not 1..={REACH_ASKS_MAX} entries"
+            )));
+        }
+        Ok(Self(list))
+    }
+
+    pub fn as_slice(&self) -> &[RepoObservation] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Observations {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(Vec::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachReply {
+    Observed(Observations),
+    NoForgeCredential,
+    Refused(ReachRefusal),
+}
+
+/// Why a reach frame was refused. Closed: a new class is a new variant and a wire change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReachRefusal {
+    Request,
+    Seal,
+    Login,
+    NotFound,
+    Unauthorized,
+    Forbidden,
+    Moved,
+    Upstream,
+    Unanswered,
+    Shape,
+    Suspended,
+    AmbiguousCredential,
+    Signer,
 }
 
 /// The largest request frame that crosses the kernel→deputy socket, stated
@@ -1293,5 +1650,551 @@ mod tests {
                 crate::encode_egress_socket_reply(&r, EGRESS_REPLY_FRAME_ENCODE_BYTES).unwrap();
             assert_eq!(crate::decode_egress_socket_reply(&buf).unwrap(), r);
         }
+    }
+
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const VAULT_PATH: &str = "users/alice/forges/github.example";
+    const KEY_FIELD: &str = "forge_token_field";
+
+    fn ask(base: &str, change: Option<u64>, head: Option<&str>) -> RepoAsk {
+        RepoAsk {
+            base: base.into(),
+            change,
+            head: head.map(Into::into),
+        }
+    }
+
+    fn asks(n: usize) -> Vec<RepoAsk> {
+        (0..n)
+            .map(|i| ask(&format!("o/r{i}"), Some(7), None))
+            .collect()
+    }
+
+    fn tasker_side() -> ReachSide {
+        ReachSide::Tasker {
+            tasker: "alice".into(),
+            expected_path: VAULT_PATH.into(),
+            key_field: KEY_FIELD.into(),
+            nonce: NONCE.into(),
+            sealed: crate::SealedKey::new(vec![0xa7; crate::SEALED_KEY_MIN_BYTES]).unwrap(),
+        }
+    }
+
+    fn cred(i: usize) -> CredentialRef {
+        CredentialRef {
+            kind: "kind-a".into(),
+            name: format!("entry{i}"),
+        }
+    }
+
+    fn agent_side(n: usize) -> ReachSide {
+        ReachSide::Agent {
+            agent: "hobi".into(),
+            credentials: (0..n).map(cred).collect(),
+        }
+    }
+
+    fn reach(side: ReachSide, asks: Vec<RepoAsk>) -> Result<ReachRequest, crate::ProtoCodecError> {
+        ReachRequest::new("forge.example".into(), "p".into(), 20_000, side, asks)
+    }
+
+    fn observation(head: Option<&str>) -> RepoObservation {
+        let ops = |o: &[crate::ForgeOp]| o.iter().copied().collect::<crate::ForgeOps>();
+        RepoObservation::new(
+            ops(&[crate::ForgeOp::Read, crate::ForgeOp::Merge]),
+            head.map(Into::into),
+            if head.is_some() {
+                ops(&[crate::ForgeOp::PushHead])
+            } else {
+                crate::ForgeOps::EMPTY
+            },
+            false,
+            true,
+        )
+        .unwrap()
+    }
+
+    fn reach_replies() -> Vec<EgressSocketReply> {
+        let mut out = vec![
+            EgressSocketReply::Reach(ReachReply::Observed(
+                Observations::new(vec![observation(Some("fork/r")), observation(None)]).unwrap(),
+            )),
+            EgressSocketReply::Reach(ReachReply::Observed(
+                Observations::new((0..REACH_ASKS_MAX).map(|_| observation(None)).collect())
+                    .unwrap(),
+            )),
+            EgressSocketReply::Reach(ReachReply::Observed(
+                Observations::new(vec![RepoObservation::new(
+                    crate::ForgeOps::EMPTY,
+                    None,
+                    crate::ForgeOps::EMPTY,
+                    true,
+                    false,
+                )
+                .unwrap()])
+                .unwrap(),
+            )),
+            EgressSocketReply::Reach(ReachReply::NoForgeCredential),
+        ];
+        out.extend(
+            REACH_REFUSALS
+                .iter()
+                .map(|r| EgressSocketReply::Reach(ReachReply::Refused(*r))),
+        );
+        out
+    }
+
+    fn reply_bytes(r: &EgressSocketReply) -> Vec<u8> {
+        crate::encode_egress_socket_reply(r, EGRESS_REPLY_FRAME_ENCODE_BYTES)
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn reach_frames_round_trip_and_bound_their_asks() {
+        assert_eq!((REACH_ASKS_MAX, REACH_CREDENTIALS_MAX), (8, 8));
+        for f in [
+            reach(tasker_side(), asks(1)).unwrap(),
+            reach(tasker_side(), asks(REACH_ASKS_MAX)).unwrap(),
+            reach(agent_side(1), vec![ask("o/r", Some(3), Some("fork/r"))]).unwrap(),
+            reach(agent_side(REACH_CREDENTIALS_MAX), asks(2)).unwrap(),
+        ] {
+            let f = EgressFrame::Reach(f);
+            assert_eq!(crate::decode_egress_frame(&frame_bytes(&f)).unwrap(), f);
+        }
+        for r in reach_replies() {
+            assert_eq!(
+                crate::decode_egress_socket_reply(&reply_bytes(&r)).unwrap(),
+                r
+            );
+        }
+
+        let refused = |what: &str, r: Result<ReachRequest, crate::ProtoCodecError>| {
+            assert!(r.is_err(), "{what} must be refused");
+        };
+        refused("no asks", reach(tasker_side(), asks(0)));
+        refused(
+            "a ninth ask",
+            reach(tasker_side(), asks(REACH_ASKS_MAX + 1)),
+        );
+        refused(
+            "a duplicate ask",
+            reach(tasker_side(), vec![ask("o/r", None, None); 2]),
+        );
+        refused(
+            "a bad base",
+            reach(tasker_side(), vec![ask("o", None, None)]),
+        );
+        refused(
+            "a bad head",
+            reach(tasker_side(), vec![ask("o/r", Some(1), Some("../x"))]),
+        );
+        refused(
+            "change zero",
+            reach(tasker_side(), vec![ask("o/r", Some(0), None)]),
+        );
+        refused("no credentials", reach(agent_side(0), asks(1)));
+        refused(
+            "a ninth credential",
+            reach(agent_side(REACH_CREDENTIALS_MAX + 1), asks(1)),
+        );
+        refused(
+            "a duplicate credential",
+            reach(
+                ReachSide::Agent {
+                    agent: "hobi".into(),
+                    credentials: vec![cred(0), cred(0)],
+                },
+                asks(1),
+            ),
+        );
+        refused(
+            "an empty agent",
+            reach(
+                ReachSide::Agent {
+                    agent: String::new(),
+                    credentials: vec![cred(0)],
+                },
+                asks(1),
+            ),
+        );
+        let tasker_with = |edit: fn(&mut ReachSide)| {
+            let mut side = tasker_side();
+            edit(&mut side);
+            reach(side, asks(1))
+        };
+        refused(
+            "an upper-case nonce",
+            tasker_with(|s| {
+                if let ReachSide::Tasker { nonce, .. } = s {
+                    *nonce = NONCE.to_uppercase();
+                }
+            }),
+        );
+        refused(
+            "an empty path",
+            tasker_with(|s| {
+                if let ReachSide::Tasker { expected_path, .. } = s {
+                    expected_path.clear();
+                }
+            }),
+        );
+        refused(
+            "an oversized key field",
+            tasker_with(|s| {
+                if let ReachSide::Tasker { key_field, .. } = s {
+                    *key_field = "k".repeat(REACH_FIELD_MAX_BYTES + 1);
+                }
+            }),
+        );
+        refused(
+            "a bad server",
+            ReachRequest::new(
+                "Forge.Example".into(),
+                "p".into(),
+                1,
+                tasker_side(),
+                asks(1),
+            ),
+        );
+        refused(
+            "an empty provider",
+            ReachRequest::new(
+                "forge.example".into(),
+                String::new(),
+                1,
+                tasker_side(),
+                asks(1),
+            ),
+        );
+        refused(
+            "a zero deadline",
+            ReachRequest::new(
+                "forge.example".into(),
+                "p".into(),
+                0,
+                tasker_side(),
+                asks(1),
+            ),
+        );
+
+        let tampered = |f: ReachRequest, edit: &dyn Fn(&mut ciborium::Value)| {
+            let mut v: ciborium::Value =
+                ciborium::from_reader(&frame_bytes(&EgressFrame::Reach(f))[..]).unwrap();
+            edit(field(&mut v, "reach"));
+            crate::decode_egress_frame(&cbor(&v))
+        };
+        let resize = |name: &'static str, n: usize| {
+            move |v: &mut ciborium::Value| {
+                let target = if name == "credentials" {
+                    field(field(field(v, "side"), "agent"), name)
+                } else {
+                    field(v, name)
+                };
+                let ciborium::Value::Array(a) = target else {
+                    panic!("{name} is an array");
+                };
+                let first = a[0].clone();
+                a.clear();
+                a.extend((0..n).map(|i| {
+                    let mut e = first.clone();
+                    *field(&mut e, if name == "asks" { "base" } else { "name" }) =
+                        format!("o/r{i}").into();
+                    e
+                }));
+            }
+        };
+        let tf = || reach(tasker_side(), asks(1)).unwrap();
+        let af = || reach(agent_side(1), asks(1)).unwrap();
+        assert!(
+            tampered(tf(), &resize("asks", 2)).is_ok(),
+            "the control decodes"
+        );
+        assert!(tampered(tf(), &resize("asks", 0)).is_err());
+        assert!(tampered(tf(), &resize("asks", REACH_ASKS_MAX + 1)).is_err());
+        assert!(
+            tampered(af(), &resize("credentials", 2)).is_ok(),
+            "the control decodes"
+        );
+        assert!(tampered(af(), &resize("credentials", 0)).is_err());
+        assert!(tampered(af(), &resize("credentials", REACH_CREDENTIALS_MAX + 1)).is_err());
+        assert!(tampered(tf(), &|v| {
+            let ciborium::Value::Map(m) = v else {
+                unreachable!()
+            };
+            m.push(("extra".into(), 1.into()));
+        })
+        .is_err());
+
+        let observed = |edit: &dyn Fn(&mut ciborium::Value)| {
+            let r = &reach_replies()[0];
+            let mut v: ciborium::Value = ciborium::from_reader(&reply_bytes(r)[..]).unwrap();
+            edit(field(field(&mut v, "reach"), "observed"));
+            crate::decode_egress_socket_reply(&cbor(&v))
+        };
+        let nth = |v: &mut ciborium::Value, i: usize| -> ciborium::Value {
+            let ciborium::Value::Array(a) = v else {
+                unreachable!()
+            };
+            a[i].clone()
+        };
+        let set = |v: &mut ciborium::Value, i: usize, name: &str, to: ciborium::Value| {
+            let ciborium::Value::Array(a) = v else {
+                unreachable!()
+            };
+            *field(&mut a[i], name) = to;
+        };
+        let resize_obs = |n: usize| {
+            move |v: &mut ciborium::Value| {
+                let first = nth(v, 1);
+                *v = ciborium::Value::Array(vec![first; n]);
+            }
+        };
+        assert!(observed(&|_| {}).is_ok(), "the control decodes");
+        assert!(observed(&resize_obs(0)).is_err());
+        assert!(observed(&resize_obs(REACH_ASKS_MAX + 1)).is_err());
+        let push_head = u8::from(crate::ForgeOps::from_iter([crate::ForgeOp::PushHead]));
+        assert!(observed(&|v| set(v, 1, "base", push_head.into())).is_err());
+        assert!(observed(&|v| set(v, 1, "head", push_head.into())).is_err());
+        assert!(observed(&|v| set(v, 0, "head_gone", true.into())).is_err());
+        assert!(observed(&|v| set(v, 0, "head_path", "fork".into())).is_err());
+        assert!(observed(&|v| set(v, 1, "base", 0x20.into())).is_err());
+    }
+
+    #[test]
+    fn a_reach_frame_debug_omits_the_sealed_token_and_path() {
+        let f = EgressFrame::Reach(reach(tasker_side(), vec![ask("o/r", Some(7), None)]).unwrap());
+        let shown = format!("{f:?}");
+        assert_eq!(
+            shown,
+            r#"Reach(ReachRequest { server: "forge.example", provider: "p", deadline_ms: 20000, side: Tasker { tasker: "alice", expected_path: "<omitted>", key_field: "<omitted>", nonce: "<omitted>", sealed: SealedKey(<127 bytes>) }, asks: [RepoAsk { base: "o/r", change: Some(7), head: None }] })"#
+        );
+        for secret in [VAULT_PATH, KEY_FIELD, NONCE, "a7", "167"] {
+            assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+        }
+    }
+
+    fn texts(v: &ciborium::Value, keys: &mut std::collections::BTreeSet<String>) {
+        match v {
+            ciborium::Value::Map(m) => {
+                for (k, e) in m {
+                    keys.insert(k.as_text().expect("a text key").to_owned());
+                    texts(e, keys);
+                }
+            }
+            ciborium::Value::Array(a) => a.iter().for_each(|e| texts(e, keys)),
+            ciborium::Value::Text(t) => {
+                keys.insert(t.clone());
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn no_forge_native_type_appears_in_reach_frames() {
+        let mut seen = std::collections::BTreeSet::new();
+        for f in [
+            reach(tasker_side(), vec![ask("o/r", Some(7), Some("f/r"))]).unwrap(),
+            reach(agent_side(1), asks(1)).unwrap(),
+        ] {
+            let v = ciborium::from_reader(&frame_bytes(&EgressFrame::Reach(f))[..]).unwrap();
+            texts(&v, &mut seen);
+        }
+        for r in reach_replies() {
+            texts(
+                &ciborium::from_reader(&reply_bytes(&r)[..]).unwrap(),
+                &mut seen,
+            );
+        }
+        let data = [
+            "forge.example",
+            "p",
+            "alice",
+            VAULT_PATH,
+            KEY_FIELD,
+            NONCE,
+            "o/r",
+            "f/r",
+            "fork/r",
+            "hobi",
+            "kind-a",
+            "entry0",
+        ];
+        let vocabulary: std::collections::BTreeSet<String> = seen
+            .into_iter()
+            .filter(|t| !data.contains(&t.as_str()) && !t.starts_with("o/r"))
+            .collect();
+        let expected = [
+            "reach",
+            "server",
+            "provider",
+            "deadline_ms",
+            "side",
+            "asks",
+            "tasker",
+            "expected_path",
+            "key_field",
+            "nonce",
+            "sealed",
+            "agent",
+            "credentials",
+            "kind",
+            "name",
+            "base",
+            "change",
+            "head",
+            "observed",
+            "head_path",
+            "head_gone",
+            "covered",
+            "no_forge_credential",
+            "refused",
+            "request",
+            "seal",
+            "login",
+            "not_found",
+            "unauthorized",
+            "forbidden",
+            "moved",
+            "upstream",
+            "unanswered",
+            "shape",
+            "suspended",
+            "ambiguous_credential",
+            "signer",
+        ];
+        assert_eq!(
+            vocabulary,
+            expected.iter().map(|s| s.to_string()).collect(),
+            "the reach frames' vocabulary is pinned"
+        );
+        for word in vocabulary {
+            for native in [
+                "github",
+                "gitlab",
+                "installation",
+                "pull",
+                "permission",
+                "jwt",
+                "app",
+                "repos",
+                "role",
+                "admin",
+                "maintain",
+                "triage",
+                "push",
+                "merge",
+            ] {
+                assert!(!word.contains(native), "`{word}` is forge-native");
+            }
+        }
+    }
+
+    const REACH_REFUSALS: [ReachRefusal; 13] = [
+        ReachRefusal::Request,
+        ReachRefusal::Seal,
+        ReachRefusal::Login,
+        ReachRefusal::NotFound,
+        ReachRefusal::Unauthorized,
+        ReachRefusal::Forbidden,
+        ReachRefusal::Moved,
+        ReachRefusal::Upstream,
+        ReachRefusal::Unanswered,
+        ReachRefusal::Shape,
+        ReachRefusal::Suspended,
+        ReachRefusal::AmbiguousCredential,
+        ReachRefusal::Signer,
+    ];
+
+    #[test]
+    fn reach_refusal_is_closed() {
+        let wire = |r: ReachRefusal| match r {
+            ReachRefusal::Request => "request",
+            ReachRefusal::Seal => "seal",
+            ReachRefusal::Login => "login",
+            ReachRefusal::NotFound => "not_found",
+            ReachRefusal::Unauthorized => "unauthorized",
+            ReachRefusal::Forbidden => "forbidden",
+            ReachRefusal::Moved => "moved",
+            ReachRefusal::Upstream => "upstream",
+            ReachRefusal::Unanswered => "unanswered",
+            ReachRefusal::Shape => "shape",
+            ReachRefusal::Suspended => "suspended",
+            ReachRefusal::AmbiguousCredential => "ambiguous_credential",
+            ReachRefusal::Signer => "signer",
+        };
+        let names: std::collections::BTreeSet<_> =
+            REACH_REFUSALS.iter().map(|r| wire(*r)).collect();
+        assert_eq!(names.len(), REACH_REFUSALS.len());
+        for r in REACH_REFUSALS {
+            let v = ciborium::Value::serialized(&r).unwrap();
+            assert_eq!(v.as_text(), Some(wire(r)));
+            assert_eq!(v.deserialized::<ReachRefusal>().unwrap(), r);
+        }
+        for unknown in ["rate_limited", "other", "Request", ""] {
+            assert!(
+                ciborium::Value::Text(unknown.into())
+                    .deserialized::<ReachRefusal>()
+                    .is_err(),
+                "`{unknown}` is not a refusal"
+            );
+        }
+        let refused = reply_bytes(&EgressSocketReply::Reach(ReachReply::Refused(
+            ReachRefusal::Signer,
+        )));
+        let mut v: ciborium::Value = ciborium::from_reader(&refused[..]).unwrap();
+        *field(field(&mut v, "reach"), "refused") = "teapot".into();
+        assert!(crate::decode_egress_socket_reply(&cbor(&v)).is_err());
+    }
+
+    #[test]
+    fn reach_frames_return_what_they_were_built_with() {
+        let wanted = vec![ask("o/r", Some(3), Some("fork/r")), ask("o/s", None, None)];
+        let r = ReachRequest::new(
+            "forge.example".into(),
+            "prov".into(),
+            12_345,
+            agent_side(2),
+            wanted.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            (r.server(), r.provider(), r.deadline_ms(), r.asks()),
+            ("forge.example", "prov", 12_345, &wanted[..])
+        );
+        assert!(r.side() == &agent_side(2));
+
+        for (kind, name) in [("kind-a", ""), ("", "entry0")] {
+            let side = ReachSide::Agent {
+                agent: "hobi".into(),
+                credentials: vec![CredentialRef {
+                    kind: kind.into(),
+                    name: name.into(),
+                }],
+            };
+            assert!(reach(side, asks(1)).is_err(), "{kind:?} {name:?}");
+        }
+
+        let ops = |o: &[crate::ForgeOp]| o.iter().copied().collect::<crate::ForgeOps>();
+        let base = ops(&[crate::ForgeOp::Read, crate::ForgeOp::Merge]);
+        let head = ops(&[crate::ForgeOp::PushHead]);
+        let named = RepoObservation::new(base, Some("fork/r".into()), head, false, true).unwrap();
+        assert_eq!(
+            (
+                named.base(),
+                named.head_path(),
+                named.head(),
+                named.head_gone(),
+                named.covered()
+            ),
+            (base, Some("fork/r"), head, false, true)
+        );
+        let gone = RepoObservation::new(base, None, crate::ForgeOps::EMPTY, true, false).unwrap();
+        assert_eq!(
+            (gone.head_path(), gone.head_gone(), gone.covered()),
+            (None, true, false)
+        );
+        let both = Observations::new(vec![named.clone(), gone.clone()]).unwrap();
+        assert_eq!(both.as_slice(), [named, gone]);
     }
 }

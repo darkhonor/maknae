@@ -1,5 +1,7 @@
 //! The production `KeyOpener`: open the seal, check the wrapping token, unwrap the key field (#153).
-use maknae_deputy::unseal::{KeyOpener, OpenFailure, OpenRequest};
+use maknae_deputy::unseal::{
+    open_forge_seal, ForgeOpenRequest, ForgeOpener, KeyOpener, OpenFailure, OpenRequest,
+};
 use maknae_seal::{SealAad, SealContext, SealPrivateKey};
 use maknae_vault::{
     aad_parts, VaultApi, VaultError, WrapExpectation, WrapMismatch, WrappingToken,
@@ -97,6 +99,50 @@ pub fn open_with<'a, U: Unwrapper + Sync>(
     }
 }
 
+/// The forge sibling of `unseal_token`: the seal's AAD is `ForgeOpenRequest`'s own.
+pub fn unseal_forge_token(
+    key: &SealPrivateKey,
+    sealed: &[u8],
+    req: &ForgeOpenRequest<'_>,
+) -> Result<(WrappingToken, WrapExpectation), OpenFailure> {
+    let expectation = WrapExpectation::new(
+        req.kv_mount(),
+        req.expected_path(),
+        req.key_field(),
+        USER_KEY_WRAP_TTL,
+    )
+    .map_err(|_| OpenFailure::Request)?;
+    let opened = open_forge_seal(key, sealed, req)?;
+    let token = WrappingToken::from_opened(opened).map_err(|_| OpenFailure::Token)?;
+    Ok((token, expectation))
+}
+
+pub fn open_forge_with<'a, U: Unwrapper + Sync>(
+    key: &SealPrivateKey,
+    vault: &'a U,
+    sealed: &[u8],
+    req: &ForgeOpenRequest<'_>,
+) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send + 'a {
+    let unsealed = unseal_forge_token(key, sealed, req);
+    async move {
+        let (token, expectation) = unsealed?;
+        vault
+            .unwrap_field(token, &expectation)
+            .await
+            .map_err(vault_failure)
+    }
+}
+
+impl ForgeOpener for SealedOpener {
+    fn open(
+        &self,
+        sealed: &[u8],
+        req: &ForgeOpenRequest<'_>,
+    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send {
+        open_forge_with(&self.key, &*self.api, sealed, req)
+    }
+}
+
 impl KeyOpener for SealedOpener {
     fn open(
         &self,
@@ -110,6 +156,7 @@ impl KeyOpener for SealedOpener {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use maknae_deputy::reach::open::tasker_open_request;
     use std::sync::{Mutex, Once};
 
     const ALICE: &str = "maknae/users/alice/openai/personal";
@@ -448,7 +495,7 @@ ampbv97Rcx9j
             api: Arc::new(VaultApi::new("https://127.0.0.1:1", &ca).unwrap()),
         };
         assert_eq!(
-            run(opener.open(&blob, &alice())).map(|_| ()),
+            run(KeyOpener::open(&opener, &blob, &alice())).map(|_| ()),
             Err(OpenFailure::Vault)
         );
         let other_model = OpenRequest {
@@ -456,7 +503,100 @@ ampbv97Rcx9j
             ..alice()
         };
         assert_eq!(
-            run(opener.open(&blob, &other_model)).map(|_| ()),
+            run(KeyOpener::open(&opener, &blob, &other_model)).map(|_| ()),
+            Err(OpenFailure::Seal)
+        );
+    }
+
+    const ALICE_FORGE_CREATION_PATH: &str = "maknae-kv/data/maknae/users/alice/forges/github.com";
+
+    fn forge_sealed(key: &SealPrivateKey, req: &ForgeOpenRequest<'_>, token: &[u8]) -> Vec<u8> {
+        maknae_seal::seal(key.public_key(), &req.aad().unwrap(), token)
+            .unwrap()
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_forge_seal_opens_only_under_its_own_server_and_path() {
+        fips();
+        let key = SealPrivateKey::generate().unwrap();
+        let bounds = crate::test_frames::bounds();
+        let frame = crate::test_frames::tasker_reach("github.com");
+        let req = tasker_open_request(&frame, &bounds).unwrap();
+        let blob = forge_sealed(&key, &req, TOKEN);
+        let (token, expect) = unseal_forge_token(&key, &blob, &req).unwrap();
+        assert!(token.expose().as_bytes() == TOKEN);
+        assert_eq!(expect.creation_path(), ALICE_FORGE_CREATION_PATH);
+        assert_eq!(expect.field(), "token");
+        assert_eq!(expect.max_ttl(), USER_KEY_WRAP_TTL);
+
+        let other = crate::test_frames::tasker_reach("ghe.example");
+        let other = tasker_open_request(&other, &bounds).unwrap();
+        assert!(matches!(
+            unseal_forge_token(&key, &blob, &other),
+            Err(OpenFailure::Seal)
+        ));
+        let prompt_blob = sealed_like_the_cli(&key, &alice(), TOKEN);
+        assert!(matches!(
+            unseal_forge_token(&key, &prompt_blob, &req),
+            Err(OpenFailure::Seal)
+        ));
+        assert!(matches!(
+            unseal_forge_token(&SealPrivateKey::generate().unwrap(), &blob, &req),
+            Err(OpenFailure::Seal)
+        ));
+        let not_a_token = forge_sealed(&key, &req, b"not a token");
+        assert!(matches!(
+            unseal_forge_token(&key, &not_a_token, &req),
+            Err(OpenFailure::Token)
+        ));
+    }
+
+    #[test]
+    fn a_forge_token_unwraps_only_from_its_own_path() {
+        fips();
+        let key = SealPrivateKey::generate().unwrap();
+        let bounds = crate::test_frames::bounds();
+        let frame = crate::test_frames::tasker_reach("github.com");
+        let req = tasker_open_request(&frame, &bounds).unwrap();
+        let blob = forge_sealed(&key, &req, TOKEN);
+        let bobs = MintedVault::minted_on(BOB_CREATION_PATH);
+        assert_eq!(
+            run(open_forge_with(&key, &bobs, &blob, &req)).map(|_| ()),
+            Err(OpenFailure::WrongPath)
+        );
+        assert_eq!(
+            bobs.calls(),
+            [format!("{ALICE_FORGE_CREATION_PATH}|token|60")]
+        );
+        let alices = MintedVault::minted_on(ALICE_FORGE_CREATION_PATH);
+        let got = run(open_forge_with(&key, &alices, &blob, &req)).unwrap();
+        assert!(got.as_str() == "sk-ALICE-SENTINEL");
+    }
+
+    #[test]
+    fn the_real_forge_opener_reaches_vault_only_after_the_seal_opens() {
+        fips();
+        let d = tempfile::tempdir().unwrap();
+        let ca = d.path().join(maknae_vault::EGRESS_VAULT_CA_FILE);
+        std::fs::write(&ca, TEST_CA_PEM).unwrap();
+        let key = SealPrivateKey::generate().unwrap();
+        let bounds = crate::test_frames::bounds();
+        let frame = crate::test_frames::tasker_reach("github.com");
+        let req = tasker_open_request(&frame, &bounds).unwrap();
+        let blob = forge_sealed(&key, &req, TOKEN);
+        let opener = SealedOpener {
+            key: Arc::new(key),
+            api: Arc::new(VaultApi::new("https://127.0.0.1:1", &ca).unwrap()),
+        };
+        assert_eq!(
+            run(ForgeOpener::open(&opener, &blob, &req)).map(|_| ()),
+            Err(OpenFailure::Vault)
+        );
+        let other = crate::test_frames::tasker_reach("ghe.example");
+        let other = tasker_open_request(&other, &bounds).unwrap();
+        assert_eq!(
+            run(ForgeOpener::open(&opener, &blob, &other)).map(|_| ()),
             Err(OpenFailure::Seal)
         );
     }

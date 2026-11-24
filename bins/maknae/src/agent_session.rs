@@ -6,7 +6,7 @@ use crate::screen::plain::{Line, Lines};
 use crate::screen::run::{Caller, Driver, Ending, Exit, Pace, Step};
 use crate::screen::term::{both_terminals, Session, TermError};
 use crate::stderr::errln;
-use maknae_agent::hints::{choose, Forge, Links, RemoteUrl, Remotes};
+use maknae_agent::hints::{choose, token_servers, Forge, Links, RemoteUrl, Remotes};
 use maknae_agent::screen::blocks::{Conversation, EntryId, EntryKind};
 use maknae_agent::screen::{Commands, HeaderLine, MenuItem};
 use maknae_agent::tasking::book::{joined, Alloc, Answer, Book, Entered, Failure, Op, Standing};
@@ -15,7 +15,8 @@ use maknae_config::AgentId;
 use maknae_loop::tasker::{AgentRoster, TaskerClient, TaskerError};
 use maknae_loop::workdir::Unreadable;
 use maknae_proto::{
-    BindingRequest, SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskView,
+    Binding, BindingRequest, ForgeTokens, SecretText, TaskCursor, TaskPage, TaskRef,
+    TaskReportPage, TaskView,
 };
 use maknae_vault::PlaneClient;
 use std::path::Path;
@@ -41,8 +42,15 @@ pub(crate) trait Tasker {
         agent: &AgentId,
         text: SecretText,
         bindings: Vec<BindingRequest>,
+        tokens: ForgeTokens,
     ) -> Result<TaskView, TaskerError>;
-    async fn add(&self, task: &TaskRef, text: SecretText) -> Result<TaskView, TaskerError>;
+    async fn add(
+        &self,
+        task: &TaskRef,
+        text: SecretText,
+        bindings: Vec<BindingRequest>,
+        tokens: ForgeTokens,
+    ) -> Result<TaskView, TaskerError>;
     async fn status(&self, task: &TaskRef) -> Result<TaskView, TaskerError>;
     async fn stop(&self, task: &TaskRef) -> Result<TaskView, TaskerError>;
     async fn drop(&self, task: &TaskRef) -> Result<TaskView, TaskerError>;
@@ -71,11 +79,18 @@ impl Tasker for TaskerClient {
         agent: &AgentId,
         text: SecretText,
         bindings: Vec<BindingRequest>,
+        tokens: ForgeTokens,
     ) -> Result<TaskView, TaskerError> {
-        TaskerClient::submit(self, agent, text, bindings).await
+        TaskerClient::submit(self, agent, text, bindings, tokens).await
     }
-    async fn add(&self, task: &TaskRef, text: SecretText) -> Result<TaskView, TaskerError> {
-        TaskerClient::add(self, task, text).await
+    async fn add(
+        &self,
+        task: &TaskRef,
+        text: SecretText,
+        bindings: Vec<BindingRequest>,
+        tokens: ForgeTokens,
+    ) -> Result<TaskView, TaskerError> {
+        TaskerClient::add(self, task, text, bindings, tokens).await
     }
     async fn status(&self, task: &TaskRef) -> Result<TaskView, TaskerError> {
         TaskerClient::status(self, task).await
@@ -105,6 +120,17 @@ impl Tasker for TaskerClient {
     }
 }
 
+/// The tasker's forge tokens for the servers a request binds, so tests can stand in for Vault.
+pub(crate) trait TokenSupply {
+    async fn tokens(&self, servers: &[&str], now: u64) -> Result<ForgeTokens, String>;
+}
+
+impl TokenSupply for crate::agent::ForgeLogins {
+    async fn tokens(&self, servers: &[&str], now: u64) -> Result<ForgeTokens, String> {
+        crate::agent::ForgeLogins::tokens(self, servers, now).await
+    }
+}
+
 /// The session's plane leaf, minted once and again only near its NotAfter.
 pub(crate) trait Leaf {
     /// Unix seconds; `None` before a mint.
@@ -130,9 +156,10 @@ pub(crate) enum Event {
 }
 
 /// One agent's verbs over one tasker client and leaf.
-pub(crate) struct Kernel<T, L> {
+pub(crate) struct Kernel<T, L, S> {
     tasker: T,
     leaf: L,
+    logins: S,
     login_expires_at: u64,
     agent: AgentId,
     hints: Hints,
@@ -176,7 +203,7 @@ impl Workdir {
     }
 }
 
-impl<T: Tasker, L: Leaf> Kernel<T, L> {
+impl<T: Tasker, L: Leaf, S: TokenSupply> Kernel<T, L, S> {
     async fn send(&self, op: Op, now: u64) -> Event {
         let not_after = self.leaf.not_after();
         let fresh = not_after.is_some_and(|at| now.saturating_add(REMINT_WITHIN_SECS) < at);
@@ -189,10 +216,18 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
                 return Event::Done(Err(Failure::NoIdentity));
             }
         }
-        Event::Done(self.perform(op).await)
+        Event::Done(self.perform(op, now).await)
     }
 
-    async fn perform(&self, op: Op) -> Result<Answer, Failure> {
+    async fn tokens(&self, bindings: &[BindingRequest], now: u64) -> Result<ForgeTokens, Failure> {
+        let forges = self.hints.forges.as_deref().unwrap_or_default();
+        self.logins
+            .tokens(&token_servers(bindings, forges), now)
+            .await
+            .map_err(Failure::NotSent)
+    }
+
+    async fn perform(&self, op: Op, now: u64) -> Result<Answer, Failure> {
         let (t, a) = (&self.tasker, &self.agent);
         let answer = match op {
             Op::Collect { after } => t.collect(a, after).await.map(Answer::Reports),
@@ -206,11 +241,33 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
                     self.hints.forges.as_deref(),
                     None,
                 );
-                t.submit(a, text, chosen.bindings)
+                let tokens = self.tokens(&chosen.bindings, now).await?;
+                t.submit(a, text, chosen.bindings, tokens)
                     .await
                     .map(|view| Answer::Submitted(view, chosen.unbound))
             }
-            Op::Add { task, text } => t.add(&task, text).await.map(Answer::View),
+            Op::Add { task, text, bound } => {
+                let mut chosen = choose(
+                    &[&Links],
+                    text.0.as_str(),
+                    self.hints.forges.as_deref(),
+                    None,
+                );
+                chosen
+                    .bindings
+                    .retain(|BindingRequest::Git(g)| !bound.iter().any(|b| same(b, g)));
+                let tokens = self.tokens(&chosen.bindings, now).await?;
+                let echo = !chosen.bindings.is_empty() || !chosen.unbound.is_empty();
+                t.add(&task, text, chosen.bindings, tokens)
+                    .await
+                    .map(|view| {
+                        if echo {
+                            Answer::Added(view, chosen.unbound)
+                        } else {
+                            Answer::View(view)
+                        }
+                    })
+            }
             Op::Stop { task } => t.stop(&task).await.map(Answer::View),
             Op::Drop { task } => t.drop(&task).await.map(Answer::View),
             Op::Status { task } => t.status(&task).await.map(Answer::View),
@@ -231,6 +288,11 @@ impl<T: Tasker, L: Leaf> Kernel<T, L> {
             }
         }
     }
+}
+
+fn same(bound: &Binding, asked: &maknae_proto::GitRef) -> bool {
+    let Binding::Git(b) = bound;
+    b.server == asked.server && b.base == asked.base && b.change == asked.change
 }
 
 fn failure(e: TaskerError) -> Failure {
@@ -270,6 +332,7 @@ fn roster_failure(e: &TaskerError) -> String {
 struct Plane {
     client: Arc<PlaneClient>,
     tasker: TaskerClient,
+    logins: crate::agent::ForgeLogins,
     input_cap: usize,
     login_expires_at: u64,
 }
@@ -277,12 +340,18 @@ struct Plane {
 async fn connect() -> Result<Plane, String> {
     let (dir, document, transport) = crate::cli::cli_config()?;
     let session = crate::login::user_session(&document, &dir)?;
-    let (client, trust) = crate::cli::minted_plane(&document, &dir, session.token).await?;
+    let (client, trust) = crate::cli::minted_plane(&document, &dir, &session.token).await?;
     let client = Arc::new(client);
     let input_cap = transport.prompt_max_bytes;
     Ok(Plane {
         tasker: TaskerClient::new(transport, Arc::clone(&client), trust),
         client,
+        logins: crate::agent::ForgeLogins {
+            api: session.api,
+            token: session.token,
+            expires_at: session.expires_at,
+            place: crate::agent::ForgePlace::of(&document),
+        },
         input_cap,
         login_expires_at: session.expires_at,
     })
@@ -355,6 +424,7 @@ pub(crate) async fn run_session(name: &str, wait: bool) -> ExitCode {
     let (end, left) = open(
         plane.tasker,
         leaf,
+        plane.logins,
         plane.login_expires_at,
         name,
         Opening {
@@ -454,9 +524,10 @@ impl Left {
 }
 
 /// Checks `name` against the agent list and runs the session with it.
-pub(crate) async fn open<T: Tasker, L: Leaf>(
+pub(crate) async fn open<T: Tasker, L: Leaf, S: TokenSupply>(
     tasker: T,
     leaf: L,
+    logins: S,
     login_expires_at: u64,
     name: &str,
     opening: Opening,
@@ -494,6 +565,7 @@ pub(crate) async fn open<T: Tasker, L: Leaf>(
     let kernel = Kernel {
         tasker,
         leaf,
+        logins,
         login_expires_at,
         agent,
         hints: Hints {
@@ -596,8 +668,8 @@ impl Caller for Screen {
     }
 }
 
-async fn full_screen<T: Tasker, L: Leaf>(
-    kernel: &Kernel<T, L>,
+async fn full_screen<T: Tasker, L: Leaf, S: TokenSupply>(
+    kernel: &Kernel<T, L, S>,
     standing: Standing,
     banner: Option<maknae_proto::BannerSpec>,
     input_cap: usize,
@@ -681,8 +753,8 @@ fn entry_text(conv: &Conversation, id: EntryId) -> (Zeroizing<String>, Alloc) {
     joined(segments.iter().map(|s| s.len()).sum(), &segments)
 }
 
-async fn plain<T: Tasker, L: Leaf>(
-    kernel: &Kernel<T, L>,
+async fn plain<T: Tasker, L: Leaf, S: TokenSupply>(
+    kernel: &Kernel<T, L, S>,
     standing: Standing,
     wait: bool,
     lines: &mut Lines,
@@ -737,8 +809,8 @@ impl Said {
     }
 }
 
-async fn plain_lines<T: Tasker, L: Leaf>(
-    kernel: &Kernel<T, L>,
+async fn plain_lines<T: Tasker, L: Leaf, S: TokenSupply>(
+    kernel: &Kernel<T, L, S>,
     book: &mut Book,
     wait: bool,
     lines: &mut Lines,
@@ -815,6 +887,8 @@ mod tests {
         refuse_submit: bool,
         forges: Option<Vec<Forge>>,
         submitted: Vec<Vec<BindingRequest>>,
+        added: Vec<Vec<BindingRequest>>,
+        tokens: Vec<ForgeTokens>,
         /// Every collect waits while this is set.
         hold: bool,
         holding: bool,
@@ -904,6 +978,7 @@ mod tests {
             last_action_secs: None,
             cursor: TaskCursor::from_seq(seq),
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -928,9 +1003,11 @@ mod tests {
             _: &AgentId,
             _: SecretText,
             bindings: Vec<BindingRequest>,
+            tokens: ForgeTokens,
         ) -> Result<TaskView, TaskerError> {
             let mut s = self.call("submit");
             s.submitted.push(bindings);
+            s.tokens.push(tokens);
             if s.refuse_submit {
                 return Err(TaskerError::Refused {
                     outcome_unknown: false,
@@ -953,9 +1030,19 @@ mod tests {
             s.tasks.push(v.clone());
             Ok(v)
         }
-        async fn add(&self, _: &TaskRef, _: SecretText) -> Result<TaskView, TaskerError> {
-            self.note("add");
-            Err(TaskerError::Protocol("unused".into()))
+        async fn add(
+            &self,
+            task: &TaskRef,
+            _: SecretText,
+            bindings: Vec<BindingRequest>,
+            tokens: ForgeTokens,
+        ) -> Result<TaskView, TaskerError> {
+            let mut s = self.call("add");
+            s.added.push(bindings);
+            s.tokens.push(tokens);
+            let mut v = view(1, TaskState::Working);
+            v.task = task.clone();
+            Ok(v)
         }
         async fn status(&self, _: &TaskRef) -> Result<TaskView, TaskerError> {
             self.note("status");
@@ -1068,6 +1155,89 @@ mod tests {
         maknae_io::now_unix().unwrap()
     }
 
+    /// No forge logins: a request that needs a token is refused.
+    struct NoLogins;
+
+    impl TokenSupply for NoLogins {
+        async fn tokens(&self, servers: &[&str], _: u64) -> Result<ForgeTokens, String> {
+            match servers {
+                [] => Ok(ForgeTokens::default()),
+                _ => Err(format!("no forge login in this test for {servers:?}")),
+            }
+        }
+    }
+
+    /// The real seal over a scripted Vault: each read answers `status`, or a wrapping token.
+    struct Logins {
+        key: maknae_seal::SealPrivateKey,
+        status: Option<u16>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl Logins {
+        fn new(status: Option<u16>) -> Logins {
+            maknae_crypto::init().unwrap();
+            Logins {
+                key: maknae_seal::SealPrivateKey::generate().unwrap(),
+                status,
+                asked: Mutex::default(),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        fn opens(&self, token: &maknae_proto::SealedForgeToken, path: &str) -> Vec<u8> {
+            let aad = maknae_seal::SealAad::forge(&maknae_seal::ForgeSealContext {
+                purpose: maknae_seal::ForgePurpose::TaskerReach,
+                nonce: token.nonce(),
+                server: token.server(),
+                expected_path: path,
+                key_field: "token",
+            })
+            .unwrap();
+            maknae_seal::open(&self.key, &aad, token.sealed().as_bytes())
+                .unwrap()
+                .to_vec()
+        }
+    }
+
+    impl TokenSupply for Logins {
+        async fn tokens(&self, servers: &[&str], now: u64) -> Result<ForgeTokens, String> {
+            let key = crate::agent::ForgeKeyContext {
+                kv_mount: "maknae-kv",
+                user_prefix: "maknae/users",
+                username: "alice",
+                seal_key: self.key.public_key(),
+                expires_at: u64::MAX,
+            };
+            crate::agent::forge_tokens(&key, servers, now, |path| {
+                self.asked.lock().unwrap().push(path.clone());
+                let status = self.status;
+                async move {
+                    match status {
+                        Some(status) => Err(maknae_vault::VaultError::VaultStatus {
+                            op: "read",
+                            status,
+                            hint: "",
+                        }),
+                        None => Ok(maknae_vault::WrappedSecret {
+                            token: maknae_vault::WrappingToken::new(Zeroizing::new(
+                                "hvs.forge-wrap-sentinel-168".into(),
+                            ))
+                            .unwrap(),
+                            ttl: Duration::from_secs(60),
+                            creation_path: format!("maknae-kv/data/{path}"),
+                            creation_time: "2026-11-23T00:00:00Z".into(),
+                        }),
+                    }
+                }
+            })
+            .await
+        }
+    }
+
     fn fresh_leaf() -> FakeLeaf {
         FakeLeaf::expiring_at(now() + 3600)
     }
@@ -1082,7 +1252,7 @@ mod tests {
     fn github() -> Forge {
         Forge {
             host: "github.com".into(),
-            provider: maknae_agent::hints::Provider::Github,
+            provider: maknae_config::ForgeProvider::Github,
         }
     }
 
@@ -1111,6 +1281,7 @@ mod tests {
         let kernel = Kernel {
             tasker: fake.clone(),
             leaf: fresh_leaf(),
+            logins: Logins::new(None),
             login_expires_at: u64::MAX,
             agent: agent(),
             hints: Hints {
@@ -1119,7 +1290,8 @@ mod tests {
             },
         };
         let prompt = "review https://github.com/o/r/pull/7 and https://elsewhere.example/x/y";
-        let Ok(Answer::Submitted(_, unbound)) = kernel.perform(submit_op(prompt)).await else {
+        let Ok(Answer::Submitted(_, unbound)) = kernel.perform(submit_op(prompt), now()).await
+        else {
             panic!("not submitted");
         };
         assert_eq!(
@@ -1136,6 +1308,170 @@ mod tests {
         );
     }
 
+    fn forge(host: &str, provider: maknae_config::ForgeProvider) -> Forge {
+        Forge {
+            host: host.into(),
+            provider,
+        }
+    }
+
+    fn bound_kernel<S: TokenSupply>(fake: &Fake, logins: S) -> Kernel<Fake, FakeLeaf, S> {
+        use maknae_config::ForgeProvider::{Github, Gitlab};
+        Kernel {
+            tasker: fake.clone(),
+            leaf: fresh_leaf(),
+            logins,
+            login_expires_at: u64::MAX,
+            agent: agent(),
+            hints: Hints {
+                forges: Some(vec![
+                    github(),
+                    forge("ghe.example:8443", Github),
+                    forge("gitlab.lab.local:8443", Gitlab),
+                ]),
+                remotes: Remotes(Vec::new()),
+            },
+        }
+    }
+
+    const BOUND_PROMPT: &str = "review https://github.com/o/r/pull/7, https://github.com/o/s, \
+        https://gitlab.lab.local:8443/g/p/-/merge_requests/3 and https://ghe.example:8443/o/t/pull/2";
+
+    #[tokio::test]
+    async fn submit_seals_one_token_per_github_server_and_none_for_gitlab() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let kernel = bound_kernel(&fake, Logins::new(None));
+        let answer = kernel.perform(submit_op(BOUND_PROMPT), now()).await;
+        assert!(matches!(answer, Ok(Answer::Submitted(..))), "{answer:?}");
+        let state = fake.state.lock().unwrap();
+        assert_eq!(
+            state.submitted,
+            [vec![
+                git("github.com", "o/r", Some(7)),
+                git("github.com", "o/s", None),
+                git("gitlab.lab.local:8443", "g/p", Some(3)),
+                git("ghe.example:8443", "o/t", Some(2)),
+            ]]
+        );
+        let paths = [
+            "maknae/users/alice/forges/github.com",
+            "maknae/users/alice/forges/ghe.example_8443",
+        ];
+        assert_eq!(kernel.logins.asked(), paths);
+        let tokens = state.tokens[0].as_slice();
+        let servers: Vec<_> = tokens.iter().map(|t| t.server()).collect();
+        assert_eq!(servers, ["github.com", "ghe.example:8443"]);
+        for (token, path) in tokens.iter().zip(paths) {
+            assert_eq!(
+                kernel.logins.opens(token, path),
+                b"hvs.forge-wrap-sentinel-168"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_login_refuses_before_submitting_and_names_the_command() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let kernel = bound_kernel(&fake, Logins::new(Some(404)));
+        let answer = kernel.perform(submit_op(BOUND_PROMPT), now()).await;
+        let Err(Failure::NotSent(why)) = answer else {
+            panic!("{answer:?}");
+        };
+        assert_eq!(
+            why,
+            "no forge login is stored for github.com: run `maknae forge login github.com`, then retry"
+        );
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+        let gitlab_only = "see https://gitlab.lab.local:8443/g/p/-/merge_requests/3";
+        let answer = kernel.perform(submit_op(gitlab_only), now()).await;
+        assert!(matches!(answer, Ok(Answer::Submitted(..))), "{answer:?}");
+        assert!(fake.state.lock().unwrap().tokens[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_runs_no_program() {
+        use maknae_io::program::Program;
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let kernel = bound_kernel(&fake, Logins::new(None));
+        assert!(kernel.perform(submit_op(BOUND_PROMPT), now()).await.is_ok());
+        let paths: Vec<_> = Program::ALL
+            .iter()
+            .map(|p| p.path().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/usr/bin/systemd-creds",
+                "/usr/bin/setfacl",
+                "/usr/bin/getfacl",
+                "/usr/sbin/restorecon",
+                "/usr/sbin/apparmor_parser",
+                "/usr/sbin/usermod",
+                "/usr/sbin/dseditgroup",
+                "/usr/bin/sudo",
+                "/usr/bin/env",
+                "/usr/bin/id",
+                "/usr/bin/security",
+                "/usr/bin/codesign",
+                "/bin/chmod",
+                "/bin/ls",
+                "/usr/bin/systemctl",
+                "/bin/launchctl",
+                "/usr/bin/stat",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn add_binds_links_in_its_text_and_seals_their_tokens() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        let kernel = bound_kernel(&fake, Logins::new(None));
+        let already = Binding::Git(maknae_proto::GitBinding {
+            server: "github.com".into(),
+            base: "o/r".into(),
+            head: Some("o/r-fork".into()),
+            change: Some(7),
+        });
+        let task = TaskRef::from_id(&TaskId([9; 16]));
+        let add = |text: &str| Op::Add {
+            task: task.clone(),
+            text: SecretText(Zeroizing::new(text.into())),
+            bound: vec![already.clone()],
+        };
+        let answer = kernel
+            .perform(
+                add("also https://github.com/o/r/pull/7 and https://ghe.example:8443/o/t/pull/2 and https://elsewhere.example/x/y"),
+                now(),
+            )
+            .await;
+        let Ok(Answer::Added(view, unbound)) = answer else {
+            panic!("{answer:?}");
+        };
+        assert_eq!(view.task, task);
+        assert_eq!(unbound.len(), 1, "{unbound:?}");
+        assert!(matches!(
+            kernel.perform(add("just more words"), now()).await,
+            Ok(Answer::View(_))
+        ));
+        let state = fake.state.lock().unwrap();
+        assert_eq!(
+            state.added,
+            [vec![git("ghe.example:8443", "o/t", Some(2))], vec![]]
+        );
+        assert_eq!(
+            kernel.logins.asked(),
+            ["maknae/users/alice/forges/ghe.example_8443"]
+        );
+        let servers: Vec<_> = state.tokens[0]
+            .as_slice()
+            .iter()
+            .map(|t| t.server())
+            .collect();
+        assert_eq!(servers, ["ghe.example:8443"]);
+        assert!(state.tokens[1].is_empty());
+        assert!(state.submitted.is_empty());
+    }
+
     #[tokio::test]
     async fn a_refused_catalog_leaves_each_candidate_not_bound_with_no_forge_list() {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
@@ -1143,6 +1479,7 @@ mod tests {
         let (end, _) = bounded(open(
             fake.clone(),
             fresh_leaf(),
+            NoLogins,
             u64::MAX,
             "hobi",
             Opening {
@@ -1203,6 +1540,7 @@ mod tests {
         let (end, _) = bounded(open(
             fake.clone(),
             fresh_leaf(),
+            NoLogins,
             u64::MAX,
             "hobi",
             Opening {
@@ -1352,6 +1690,7 @@ mod tests {
             let ended = rt.block_on(open(
                 session,
                 leaf,
+                NoLogins,
                 login_expires_at,
                 "hobi",
                 Opening {
@@ -1421,6 +1760,7 @@ mod tests {
         let ended = bounded(open(
             fake.clone(),
             fresh_leaf(),
+            NoLogins,
             u64::MAX,
             "summarize my files",
             Opening {
@@ -1455,6 +1795,7 @@ mod tests {
         let (end, _) = bounded(open(
             fake.clone(),
             fresh_leaf(),
+            NoLogins,
             u64::MAX,
             "hobi",
             Opening {
@@ -1508,6 +1849,7 @@ mod tests {
         let kernel = Kernel {
             tasker: Fake::new(&[], 0),
             leaf: FakeLeaf::expiring_at(now + 3600),
+            logins: NoLogins,
             login_expires_at: now + 7200,
             agent: agent(),
             hints: no_hints(),
@@ -1536,6 +1878,7 @@ mod tests {
         let expired = Kernel {
             tasker: Fake::new(&[], 0),
             leaf: FakeLeaf::expiring_at(now + 10),
+            logins: NoLogins,
             login_expires_at: now,
             agent: agent(),
             hints: no_hints(),
@@ -1881,6 +2224,7 @@ mod tests {
         let kernel = Kernel {
             tasker: Fake::new(&[], 0),
             leaf: Refusing(Mutex::new(Some(now + 30)), AtomicU32::new(0)),
+            logins: NoLogins,
             login_expires_at: now + 7200,
             agent: agent(),
             hints: no_hints(),

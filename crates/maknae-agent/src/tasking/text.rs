@@ -2,7 +2,10 @@ use crate::hints::{Reason, Subject, Unbound};
 use crate::render::display_piece;
 use crate::render::DISPLAY_PIECE_MAX;
 use crate::screen::MenuItem;
-use maknae_proto::{AgentEntry, AgentStanding, Binding, TaskClose, TaskState};
+use maknae_proto::{
+    AgentEntry, AgentStanding, Binding, EmptyReason, ForgeOp, ForgeOps, ReachSummary, TaskClose,
+    TaskState,
+};
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
 pub const LIST_INCOMPLETE: &str = "the list may be incomplete; try again";
@@ -230,11 +233,64 @@ fn unbound_line(u: &Unbound) -> String {
     format!("not bound: {subject}: {}", unbound_reason(u.reason))
 }
 
-/// One line per binding the kernel sealed, then one per candidate not bound and why.
-pub fn echo_lines(bindings: &[Binding], unbound: &[Unbound]) -> Vec<String> {
+fn op_word(op: ForgeOp) -> &'static str {
+    match op {
+        ForgeOp::Read => "read",
+        ForgeOp::Review => "review",
+        ForgeOp::IssueWrite => "write issues",
+        ForgeOp::PushHead => "push",
+        ForgeOp::Merge => "merge",
+    }
+}
+
+fn ops_words(ops: ForgeOps) -> String {
+    let words: Vec<&str> = ForgeOp::ALL
+        .into_iter()
+        .filter(|op| ops.contains(*op))
+        .map(op_word)
+        .collect();
+    if words.is_empty() {
+        "none".into()
+    } else {
+        words.join(", ")
+    }
+}
+
+fn empty_reason(why: EmptyReason) -> &'static str {
+    match why {
+        EmptyReason::HeadGone => "the change's head repository is gone",
+        EmptyReason::AgentNotCovered => "the agent's credential does not cover it",
+        EmptyReason::NoForgeCredential => "no forge credential observed it",
+        EmptyReason::NoReachCheck => "this forge has no reach check",
+    }
+}
+
+fn reach_text(reach: ReachSummary) -> String {
+    let mut text = format!("reach: {}", ops_words(reach.base()));
+    if !reach.head().is_empty() {
+        text.push_str(&format!("; head: {}", ops_words(reach.head())));
+    }
+    if let Some(why) = reach.why() {
+        text.push_str(&format!(" ({})", empty_reason(why)));
+    }
+    text
+}
+
+/// One line per binding the kernel sealed, with its effective reach when the view carries one
+/// per binding, then one per candidate not bound and why.
+pub fn echo_lines(
+    bindings: &[Binding],
+    reach: &[ReachSummary],
+    unbound: &[Unbound],
+) -> Vec<String> {
+    let aligned = reach.len() == bindings.len();
     bindings
         .iter()
-        .map(|b| format!("bound: {}", binding_name(b)))
+        .enumerate()
+        .map(|(i, b)| match reach.get(i).filter(|_| aligned) {
+            Some(r) => format!("bound: {}; {}", binding_name(b), reach_text(*r)),
+            None => format!("bound: {}", binding_name(b)),
+        })
         .chain(unbound.iter().map(unbound_line))
         .collect()
 }
@@ -426,6 +482,39 @@ mod tests {
     }
 
     #[test]
+    fn the_reach_echo_shows_effective_ops_and_why() {
+        let summary = |ops: u16, why: Option<u8>| ReachSummary::try_from((ops, why)).unwrap();
+        let bindings = [
+            sealed("github.com", "o/r", Some(12)),
+            sealed("github.com", "o/s", None),
+            sealed("gitlab.lab.local:8443", "g/s/p", None),
+            sealed("github.com", "o/t", Some(3)),
+            sealed("github.com", "o/u", None),
+        ];
+        let reach = [
+            summary(0b00011 | 0b01000 << 5, None),
+            summary(0, Some(1)),
+            summary(0, Some(3)),
+            summary(0b10101, Some(0)),
+            summary(0, Some(2)),
+        ];
+        assert_eq!(
+            echo_lines(&bindings, &reach, &[]),
+            [
+                "bound: github.com/o/r change 12; reach: read, review; head: push",
+                "bound: github.com/o/s; reach: none (the agent's credential does not cover it)",
+                "bound: gitlab.lab.local:8443/g/s/p; reach: none (this forge has no reach check)",
+                "bound: github.com/o/t change 3; reach: read, write issues, merge (the change's head repository is gone)",
+                "bound: github.com/o/u; reach: none (no forge credential observed it)",
+            ]
+        );
+        assert_eq!(
+            echo_lines(&bindings[..1], &[], &[]),
+            ["bound: github.com/o/r change 12"]
+        );
+    }
+
+    #[test]
     fn echo_lines_name_each_sealed_binding_and_each_unbound_reason() {
         let git = |base: &str, change| maknae_proto::GitRef {
             server: "github.com".into(),
@@ -438,6 +527,7 @@ mod tests {
                 sealed("github.com", "o/r", Some(12)),
                 sealed("gitlab.lab.local:8443", "g/s/p", None),
             ],
+            &[],
             &[
                 not(Subject::Host("evil.example".into()), Reason::UnknownServer),
                 not(Subject::Host("github.com".into()), Reason::NotHttps),
@@ -471,7 +561,7 @@ mod tests {
                 "not bound: 9960 more candidates: notes past the first 32 are not listed",
             ]
         );
-        assert!(echo_lines(&[], &[]).is_empty());
+        assert!(echo_lines(&[], &[], &[]).is_empty());
         assert_eq!(
             binding_name(&sealed("x\u{202e}", "o/r", None)),
             "x\\u{202e}/o/r"

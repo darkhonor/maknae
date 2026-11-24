@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use maknae_config::AgentId;
 use maknae_io::Zeroizing;
-use maknae_proto::{SecretText, SignedTask, TaskClose, TaskId, TaskState, Tasker};
+use maknae_proto::{SecretText, SignedAddendum, SignedTask, TaskClose, TaskId, TaskState, Tasker};
 use serde::{Deserialize, Serialize};
 
 use crate::conversation::dir_store::{DirBlobs, Layout};
@@ -17,6 +17,8 @@ pub const REPORT_HOLD: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub const RECORD_MAX: u64 = (3 * maknae_config::PROMPT_MAX_CEILING
     + maknae_proto::TASK_ENVELOPE_MARGIN
+    + maknae_proto::TASK_SIGNATURE_MAX_BYTES
+    + maknae_proto::TASK_ADDENDUM_MARGIN
     + maknae_proto::TASK_SIGNATURE_MAX_BYTES
     + 4096) as u64;
 
@@ -125,6 +127,19 @@ pub struct TaskRecord {
     /// The parent's `starts` when this sub-task was given under it.
     #[serde(default)]
     pub parent_start: Option<u64>,
+    /// The bindings its tasker added while it was working, the latest cumulative addendum.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "arc_addendum"
+    )]
+    pub addendum: Option<Arc<SignedAddendum>>,
+}
+
+impl TaskRecord {
+    pub(crate) fn bound(&self) -> crate::reach::TaskBound<'_> {
+        crate::reach::TaskBound::of(&self.signed.task, self.addendum.as_deref())
+    }
 }
 
 mod arc_signed {
@@ -138,6 +153,23 @@ mod arc_signed {
         d: D,
     ) -> Result<Arc<SignedTask>, D::Error> {
         SignedTask::deserialize(d).map(Arc::new)
+    }
+}
+
+mod arc_addendum {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        a: &Option<Arc<SignedAddendum>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        a.as_deref().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Arc<SignedAddendum>>, D::Error> {
+        Option::<SignedAddendum>::deserialize(d).map(|a| a.map(Arc::new))
     }
 }
 
@@ -757,6 +789,7 @@ mod tests {
                 },
                 labels: Labels {},
                 bindings: vec![],
+                reach: vec![],
             },
             signature: TaskSignature {
                 alg: "test".into(),
@@ -774,6 +807,12 @@ mod tests {
             let mut s = signed("hobi", Tasker::Uid(0), "");
             s.task = task;
             Ok(s)
+        }
+        fn sign_addendum(
+            &self,
+            _addendum: maknae_proto::TaskAddendum,
+        ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+            Err(TaskRefusal::Unsigned)
         }
         fn current_leaf(&self) -> Option<[u8; 32]> {
             None
@@ -894,6 +933,61 @@ mod tests {
         b.put(&name_of(&id), &plain);
         let loaded = read_record(&b, &name_of(&id)).unwrap();
         assert_eq!((loaded.held_at, loaded.held_for), (None, None));
+    }
+
+    #[test]
+    fn a_pr_a_record_without_an_addendum_decodes() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "pr-a");
+        let rec = store.record(&id).unwrap();
+        assert!(rec.addendum.is_none());
+        let bytes = encode(&rec).unwrap();
+        let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let ciborium::Value::Map(fields) = &value else {
+            panic!("a record encodes as a map");
+        };
+        assert!(fields.iter().all(|(k, _)| k.as_text() != Some("addendum")));
+        b.put(&name_of(&id), &bytes);
+        let loaded = read_record(&b, &name_of(&id)).unwrap();
+        assert!(loaded.addendum.is_none());
+        assert_eq!(*encode(&loaded).unwrap(), *bytes);
+    }
+
+    #[test]
+    fn a_record_with_an_addendum_decodes_with_it() {
+        use maknae_proto::{
+            AgentReach, BindingReach, GitBinding, GitReach, SideReach, TaskAddendum, TaskerBasis,
+        };
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b);
+        let id = by_uid(&store, "added");
+        let mut rec = store.record(&id).unwrap();
+        let addendum = TaskAddendum::new(
+            id,
+            1,
+            vec![maknae_proto::Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base: "o/r".into(),
+                head: None,
+                change: None,
+            })],
+            vec![BindingReach::Git(GitReach {
+                tasker: SideReach::EMPTY,
+                basis: TaskerBasis::Token,
+                agent: AgentReach::AtHandOut,
+                why: None,
+            })],
+        )
+        .unwrap();
+        let signed = SignedAddendum {
+            addendum,
+            signature: rec.signed.signature.clone(),
+        };
+        rec.addendum = Some(Arc::new(signed.clone()));
+        b.put(&name_of(&id), &encode(&rec).unwrap());
+        let loaded = read_record(&b, &name_of(&id)).unwrap();
+        assert_eq!(loaded.addendum.as_deref(), Some(&signed));
     }
 
     #[test]
@@ -1500,6 +1594,8 @@ mod tests {
             RECORD_MAX,
             (3 * maknae_config::PROMPT_MAX_CEILING
                 + maknae_proto::TASK_ENVELOPE_MARGIN
+                + maknae_proto::TASK_SIGNATURE_MAX_BYTES
+                + maknae_proto::TASK_ADDENDUM_MARGIN
                 + maknae_proto::TASK_SIGNATURE_MAX_BYTES
                 + 4096) as u64
         );

@@ -125,7 +125,8 @@ pub fn task_for(
                     | TaskRefusal::FollowUps
                     | TaskRefusal::FollowUpsUnseen
                     | TaskRefusal::Unavailable(_)
-                    | TaskRefusal::Unbound(_) => DenyCause::TaskNotWorking { cited: *id },
+                    | TaskRefusal::Unbound(_)
+                    | TaskRefusal::Unreached(_) => DenyCause::TaskNotWorking { cited: *id },
                 })
         }
     }
@@ -222,6 +223,7 @@ fn task_reason(r: &TaskRefusal) -> &'static str {
         TaskRefusal::NotWorking => "task-not-working",
         TaskRefusal::Unavailable(_) => "task-unavailable",
         TaskRefusal::Unbound(_) => "task-unbound",
+        TaskRefusal::Unreached(_) => "task-unreached",
     }
 }
 
@@ -1521,6 +1523,7 @@ mod tests {
             (TaskRefusal::NotWorking, "task-not-working"),
             (TaskRefusal::Unavailable("u".into()), "task-unavailable"),
             (TaskRefusal::Unbound("b".into()), "task-unbound"),
+            (TaskRefusal::Unreached("r".into()), "task-unreached"),
         ] {
             assert_eq!(
                 cause_reason(&DenyCause::Task { refusal, cited }),

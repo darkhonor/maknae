@@ -10,15 +10,15 @@ use maknae_agent::plane::{
     StatOutcome, WriteOutcome,
 };
 use maknae_agent::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
-use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified};
+use maknae_agent::task_driver::{DriverEvent, PersonaAt, TaskPlane, Unverified, VerifyClass};
 use maknae_config::AgentId;
 use maknae_graph::graph::Graph;
 use maknae_io::{
     AnchorRequired, DescendantRequired, IoError, IoKind, StrategyPref, TargetRequired, Zeroizing,
 };
 use maknae_proto::{
-    BindingRequest, Bytes, ConversationId, ConversationView, SecretText, SignedTask, TaskCursor,
-    TaskId, TaskRef, TaskReportPage, TaskView, Turn,
+    BindingRequest, Bytes, ConversationId, ConversationView, SecretText, SignedAddendum,
+    SignedTask, TaskCursor, TaskId, TaskRef, TaskReportPage, TaskView, Turn,
 };
 use maknae_vault::TrustBundle;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,21 @@ impl TaskTrust {
             class: crate::task::verify_class(e),
         })?;
         Ok(task)
+    }
+
+    pub fn verify_addendum(
+        &self,
+        task: &TaskId,
+        signed: &Bytes,
+        now: Result<std::time::Duration, String>,
+    ) -> Result<SignedAddendum, VerifyClass> {
+        use maknae_vault::task_sig::TaskSignatureError;
+        let added: SignedAddendum = ciborium::from_reader(signed.0.as_slice())
+            .map_err(|_| crate::task::verify_class(TaskSignatureError::Encoding))?;
+        let now = now.map_err(|_| crate::task::verify_class(TaskSignatureError::NotKernel))?;
+        maknae_vault::task_sig::verify_addendum(&self.trust, &self.trust_domain, task, &added, now)
+            .map_err(crate::task::verify_class)?;
+        Ok(added)
     }
 }
 
@@ -249,6 +264,14 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
     fn verify(&mut self, signed: &Bytes) -> Result<SignedTask, Unverified> {
         self.trust.verify(signed, maknae_io::now_since_epoch())
     }
+    fn verify_addendum(
+        &mut self,
+        task: &TaskId,
+        signed: &Bytes,
+    ) -> Result<SignedAddendum, VerifyClass> {
+        self.trust
+            .verify_addendum(task, signed, maknae_io::now_since_epoch())
+    }
     async fn persona(&mut self, at: PersonaAt<'_>) -> Result<Option<SecretText>, String> {
         let rel = match at {
             PersonaAt::Etc => return self.personas.etc(),
@@ -283,7 +306,12 @@ impl<K: KeySupply, R: PersonaRead, D: Dial> TaskPlane for AgentPlane<K, R, D> {
         let agent = AgentId::parse(agent).map_err(|_| TaskerFail::Refused)?;
         self.plane
             .tasker()
-            .submit(&agent, prompt, bindings)
+            .submit(
+                &agent,
+                prompt,
+                bindings,
+                maknae_proto::ForgeTokens::default(),
+            )
             .await
             .map_err(fail)
     }
@@ -346,6 +374,7 @@ mod tests {
             },
             labels: Labels {},
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -525,7 +554,7 @@ mod tests {
                     Verb::FsList { .. } => "list",
                     Verb::FsStat { .. } => "stat",
                     Verb::SessionClose { .. } => "close",
-                    Verb::TaskSubmit { task } if task.agent == "jin" => "submit",
+                    Verb::TaskSubmit { task, .. } if task.agent == "jin" => "submit",
                     Verb::TaskStatus { task } if *task == sub => "status",
                     Verb::TaskCollect {
                         agent,
@@ -675,6 +704,97 @@ mod tests {
         }
     }
 
+    fn addendum(id: TaskId) -> maknae_proto::TaskAddendum {
+        use maknae_proto::{
+            AgentReach, Binding, BindingReach, EmptyReason, GitBinding, GitReach, SideReach,
+            TaskerBasis,
+        };
+        maknae_proto::TaskAddendum::new(
+            id,
+            1,
+            vec![Binding::Git(GitBinding {
+                server: "git.sentinel-168l.example".into(),
+                base: "o/r".into(),
+                head: None,
+                change: None,
+            })],
+            vec![BindingReach::Git(GitReach {
+                tasker: SideReach::EMPTY,
+                basis: TaskerBasis::Parent,
+                agent: AgentReach::NoForgeCredential,
+                why: Some(EmptyReason::NoForgeCredential),
+            })],
+        )
+        .unwrap()
+    }
+
+    fn wire_added(signed: &SignedAddendum) -> Bytes {
+        let mut out = Vec::new();
+        ciborium::into_writer(signed, &mut out).unwrap();
+        Bytes::new(Zeroizing::new(out))
+    }
+
+    #[test]
+    fn a_kernel_signed_addendum_for_this_task_verifies_and_anything_else_names_its_class() {
+        maknae_crypto::init().unwrap();
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let kernel = ca.kernel(PlaneKey::MlDsa87, None);
+        let trust = TaskTrust {
+            trust: ca.trust(),
+            trust_domain: TRUST_DOMAIN.into(),
+            agent: hobi(),
+        };
+        let id = TaskId([0x62; 16]);
+        let now = || maknae_io::now_since_epoch();
+        let signed = maknae_vault::task_sig::sign_addendum(&kernel, addendum(id)).unwrap();
+        assert_eq!(
+            trust.verify_addendum(&id, &wire_added(&signed), now()),
+            Ok(signed.clone())
+        );
+        assert_eq!(
+            trust.verify_addendum(&TaskId([0x63; 16]), &wire_added(&signed), now()),
+            Err(VerifyClass::Task)
+        );
+        let mut forged = signed.clone();
+        let mut sig = forged.signature.sig.0.to_vec();
+        sig[0] ^= 1;
+        forged.signature.sig = Bytes::new(Zeroizing::new(sig));
+        assert_eq!(
+            trust.verify_addendum(&id, &wire_added(&forged), now()),
+            Err(VerifyClass::Signature)
+        );
+        let other = TestCa::new(PlaneKey::MlDsa87);
+        let foreign = maknae_vault::task_sig::sign_addendum(
+            &other.kernel(PlaneKey::MlDsa87, None),
+            addendum(id),
+        )
+        .unwrap();
+        assert_eq!(
+            trust.verify_addendum(&id, &wire_added(&foreign), now()),
+            Err(VerifyClass::NotKernel)
+        );
+        assert_eq!(
+            trust.verify_addendum(
+                &id,
+                &wire_added(&signed),
+                Err("the system clock reads before 1970".into())
+            ),
+            Err(VerifyClass::NotKernel)
+        );
+        for junk in [
+            vec![],
+            vec![0xff; 9],
+            wire(&maknae_vault::task_sig::sign_task(&kernel, task("hobi")).unwrap())
+                .0
+                .to_vec(),
+        ] {
+            assert_eq!(
+                trust.verify_addendum(&id, &Bytes::new(Zeroizing::new(junk)), now()),
+                Err(VerifyClass::Encoding)
+            );
+        }
+    }
+
     struct Home(PathBuf);
     impl Drop for Home {
         fn drop(&mut self) {
@@ -793,9 +913,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_agent_subtask_sends_no_token() {
+        use crate::plane::fake::{refused, FakeKernel};
+        use maknae_proto::{BindingRequest, GitRef, Verb};
+        let ca = TestCa::new(PlaneKey::MlDsa87);
+        let lp = LoopPlane::with_dial(
+            FakeKernel::answering(vec![refused()]),
+            maknae_config::TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let mut plane = AgentPlane::new(
+            lp,
+            TaskTrust {
+                trust: ca.trust(),
+                trust_domain: TRUST_DOMAIN.into(),
+                agent: hobi(),
+            },
+            PartitionPersona(PathBuf::from("/home/hobi")),
+            Box::new(|_| {}),
+        );
+        let bound = vec![BindingRequest::Git(GitRef {
+            server: "github.com".into(),
+            base: "o/r".into(),
+            change: Some(7),
+        })];
+        let asked = SecretText(Zeroizing::new("review github.com/o/r#7".into()));
+        let _ = plane.submit("jin", asked, bound.clone()).await;
+        let seen = plane.plane.link_for_test().finish().await.requests;
+        assert_eq!(seen.len(), 1);
+        match &seen[0].verb {
+            Verb::TaskSubmit { task, forge_tokens } => {
+                assert_eq!(task.bindings, bound);
+                assert!(forge_tokens.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn the_planes_forges_are_the_held_catalogs() {
         use crate::plane::fake::FakeKernel;
-        use maknae_agent::hints::Provider;
+        use maknae_config::ForgeProvider;
         use maknae_graph::catalog::{self, CatalogForge, CatalogInput};
         use maknae_proto::{CatalogDigest, Payload, RespResult, ToolCatalogReply};
         let bytes = catalog::encode(&CatalogInput {
@@ -840,7 +1000,7 @@ mod tests {
             plane.forges(),
             Some(vec![Forge {
                 host: "github.com".into(),
-                provider: Provider::Github,
+                provider: ForgeProvider::Github,
             }])
         );
     }

@@ -167,6 +167,14 @@ impl Snapshot {
         self.loaded.agents.0.get(&uid).map(String::as_str)
     }
 
+    pub fn forge_credentials(
+        &self,
+        agent_uid: u32,
+        principal_uid: u32,
+    ) -> Vec<maknae_proto::CredentialRef> {
+        crate::catalog::forge_credentials(&self.loaded, agent_uid, principal_uid)
+    }
+
     pub fn tools(&self) -> &Arc<maknae_config::ToolsCatalog> {
         &self.loaded.tools
     }

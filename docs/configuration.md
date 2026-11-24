@@ -146,10 +146,10 @@ The host side, `<config-dir>` (`/etc/maknae` when packaged):
 ├── sensitive.yaml        # paths no file verb may reach, whatever is granted — a SEPARATE document (§2.5)
 ├── tools.yaml            # the tool catalog, the ceiling every tool call is held to — a SEPARATE document (§2.8)
 ├── banner.yaml           # the operator's banner for the agent session — a SEPARATE document (§2.7)
-├── egress-bounds.yaml    # required WHEN any provider is authorized (§6.1.3); written by `maknae enroll`, 0644 root:root
+├── egress-bounds.yaml    # required WHEN any provider is authorized, read when a GitHub forge is configured (§6.1.3); written by `maknae enroll`, 0644 root:root
 ├── egress/               # 0750 root:_maknae-egress, created by the package; files written by `maknae enroll`
 │   ├── vault-ca.crt      # 0640 root:_maknae-egress — the deputy's Vault TLS anchor
-│   ├── minting.yaml      # optional, operator-written, never regenerated; 0640 root:_maknae-egress (§6.1.4)
+│   ├── minting.yaml      # operator-written, never regenerated; 0640 root:_maknae-egress; needed for minting and for any GitHub forge (§6.1.4)
 │   ├── role-id           # Linux, while minting.yaml exists: the deputy's minting role id, 0640 root:_maknae-egress
 │   ├── agents/           # Linux: 0750 root:_maknae-egress, created by `maknae enroll agent`
 │   │   └── <id>.seal.pub # an Agent Daemon's public seal key, 0640 root:_maknae-egress
@@ -834,7 +834,7 @@ The value is a list of at most **32** entries, and each `name` may appear once (
 
 A malformed entry refuses boot with `InvalidProvider`, which reads `invalid provider config: <reason>` and names the entry by index, for example `invalid provider config: providers[0].endpoint must be an https:// URL (http:// is permitted to loopback only)`.
 
-- **No providers is a valid state.** An absent section, or `providers: []`, boots, and `egress-bounds.yaml` is then not read. Every prompt is then refused by the kernel: the administrator's `jq` over the audit trail shows the reason `no model access: no providers are authorized on this host`, while the user sees only `maknae: stopped: ` followed by the CLI's generic refusal text (§6.1.1). A `providers:` key with no value (YAML `null`) is not the same thing and refuses boot: `invalid provider config: providers must be a sequence of provider entries`.
+- **No providers is a valid state.** An absent section, or `providers: []`, boots, and `egress-bounds.yaml` is then not read unless a `forges:` entry observes reach (a GitHub forge, §6.1.3). Every prompt is then refused by the kernel: the administrator's `jq` over the audit trail shows the reason `no model access: no providers are authorized on this host`, while the user sees only `maknae: stopped: ` followed by the CLI's generic refusal text (§6.1.1). A `providers:` key with no value (YAML `null`) is not the same thing and refuses boot: `invalid provider config: providers must be a sequence of provider entries`.
 - **Values are taken as written.** Nothing is trimmed; a value with surrounding whitespace fails its own shape rule.
 - **No key is ever in this file.** A key named `key`, `api_key`, `apikey`, `token`, `secret`, `secret_key` or `bearer` (case-insensitive) in any entry refuses boot before any other defect in the section is reported (ownership and classification checks run earlier in boot): `provider config carries a plaintext credential under '<field>': each user's key lives in Vault under their own login, never in the config` (`ProviderPlaintextKey`). The scan covers every entry and **every contribution** to the section, including a base block that a `config.d/` member shadows. It is a field-name check only, not a general secret scanner: a secret pasted as the *value* of `name` is not detected.
 - **Who may write the section.** The file that contributes `providers` — `maknae.yaml` **or a `config.d/` member** — must be **root-owned and not group/other-writable**, and so must the **config directory and `config.d/` themselves** (a subject who owns the directory could otherwise choose between root-authored candidates by renaming one out of the scan); otherwise boot refuses with `SourceNotRootOwned` (§2.2). The packaged `/etc/maknae` (`root:_maknae 0640` under `0750`) satisfies this; the subject the loop runs as cannot authorize a destination. A dev-shape `~/.maknae/maknae.yaml` owned by the operator does not, by design.
@@ -949,7 +949,7 @@ call_timeout_ms: 120000   # optional
 - **Three required keys and two optional**: `kv_mount`, `user_prefix` and `vault` (holding exactly `addr`), and `agent_prefix` and `call_timeout_ms`. Any other key refuses with `unknown key '<key>' in 'egress-bounds.yaml'` (or `in 'egress-bounds.yaml/vault'`) — including the retired `key_vault_path_prefix` and `approle_mount`.
 - **`agent_prefix`** (optional): where Agent Daemon keys live below `kv_mount`, each agent's under `<agent_prefix>/<id>/`. It follows the same fragment grammar as `user_prefix`, and must not equal `user_prefix` or contain it or lie inside it at a `/` boundary (`maknae/users2` beside `maknae/users` is accepted); an overlap refuses with `'agent_prefix' overlaps 'user_prefix'`. Without it agents have no model access: `maknaed` refuses an agent's prompt before deciding it, and `maknae enroll agent` refuses (§6.4). `maknae enroll` does not write it. `maknaed` builds an agent's key path from the agent id on its verified certificate, never from the request, and the Egress Daemon accepts a key path within either prefix and refuses any other (ADR-0028 decision 3, amended).
 - **The fragment grammar.** `kv_mount` and `user_prefix` are each required, a string, at most 256 bytes, in `[A-Za-z0-9._/-]`, with no whitespace, no empty, `.`, `..` or `data` segment, and no leading or trailing `/`. `vault.addr` is required, non-empty, without whitespace, at most 256 bytes, and must be `https://` (checked at boot).
-- **Required only when providers are authorized.** With an empty or absent `providers` section the file is not read. With providers authorized, a file that cannot be read refuses boot with `providers are authorized but egress-bounds.yaml could not be read: <reason>`, and one that was read but refused — by its parser or by the boot gate's own `user_prefix`, `agent_prefix`, `vault.addr` and `call_timeout_ms` checks — refuses with `providers are authorized but the egress bounds were refused — <reason>` (`crates/maknae-kernel/src/boot_gate.rs`). A parser refusal's reason reads `egress-bounds.yaml: <reason>` (`InvalidEgressBounds`).
+- **Required only when providers are authorized.** With an empty or absent `providers` section the file is read only when a `forges:` entry observes reach (a GitHub forge), for its `user_prefix`, where a person's forge token is kept: then an absent file boots and every person-tasked task bound to that forge is refused (`no user key prefix is configured`), a file that cannot be read refuses boot, and one whose `user_prefix` or `agent_prefix` is refused refuses boot, each with `a forge observes reach but egress-bounds.yaml was refused: <reason>`. Otherwise the file is not read. With providers authorized, a file that cannot be read refuses boot with `providers are authorized but egress-bounds.yaml could not be read: <reason>`, and one that was read but refused — by its parser or by the boot gate's own `user_prefix`, `agent_prefix`, `vault.addr` and `call_timeout_ms` checks — refuses with `providers are authorized but the egress bounds were refused — <reason>` (`crates/maknae-kernel/src/boot_gate.rs`). A parser refusal's reason reads `egress-bounds.yaml: <reason>` (`InvalidEgressBounds`).
 - **Mode `0644 root:root`, by design.** It is read through the root-artifact rule — root-owned, not group- or other-writable — by both `maknaed` and `_maknae-egress`, so it is owned by neither and editable by neither; it is world-readable because nothing in it is a secret and because the deputy is in neither `root` nor `_maknae`. To reach it, the deputy has a POSIX ACL `u:_maknae-egress:rx` on `/etc/maknae` (`r` as well as `x`, because the anchored reader opens the directory `O_RDONLY|O_DIRECTORY`), set by the package's `postinst`/`%post` and re-asserted by `maknae enroll`. A write-granting ACL would raise the group bits into the loader's `0o022` mask and be refused, so the root-artifact check is not weakened.
 - **`call_timeout_ms`** (optional, default `120000`, `1000..=440000`): how long the deputy waits for one provider answer, end to end; the call is not streamed. Raise it for a self-hosted model that is slow to begin answering on a long, uncached context, or that writes long replies. Boot refuses a value that does not fit `egress.deadline_ms` (§6.2), so raise both together; 440000 is the most that fits the 600000 ceiling. The deputy reads this file when it starts and `maknaed` checks it at boot, so restart both after changing it; until both are restarted, the deputy refuses any request whose deadline (sent by `maknaed` with each request) its timeout does not fit, and the kernel records that request as failed. `maknae enroll` rewrites the file without it.
 - **Not in `config.d/`.** It is a standalone document with its own reader, never merged or shadowed.
@@ -958,41 +958,51 @@ call_timeout_ms: 120000   # optional
 
 ### 6.1.4 `minting.yaml`
 
-`/etc/maknae/egress/minting.yaml` holds the Egress Daemon's credential-minting settings. It is operator-owned: `maknae enroll` never writes or regenerates it, and `egress-bounds.yaml` is unaffected by it. A missing file means no minting is configured. Parser: `crates/maknae-config/src/egress_mint.rs`.
+`/etc/maknae/egress/minting.yaml` holds the Egress Daemon's forge API map and its credential-minting settings. It is operator-owned: `maknae enroll` never writes or regenerates it, and `egress-bounds.yaml` is unaffected by it. Parser: `crates/maknae-config/src/egress_mint.rs`.
 
 ```yaml
+apis:
+  github.com:
+    provider: github
+    api: https://api.github.com
 vault:
   approle_mount: approle-mint
 github_apps:
   ci-bot:
     app_id: 12345
     installation_id: 67890
+    host: github.com
     api: https://api.github.com
     transit_mount: transit
     transit_key: gh-app-1
 ```
 
-- **`vault.approle_mount`** (required): the AppRole mount the daemon's minting identity logs in at. The role id is not here; enroll writes it to `egress/role-id`.
-- **`github_apps`** (optional mapping): one entry per GitHub App, keyed by a name of 1 to 64 characters in `[a-z0-9-]`. Each entry takes exactly `app_id` and `installation_id` (positive integers), `api`, `transit_mount` and `transit_key` (1 to 64 characters in `[A-Za-z0-9_-]`, naming the Vault transit key that signs the App's JWT). `transit_mount` must equal Terraform's `transit_mount_path` (`deploy/vault-pki`): the egress policy grants signing on that mount only, so any other mount answers every sign 403. Any other key refuses with `unknown key '<key>' in 'minting.yaml'` (or `in 'minting.yaml/vault'`, `in 'minting.yaml/github_apps.<name>'`); a private key in this file is one of them.
+- **`apis`** (optional mapping, at most 32 entries): where each forge's API is, for the reach check a task submission runs (§6.6). Each key is a forge host spelled exactly as its `maknae.yaml` `forges:` `host` is, lowercase, port included when the forge has one (`ghe.example:8443`). Each entry takes exactly `provider` (`github` or `gitlab`) and `api`. **Every `github` forge in `forges:` needs an entry here.** The Egress Daemon refuses a reach frame for a server that is not listed, or is listed under another provider, so without one every task bound to that forge is refused (`task not reached: …` in the trail).
+- **`vault`** (a mapping holding only `approle_mount`): required when `github_apps` is present, and refused when absent with `'github_apps' requires the 'vault' mapping`. A file with `apis` alone loads, configures no minting and makes no Vault login: the tasker side of a reach check needs only `apis`.
+- **`vault.approle_mount`** (required in `vault`): the AppRole mount the daemon's minting identity logs in at. The role id is not here; enroll writes it to `egress/role-id`.
+- **`github_apps`** (optional mapping): one entry per GitHub App, keyed by a name of 1 to 64 characters in `[a-z0-9-]`. Each entry takes exactly `app_id` and `installation_id` (positive integers), `host`, `api`, `transit_mount` and `transit_key` (1 to 64 characters in `[A-Za-z0-9_-]`, naming the Vault transit key that signs the App's JWT). `transit_mount` must equal Terraform's `transit_mount_path` (`deploy/vault-pki`): the egress policy grants signing on that mount only, so any other mount answers every sign 403. Any other key refuses with `unknown key '<key>' in 'minting.yaml'` (or `in 'minting.yaml/vault'`, `in 'minting.yaml/github_apps.<name>'`); a private key in this file is one of them.
+- **`host`** (required in each App): the forge host the App is installed for. It must be a `github` entry of `apis` (`'github_apps.<name>.host' is outside its grammar` otherwise), and the App's `api` must equal that entry's `api` (`'github_apps.<name>.api' differs from 'apis.<host>.api'`). An agent's App counts for a reach check only on its own `host`; two of one agent's Apps on the same host refuse the task.
 - **`api`**: `https://host[:port]` and nothing else. `http://` is refused, loopback included. A path, query, userinfo or fragment is refused; one trailing `/` is accepted and dropped. Host and port follow the provider endpoint rules (§6.1).
 - **Size.** The file is refused over 64 KiB, before it is parsed.
 - **Owner and mode: `root:_maknae-egress 0640`.** The file is read through `maknae-io`: it must be a regular file owned by root with no mode bit beyond `0640`. The loader requires owner root and refuses a group-write, any execute bit and any bit for other users; it cannot name the group, so setting it to `_maknae-egress` is the operator's job (`chown root:_maknae-egress`, `chmod 0640`).
 - **Refusals.** A file that is present but has the wrong owner or mode, or fails to parse, is an error naming the path and what was wrong; its contents are never quoted.
+- **Without the file.** No minting is configured, and every reach frame is refused. **A host whose `maknae.yaml` lists a `github` forge and that has no `minting.yaml` refuses every task bound to that forge**, because the tasker's reach cannot be observed (ADR-0037 decision 7). Write a file with at least that forge's `apis` entry. With `apis` but no App for the host, or minting configured but unavailable, a task is accepted: its agent side is `no forge credential observed it`, so its effective reach is empty.
 - On an SELinux host, run `restorecon -R /etc/maknae` after creating the file.
-- **Enrollment.** `maknae enroll` reads the file before it touches Vault and stops on any refusal above, naming the path and `root:_maknae-egress 0640`; it also refuses a `vault.approle_mount` equal to `maknaed`'s or to the AppRole mount any enrolled agent records. While the file exists, enroll writes `egress/role-id`, seals a SecretID for the `maknae-egress` role to `private/maknae-egress-secret-id.cred`, loads it through the drop-in `/etc/systemd/system/maknae-egress.service.d/50-minting.conf`, and restarts the Egress Daemon before it destroys the SecretIDs it replaced. When the file is gone, enroll removes the drop-in, the sealed SecretID and the role id, and destroys the recorded SecretIDs. Minting is Linux-only: on macOS enroll refuses a host that has the file (ADR-0038). The GitHub App and Transit setup is in the runbook ([Mint GitHub App tokens](runbook.md#mint-github-app-tokens)).
+- **Enrollment.** `maknae enroll` reads the file before it touches Vault and stops on any refusal above, naming the path and `root:_maknae-egress 0640`; it also refuses a `vault.approle_mount` equal to `maknaed`'s or to the AppRole mount any enrolled agent records. While the file configures minting (it has `vault`), enroll writes `egress/role-id`, seals a SecretID for the `maknae-egress` role to `private/maknae-egress-secret-id.cred`, loads it through the drop-in `/etc/systemd/system/maknae-egress.service.d/50-minting.conf`, and restarts the Egress Daemon before it destroys the SecretIDs it replaced. When the file is gone or configures no minting (`apis` alone), enroll removes the drop-in, the sealed SecretID and the role id, and destroys the recorded SecretIDs. Minting is Linux-only: on macOS enroll refuses a host whose file configures minting (ADR-0038); a file with `apis` alone is accepted there. The GitHub App and Transit setup is in the runbook ([Mint GitHub App tokens](runbook.md#mint-github-app-tokens)).
 
 ---
 
 ### 6.2 The `egress` section (#240)
 
-Where `maknaed` finds the egress deputy, and how long one `session.prompt` send may take.
-Both keys are optional and default to what the packaging ships, so a deployment on the
+Where `maknaed` finds the egress deputy, how long one `session.prompt` send may take, and
+how long a task submission's reach check may take. All three keys are optional and default to what the packaging ships, so a deployment on the
 packaged Linux layout needs no `egress` block at all.
 
 ```yaml
 egress:
   socket_path: /run/maknae-egress/egress.sock   # the deputy's activation socket (maknae-egress.socket)
   deadline_ms: 280000                            # the outer bound on one send to the deputy; 1000..=600000
+  reach_deadline_ms: 20000                       # the bound on one submission's reach check; 1000..=300000
 ```
 
 - **`socket_path`** — the Unix socket the deputy accepts on. Linux packaging creates it by
@@ -1029,11 +1039,14 @@ egress:
   refuses boot by name. Shutdown waits
   for a send in flight: the daemon's handler drain is bounded by one connection's whole
   work — the handshake, the frame read and the response write (each at
-  its `transport` timeout), the session-fact lookups at connect and at the request and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, this
-  deadline, the close, and a ten-second margin for the audit appends — so the outcome
+  its `transport` timeout), the session-fact lookups at connect and at the request and the admission audit append (each a fixed 5 s), the requester home's resolution, the PDP decision and the verb's own blocking step, the
+  longer of this deadline and a task submission's reach (`reach_deadline_ms`, one 20 s
+  forge call, the 100 s margin, and eight 5 s stages for its decisions, store steps and
+  audit appends; a connection carries one request, so never both), the close, and a
+  ten-second margin for the audit appends — so the outcome
   record is written, and the shipped units' stop timeouts (`TimeoutStopSec=902`, launchd
-  `ExitTimeOut`) cover that drain at BOTH ceilings (60 s transport timeouts, 600 s
-  deadline) plus every other term of the shutdown chain — the bounded wait for a policy reload's turn, the stop record's append, the
+  `ExitTimeOut`) cover that drain at every ceiling (60 s transport timeouts, 600 s
+  deadline, 300 s reach deadline) plus every other term of the shutdown chain — the bounded wait for a policy reload's turn, the stop record's append, the
   credential supervisor's abort and reap, the reap of aborted handlers, the audit drain,
   the plane client's bounded lock wait and token revoke, the runtime teardown and the diagnostics flush — and
   a kernel test holds the unit values to that chain, two-sided. At the defaults the
@@ -1041,6 +1054,21 @@ egress:
   the ceiling: the deputy's request cap is 16,842,752 bytes — 16 MiB and a 64 KiB margin
   for the re-wrap — so a prompt that fills `transport.prompt_max_bytes` at its own 16
   MiB maximum still reaches the deputy.
+- **`reach_deadline_ms`** (default 20000, `1000..=300000`): the bound on one task
+  submission's or addition's reach check (§6.6), from when the check starts. Each reach frame
+  carries the time left, and the deputy stops at it, revoking any token it holds; its exit
+  revoke can take up to 20 s more, and `maknaed` waits that plus a 100 s margin before it
+  calls the outcome unknown. At most 4 reach exchanges
+  run at once on each side of the deputy socket, and waiting for a turn counts against this
+  bound. Reach shares the deputy's connection pool with prompts but is not counted in the
+  prompt breaker. After the check, storing the task gets its own fresh bound. The client waits
+  for a submit or an add for its control-class wait plus 460 s (this key's ceiling, one 20 s
+  forge call, the 100 s margin and eight 5 s stages), whatever the host sets. The tasker's
+  forge token travels as a Vault wrapping token that lives 60 s from the client's read, which
+  is shorter than this key's ceiling: a token whose tasker side is reached more than 60 s
+  after the read, after a long wait for a reach turn, cannot be unwrapped, and the task is
+  refused as `reach refused: login`, not as a timeout. Resubmitting reads a fresh token. Out of
+  range refuses boot by name; `admin.config.show` shows it.
 - **A provider's error reaches the deputy's journal** (#372). When the provider answers
   non-2xx, the deputy reads at most 4 KiB of the body, masks the provider key wherever it
   appears, escapes everything outside printable ASCII and writes one line:
@@ -1273,6 +1301,7 @@ A malformed entry refuses start with `InvalidForge`, which reads `invalid forge 
 - **Intake checks every binding against it.** A submitted binding whose server is not the `host` of a `kind: git` entry is refused, and the task with it: the trail reads `task not bound: server <server> is not the host of a git forge`. A sub-task's binding must also be one of its parent's, and its server must still be a forge's host.
 - **The `provider` decides the link forms.** For `github`: `https://<host>/<owner>/<repo>/pull/<n>` binds that pull request, and any other link into a repository binds the repository; `owner/repo#<n>` binds the pull request when this list names exactly one forge, counting entries with the same `host` and `provider` as one. For `gitlab`: `https://<host>/<group>/…/<project>/-/merge_requests/<n>` binds the merge request, any other link binds the project before `/-/`, and, again with exactly one forge, `group/project!<n>` binds the merge request and `group/project#<n>` (an issue) the project. A first path segment that is the forge's own page (`settings`, `orgs` and the like on GitHub; GitLab's reserved names) never binds.
 - **Remotes match on the hostname.** A working-directory remote such as `git@github.com:o/r.git` matches the forge whose `host` has that hostname, whatever its port, and the binding's server is the forge's `host` as written here. Two forges on one hostname (two ports, or two names) leave such a remote unbound.
+- **A `github` forge observes reach.** Each task bound to it is checked at submission against GitHub, as the tasker and as the agent, and the result is sealed into the task as its `reach` (ADR-0037 decision 7). Nothing enforces `reach` yet: it is shown, listed and recorded, and the tool calls and tokens that will be bounded by it come later (#479). For the check the host needs: an `apis` entry for the forge's `host` in `minting.yaml` (§6.1.4), without which every task bound to the forge is refused; `egress-bounds.yaml` for its `user_prefix` (§6.1.3); and, from each tasker, a forge login stored with `maknae forge login <host>` ([runbook](runbook.md#store-your-forge-login)). The agent side needs a `github_apps` entry on that `host` granted to the agent; without one the task is accepted with an empty reach. Any answer from GitHub but success refuses the task, including a 404 for a repository that does not exist, that the tasker's token does not cover, or that a working-directory remote still names after it moved: a stale remote refuses every task from that checkout. A `gitlab` forge has no reach check: its bindings seal an empty reach, and it takes no forge login.
 
 ---
 

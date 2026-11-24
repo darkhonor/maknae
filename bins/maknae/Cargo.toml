@@ -36,6 +36,8 @@ maknae-msgs = { path = "../../crates/maknae-msgs" }
 # filesystem, socket or process API. Its own lib.rs states it that way and says why the
 # feature-set framing was wrong.)
 maknae-agent = { path = "../../crates/maknae-agent" }
+# `maknae forge login` refuses a forge that observes no reach (`observes_reach`).
+maknae-forge = { path = "../../crates/maknae-forge" }
 # The loop's I/O half (#470): the wire client, the subject-side mutation client
 # and the real Plane. The CLI's own verbs use the same wire client.
 maknae-loop = { path = "../../crates/maknae-loop" }
@@ -70,7 +72,8 @@ maknae-crypto = { path = "../../crates/maknae-crypto" }
 # NO privileged crate (maknae-kernel/-subject-ctx-mint/-audit-append/-spif-compile) — spec §3 P1.
 # STRICTLY non-privileged: the closed set of direct deps this crate links is
 # maknae-proto, maknae-vault, maknae-config, maknae-msgs, maknae-io, maknae-agent, maknae-loop, maknae-seal,
-# maknae-graph (`tools.rs` walks the catalog `maknae tools` prints, #674), clap, tokio, nix, zeroize,
+# maknae-graph (`tools.rs` walks the catalog `maknae tools` prints, #674), maknae-forge
+# (`forge.rs`), clap, tokio, nix, zeroize,
 # yaml-rust2, rpassword and maknae-crypto (policy_sync.rs's digest, the TLS provider) — no
 # maknae-mcp either. maknae-agent is non-privileged; it is the loop's decision code and its
 # five direct deps are maknae-proto, serde, serde_json, zeroize and unicode-width. No gate

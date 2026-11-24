@@ -47,6 +47,7 @@ disclose	forges[].host	the forge's link server, host and optional port; a link s
 disclose	forges[].provider	which link forms the client recognizes for this forge: github or gitlab (#674)
 disclose	egress.socket_path	the socket the daemon connects to for egress (#240)
 disclose	egress.deadline_ms	the outer bound on one provider call — deployment shape (#240)
+disclose	egress.reach_deadline_ms	the bound on one reach exchange — deployment shape (#168)
 disclose	transport.socket_path	the socket the daemon is listening on
 disclose	transport.agent_socket_path	the socket the daemon accepts agents on
 disclose	transport.max_connections	transport shape
@@ -124,6 +125,8 @@ always	task.bindings.server	task.add, task.status and task.stop (#168): the call
 always	task.bindings.base	task.add, task.status and task.stop (#168): the caller's own task: one sealed git binding: the base repository on that server, grammar-validated; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
 always	task.bindings.head	task.add, task.status and task.stop (#168): the caller's own task: one sealed git binding: the repository the change head lives in, grammar-validated, absent when not known; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
 always	task.bindings.change	task.add, task.status and task.stop (#168): the caller's own task: one sealed git binding: the change number on the base repository, absent when the binding names none; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
+always	task.reach.ops	task.add, task.status and task.stop (#168): the caller's own task: one binding's effective reach, sealed at submission: the operations both its tasker and its agent were observed able to perform, base operations in bits 0-4 and head operations in bits 5-9; never the tasker's or the agent's own side (ADR-0037 decision 7)
+always	task.reach.why	task.add, task.status and task.stop (#168): the caller's own task: one binding's effective reach: a fixed tag naming why it is empty (head gone, agent not covered, no forge credential, no reach check), absent when none was recorded (ADR-0037 decision 7)
 always	task_list.entries.task	task.list (#628): one of the caller's own tasks: the task's own id, which its tasker cites on later task verbs
 always	task_list.entries.agent	task.list (#628): one of the caller's own tasks: the agent the tasker gave the task to, named by the tasker
 always	task_list.entries.state	task.list (#628): one of the caller's own tasks: one fixed token: queued, working, reported or closed
@@ -137,6 +140,8 @@ always	task_list.entries.bindings.server	task.list (#168): one of the caller's o
 always	task_list.entries.bindings.base	task.list (#168): one of the caller's own tasks: one sealed git binding: the base repository on that server, grammar-validated; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
 always	task_list.entries.bindings.head	task.list (#168): one of the caller's own tasks: one sealed git binding: the repository the change head lives in, grammar-validated, absent when not known; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
 always	task_list.entries.bindings.change	task.list (#168): one of the caller's own tasks: one sealed git binding: the change number on the base repository, absent when the binding names none; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
+always	task_list.entries.reach.ops	task.list (#168): one of the caller's own tasks: one binding's effective reach, sealed at submission: the operations both its tasker and its agent were observed able to perform, base operations in bits 0-4 and head operations in bits 5-9; never the tasker's or the agent's own side (ADR-0037 decision 7)
+always	task_list.entries.reach.why	task.list (#168): one of the caller's own tasks: one binding's effective reach: a fixed tag naming why it is empty (head gone, agent not covered, no forge credential, no reach check), absent when none was recorded (ADR-0037 decision 7)
 always	task_list.next	task.list (#628): the cursor for the next page, the submission sequence of one of the caller's own tasks
 always	task_report.task	a task report, as task.collect carries it (#628): one of the caller's own tasks: the task's own id
 always	task_report.agent	a task report, as task.collect carries it (#628): one of the caller's own tasks: the agent that reported or was closed
@@ -157,6 +162,7 @@ always	task_delivery.fresh	task.claim (#632): whether the agent starts the task 
 always	task_follow_ups.task	task.claim (#629): the id of the claimed task these follow-ups belong to, released only to the agent holding it
 always	task_follow_ups.from	task.claim (#628): the index of the first follow-up in this answer; a count, never content
 always	task_follow_ups.items	task.claim (#628): the tasker's follow-ups to the claimed task, released only to the agent holding it
+always	task_follow_ups.addendum	task.claim (#168): the kernel-signed addendum of bindings the tasker added, released only to the agent holding the task
 always	agent_list.entries.agent	agent.list (#630): an agent the caller may task, or one with which it holds tasks or reports: its id
 always	agent_list.entries.standing	agent.list (#630): one agent: one fixed token: enrolled, contained, withdrawn, removed or undecided
 always	agent_list.entries.waiting	agent.list (#630): one agent: how many of the caller's own tasks wait on it; a count, never content
@@ -177,6 +183,8 @@ always	held_list.entries.view.bindings.server	admin.release (#168): one held tas
 always	held_list.entries.view.bindings.base	admin.release (#168): one held task: one sealed git binding: the base repository on that server, grammar-validated; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
 always	held_list.entries.view.bindings.head	admin.release (#168): one held task: one sealed git binding: the repository the change head lives in, grammar-validated, absent when not known; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
 always	held_list.entries.view.bindings.change	admin.release (#168): one held task: one sealed git binding: the change number on the base repository, absent when the binding names none; repository coordinates, not secret-class (ADR-0037 decision 2, amendment 2026-11-22)
+always	held_list.entries.view.reach.ops	admin.release (#168): one held task: one binding's effective reach, sealed at submission: the operations both its tasker and its agent were observed able to perform, base operations in bits 0-4 and head operations in bits 5-9; never the tasker's or the agent's own side (ADR-0037 decision 7)
+always	held_list.entries.view.reach.why	admin.release (#168): one held task: one binding's effective reach: a fixed tag naming why it is empty (head gone, agent not covered, no forge credential, no reach check), absent when none was recorded (ADR-0037 decision 7)
 always	held_list.entries.tasker	admin.release (#632): one held task: the tasker's name and uid from the last applied load, or an agent id; never a live account lookup
 always	held_list.entries.held_from	admin.release (#632): one held task: one fixed token naming the state the task was held from
 always	held_list.entries.held_for	admin.release (#632): one held task: one fixed token naming whose containment holds it, tasker, root or agent; absent when the store did not record it

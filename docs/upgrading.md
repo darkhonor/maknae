@@ -4,6 +4,17 @@ Each release that needs an action from you lists it here, newest first. Read eve
 
 ---
 
+## Task reach and forge logins (#168)
+
+A task bound to a GitHub forge is now checked against GitHub at submission, as its tasker and as its agent ([configuration §6.6](configuration.md#66-the-forges-section)). Before you upgrade a host whose `maknae.yaml` lists a `github` forge:
+
+- **Give every App a `host`, and list the forge in `apis:`.** In `/etc/maknae/egress/minting.yaml` each `github_apps` entry now requires `host`, naming an `apis:` entry with the same `api`; a file without them no longer loads, and minting is unavailable until it does. A host with a `github` forge and no `minting.yaml` refuses every task bound to that forge: write a file with at least that forge's `apis:` entry, which needs no `vault` ([configuration §6.1.4](configuration.md#614-mintingyaml)).
+- **Keep `egress-bounds.yaml`**, even on a host with no provider: its `user_prefix` locates each tasker's forge login, and without the file every person's task bound to the forge is refused (`no user key prefix is configured`) ([configuration §6.1.3](configuration.md#613-egress-boundsyaml)).
+- **Grant the App Issues: Read-only** beside Contents, Pull requests and Metadata, or its tasks get no read reach ([runbook](runbook.md#mint-github-app-tokens), step 1).
+- **Each tasker runs `maknae forge login <host>` once** ([runbook](runbook.md#store-your-forge-login)). Without it, a task bound to the forge is refused before it is sent.
+
+---
+
 ## Session checks and the `deployment` section (#115)
 
 `maknaed` now re-checks every connection and every request against the host: `maknae`-group membership, and on Linux the local account's state and the sender of every message ([runbook](runbook.md#session-checks)). No login session is required: a `tmux` session, a desktop terminal, a cron job or a user service under an enrolled uid is decided by the same checks.

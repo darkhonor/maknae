@@ -68,6 +68,10 @@ pub fn describe(event: &DriverEvent) -> Option<String> {
             None => format!("a delivered task ended: {ending:?}"),
         }),
         DriverEvent::CloseFailed(e) => Some(format!("closing a task's conversation failed: {e:?}")),
+        DriverEvent::AddendumRefused { task, class } => Some(format!(
+            "task {task}: an addendum did not verify ({}); its bindings were not taken",
+            class.as_str()
+        )),
         DriverEvent::Loop(LoopEvent::Diagnostic(d)) => Some(d.clone()),
         DriverEvent::Loop(LoopEvent::Stopped(reason)) => {
             Some(format!("a step stopped: {reason:?}"))
@@ -374,6 +378,15 @@ mod tests {
             Some("a delivered task ended: Undecodable".into())
         );
         assert_eq!(describe(&DriverEvent::Loop(LoopEvent::Answered)), None);
+        assert_eq!(
+            describe(&DriverEvent::AddendumRefused {
+                task: id,
+                class: VerifyClass::Task,
+            }),
+            Some(format!(
+                "task {id}: an addendum did not verify (task); its bindings were not taken"
+            ))
+        );
     }
 
     #[test]

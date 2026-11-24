@@ -798,7 +798,14 @@ mod tests {
         let tasker = plane.tasker();
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
         let text = maknae_proto::SecretText(zeroize::Zeroizing::new("p".into()));
-        let _ = tasker.submit(&hobi, text, Vec::new()).await;
+        let _ = tasker
+            .submit(
+                &hobi,
+                text,
+                Vec::new(),
+                maknae_proto::ForgeTokens::default(),
+            )
+            .await;
         let sub = maknae_proto::TaskRef::from_id(&TaskId([4; 16]));
         let _ = tasker.status(&sub).await;
         plane.cite(None);
@@ -910,6 +917,20 @@ mod tests {
 
     fn trust(dir: &std::path::Path) -> Arc<TrustBundle> {
         TrustBundle::from_pins(&[&maknae_vault::load_ca_pin(dir).unwrap()]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_unminted_agent_client_reads_no_provider_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut keys = agent_keys(agent_client(dir.path(), "hobi"), "hobi");
+        let got = keys
+            .choice("sentinel-168-conversation", 0)
+            .await
+            .unwrap_err();
+        assert!(
+            got.starts_with("reading the agent's provider key failed: "),
+            "{got}"
+        );
     }
 
     #[test]

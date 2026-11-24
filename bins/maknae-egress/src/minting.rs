@@ -1,9 +1,12 @@
 //! Minting's start-up state and the Egress Daemon's only Vault login (#168, ADR-0038
 //! decisions 5 and 7). The re-login state machine is `maknae-deputy`'s `ServiceSigner`.
 
-use crate::serve::MintFrames;
+use crate::opener::SealedOpener;
+use crate::reach::{EgressReach, Parts};
+use crate::serve::{Frames, MintFrames};
 use maknae_config::{
-    AgentId, ConfigError, GithubAppConfig, MintingConfig, MINTING_FILE, MINT_ROLE_ID_FILE,
+    AgentId, ConfigError, EgressBounds, GithubAppConfig, MintingConfig, MintingFile, MINTING_FILE,
+    MINT_ROLE_ID_FILE,
 };
 use maknae_deputy::mint::admit::AdmittedMint;
 use maknae_deputy::mint::github::GithubClient;
@@ -94,7 +97,7 @@ fn sign_failure(e: &VaultError) -> VaultSignError {
 
 /// What `minting_state` reads, so a test can count the reads.
 pub(crate) trait MintingReads {
-    fn minting(&self, path: &Path) -> Result<Option<MintingConfig>, ConfigError>;
+    fn minting(&self, path: &Path) -> Result<Option<MintingFile>, ConfigError>;
     fn role_id(&self, path: &Path) -> Result<String, ConfigError>;
     fn secret_id(&self, credentials_dir: Option<&Path>) -> Result<Zeroizing<String>, VaultError>;
 }
@@ -102,7 +105,7 @@ pub(crate) trait MintingReads {
 pub(crate) struct FileReads;
 
 impl MintingReads for FileReads {
-    fn minting(&self, path: &Path) -> Result<Option<MintingConfig>, ConfigError> {
+    fn minting(&self, path: &Path) -> Result<Option<MintingFile>, ConfigError> {
         maknae_config::load_minting(path)
     }
 
@@ -115,11 +118,20 @@ impl MintingReads for FileReads {
     }
 }
 
+pub(crate) type EgressSigner = ServiceSigner<ApproleLogin>;
+
 #[derive(Debug)]
 pub(crate) enum MintingState {
     Off,
-    Ready(Box<ServiceSigner<ApproleLogin>>, MintingConfig),
+    Ready(Arc<EgressSigner>, MintingConfig),
     Unavailable(&'static str),
+}
+
+/// `minting.yaml` as loaded (its `apis:` serve reach with or without a minter) and minting's state.
+#[derive(Debug)]
+pub(crate) struct Minting {
+    pub(crate) file: Option<MintingFile>,
+    pub(crate) state: MintingState,
 }
 
 pub(crate) fn minting_state(
@@ -127,12 +139,30 @@ pub(crate) fn minting_state(
     credentials_dir: Option<&Path>,
     api: &Arc<VaultApi>,
     read: &dyn MintingReads,
-) -> MintingState {
-    let config = match read.minting(&egress_dir.join(MINTING_FILE)) {
-        Ok(None) => return MintingState::Off,
-        Ok(Some(c)) => c,
-        Err(e) => return unavailable("minting.yaml could not be loaded", e),
+) -> Minting {
+    let file = match read.minting(&egress_dir.join(MINTING_FILE)) {
+        Ok(f) => f,
+        Err(e) => {
+            return Minting {
+                file: None,
+                state: unavailable("minting.yaml could not be loaded", e),
+            }
+        }
     };
+    let state = match file.as_ref().and_then(MintingFile::minting) {
+        None => MintingState::Off,
+        Some(c) => minter_state(egress_dir, credentials_dir, api, read, c.clone()),
+    };
+    Minting { file, state }
+}
+
+fn minter_state(
+    egress_dir: &Path,
+    credentials_dir: Option<&Path>,
+    api: &Arc<VaultApi>,
+    read: &dyn MintingReads,
+    config: MintingConfig,
+) -> MintingState {
     let role_id = match read.role_id(&egress_dir.join(MINT_ROLE_ID_FILE)) {
         Ok(r) => r,
         Err(e) => return unavailable("the role id could not be read", e),
@@ -148,7 +178,7 @@ pub(crate) fn minting_state(
         secret_id,
         journal: stderr_journal,
     };
-    MintingState::Ready(Box::new(ServiceSigner::new(login)), config)
+    MintingState::Ready(Arc::new(ServiceSigner::new(login)), config)
 }
 
 fn unavailable(why: &'static str, e: impl Display) -> MintingState {
@@ -158,7 +188,7 @@ fn unavailable(why: &'static str, e: impl Display) -> MintingState {
 
 struct Ready {
     config: MintingConfig,
-    signer: ServiceSigner<ApproleLogin>,
+    signer: Arc<EgressSigner>,
     github: GithubClient,
     own_key: Arc<SealPrivateKey>,
     egress_dir: PathBuf,
@@ -166,12 +196,9 @@ struct Ready {
 }
 
 impl Ready {
-    fn deps<'a>(
-        &'a self,
-        journal: &'a mut dyn FnMut(&str),
-    ) -> MintDeps<'a, ServiceSigner<ApproleLogin>> {
+    fn deps<'a>(&'a self, journal: &'a mut dyn FnMut(&str)) -> MintDeps<'a, EgressSigner> {
         MintDeps {
-            signer: &self.signer,
+            signer: &*self.signer,
             github: &self.github,
             own_pub: self.own_key.public_key(),
             own_key: &self.own_key,
@@ -187,45 +214,69 @@ pub(crate) struct EgressMinting {
     journal: Journal,
 }
 
-/// The `MintFrames` serve is handed: none when minting is off.
-pub(crate) fn frames(
-    state: MintingState,
-    own_key: Arc<SealPrivateKey>,
-    egress_dir: PathBuf,
-    rt: tokio::runtime::Handle,
-) -> Option<Arc<dyn MintFrames>> {
-    frames_journaled(state, own_key, egress_dir, rt, stderr_journal)
+pub(crate) struct Wiring {
+    pub(crate) own_key: Arc<SealPrivateKey>,
+    pub(crate) opener: Arc<SealedOpener>,
+    pub(crate) bounds: Arc<EgressBounds>,
+    pub(crate) egress_dir: PathBuf,
+    pub(crate) rt: tokio::runtime::Handle,
 }
 
-fn frames_journaled(
+pub(crate) fn frames(minting: Minting, w: Wiring) -> Frames {
+    frames_journaled(minting, w, stderr_journal)
+}
+
+fn frames_journaled(minting: Minting, w: Wiring, journal: Journal) -> Frames {
+    let github = GithubClient::new()
+        .map_err(|e| journal(&format!("the GitHub client could not be built: {e:?}")))
+        .ok();
+    let (mint, minter) = mint_frames(minting.state, github.clone(), &w, journal);
+    let reach = EgressReach::new(Parts {
+        file: minting.file,
+        minter,
+        opener: w.opener,
+        github,
+        bounds: w.bounds,
+        rt: w.rt,
+        journal,
+    });
+    Frames {
+        mint,
+        reach: Arc::new(reach),
+    }
+}
+
+type MintAndMinter = (Option<Arc<dyn MintFrames>>, Option<Arc<EgressSigner>>);
+
+fn mint_frames(
     state: MintingState,
-    own_key: Arc<SealPrivateKey>,
-    egress_dir: PathBuf,
-    rt: tokio::runtime::Handle,
+    github: Option<GithubClient>,
+    w: &Wiring,
     journal: Journal,
-) -> Option<Arc<dyn MintFrames>> {
+) -> MintAndMinter {
     let ready = match state {
-        MintingState::Off => return None,
+        MintingState::Off => return (None, None),
         MintingState::Unavailable(why) => Err(why),
-        MintingState::Ready(signer, config) => match GithubClient::new() {
-            Ok(github) => Ok(Ready {
+        MintingState::Ready(signer, config) => match github {
+            Some(github) => Ok(Ready {
                 config,
-                signer: *signer,
+                signer,
                 github,
-                own_key,
-                egress_dir,
-                rt,
+                own_key: Arc::clone(&w.own_key),
+                egress_dir: w.egress_dir.clone(),
+                rt: w.rt.clone(),
             }),
-            Err(e) => {
-                journal(&format!("minting is unavailable: GitHub client: {e:?}"));
+            None => {
+                journal("minting is unavailable: the GitHub client could not be built");
                 Err("the GitHub client could not be built")
             }
         },
     };
-    Some(Arc::new(EgressMinting { ready, journal }))
+    let minter = ready.as_ref().ok().map(|r| Arc::clone(&r.signer));
+    (Some(Arc::new(EgressMinting { ready, journal })), minter)
 }
 
-fn unix_now() -> Option<u64> {
+pub(crate) fn unix_now() -> Option<u64> {
     maknae_io::now_unix().ok()
 }
 
@@ -274,13 +325,15 @@ impl MintFrames for EgressMinting {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_frames::{canned_reply, prompt_frame, served_frame};
+    use crate::test_frames::{
+        agent_reach, canned_reply, prompt_frame, served_frame, served_frame_reaching, tasker_reach,
+    };
     use maknae_config::{ApiBase, MintVault};
     use maknae_deputy::mint::admit::admit_mint;
     use maknae_deputy::mint::signer::Signer;
     use maknae_proto::{
         AccessLevel, EgressFrame, EgressSocketReply, GithubPermission, MintRequest, PermissionSet,
-        SealedCredentialBytes,
+        ReachRefusal, ReachReply, SealedCredentialBytes,
     };
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -334,6 +387,7 @@ mod tests {
                 GithubAppConfig {
                     app_id: 5834363,
                     installation_id: 77,
+                    host: "github.example".into(),
                     api: ApiBase::parse("https://api.github.example").unwrap(),
                     transit_mount: "transit".into(),
                     transit_key: "deploy-app".into(),
@@ -342,8 +396,36 @@ mod tests {
         }
     }
 
+    const MINTING_YAML: &str = concat!(
+        "vault:\n",
+        "  approle_mount: approle-mint\n",
+        "apis:\n",
+        "  github.example:\n",
+        "    provider: github\n",
+        "    api: https://api.github.example\n",
+        "github_apps:\n",
+        "  deploy:\n",
+        "    app_id: 5834363\n",
+        "    installation_id: 77\n",
+        "    host: github.example\n",
+        "    api: https://api.github.example\n",
+        "    transit_mount: transit\n",
+        "    transit_key: deploy-app\n",
+    );
+
+    const APIS_ONLY_YAML: &str = concat!(
+        "apis:\n",
+        "  github.example:\n",
+        "    provider: github\n",
+        "    api: https://api.github.example\n",
+    );
+
+    fn file(yaml: &str) -> MintingFile {
+        maknae_config::minting_from_document(&maknae_config::load_str(yaml).unwrap()).unwrap()
+    }
+
     struct Reads {
-        minting: Result<Option<MintingConfig>, ()>,
+        minting: Result<Option<MintingFile>, ()>,
         role: Result<&'static str, ()>,
         secret: Result<&'static str, ()>,
         calls: Mutex<Vec<(&'static str, Option<PathBuf>)>>,
@@ -351,7 +433,7 @@ mod tests {
 
     impl Reads {
         fn new(
-            minting: Result<Option<MintingConfig>, ()>,
+            minting: Result<Option<MintingFile>, ()>,
             role: Result<&'static str, ()>,
             secret: Result<&'static str, ()>,
         ) -> Self {
@@ -369,7 +451,7 @@ mod tests {
     }
 
     impl MintingReads for Reads {
-        fn minting(&self, path: &Path) -> Result<Option<MintingConfig>, ConfigError> {
+        fn minting(&self, path: &Path) -> Result<Option<MintingFile>, ConfigError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -406,27 +488,47 @@ mod tests {
     const EGRESS: &str = "/etc/maknae/egress";
     const CREDS: &str = "/run/credentials/maknae-egress.service";
 
-    fn state(reads: &Reads, api: &Arc<VaultApi>) -> MintingState {
+    fn loaded(reads: &Reads, api: &Arc<VaultApi>) -> Minting {
         minting_state(Path::new(EGRESS), Some(Path::new(CREDS)), api, reads)
+    }
+
+    fn state(reads: &Reads, api: &Arc<VaultApi>) -> MintingState {
+        loaded(reads, api).state
     }
 
     fn runtime() -> tokio::runtime::Runtime {
         crate::runtime().unwrap()
     }
 
+    fn wired(minting: Minting, rt: &tokio::runtime::Runtime) -> (Frames, tempfile::TempDir) {
+        let (_d, api) = dead_vault();
+        let egress = tempfile::tempdir().unwrap();
+        let own_key = Arc::new(SealPrivateKey::generate().unwrap());
+        let w = Wiring {
+            opener: Arc::new(SealedOpener {
+                key: Arc::clone(&own_key),
+                api,
+            }),
+            own_key,
+            bounds: Arc::new(crate::test_frames::bounds()),
+            egress_dir: egress.path().to_owned(),
+            rt: rt.handle().clone(),
+        };
+        (frames_journaled(minting, w, record), egress)
+    }
+
     fn frames_for(
         st: MintingState,
         rt: &tokio::runtime::Runtime,
     ) -> (Option<Arc<dyn MintFrames>>, tempfile::TempDir) {
-        let egress = tempfile::tempdir().unwrap();
-        let m = frames_journaled(
-            st,
-            Arc::new(SealPrivateKey::generate().unwrap()),
-            egress.path().to_owned(),
-            rt.handle().clone(),
-            record,
+        let (f, egress) = wired(
+            Minting {
+                file: Some(file(MINTING_YAML)),
+                state: st,
+            },
+            rt,
         );
-        (m, egress)
+        (f.mint, egress)
     }
 
     fn minting_yaml() -> Option<PathBuf> {
@@ -472,24 +574,96 @@ mod tests {
     fn minting_state_is_off_without_the_file_and_reads_nothing() {
         let (_d, api) = dead_vault();
         let reads = Reads::new(Ok(None), Ok("role"), Ok("secret"));
-        let st = state(&reads, &api);
-        assert!(matches!(st, MintingState::Off), "{st:?}");
+        let st = loaded(&reads, &api);
+        assert!(matches!(st.state, MintingState::Off), "{st:?}");
+        assert!(st.file.is_none());
         assert_eq!(reads.calls(), [("minting", minting_yaml())]);
         let rt = runtime();
-        let egress = tempfile::tempdir().unwrap();
-        let m = frames(
-            st,
-            Arc::new(SealPrivateKey::generate().unwrap()),
-            egress.path().to_owned(),
-            rt.handle().clone(),
+        assert!(wired(st, &rt).0.mint.is_none());
+    }
+
+    #[test]
+    fn an_apis_only_file_is_kept_for_reach_and_minting_is_off() {
+        let (_d, api) = dead_vault();
+        let reads = Reads::new(Ok(Some(file(APIS_ONLY_YAML))), Ok("role"), Ok("secret"));
+        let st = loaded(&reads, &api);
+        assert!(matches!(st.state, MintingState::Off), "{st:?}");
+        assert_eq!(st.file, Some(file(APIS_ONLY_YAML)));
+        assert_eq!(reads.calls(), [("minting", minting_yaml())]);
+    }
+
+    #[test]
+    fn a_reach_frame_without_minting_is_refused_and_prompts_still_serve() {
+        let (_d, api) = dead_vault();
+        let rt = runtime();
+        let tasker = EgressFrame::Reach(tasker_reach("github.example"));
+        let agent = EgressFrame::Reach(agent_reach("github.example", "deploy"));
+        let reach = |reply| Some(EgressSocketReply::Reach(reply));
+        let refused = reach(ReachReply::Refused(ReachRefusal::Request));
+        let no_credential = reach(ReachReply::NoForgeCredential);
+        for (what, minting, frame, want) in [
+            ("no minting.yaml", Ok(None), &tasker, &refused),
+            ("no minting.yaml", Ok(None), &agent, &refused),
+            ("an unloadable minting.yaml", Err(()), &agent, &refused),
+            (
+                "apis only",
+                Ok(Some(file(APIS_ONLY_YAML))),
+                &agent,
+                &no_credential,
+            ),
+            (
+                "an unavailable minter",
+                Ok(Some(file(MINTING_YAML))),
+                &agent,
+                &no_credential,
+            ),
+        ] {
+            let reads = Reads::new(minting, Ok("role"), Err(()));
+            let (f, _egress) = wired(loaded(&reads, &api), &rt);
+            let (out, reply) = served_frame_reaching(frame, f.mint.as_deref(), &*f.reach);
+            assert_eq!(out, Ok(()), "{what}");
+            assert_eq!(&reply, want, "{what}");
+            let (out, reply) = served_frame_reaching(&prompt_frame(), f.mint.as_deref(), &*f.reach);
+            assert_eq!(out, Ok(()), "{what}");
+            assert_eq!(
+                reply,
+                Some(canned_reply()),
+                "{what}: the provider path is served"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ready_minter_admits_the_agent_side_and_signs_for_it() {
+        let (_d, api) = dead_vault();
+        let rt = runtime();
+        let reads = Reads::new(Ok(Some(file(MINTING_YAML))), Ok("role"), Ok("secret"));
+        let (f, _egress) = wired(loaded(&reads, &api), &rt);
+        recorded();
+        let (out, reply) = served_frame_reaching(
+            &EgressFrame::Reach(agent_reach("github.example", "deploy")),
+            f.mint.as_deref(),
+            &*f.reach,
         );
-        assert!(m.is_none());
+        assert_eq!(out, Ok(()));
+        assert_eq!(
+            reply,
+            Some(EgressSocketReply::Reach(ReachReply::Refused(
+                ReachRefusal::Signer
+            ))),
+            "the App side reached mint's signer, whose Vault is dead"
+        );
+        let lines = recorded();
+        assert_eq!(
+            lines,
+            ["reach server=\"github.example\" provider=\"github\" side=agent asks=1: refused signer"]
+        );
     }
 
     #[test]
     fn an_unreadable_secret_id_is_unavailable_and_provider_path_starts() {
         let (_d, api) = dead_vault();
-        let reads = Reads::new(Ok(Some(config())), Ok("role"), Err(()));
+        let reads = Reads::new(Ok(Some(file(MINTING_YAML))), Ok("role"), Err(()));
         let st = state(&reads, &api);
         assert!(
             matches!(
@@ -549,7 +723,7 @@ mod tests {
         );
         assert_eq!(bad_file.calls(), [("minting", minting_yaml())]);
 
-        let bad_role = Reads::new(Ok(Some(config())), Err(()), Ok("secret"));
+        let bad_role = Reads::new(Ok(Some(file(MINTING_YAML))), Err(()), Ok("secret"));
         let st = state(&bad_role, &api);
         assert!(
             matches!(
@@ -567,7 +741,7 @@ mod tests {
     #[test]
     fn a_complete_configuration_is_ready_and_mints_and_revokes_through_the_minter() {
         let (_d, api) = dead_vault();
-        let reads = Reads::new(Ok(Some(config())), Ok("role"), Ok("secret"));
+        let reads = Reads::new(Ok(Some(file(MINTING_YAML))), Ok("role"), Ok("secret"));
         let st = state(&reads, &api);
         let MintingState::Ready(_, ref got) = st else {
             panic!("expected Ready, got {st:?}");
@@ -624,7 +798,7 @@ mod tests {
     #[test]
     fn unavailable_minting_refuses_a_direct_mint_and_revoke_and_revokes_nothing() {
         let (_d, api) = dead_vault();
-        let reads = Reads::new(Ok(Some(config())), Ok("role"), Err(()));
+        let reads = Reads::new(Ok(Some(file(MINTING_YAML))), Ok("role"), Err(()));
         let rt = runtime();
         let (m, _egress) = frames_for(state(&reads, &api), &rt);
         let m = m.unwrap();
@@ -658,7 +832,7 @@ mod tests {
     #[test]
     fn ready_minting_attempts_every_live_token_on_revoke_all() {
         let (_d, api) = dead_vault();
-        let reads = Reads::new(Ok(Some(config())), Ok("role"), Ok("secret"));
+        let reads = Reads::new(Ok(Some(file(MINTING_YAML))), Ok("role"), Ok("secret"));
         let rt = runtime();
         let (m, _egress) = frames_for(state(&reads, &api), &rt);
         recorded();
@@ -729,7 +903,7 @@ mod tests {
     #[test]
     fn the_signer_minting_state_builds_fails_closed_over_a_dead_vault() {
         let (_d, api) = dead_vault();
-        let reads = Reads::new(Ok(Some(config())), Ok("role"), Ok("secret"));
+        let reads = Reads::new(Ok(Some(file(MINTING_YAML))), Ok("role"), Ok("secret"));
         let MintingState::Ready(signer, _) = state(&reads, &api) else {
             panic!("expected Ready");
         };

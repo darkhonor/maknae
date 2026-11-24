@@ -194,11 +194,12 @@ fn forge_refusal(e: ForgeError) -> MintRefusal {
         | ForgeError::Unread
         | ForgeError::Oversize
         | ForgeError::Shape
-        | ForgeError::Malformed { .. } => MintRefusal::Forge(ForgeStatus::Other),
+        | ForgeError::Malformed { .. }
+        | ForgeError::Undocumented { .. } => MintRefusal::Forge(ForgeStatus::Other),
     }
 }
 
-fn live_token_may_remain(e: ForgeError) -> bool {
+pub(crate) fn live_token_may_remain(e: ForgeError) -> bool {
     match e {
         ForgeError::Unanswered
         | ForgeError::Unread
@@ -206,6 +207,7 @@ fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Shape
         | ForgeError::Mismatch { revoked: false }
         | ForgeError::Malformed { revoked: false }
+        | ForgeError::Undocumented { revoked: false }
         | ForgeError::Status(ForgeStatus::Other) => true,
         ForgeError::Status(
             ForgeStatus::Unauthorized
@@ -215,7 +217,8 @@ fn live_token_may_remain(e: ForgeError) -> bool {
         )
         | ForgeError::Transport
         | ForgeError::Mismatch { revoked: true }
-        | ForgeError::Malformed { revoked: true } => false,
+        | ForgeError::Malformed { revoked: true }
+        | ForgeError::Undocumented { revoked: true } => false,
     }
 }
 
@@ -309,6 +312,7 @@ mod tests {
         GithubAppConfig {
             app_id: 5834363,
             installation_id: 77,
+            host: "github.example".into(),
             api: ApiBase::parse(name_api).unwrap(),
             transit_mount: "transit".into(),
             transit_key: "deploy-app".into(),

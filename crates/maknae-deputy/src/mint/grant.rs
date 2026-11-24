@@ -68,6 +68,11 @@ pub(super) fn grant_matches(set: &PermissionSet, grant: &Grant) -> bool {
         && got_repos == want_repos
 }
 
+pub(super) fn grant_is_metadata_read(grant: &Grant) -> bool {
+    let metadata = GithubPermission::Metadata.as_str();
+    matches!(grant.permissions.as_slice(), [(p, l)] if p == metadata && l == "read")
+}
+
 /// The token alone, parsed before the rest of the grant so a grant that fails
 /// to parse can still be revoked with it.
 #[derive(Deserialize)]

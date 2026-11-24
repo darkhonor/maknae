@@ -522,15 +522,21 @@ const HANDLER_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// restart that races it — for a prompt: content left, `IntentOnly` in the
 /// trail, no outcome record. The units give the supervisor the matching
 /// patience (`TimeoutStopSec=`, launchd's `ExitTimeOut`), held to this sum at
-/// both ceilings by a test.
-fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Duration {
+/// both ceilings by a test. A connection reads one request frame, so a submission's reach
+/// and the store steps after it (`maknae_config::task_reach_reply_ms`) replace the egress
+/// deadline when longer, never add to it.
+fn handler_drain_bound(
+    cfg: &TransportConfig,
+    egress_deadline: Duration,
+    reach_deadline_ms: u64,
+) -> Duration {
     // One connection's bounded work, in the order the handler performs it:
     // the TLS handshake (inside the handler, not on the loop), the connect-time
     // session-fact gather, the admission audit append, the frame read, the
     // request's session-fact gather (#115), the requester home's resolution (filesystem
     // verbs only), the PDP decision, the verb's own blocking step under the
     // same bound (the subject enumeration — a second `AUTHZ_DECIDE_TIMEOUT`,
-    // review round 6), the provider call, the response write (bounded by the
+    // review round 6), the provider call or a reach, the response write (bounded by the
     // read timeout), the close — then the margin for the audit appends.
     Duration::from_millis(cfg.handshake_timeout_ms)
         + Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS)
@@ -540,7 +546,9 @@ fn handler_drain_bound(cfg: &TransportConfig, egress_deadline: Duration) -> Dura
         + HOME_RESOLVE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
         + crate::handler::AUTHZ_DECIDE_TIMEOUT
-        + egress_deadline
+        + egress_deadline.max(Duration::from_millis(maknae_config::task_reach_reply_ms(
+            reach_deadline_ms,
+        )))
         + Duration::from_millis(cfg.read_timeout_ms)
         + STREAM_CLOSE_TIMEOUT
         + HANDLER_DRAIN_SHUTDOWN_TIMEOUT
@@ -711,6 +719,7 @@ pub(crate) fn make_record(
             board_op: None,
             tasker: None,
             bindings: Vec::new(),
+            reach: Vec::new(),
         },
         action: action.to_string(),
         object: object.map(str::to_string),
@@ -1029,6 +1038,32 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 "frame class mismatch: declared {class:?}, {} is {:?}",
                 verb_to_action(&request.verb),
                 class_of(&request.verb)
+            ),
+            "unauthorized",
+            &au3_1,
+        )
+        .await;
+        close_bounded(&mut stream).await;
+        return;
+    }
+
+    if over_prompt_cap(class, &request.verb, body.len(), &cfg) {
+        emit_request_deny(
+            &emit,
+            &host,
+            &socket,
+            peer_uid,
+            peer_uri.as_deref(),
+            peer_user.as_deref(),
+            None,
+            session_id,
+            seq.next(),
+            "decode",
+            &format!(
+                "{PROMPT_CAP_REFUSAL}: {} is {} bytes, more than {}",
+                verb_to_action(&request.verb),
+                body.len(),
+                maknae_proto::prompt_request_cap(cfg.prompt_max_bytes)
             ),
             "unauthorized",
             &au3_1,
@@ -2987,7 +3022,44 @@ pub(crate) fn submit_outcome_record(
     outcome.subject.task_id = Some(task.task_id.to_string());
     outcome.subject.parent_task_id = task.parent.as_ref().map(ToString::to_string);
     outcome.subject.bindings = record_bindings(&task.bindings);
+    outcome.subject.reach = record_reach(&task.reach);
     outcome
+}
+
+pub(crate) fn record_reach(
+    reach: &[maknae_proto::BindingReach],
+) -> Vec<maknae_audit_append::RecordReach> {
+    use maknae_audit_append::{ReachBasis, ReachWhy, RecordAgentReach, RecordReach};
+    use maknae_proto::{AgentReach, BindingReach, EmptyReason, SideReach, TaskerBasis};
+    let packed = |s: SideReach| {
+        u16::from(s.base().bits()) | u16::from(s.head().bits()) << maknae_proto::ForgeOp::ALL.len()
+    };
+    reach
+        .iter()
+        .map(|r| {
+            let BindingReach::Git(g) = r;
+            RecordReach {
+                effective: packed(maknae_proto::effective_reach(r)),
+                tasker: packed(g.tasker),
+                basis: match g.basis {
+                    TaskerBasis::Token => ReachBasis::Token,
+                    TaskerBasis::Parent => ReachBasis::Parent,
+                    TaskerBasis::Submitter => ReachBasis::Submitter,
+                },
+                agent: match g.agent {
+                    AgentReach::Observed(a) => RecordAgentReach::Observed(packed(a)),
+                    AgentReach::AtHandOut => RecordAgentReach::AtHandOut,
+                    AgentReach::NoForgeCredential => RecordAgentReach::NoForgeCredential,
+                },
+                why: g.why.map(|w| match w {
+                    EmptyReason::HeadGone => ReachWhy::HeadGone,
+                    EmptyReason::AgentNotCovered => ReachWhy::AgentNotCovered,
+                    EmptyReason::NoForgeCredential => ReachWhy::NoForgeCredential,
+                    EmptyReason::NoReachCheck => ReachWhy::NoReachCheck,
+                }),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn record_bindings(
@@ -3952,7 +4024,7 @@ async fn serve_task_verb<S, E, P>(
         )
     };
 
-    if let TaskVerb::Submit(task) = asked {
+    if let TaskVerb::Submit { task, tokens } = asked {
         let home = crate::authz::admitted_home(trail.uid, tasks.peer_dir.clone())
             .await
             .ok();
@@ -3983,6 +4055,12 @@ async fn serve_task_verb<S, E, P>(
             decide_timeout: timeout,
             text_max: tasks.text_max,
             forges: live.forges(),
+            reach: crate::reach::ReachCtx {
+                egress: &tasks.agents.reach,
+                settings: live.reach(),
+                permits: crate::reach::kernel_reach_permits(),
+                credentials: &|uid| authorizer.forge_credentials(uid),
+            },
         };
         let submitted = crate::task::submit_task(
             Arc::clone(authorizer),
@@ -3991,7 +4069,7 @@ async fn serve_task_verb<S, E, P>(
             &tasks.agents.view,
             &ctx,
             by,
-            task.clone(),
+            (task.clone(), tokens.clone()),
             &**trail.emit,
         )
         .await;
@@ -4169,7 +4247,12 @@ async fn serve_task_verb<S, E, P>(
                     .await;
             }
         },
-        TaskVerb::Add { task, text } => {
+        TaskVerb::Add {
+            task,
+            text,
+            bindings,
+            tokens,
+        } => {
             if text.0.len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 trail
@@ -4179,6 +4262,53 @@ async fn serve_task_verb<S, E, P>(
             }
             let intent = decided("permit", "intent recorded", "authorized");
             if !trail.record_bounded(&intent).await {
+                return;
+            }
+            if !bindings.is_empty() || !tokens.is_empty() {
+                let ctx = crate::task::AddCtx {
+                    user: trail.peer_user,
+                    view: &tasks.agents.view,
+                    decide_timeout: timeout,
+                    text_max: tasks.text_max,
+                    forges: live.forges(),
+                    reach: crate::reach::ReachCtx {
+                        egress: &tasks.agents.reach,
+                        settings: live.reach(),
+                        permits: crate::reach::kernel_reach_permits(),
+                        credentials: &|uid| authorizer.forge_credentials(uid),
+                    },
+                };
+                let added = crate::task::add_task_bindings(
+                    store,
+                    &tasks.agents.signer,
+                    &ctx,
+                    (task, caller.clone(), tasks.under, trail.uid),
+                    text.clone(),
+                    (bindings, tokens.clone()),
+                    &crate::reach::FrameTrail {
+                        emit: &**trail.emit,
+                        record: &decided,
+                    },
+                )
+                .await;
+                match added {
+                    Ok((view, added, reach)) => {
+                        let mut outcome = trail.outcome(&intent, "addendum sealed", "authorized");
+                        outcome.subject.bindings = record_bindings(&added);
+                        outcome.subject.reach = record_reach(&reach);
+                        trail
+                            .deliver(
+                                stream,
+                                &outcome,
+                                Payload::TaskAcknowledged(view),
+                                role,
+                                rule.as_ref(),
+                                action,
+                            )
+                            .await;
+                    }
+                    Err(r) => trail.unauthorized(stream, &refused(&intent, &r)).await,
+                }
                 return;
             }
             let (who, under, text, max) =
@@ -4344,22 +4474,39 @@ async fn serve_task_verb<S, E, P>(
                         tasker,
                         from,
                         items,
-                    } => (
-                        of(
-                            decided(
-                                "permit",
-                                &format!("heartbeat: {} follow-ups after {from}", items.len()),
-                                "authorized",
+                        addendum,
+                    } => {
+                        let addendum =
+                            match addendum.map(|a| crate::task_store::encode(&*a)).transpose() {
+                                Ok(wire) => wire.map(maknae_proto::Bytes::new),
+                                Err(e) => {
+                                    let r = crate::task::TaskRefusal::Store(e.to_string());
+                                    let rec = of(
+                                        decided("deny", &r.to_string(), "unavailable"),
+                                        &task,
+                                        &tasker,
+                                    );
+                                    trail.unauthorized(stream, &rec).await;
+                                    return;
+                                }
+                            };
+                        let said = match addendum {
+                            Some(_) => format!(
+                                "heartbeat: the addendum and {} follow-ups after {from}",
+                                items.len()
                             ),
-                            &task,
-                            &tasker,
-                        ),
-                        Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
-                            task: maknae_proto::TaskRef::from_id(&task),
-                            from,
-                            items,
-                        }),
-                    ),
+                            None => format!("heartbeat: {} follow-ups after {from}", items.len()),
+                        };
+                        (
+                            of(decided("permit", &said, "authorized"), &task, &tasker),
+                            Payload::TaskFollowUps(maknae_proto::TaskFollowUps {
+                                task: maknae_proto::TaskRef::from_id(&task),
+                                from,
+                                items,
+                                addendum,
+                            }),
+                        )
+                    }
                     crate::task::Heartbeat::Closed(view) => {
                         let said = match view.state {
                             maknae_proto::TaskState::Held => "heartbeat: the task is held",
@@ -4570,7 +4717,7 @@ async fn serve_task_verb<S, E, P>(
             )
             .await;
         }
-        TaskVerb::Submit(_) | TaskVerb::Agents { .. } => {
+        TaskVerb::Submit { .. } | TaskVerb::Agents { .. } => {
             trail
                 .unauthorized(
                     stream,
@@ -4681,6 +4828,7 @@ async fn submit_authority<P: Authorizer + Send + Sync + 'static>(
             labels: maknae_proto::Labels {},
             bindings: Vec::new(),
         },
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     };
     authority(authorizer, &verb, uid, stamp, target, lane, timeout).await
 }
@@ -5239,12 +5387,21 @@ async fn write_error_bounded<S>(
     }
 }
 
+const PROMPT_CAP_REFUSAL: &str = "request over the prompt request cap";
+
 fn request_caps(cfg: &TransportConfig, attempt_caps: crate::mutation::AttemptCaps) -> FrameCaps {
     FrameCaps {
         control: CONTROL_REQUEST_MAX,
         attempt: attempt_caps.request,
-        prompt: maknae_proto::prompt_request_cap(cfg.prompt_max_bytes),
+        prompt: maknae_proto::task_request_cap(cfg.prompt_max_bytes),
     }
+}
+
+fn over_prompt_cap(class: FrameClass, verb: &Verb, len: usize, cfg: &TransportConfig) -> bool {
+    let task = maknae_proto::takes_task_request_cap(verb);
+    class == FrameClass::Prompt
+        && !task
+        && len > maknae_proto::prompt_request_cap(cfg.prompt_max_bytes)
 }
 
 pub(crate) fn rule_audit(c: &RuleCitation) -> maknae_audit_append::RuleAudit {
@@ -5538,6 +5695,7 @@ pub struct AgentAdmission {
     pub tasks: Arc<crate::task::TaskStore>,
     pub signer: Arc<dyn crate::task::TaskSigner>,
     pub banner: Banner,
+    pub reach: Arc<dyn crate::egress_socket::ReachEgress>,
     pub board: Arc<crate::board::BoardStore>,
     pub switches: Arc<dyn crate::board_verbs::BoardSwitches>,
 }
@@ -5553,6 +5711,7 @@ impl AgentAdmission {
             tasks: Arc::new(crate::task::TaskStore::new()),
             signer: Arc::new(crate::task::UnverifiedSigner),
             banner: Banner::default(),
+            reach: crate::egress_socket::no_reach("no egress socket in this test"),
             board: Arc::new(crate::board::BoardStore::new()),
             switches: Arc::new(crate::board_verbs::SwitchesOff),
         }
@@ -6170,7 +6329,7 @@ where
     // than dropping them mid-flight. BOUNDED (same class as the audit drain below): a
     // handler stuck in a wedged audit append would otherwise hang shutdown here before
     // the at-capacity drain bound is even reached.
-    let handler_drain = handler_drain_bound(&cfg, egress.deadline());
+    let handler_drain = handler_drain_bound(&cfg, egress.deadline(), live.reach().deadline_ms());
     if drain_handlers_bounded(&mut handlers, handler_drain).await == DrainOutcome::Aborted {
         eprintln!(
             "maknaed: in-flight handler drain did not complete within {}s during shutdown; aborting remaining handlers to allow exit",
@@ -7458,7 +7617,11 @@ where
     }
 
     /// What the agent listener admits against: this PDP's snapshot and the store it reconciles.
-    fn agent_admission(&self, signer: Arc<dyn crate::task::TaskSigner>) -> AgentAdmission {
+    fn agent_admission(
+        &self,
+        signer: Arc<dyn crate::task::TaskSigner>,
+        reach: Arc<dyn crate::egress_socket::ReachEgress>,
+    ) -> AgentAdmission {
         AgentAdmission {
             view: Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
                 &self.authorizer,
@@ -7466,6 +7629,7 @@ where
             tasks: Arc::clone(&self.tasks),
             signer,
             banner: Arc::clone(&self.banner),
+            reach,
             board: Arc::clone(&self.board),
             switches: Arc::clone(&self.switches),
         }
@@ -10951,6 +11115,8 @@ async fn boot_after_sink(
         seams.env.egress_account()
     })
     .map_err(|e| RunError::Other(e.to_string()))?;
+    let reach =
+        crate::egress_socket::production_reach_with(&egress_cfg, |_| seams.env.egress_account());
     let banner = crate::boot_gate::banner_boot_gate(config_dir, seams.banner_load)
         .map_err(|e| RunError::Other(e.to_string()))?;
 
@@ -11320,7 +11486,7 @@ async fn boot_after_sink(
         classification_policy_name,
         plane_key_name,
         kernel_graph,
-        egress,
+        (egress, reach),
         hup,
         Arc::new(reloader),
         deployment,
@@ -11368,7 +11534,10 @@ async fn serve_after_mint<B>(
     classification_policy_name: Arc<String>,
     plane_key_name: Arc<String>,
     kernel_graph: Arc<Option<KernelGraphStatus>>,
-    egress: Arc<dyn crate::egress::Egress>,
+    (egress, reach): (
+        Arc<dyn crate::egress::Egress>,
+        Arc<dyn crate::egress_socket::ReachEgress>,
+    ),
     hup: tokio::signal::unix::Signal,
     reloader: Arc<Reloader<B, maknae_audit_append::AuditSink>>,
     deployment: maknae_config::Deployment,
@@ -11470,8 +11639,11 @@ where
         breaker: group_lookup_breaker(),
         bound: Duration::from_millis(maknae_config::GROUP_LOOKUP_TIMEOUT_MS),
     });
-    let lifetime = handler_drain_bound(&transport, egress.deadline());
-    let agents = reloader.agent_admission(Arc::new(crate::task::PlaneSigner(Arc::clone(client))));
+    let lifetime = handler_drain_bound(&transport, egress.deadline(), live.reach().deadline_ms());
+    let agents = reloader.agent_admission(
+        Arc::new(crate::task::PlaneSigner(Arc::clone(client))),
+        reach,
+    );
     let sweep_stop = Arc::new(tokio::sync::Notify::new());
     let mut sweeper = tokio::spawn(sweep_tasks(
         agents.clone(),
@@ -11900,6 +12072,39 @@ mod record_widths {
         bound
     }
 
+    /// The widest record entry per binding: every op on every side, the longest basis and reason.
+    fn widest_reach() -> Vec<maknae_proto::BindingReach> {
+        use maknae_proto::{AgentReach, BindingReach, EmptyReason, ForgeOp, GitReach, SideReach};
+        let all = |head: bool| {
+            ForgeOp::ALL
+                .into_iter()
+                .filter(|op| head || *op != ForgeOp::PushHead)
+                .collect()
+        };
+        let side = SideReach::new(all(false), all(true)).unwrap();
+        let entry = BindingReach::Git(GitReach {
+            tasker: side,
+            basis: maknae_proto::TaskerBasis::Submitter,
+            agent: AgentReach::Observed(side),
+            why: Some(EmptyReason::NoForgeCredential),
+        });
+        let widest = crate::run::record_reach(&[entry]);
+        for why in [
+            EmptyReason::HeadGone,
+            EmptyReason::AgentNotCovered,
+            EmptyReason::NoReachCheck,
+        ] {
+            let BindingReach::Git(mut g) = entry;
+            g.why = Some(why);
+            let other = crate::run::record_reach(&[BindingReach::Git(g)]);
+            assert!(
+                serde_json::to_vec(&other).unwrap().len()
+                    <= serde_json::to_vec(&widest).unwrap().len()
+            );
+        }
+        vec![entry; maknae_proto::TASK_BINDINGS_MAX]
+    }
+
     fn task_verbs(agent: &str) -> Vec<Verb> {
         let text = || maknae_proto::SecretText(String::new().into());
         let task = || maknae_proto::TaskRef::from_id(&TASK);
@@ -11913,10 +12118,13 @@ mod record_widths {
                     labels: maknae_proto::Labels {},
                     bindings: Vec::new(),
                 },
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskAdd {
                 task: task(),
                 text: text(),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: task() },
             Verb::TaskList {
@@ -11964,6 +12172,7 @@ mod record_widths {
         NoTasker,
         Cites(Option<String>),
         Submitted,
+        Added,
     }
 
     struct Say {
@@ -12001,6 +12210,7 @@ mod record_widths {
             TaskRefusal::NotWorking,
             TaskRefusal::Unavailable(String::new()),
             TaskRefusal::Unbound(String::new()),
+            TaskRefusal::Unreached(String::new()),
         ];
         kinds
             .iter()
@@ -12045,7 +12255,12 @@ mod record_widths {
                 .map(|r| permit((*r).into(), Shape::Submitted))
                 .collect(),
             ("add", _) => {
-                let mut all = vec![deny(too_long, Shape::Plain), intent(), done()];
+                let mut all = vec![
+                    deny(too_long, Shape::Plain),
+                    intent(),
+                    done(),
+                    permit("addendum sealed".into(), Shape::Added),
+                ];
                 all.extend(refusals(Shape::Plain));
                 all
             }
@@ -12087,6 +12302,14 @@ mod record_widths {
                     permit(
                         format!(
                             "heartbeat: {} follow-ups after {}",
+                            crate::task::MAX_FOLLOW_UPS_PER_TASK,
+                            u32::MAX
+                        ),
+                        Shape::Cites(Some(tasker.to_owned())),
+                    ),
+                    permit(
+                        format!(
+                            "heartbeat: the addendum and {} follow-ups after {}",
                             crate::task::MAX_FOLLOW_UPS_PER_TASK,
                             u32::MAX
                         ),
@@ -12195,6 +12418,7 @@ mod record_widths {
             task.task_id = TASK;
             task.parent = self.parent();
             task.bindings = maximal_bindings();
+            task.reach = widest_reach();
             task
         }
 
@@ -12342,6 +12566,13 @@ mod record_widths {
                     match shape {
                         Shape::Plain | Shape::Submitted => {
                             (tasker, task) = (Some(own), asked.cited().map(|id| id.to_string()));
+                            rec
+                        }
+                        Shape::Added => {
+                            (tasker, task) = (Some(own), asked.cited().map(|id| id.to_string()));
+                            let mut rec = rec;
+                            rec.subject.bindings = record_bindings(&maximal_bindings());
+                            rec.subject.reach = record_reach(&widest_reach());
                             rec
                         }
                         Shape::NoTasker => {
@@ -12498,7 +12729,8 @@ mod record_widths {
             | TaskRefusal::Audit(_)
             | TaskRefusal::Store(_)
             | TaskRefusal::Unavailable(_)
-            | TaskRefusal::Unbound(_) => None,
+            | TaskRefusal::Unbound(_)
+            | TaskRefusal::Unreached(_) => None,
             TaskRefusal::AtCapacity { .. } => Some(TaskRefusal::AtCapacity {
                 agent: agent.to_owned(),
             }),
@@ -12543,11 +12775,13 @@ mod record_widths {
             assert!(line.contains(&format!("op={op}")), "op in {line}");
         }
         let bound = c.rec.subject.bindings.len();
-        match c.label.starts_with("submit: ") {
+        match c.label.starts_with("submit: ") || c.label == "add: permit addendum sealed" {
             true => assert_eq!(bound, maknae_proto::TASK_BINDINGS_MAX, "{at}"),
             false => assert_eq!(bound, 0, "{at}"),
         }
         assert_eq!(line.matches("\"kind\":\"git\"").count(), bound, "{at}");
+        assert_eq!(c.rec.subject.reach.len(), bound, "{at}");
+        assert_eq!(line.matches("\"basis\":").count(), bound, "{at}");
     }
 
     fn assert_each_case_mirrors_as_measured(cases: &[Case], in_full: &[&str]) {
@@ -12588,14 +12822,20 @@ mod record_widths {
     fn a_persons_task_verb_records_mirror_as_measured() {
         let cases = Who::new(true).task_verb_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
-        assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
+        assert_eq!(
+            widest_label(&cases),
+            "submit: permit task gone before the answer"
+        );
     }
 
     #[test]
     fn the_task_verb_records_of_the_widest_agent_mirror_as_measured() {
         let cases = Who::new(false).task_verb_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
-        assert!(widest_label(&cases).starts_with("collect: permit acknowledged "));
+        assert_eq!(
+            widest_label(&cases),
+            "submit: permit task gone before the answer"
+        );
     }
 
     fn widest_addressees() -> Vec<String> {
@@ -13513,16 +13753,52 @@ mod tests {
     #[test]
     fn the_handler_drain_bound_covers_the_egress_deadline() {
         // at the transport defaults (5 s handshake, 5 s read): 5 + 5 + 5 + 5 + 5
-        // + 5 + 5 + 5 + 0 + 5 + 1 + 10 = 56 s with no provider, plus the deadline with one
+        // + 5 + 5 + 5 + 5 + 1 + 10 = 56 s, plus the longer of the egress deadline and a
+        // submission's reach (the reach deadline, a forge call, the margin and 8 stages)
         let cfg = maknae_config::transport_from_section(None).unwrap();
+        let egress = maknae_config::EgressConfig::default();
+        let reach = egress.reach_deadline_ms;
         assert_eq!(
-            handler_drain_bound(&cfg, Duration::ZERO),
-            Duration::from_secs(56)
+            handler_drain_bound(&cfg, Duration::ZERO, reach),
+            Duration::from_secs(236)
         );
         assert_eq!(
-            handler_drain_bound(&cfg, Duration::from_secs(120)),
-            Duration::from_secs(176)
+            handler_drain_bound(&cfg, Duration::from_millis(egress.deadline_ms), reach),
+            Duration::from_secs(336)
         );
+        assert_eq!(
+            handler_drain_bound(&cfg, Duration::ZERO, maknae_config::REACH_DEADLINE_MS_MAX),
+            Duration::from_secs(516)
+        );
+        assert_eq!(
+            handler_drain_bound(
+                &cfg,
+                Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
+                maknae_config::REACH_DEADLINE_MS_MAX
+            ),
+            Duration::from_secs(656)
+        );
+    }
+
+    #[test]
+    fn a_reach_submissions_reply_wait_covers_its_stages() {
+        use maknae_config::{task_reach_reply_ms, REACH_DEADLINE_MS_MAX, TASK_REACH_REPLY_STAGES};
+        let stage = Duration::from_millis(maknae_config::BLOCKING_STAGE_TIMEOUT_MS);
+        let stages = stage * u32::try_from(TASK_REACH_REPLY_STAGES).unwrap();
+        let decide = crate::handler::AUTHZ_DECIDE_TIMEOUT;
+        let (before, last_frame, after, records) = (
+            decide,
+            2 * AUDIT_APPEND_TIMEOUT,
+            2 * decide,
+            3 * AUDIT_APPEND_TIMEOUT,
+        );
+        assert!(before + last_frame + after + records <= stages);
+        for reach in [1_000, REACH_DEADLINE_MS_MAX] {
+            assert_eq!(
+                Duration::from_millis(task_reach_reply_ms(reach)),
+                crate::reach_socket_wait(reach) + stages
+            );
+        }
     }
 
     /// How far above the walked shutdown chain the shipped units' stop
@@ -13542,7 +13818,7 @@ mod tests {
             + Duration::from_millis(cfg.read_timeout_ms)
             + STREAM_CLOSE_TIMEOUT;
         for deadline in [Duration::from_millis(egress.deadline_ms), Duration::ZERO] {
-            let bound = handler_drain_bound(&cfg, deadline);
+            let bound = handler_drain_bound(&cfg, deadline, egress.reach_deadline_ms);
             assert!(remaining < bound, "{remaining:?} {bound:?}");
         }
     }
@@ -13614,6 +13890,7 @@ mod tests {
             + handler_drain_bound(
                 &ceiling,
                 Duration::from_millis(maknae_config::EGRESS_DEADLINE_MS_MAX),
+                maknae_config::REACH_DEADLINE_MS_MAX,
             )
             + DRAIN_ABORT_REAP_TIMEOUT
             + AUDIT_DRAIN_SHUTDOWN_TIMEOUT
@@ -18711,6 +18988,143 @@ mod home_resolution_tests {
         )
     }
 
+    fn authorizer_in(
+        dir: &Path,
+        uid: u32,
+    ) -> Arc<crate::Composition<maknae_authz_basic::HermeticAuthorizer>> {
+        let us = &maknae_config::BasicPolicy;
+        Arc::new(crate::Composition::new(
+            maknae_authz_basic::HermeticAuthorizer::new(
+                maknae_authz_basic::PolicyPaths::in_dir(dir),
+                maknae_config::Principal {
+                    name: "operator".into(),
+                    uid,
+                },
+                maknae_config::TargetRequired {
+                    owner: None,
+                    mode_mask: Some(0o022),
+                    nlink_exactly_one: false,
+                    regular_file: true,
+                    max_bytes: None,
+                },
+                maknae_crypto::sha256,
+            )
+            .unwrap(),
+            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
+        ))
+    }
+
+    async fn records_of(verb: Verb, transport: TransportConfig) -> Vec<AuditRecord> {
+        let uid = nix::unistd::geteuid().as_raw();
+        let raw = std::env::temp_dir().join(format!(
+            "run_cap_{}_{}",
+            std::process::id(),
+            verb_to_action(&verb)
+        ));
+        let _ = std::fs::remove_dir_all(&raw);
+        std::fs::create_dir(&raw).unwrap();
+        let dir = Dir(raw.canonicalize().unwrap());
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = dir.0.join("authz.yaml");
+        std::fs::write(
+            &policy,
+            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        crate::test_fixtures::write_empty_sensitive(&dir.0);
+        let authorizer = authorizer_in(&dir.0, uid);
+        let (mut client, server) = tokio::io::duplex(1 << 20);
+        let body = maknae_proto::encode_request(&maknae_proto::Request {
+            task: None,
+            protocol_version: PROTOCOL_VERSION,
+            verb: verb.clone(),
+        })
+        .unwrap();
+        maknae_proto::write_frame(&mut client, maknae_proto::class_of(&verb), &body)
+            .await
+            .unwrap();
+        let emit = Arc::new(Recorder::default());
+        let backend_name = Arc::new(maknae_security::guarded_backend_name(&*authorizer));
+        handle(
+            server,
+            Some("spiffe://d/plane/cli".to_string()),
+            SessionRecord::for_test(uid, Some("u".to_string())).into(),
+            FactsGate::allow_as(Some("u".to_string()), Some(dir.0.clone())),
+            emit.clone(),
+            transport,
+            serde_json::json!({}),
+            authorizer,
+            std::sync::Arc::new(crate::live::LiveConfig::new(ConfigView::default(), None)),
+            backend_name,
+            Arc::new("US".to_string()),
+            Arc::new("ml-dsa-87".to_string()),
+            Arc::new(None),
+            crate::egress::unavailable_egress(),
+            Duration::from_secs(10),
+            maknae_io::DelegatedFds::new(1),
+            baseline_stub::no_baseline(),
+            Arc::new(crate::conversation::mem_store::MemStore::default()),
+            crate::run::AgentAdmission::none(),
+        )
+        .await;
+        let records = emit.0.lock().unwrap().clone();
+        records
+    }
+
+    #[tokio::test]
+    async fn a_non_task_prompt_class_verb_over_the_prompt_cap_is_refused() {
+        let transport = TransportConfig {
+            prompt_max_bytes: maknae_config::PROMPT_MAX_BYTES_FLOOR,
+            ..maknae_config::transport_from_section(None).unwrap()
+        };
+        let over = maknae_proto::prompt_request_cap(transport.prompt_max_bytes);
+        let reasons = |records: &[AuditRecord]| -> Vec<String> {
+            records.iter().map(|r| r.outcome.reason.clone()).collect()
+        };
+        let verbs = [
+            Verb::SessionPrompt {
+                conversation: "c".repeat(over),
+                turns: vec![],
+                output_tokens: None,
+                choice: None,
+            },
+            Verb::TaskReport {
+                text: maknae_proto::SecretText("r".repeat(over).into()),
+                seen_follow_ups: None,
+            },
+        ];
+        for verb in verbs {
+            let records = records_of(verb.clone(), transport.clone()).await;
+            let said = reasons(&records);
+            assert!(
+                said.iter().any(|r| r.starts_with(PROMPT_CAP_REFUSAL)),
+                "{}: {said:?}",
+                verb_to_action(&verb)
+            );
+        }
+        let submit = Verb::TaskSubmit {
+            task: maknae_proto::TaskSubmission {
+                schema: maknae_proto::TASK_SCHEMA.into(),
+                version: maknae_proto::TASK_VERSION,
+                agent: "hobi".into(),
+                ask: maknae_proto::Ask::Prompt {
+                    prompt: maknae_proto::SecretText("p".repeat(over).into()),
+                },
+                labels: maknae_proto::Labels {},
+                bindings: vec![],
+            },
+            forge_tokens: maknae_proto::ForgeTokens::default(),
+        };
+        let said = reasons(&records_of(submit, transport).await);
+        assert!(
+            !said
+                .iter()
+                .any(|r| r.starts_with(PROMPT_CAP_REFUSAL) || r.starts_with("frame read failed")),
+            "{said:?}"
+        );
+    }
+
     #[tokio::test]
     async fn only_a_filesystem_verb_resolves_the_requesters_home() {
         let uid = nix::unistd::geteuid().as_raw();
@@ -18731,26 +19145,7 @@ mod home_resolution_tests {
         .unwrap();
         std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o640)).unwrap();
         crate::test_fixtures::write_empty_sensitive(&dir.0);
-        let us = &maknae_config::BasicPolicy;
-        let authorizer = Arc::new(crate::Composition::new(
-            maknae_authz_basic::HermeticAuthorizer::new(
-                maknae_authz_basic::PolicyPaths::in_dir(&dir.0),
-                maknae_config::Principal {
-                    name: "operator".into(),
-                    uid,
-                },
-                maknae_config::TargetRequired {
-                    owner: None,
-                    mode_mask: Some(0o022),
-                    nlink_exactly_one: false,
-                    regular_file: true,
-                    max_bytes: None,
-                },
-                maknae_crypto::sha256,
-            )
-            .unwrap(),
-            crate::CeilingAuthorizer::new(maknae_config::Ceiling::baseline_for(us), us),
-        ));
+        let authorizer = authorizer_in(&dir.0, uid);
         let held = crate::authz::home_resolver()
             .claim(uid)
             .expect("the euid's home slot is free");
@@ -27882,9 +28277,10 @@ mod agent_listener_tests {
 
     /// Admits hobi's leaf at connect against the agent listener's admission, then serves it.
     fn connect(fx: &Fx) -> Result<Session, crate::authz::DenyCause> {
-        let agents = fx
-            .reloader
-            .agent_admission(Arc::new(crate::task::UnverifiedSigner));
+        let agents = fx.reloader.agent_admission(
+            Arc::new(crate::task::UnverifiedSigner),
+            crate::egress_socket::no_reach("no egress socket in this test"),
+        );
         let peer = hobi_leaf();
         crate::authz::admit(
             crate::handler::Admission::EnrolledAgent,
@@ -28258,9 +28654,10 @@ mod agent_listener_tests {
     ) -> impl FnOnce(LoopRun) -> std::pin::Pin<Box<dyn Future<Output = ServeOutcome> + Send>> {
         let authorizer = Arc::clone(&fx.reloader.authorizer);
         let emit = Arc::clone(emit);
-        let agents = fx
-            .reloader
-            .agent_admission(Arc::new(crate::task::UnverifiedSigner));
+        let agents = fx.reloader.agent_admission(
+            Arc::new(crate::task::UnverifiedSigner),
+            crate::egress_socket::no_reach("no egress socket in this test"),
+        );
         move |run: LoopRun| {
             Box::pin(accept_loop(
                 acceptor,

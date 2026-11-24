@@ -1080,6 +1080,7 @@ dependencies = [
  "maknae-agent",
  "maknae-config",
  "maknae-crypto",
+ "maknae-forge",
  "maknae-graph",
  "maknae-io",
  "maknae-loop",
@@ -1099,6 +1100,7 @@ name = "maknae-agent"
 version = "0.0.0"
 dependencies = [
  "maknae-config",
+ "maknae-forge",
  "maknae-proto",
  "serde",
  "serde_json",
@@ -1186,10 +1188,12 @@ dependencies = [
  "base64 0.23.1",
  "maknae-config",
  "maknae-crypto",
+ "maknae-forge",
  "maknae-io",
  "maknae-llm",
  "maknae-proto",
  "maknae-seal",
+ "maknae-vault",
  "reqwest",
  "serde",
  "serde_json",
@@ -1214,6 +1218,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "maknae-forge"
+version = "0.0.0"
+dependencies = [
+ "maknae-config",
+ "maknae-proto",
+ "serde_json",
 ]
 
 [[package]]
@@ -1243,6 +1256,7 @@ dependencies = [
  "maknae-classification-aus",
  "maknae-config",
  "maknae-crypto",
+ "maknae-forge",
  "maknae-graph",
  "maknae-io",
  "maknae-kernel",

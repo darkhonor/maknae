@@ -239,6 +239,11 @@ enum Command {
     Login,
     /// Revoke and erase your stored Vault token.
     Logout,
+    /// Your logins to the forges this host's catalog names, kept in your own Vault space.
+    Forge {
+        #[command(subcommand)]
+        action: ForgeCommand,
+    },
     /// One-time elevated provisioning: mint credentials, seal them to the
     /// platform HRoT, write daemon+CLI config (spec §4.1). Requires `sudo`.
     Enroll(Box<crate::enroll::EnrollArgs>),
@@ -327,6 +332,20 @@ enum SessionCommand {
     },
     /// Close the conversation with this id; its record is kept.
     Close { conversation: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ForgeCommand {
+    /// Store a token for SERVER, read from a hidden prompt.
+    Login {
+        /// The forge as the catalog names it, port included (e.g. ghe.example:8443).
+        server: String,
+    },
+    /// Erase the token stored for SERVER.
+    Logout {
+        /// The forge as the catalog names it, port included.
+        server: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -624,9 +643,10 @@ pub(crate) fn cli_config() -> Result<(PathBuf, Document, TransportConfig), Strin
 pub(crate) async fn minted_plane(
     document: &Document,
     dir: &Path,
-    token: maknae_vault::UserToken,
+    token: &maknae_vault::UserToken,
 ) -> Result<(PlaneClient, std::sync::Arc<maknae_vault::TrustBundle>), String> {
-    let client = PlaneClient::for_user(document, dir, token).map_err(|e| e.to_string())?;
+    let client = PlaneClient::for_user(document, dir, crate::agent::token_copy(token)?)
+        .map_err(|e| e.to_string())?;
     let ca = load_ca_pin(dir).map_err(|e| e.to_string())?;
     let trust = maknae_vault::TrustBundle::from_pins(&[&ca]).map_err(|e| e.to_string())?;
     client.mint().await.map_err(|e| e.to_string())?;
@@ -648,7 +668,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
         &mut std::io::stdin().lock(),
     )?;
 
-    let (client, trust) = minted_plane(&document, &dir, session.token).await?;
+    let (client, trust) = minted_plane(&document, &dir, &session.token).await?;
     let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
     if let Err(e) = client.shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
@@ -1505,6 +1525,12 @@ pub async fn run_cli() -> ExitCode {
         Command::Agent(_) => ExitCode::from(2),
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
+        Command::Forge {
+            action: ForgeCommand::Login { server },
+        } => crate::forge::run_login(&server).await,
+        Command::Forge {
+            action: ForgeCommand::Logout { server },
+        } => crate::forge::run_logout(&server).await,
         Command::Enroll(args) => crate::enroll::run_enroll(*args).await,
         Command::Reseed => crate::reseed::run_reseed(),
         Command::Policy {
@@ -1818,6 +1844,30 @@ mod tests {
     fn parses_whoami() {
         let cli = Cli::try_parse_from(["maknae", "whoami"]).expect("parses");
         assert!(matches!(cli.command.unwrap(), Command::Whoami));
+    }
+
+    #[test]
+    fn forge_login_and_logout_take_one_server_and_no_token() {
+        for (verb, login) in [("login", true), ("logout", false)] {
+            let cli =
+                Cli::try_parse_from(["maknae", "forge", verb, "ghe.example:8443"]).expect("parses");
+            match cli.command.unwrap() {
+                Command::Forge {
+                    action: ForgeCommand::Login { server },
+                } if login => assert_eq!(server, "ghe.example:8443"),
+                Command::Forge {
+                    action: ForgeCommand::Logout { server },
+                } if !login => assert_eq!(server, "ghe.example:8443"),
+                other => panic!("{verb}: {other:?}"),
+            }
+            for argv in [
+                ["maknae", "forge", verb].as_slice(),
+                ["maknae", "forge", verb, "github.com", "ghp_abc"].as_slice(),
+                ["maknae", "forge", verb, "github.com", "--token", "ghp_abc"].as_slice(),
+            ] {
+                assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} parsed");
+            }
+        }
     }
 
     #[test]
@@ -2583,6 +2633,7 @@ mod tests {
             last_action_secs: None,
             cursor: maknae_proto::TaskCursor::from_seq(1),
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -2666,6 +2717,7 @@ mod tests {
                     task: maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([0; 16])),
                     from: 0,
                     items: Vec::new(),
+                    addendum: None,
                 }),
                 "task follow-ups",
             ),

@@ -34,6 +34,7 @@ mod mutation_exchange;
 mod partition_authz;
 mod posture;
 mod provider_choice;
+mod reach;
 pub mod reload;
 mod run;
 mod sensitive_authz;
@@ -83,7 +84,10 @@ pub use egress::{
     EgressFailure, EgressReply, EgressRequest, ReplyRefusal, SendOutcome, Unavailable,
     EGRESS_MAX_REPLY_FRAME_BYTES, EGRESS_USER,
 };
-pub use egress_socket::SocketEgress;
+pub use egress_socket::{
+    no_reach, production_reach, production_reach_with, reach_socket_wait, ReachEgress,
+    ReachOutcome, SocketEgress, Unanswered,
+};
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 pub use enrollment::{Containing, FixedEnrollment, Unresolving};
 pub use enrollment::{EnrollmentView, Load, SnapshotEnrollment};
@@ -103,6 +107,7 @@ pub use posture::{
 pub use provider_choice::{
     admit_choice, provider_authority, AdmittedChoice, ChoiceRefusal, KeyOwner, ProviderAuthority,
 };
+pub use reach::{kernel_reach_permits, ForgeTraits, ReachSettings};
 pub use run::{
     accept_loop, handle, handle_with_attempt_caps, run, AcceptAnswer, AdminOps, AgentAdmission,
     BaselineOps, BoxFuture, ConfigView, Conn, ContainAnswer, ContainRequest, ContainmentOps,

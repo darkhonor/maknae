@@ -2,6 +2,7 @@
 //! `minting.yaml`, before any Vault or GitHub I/O.
 
 use maknae_config::{AgentId, CredentialKind, GithubAppConfig, MintingConfig};
+use maknae_forge::{forge, CredentialForge, ForgeProvider, Minting};
 use maknae_proto::{
     AccessLevel, GithubPermission, MintRefusal, MintRequest, PermissionSet, RevokeRequest,
     MINT_MAX_PERMISSIONS_PER_SET, MINT_MAX_REPOS_PER_SET, MINT_MAX_SETS,
@@ -17,13 +18,14 @@ pub enum TrustPlaneKind {
 }
 
 pub fn trust_plane_kind(kind: CredentialKind) -> Option<TrustPlaneKind> {
-    match kind {
-        CredentialKind::GithubAppInstallation => Some(TrustPlaneKind::GithubApp),
-        CredentialKind::GithubMachineUser
-        | CredentialKind::GitlabProjectToken
-        | CredentialKind::GitlabBotToken
-        | CredentialKind::VaultChildToken
-        | CredentialKind::VaultDynamicSecret => None,
+    let kind = kind.forge()?;
+    match (kind.provider(), forge(kind.provider()).minting(kind)) {
+        (ForgeProvider::Github, Minting::TrustPlane) => Some(TrustPlaneKind::GithubApp),
+        (ForgeProvider::Gitlab, Minting::TrustPlane)
+        | (
+            ForgeProvider::Github | ForgeProvider::Gitlab,
+            Minting::FrontEnd | Minting::NotThisForge,
+        ) => None,
     }
 }
 
@@ -133,6 +135,7 @@ mod tests {
         let app = GithubAppConfig {
             app_id: 5834363,
             installation_id: 77,
+            host: "github.example".into(),
             api: ApiBase::parse("https://api.github.com").expect("api base"),
             transit_mount: "transit".into(),
             transit_key: "deploy-app".into(),
@@ -228,6 +231,29 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn trust_plane_minting_is_dispatched_through_the_forge() {
+        use maknae_forge::{forge, CredentialForge, Minting};
+        for kind in [
+            CredentialKind::GithubAppInstallation,
+            CredentialKind::GithubMachineUser,
+            CredentialKind::GitlabProjectToken,
+            CredentialKind::GitlabBotToken,
+            CredentialKind::VaultChildToken,
+            CredentialKind::VaultDynamicSecret,
+        ] {
+            let minting = kind.forge().map(|fk| forge(fk.provider()).minting(fk));
+            if minting != Some(Minting::TrustPlane) {
+                assert_eq!(trust_plane_kind(kind), None, "{kind:?}");
+            }
+        }
+        assert_eq!(
+            trust_plane_kind(CredentialKind::GithubAppInstallation),
+            Some(TrustPlaneKind::GithubApp)
+        );
+        assert_eq!(trust_plane_kind(CredentialKind::GitlabProjectToken), None);
     }
 
     #[test]

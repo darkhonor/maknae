@@ -61,6 +61,12 @@ impl maknae_kernel::TaskSigner for FixedSigner {
     ) -> Result<maknae_proto::SignedTask, TaskRefusal> {
         Ok(signed(task))
     }
+    fn sign_addendum(
+        &self,
+        _addendum: maknae_proto::TaskAddendum,
+    ) -> Result<maknae_proto::SignedAddendum, TaskRefusal> {
+        Err(TaskRefusal::Unsigned)
+    }
     fn current_leaf(&self) -> Option<[u8; 32]> {
         Some(maknae_crypto::sha256(&[1]))
     }
@@ -224,6 +230,7 @@ fn world_bound(tag: &str, agents: &[Agent], bindings: &str) -> World {
         tasks,
         signer: Arc::new(FixedSigner),
         banner: Default::default(),
+        reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::SwitchesOff),
     };
@@ -443,6 +450,7 @@ fn submit(agent: &str) -> Verb {
             labels: maknae_proto::Labels {},
             bindings: vec![],
         },
+        forge_tokens: maknae_proto::ForgeTokens::default(),
     }
 }
 

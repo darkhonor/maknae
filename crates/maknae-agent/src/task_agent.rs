@@ -197,6 +197,7 @@ mod tests {
             last_action_secs: None,
             cursor: TaskCursor::from_seq(1),
             bindings: vec![],
+            reach: vec![],
         }
     }
 
@@ -313,6 +314,13 @@ mod tests {
             self.mkdir.clone().unwrap_or(WriteOutcome::Applied(None))
         }
         fn verify(&mut self, _: &Bytes) -> Result<SignedTask, Unverified> {
+            unreachable!()
+        }
+        fn verify_addendum(
+            &mut self,
+            _: &TaskId,
+            _: &Bytes,
+        ) -> Result<maknae_proto::SignedAddendum, crate::task_driver::VerifyClass> {
             unreachable!()
         }
         async fn persona(&mut self, _: PersonaAt<'_>) -> Result<Option<SecretText>, String> {

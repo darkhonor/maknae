@@ -278,6 +278,9 @@ pub trait CatalogNow {
 
     /// `None` for a uid that holds no role or is contained, and for a catalog that cannot be built.
     fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest>;
+
+    /// An agent's forge credentials on the installed snapshot; empty for anything else.
+    fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef>;
 }
 
 impl<B: Baseline> CatalogNow for B {
@@ -294,6 +297,10 @@ impl<B: Baseline> CatalogNow for B {
             .ok()
             .map(|c| c.digest)
     }
+
+    fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        Baseline::forge_credentials(self, agent_uid, self.principal().uid)
+    }
 }
 
 impl<B: Baseline> CatalogNow for Composition<B> {
@@ -307,6 +314,10 @@ impl<B: Baseline> CatalogNow for Composition<B> {
 
     fn catalog_stamp(&self, uid: u32, forges: &maknae_config::ForgeSet) -> Option<CatalogDigest> {
         self.baseline.catalog_stamp(uid, forges)
+    }
+
+    fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        CatalogNow::forge_credentials(&self.baseline, agent_uid)
     }
 }
 

@@ -42,6 +42,8 @@ pub(crate) enum VaultOp {
     RevokeSelf,
     AppRoleLogin,
     TransitSign,
+    WrappedWrite,
+    DeleteMetadata,
 }
 
 impl VaultOp {
@@ -54,6 +56,8 @@ impl VaultOp {
             VaultOp::RevokeSelf => "token revoke-self",
             VaultOp::AppRoleLogin => "AppRole login",
             VaultOp::TransitSign => "Transit sign",
+            VaultOp::WrappedWrite => "wrapped KV write",
+            VaultOp::DeleteMetadata => "KV metadata delete",
         }
     }
 }
@@ -107,7 +111,7 @@ pub(crate) fn refuse_status(op: VaultOp, status: u16) -> VaultError {
         (VaultOp::WrapLookup | VaultOp::Unwrap, 400 | 403) => {
             return VaultError::WrapMismatch(WrapMismatch::Invalid)
         }
-        (VaultOp::WrappedRead, 403) => {
+        (VaultOp::WrappedRead | VaultOp::WrappedWrite | VaultOp::DeleteMetadata, 403) => {
             "the token is expired or revoked (run `maknae login`), or the path is outside your grant"
         }
         (VaultOp::WrappedRead, 404) => "no secret at this path",
@@ -254,9 +258,16 @@ mod tests {
         assert_eq!(
             [
                 VaultOp::AppRoleLogin.as_str(),
-                VaultOp::TransitSign.as_str()
+                VaultOp::TransitSign.as_str(),
+                VaultOp::WrappedWrite.as_str(),
+                VaultOp::DeleteMetadata.as_str()
             ],
-            ["AppRole login", "Transit sign"]
+            [
+                "AppRole login",
+                "Transit sign",
+                "wrapped KV write",
+                "KV metadata delete"
+            ]
         );
     }
 
@@ -291,6 +302,15 @@ mod tests {
             refuse_status(VaultOp::WrappedRead, 403),
             VaultError::VaultStatus { status: 403, hint, .. } if hint.contains("maknae login")
         ));
+        for op in [VaultOp::WrappedWrite, VaultOp::DeleteMetadata] {
+            assert!(
+                matches!(
+                    refuse_status(op, 403),
+                    VaultError::VaultStatus { status: 403, hint, .. } if hint.contains("maknae login")
+                ),
+                "{op:?}"
+            );
+        }
         assert!(matches!(
             refuse_status(VaultOp::WrappedRead, 404),
             VaultError::VaultStatus { status: 404, hint, .. } if hint.contains("no secret")

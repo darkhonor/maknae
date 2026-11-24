@@ -25,11 +25,13 @@ ExecReload=/usr/bin/kill -HUP $MAINPID
 # (600 s at the configured ceiling) while the provider answers, and the shutdown
 # drain waits that long plus 10 s to write the outcome record rather than abort
 # a call whose content already left. systemd's default 90 s would SIGKILL that
-# wait. The chain at BOTH ceilings (transport timeouts 60 s, egress deadline
-# 600 s), walked in execution order: the wait for a reload's turn 5 s + the
+# wait. The chain at every ceiling (transport timeouts 60 s, egress deadline
+# 600 s, reach deadline 300 s), walked in execution order: the wait for a reload's turn 5 s + the
 # stop record's append 5 s + the
 # credential supervisor's abort and reap 1 s + the handler drain 821 s (handshake 60 + session-fact lookup at connect 5 + admission audit append 5 + frame read 60 + session-fact lookup at the request 5 + home resolution 5
-# + PDP decision 5 + the verb's own blocking step 5 + provider call 600 +
+# + PDP decision 5 + the verb's own blocking step 5 + the longer of the provider
+# call 600 and a task submission's reach 460 (reach deadline 300 + forge call 20 +
+# deadline margin 100 + eight 5 s stages; a connection carries one request) +
 # response write 60 + close 1 + a 10 s margin for the audit appends) + the reap
 # of what it aborts 1 s + the audit drain 5 s + the plane client's shutdown 60 s
 # (a lock wait bounded at 30 s — the supervisor is aborted first, so it is free

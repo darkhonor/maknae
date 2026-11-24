@@ -68,6 +68,8 @@ files = [
   # #161: fs.list's per-entry decisions, bounds and order; a wrong arm releases a
   # withheld name.
   "crates/maknae-kernel/src/listing.rs",
+  # Intake reach (#168): what a task is sealed able to reach, and the refusals.
+  "crates/maknae-kernel/src/reach.rs",
   # The reload's ordering, plan choice, turn and stop, and the vocabulary given to
   # the store and compiler: a wrong arm installs a snapshot the store never
   # recorded, or keeps serving a refused one. Unit-tested and coverage-gated.
@@ -232,6 +234,8 @@ files = [
   "crates/maknae-proto/src/task.rs",
   # #168: the host grammar every binding's server is checked against.
   "crates/maknae-proto/src/host.rs",
+  # #168 slice 4 PR B: a task's sealed reach; its decode refusals and `effective_reach` are the control.
+  "crates/maknae-proto/src/reach.rs",
   # #695: the board wire types; their decode-time bounds are the refusal control.
   "crates/maknae-proto/src/board.rs",
   # #240a D3-A: the PURE peer-identity decision. It is a separate file from
@@ -277,6 +281,11 @@ files = [
   "crates/maknae-deputy/src/mint/minter.rs",
   "crates/maknae-deputy/src/mint/recipient.rs",
   "crates/maknae-deputy/src/mint/signer.rs",
+  # #168: reach admission before any I/O (bounds, the server's `apis:` entry, a
+  # forge that observes reach, the one App on the host) and the tasker token's
+  # own Vault path and open-failure classes.
+  "crates/maknae-deputy/src/reach/admit.rs",
+  "crates/maknae-deputy/src/reach/open.rs",
   # #318: what ALL THREE binaries refuse to inherit from their environment, and
   # the disjoint list of what they must never stop inheriting. Moved here from
   # bins/maknae-egress/src/env.rs (#240b) when maknaed and maknae adopted the
@@ -429,6 +438,13 @@ files = [
   "crates/maknae-agent/src/tasking/text.rs",
   # #168: the tasker's binding candidates. A look-alike host read as a forge binds a task to a repository the tasker never named; a remote's userinfo copied out of .git/config puts a token in the echo.
   "crates/maknae-agent/src/hints.rs",
+  # #168: the forge seam. A wrong arm dispatches a credential kind to another forge's minter or reach observer, or reads a reserved page as a repository.
+  "crates/maknae-forge/src/lib.rs",
+  "crates/maknae-forge/src/github.rs",
+  "crates/maknae-forge/src/gitlab.rs",
+  # #168: GitHub's reach observers. A wrong arm reports a repository, a head or an operation the credential does not reach, or reads a suspended or foreign installation as live.
+  "crates/maknae-forge/src/github/tasker.rs",
+  "crates/maknae-forge/src/github/agent.rs",
   "crates/maknae-sys/src/reply.rs",
   "crates/maknae-sys/src/macos.rs",
   # #490: whether a prepared audit trail carries the append-only flag; a false "yes" moves the trail to a file the daemon can rewrite.
@@ -472,7 +488,7 @@ files = [
 # critical crates whose fail-closed behavior must be provable to external
 # third parties. Zero missed mutants required.
 # It also carries the loop's decision code (maknae-agent), whose false-assurance surface is T1.
-mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-crypto", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state"]
+mutants_crates = ["maknae-security", "maknae-config", "maknae-io", "maknae-kernel", "maknae-vault", "maknae-crypto", "maknae-proto", "maknae-audit-append", "maknae-msgs", "maknae-authz-basic", "maknae-classification-aus", "maknae-llm", "maknae-agent", "maknae-deputy", "maknae-sys", "maknae-seal", "maknae-graph", "maknae-state", "maknae-forge"]
 # Crates whose mutation run needs a non-default feature so feature-gated seam
 # code is LIVE (mutants in cfg'd-out code are unkillable-MISSED — the
 # 2026-08-27 main-red class; #77 generalized the maknae-config special case).
@@ -530,6 +546,10 @@ files = [
   # grant check they apply is mint/grant.rs (T1), pinned end to end by the
   # loopback-stub tests here.
   "crates/maknae-deputy/src/mint/github.rs",
+  # #168: the reach driver. T2: it carries the observer's steps to the forge
+  # under the frame deadline and a permit, and revokes any token it minted on
+  # every exit; the decisions are reach/admit.rs, reach/open.rs and maknae-forge.
+  "crates/maknae-deputy/src/reach/drive.rs",
   "crates/maknae-plane/src/fd.rs", "crates/maknae-plane/src/send.rs",
   # Cooperative execution in the untrusted CLI: cannot issue a PDP Permit or
   # kernel-observed completion. Guard failures can damage the subject's own
@@ -612,8 +632,12 @@ path = "bins/maknae-egress/src/listen.rs"
 why = "socket acquisition; the two production arms (an inherited LISTEN_FDS socket, and its failure) need a real init system and cannot be unit-tested. The fallback bind path, the named-absence case and the error rendering ARE tested; the fail-closed DECISION on no socket is main.rs's"
 
 [[t3]]
+path = "bins/maknae-egress/src/reach.rs"
+why = "#168: glue from a reach frame to maknae-deputy's reach driver: the loaded minting.yaml, mint's signer when the minter is up, the shared GitHub client, the forge opener and one process-wide ReachGate, driven with block_on on the connection's thread. It decides nothing: admission, the exchange, the revokes and the journal line are T1/T2 in maknae-deputy's reach/admit.rs, reach/open.rs and reach/drive.rs. Its tests drive a tasker frame end to end against a loopback forge and pin the no-minter and no-client answers"
+
+[[t3]]
 path = "bins/maknae-egress/src/opener.rs"
-why = "#153: opens the turn's sealed key with the Egress Daemon's seal key and unwraps the wrapping token through maknae-vault; the Vault leg has no stub by design. Its tests open real seals, assert the expectation it hands Vault and the refusal mapping through the Unwrapper seam, and reach a dead Vault through the real VaultApi; the decisions are T1 in maknae-deputy's unseal.rs, maknae-seal and maknae-vault's wrap.rs"
+why = "#153, #168: opens the turn's sealed key (and a tasker's sealed forge token) with the Egress Daemon's seal key and unwraps the wrapping token through maknae-vault; the Vault leg has no stub by design. Its tests open real seals, assert the expectation it hands Vault and the refusal mapping through the Unwrapper seam, and reach a dead Vault through the real VaultApi; the decisions are T1 in maknae-deputy's unseal.rs, maknae-seal and maknae-vault's wrap.rs"
 
 [[t3]]
 path = "crates/maknae-llm/src/client.rs"
@@ -754,6 +778,22 @@ why = "module declarations only; the decisions are handle/unseal/call (T1)"
 [[t3]]
 path = "crates/maknae-deputy/src/mint/mod.rs"
 why = "#168: module declarations only; the GitHub client is mint/github.rs (T2), its grant check mint/grant.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-deputy/src/reach/mod.rs"
+why = "#168: module declarations only; reach admission is reach/admit.rs and reach/open.rs (T1), the driver reach/drive.rs (T2)"
+
+[[t3]]
+path = "crates/maknae-deputy/src/reach/testutil.rs"
+why = "#168: test-only fixtures (the minting.yaml text, reach frames and egress bounds) shared by admit.rs's and drive.rs's test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in reach/mod.rs, so it has no production regions"
+
+[[t3]]
+path = "crates/maknae-forge/src/observe.rs"
+why = "#168: the observer seam's types and traits only (HttpReply, Auth, Step, Observer, ForgeReach); no executable region, so it cannot be T1-measured. The observers that implement it are github/tasker.rs and github/agent.rs (T1)"
+
+[[t3]]
+path = "crates/maknae-proto/src/testutil.rs"
+why = "#168: test-only fixture (the widest forge-token list) shared by sealed.rs's and task.rs's test suites (the gate requires `#[cfg(test)]` to be followed by a line beginning `mod `, which rules out `pub(crate) mod tests`); declared under `#[cfg(test)]` in lib.rs, so it has no production regions"
 
 [[t3]]
 path = "crates/maknae-vault/src/lib.rs"
@@ -920,11 +960,11 @@ why = "#594: the CLI's one best-effort stderr writer; bin code, T3 per the tieri
 
 [[t3]]
 path = "bins/maknae/src/agent.rs"
-why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 on the bins/maknaed precedent. It is NOT a pure shell: read_outcome, write_outcome and prompt_outcome live here, and all three are controls (a BadRequest or an UNARMED refusal must never render as a final refusal to the model; an uncertain write must never render as certainty; a BadRequest on the prompt leg is a shape fault the subject can fix and must not be reported as a refusal that may have landed). All three are pure functions, deliberately, and carry discriminating table tests plus hand-mutation evidence recorded in #241's pull request (#341). The rest of the file — run, RealPlane — needs a live daemon, Vault and certificates, so it stays report-only. Amended 2026-09-22 (#241): the earlier why said the decision code was all in maknae-agent, which stopped being true when the mappers landed here. (Corrected 2026-09-22, #344: that amendment named only read_outcome and write_outcome and called them 'the two mappers'; prompt_outcome is a third control in the same file and was unlisted, so the tier's justification did not cover it.) Amended 2026-09-28 (#372): user_budget_from_section, loop_prompt_cap, warning_line and stop_line are table-tested here, and the bounds and prompt_cap they call are T1 in maknae-agent::budget. Amended 2026-09-28 (#388): write_outcome now also maps a client-decided stale refusal to Stale (certain, not guessed), and check_for — the loop's read basis as the client's write check — is a fourth control here, table-tested; the check itself is T1 in maknae-io. Amended 2026-10-02 (#153): user_budget_from_section is gone (the budget is per providers.yaml entry, parsed in maknae-config); key_location, choose_entry, login_expired, key_read_failure, seal_key_from, token_copy and turn_choice (each turn: an expired login refused locally, then the wrapped read, then the seal to exactly this request, then the choice, driven by a scripted reader and opened with a test key) are tested here; the seal is T1 in maknae-seal and the path rules T1 in maknae-config and maknae-vault. Amended 2026-11-03 (#470): read_outcome, write_outcome, prompt_outcome and check_for moved to maknae-agent::wire (T1, mutation-tested); the conversion into their input type is From<SentOutcome>, tested field for field. Amended 2026-11-03 (#470): RealPlane moved to maknae-loop as LoopPlane (T3); this file is the user host: config, login, UserLoginKeys over turn_choice, and the printer that the_agent_printer_is_byte_identical pins byte for byte. Amended 2026-11-08 (#170): the session is opened by the kernel before the first turn and closed on every ending through maknae-agent::session's open and converse (T1); converse_to, open_failure, close_line and interrupted_status are tested here, and the SIGINT/SIGTERM listener is the I/O; exit_on_next_signal (armed when the close begins, so a signal during the close or shutdown exits at once) is tested with a real self-sent signal."
+why = "#241: the loop's I/O wiring — config, one plane client, stdout — T3 on the bins/maknaed precedent. It is NOT a pure shell: read_outcome, write_outcome and prompt_outcome live here, and all three are controls (a BadRequest or an UNARMED refusal must never render as a final refusal to the model; an uncertain write must never render as certainty; a BadRequest on the prompt leg is a shape fault the subject can fix and must not be reported as a refusal that may have landed). All three are pure functions, deliberately, and carry discriminating table tests plus hand-mutation evidence recorded in #241's pull request (#341). The rest of the file — run, RealPlane — needs a live daemon, Vault and certificates, so it stays report-only. Amended 2026-09-22 (#241): the earlier why said the decision code was all in maknae-agent, which stopped being true when the mappers landed here. (Corrected 2026-09-22, #344: that amendment named only read_outcome and write_outcome and called them 'the two mappers'; prompt_outcome is a third control in the same file and was unlisted, so the tier's justification did not cover it.) Amended 2026-09-28 (#372): user_budget_from_section, loop_prompt_cap, warning_line and stop_line are table-tested here, and the bounds and prompt_cap they call are T1 in maknae-agent::budget. Amended 2026-09-28 (#388): write_outcome now also maps a client-decided stale refusal to Stale (certain, not guessed), and check_for — the loop's read basis as the client's write check — is a fourth control here, table-tested; the check itself is T1 in maknae-io. Amended 2026-10-02 (#153): user_budget_from_section is gone (the budget is per providers.yaml entry, parsed in maknae-config); key_location, choose_entry, login_expired, key_read_failure, seal_key_from, token_copy and turn_choice (each turn: an expired login refused locally, then the wrapped read, then the seal to exactly this request, then the choice, driven by a scripted reader and opened with a test key) are tested here; the seal is T1 in maknae-seal and the path rules T1 in maknae-config and maknae-vault. Amended 2026-11-03 (#470): read_outcome, write_outcome, prompt_outcome and check_for moved to maknae-agent::wire (T1, mutation-tested); the conversion into their input type is From<SentOutcome>, tested field for field. Amended 2026-11-03 (#470): RealPlane moved to maknae-loop as LoopPlane (T3); this file is the user host: config, login, UserLoginKeys over turn_choice, and the printer that the_agent_printer_is_byte_identical pins byte for byte. Amended 2026-11-08 (#170): the session is opened by the kernel before the first turn and closed on every ending through maknae-agent::session's open and converse (T1); converse_to, open_failure, close_line and interrupted_status are tested here, and the SIGINT/SIGTERM listener is the I/O; exit_on_next_signal (armed when the close begins, so a signal during the close or shutdown exits at once) is tested with a real self-sent signal. Amended 2026-11-24 (#168): the tasker's forge logins. forge_tokens refuses an expired login before any read and returns no token for no server (an_expired_login_reads_no_forge_token); forge_read_failure names the server and the remedy for a 403, a 404 and any other Vault failure (forge_read_failures_name_the_server_and_the_remedy); ForgePlace::of resolves the KV mount, user prefix, account and seal key once, and an unusable place refuses only a task that needs a token; ForgeLogins::tokens reads nothing for no server and otherwise delegates to forge_tokens with one wrapped read per server. The sealing and path rules they call are T1 in maknae-vault and maknae-seal."
 
 [[t3]]
 path = "bins/maknae/src/tty.rs"
-why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs. Amended 2026-11-15 (#630): Restore is shared with the session screen's raw mode (screen/term.rs), and raw() is hidden() with ICRNL, INLCR, IXON, ISTRIP, BRKINT, IGNCR and PARMRK cleared."
+why = "#153: the termios glue for maknae login's hidden prompt — tcgetattr/tcsetattr, an echo re-check and a byte read on stdin's descriptor; proven on a real pseudo-terminal with a 10 s watchdog (echo off, the typed bytes arrive, Ctrl-C and Ctrl-D end it, the saved mode is restored, a non-terminal is refused, and SIGINT, SIGTERM, SIGHUP and SIGQUIT are held back while echo is off and released after the restore, on the prompting thread and on every runtime thread from its start). The line discipline it drives is T1 in maknae-vault password_line.rs. Amended 2026-11-15 (#630): Restore is shared with the session screen's raw mode (screen/term.rs), and raw() is hidden() with ICRNL, INLCR, IXON, ISTRIP, BRKINT, IGNCR and PARMRK cleared. Amended (#168): the same prompt reads maknae forge login's token through the HiddenLine seam; forge.rs's TokenLine is that line."
 
 [[t3]]
 path = "bins/maknae/src/screen/mod.rs"
@@ -940,11 +980,15 @@ why = "#630: the session screen's run loop — stdin bytes through the fixed rea
 
 [[t3]]
 path = "bins/maknae/src/agent_session.rs"
-why = "#630: maknae agent list and maknae agent <name> wired to the kernel: the CLI's plane client and leaf, one tasker verb in flight at a time, the full-screen driver or the plain-line loop, and the exit status. Every decision it feeds is T1 in maknae-agent::tasking (the book, the command parser, the text). Tested with a fake tasker and leaf: a name off the list is refused with nothing submitted, an invalid banner opens no session, a leaf within 60 s of its NotAfter is reminted and an expired login is said as such, the plain session exits once its requests are acknowledged and with --wait once its reports are shown and acknowledged, and on a real pseudo-terminal a request is submitted and /bye leaves. Amended (fix round 1): a failed remint keeps a leaf that is still valid and says no plane identity only once it has expired, --wait ends after a /drop because the plain loop reads the next line only once the last one is answered, and the printed entry buffer never grows. #168: it reads the working directory once and sends the prompt-and-remote bindings that maknae-agent::hints chooses; a refused catalog and an unreadable checkout are reported, not bound."
+why = "#630: maknae agent list and maknae agent <name> wired to the kernel: the CLI's plane client and leaf, one tasker verb in flight at a time, the full-screen driver or the plain-line loop, and the exit status. Every decision it feeds is T1 in maknae-agent::tasking (the book, the command parser, the text). Tested with a fake tasker and leaf: a name off the list is refused with nothing submitted, an invalid banner opens no session, a leaf within 60 s of its NotAfter is reminted and an expired login is said as such, the plain session exits once its requests are acknowledged and with --wait once its reports are shown and acknowledged, and on a real pseudo-terminal a request is submitted and /bye leaves. Amended (fix round 1): a failed remint keeps a leaf that is still valid and says no plane identity only once it has expired, --wait ends after a /drop because the plain loop reads the next line only once the last one is answered, and the printed entry buffer never grows. #168: it reads the working directory once and sends the prompt-and-remote bindings that maknae-agent::hints chooses; a refused catalog and an unreadable checkout are reported, not bound. Amended 2026-11-24 (#168): a submit or add asks the session's TokenSupply (ForgeLogins::tokens) for one sealed token per bound GitHub server before it sends, and a failed read refuses with nothing sent; same() drops from an add the links its task already binds, by server, base and change. Pinned by submit_seals_one_token_per_github_server_and_none_for_gitlab, a_missing_login_refuses_before_submitting_and_names_the_command and add_binds_links_in_its_text_and_seals_their_tokens (an already-bound change is neither re-added nor read a token for)."
 
 [[t3]]
 path = "bins/maknae/src/screen/plain.rs"
 why = "#630: the plain-line session's reader and writer: lines in through one fixed zeroizing buffer, an over-long or non-UTF-8 line refused on the diagnostics descriptor (stderr), lines out through maknae-agent's display_safe (T1). Tested over pipes with bounded reads."
+
+[[t3]]
+path = "bins/maknae/src/forge.rs"
+why = "#168: maknae forge login and logout — config, the user's Vault login, the kernel's tool catalog over a minted plane client, the hidden prompt, then one wrapped KV write or one metadata delete; it needs a live daemon, Vault and a terminal. Its decisions are tested here against a recording store: login_path (a server the catalog does not name, a forge whose provider observes no reach per maknae-forge observes_reach, and a host with no forge_token_subpath are refused before the prompt, and the path equals the one the submission's wrapped read uses), login and logout (one write_wrapped at FORGE_TOKEN_FIELD with USER_KEY_WRAP_TTL, or one delete_metadata), and TokenLine (one zeroizing buffer sized once to MAX_TOKEN_BYTES that refuses rather than grows, and refuses any byte outside the token alphabet). The path rules are T1 in maknae-vault and maknae-config."
 
 [[t3]]
 path = "bins/maknae/src/login.rs"

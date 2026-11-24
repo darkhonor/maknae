@@ -1271,6 +1271,7 @@ mod tests {
                 board_op: None,
                 tasker: None,
                 bindings: Vec::new(),
+                reach: Vec::new(),
             },
             action: "session.prompt".into(),
             object: Some("provider:openai".into()),
@@ -1442,6 +1443,7 @@ mod tests {
         let cfg = maknae_config::EgressConfig {
             socket_path: d.path().join("egress.sock"),
             deadline_ms: 7_000,
+            reach_deadline_ms: 20_000,
         };
         let b = production_egress_with(&p, &cfg, |name| {
             assert_eq!(name, EGRESS_USER);

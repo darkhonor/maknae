@@ -23,11 +23,12 @@ use crate::egress::DurableEgressIntent;
 use crate::egress::{Egress, EgressFailure, EgressReply, EgressRequest};
 use maknae_proto::{
     decode_egress_socket_reply, encode_egress_frame, EgressFrame, EgressFrameReply,
-    EgressFrameRequest, EgressSocketReply,
+    EgressFrameRequest, EgressSocketReply, ReachRefusal, ReachReply, ReachRequest,
 };
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The deputy's socket, and the uid its listener must have been created
@@ -221,34 +222,14 @@ impl SocketEgress {
         }
         Ok(())
     }
-}
 
-impl Egress for SocketEgress {
-    /// The configured `egress.deadline_ms`: a WALL-CLOCK budget over the whole
-    /// exchange — every non-blocking write is preceded by a `poll` for what is
-    /// left (`write_all_by`) and every read is preceded by a `poll` for what is
-    /// left (`read_exact_by`), so per-operation timers cannot be strung
-    /// together past it in either direction. The one step outside it is `connect`, which on a Unix socket
-    /// completes or fails at once unless the listener's backlog is full; the
-    /// kernel's outer `tokio::time::timeout` on the same value then abandons
-    /// the worker and the egress breaker counts the expiry.
-    fn deadline(&self) -> Duration {
-        self.timeout
-    }
-    fn ready(&self) -> Result<(), EgressFailure> {
-        if self.path.exists() {
-            Ok(())
-        } else {
-            Err(EgressFailure::NotConfigured)
-        }
-    }
-
-    fn send(
+    /// One frame over one connection, under the wall-clock `deadline_at`: connect, the
+    /// listener's uid before the first write, the request cap, then the reply.
+    fn exchange(
         &self,
-        _intent: &DurableEgressIntent,
-        req: EgressRequest,
-    ) -> Result<EgressReply, EgressFailure> {
-        let deadline_at = Instant::now() + self.timeout;
+        frame: &EgressFrame,
+        deadline_at: Instant,
+    ) -> Result<EgressSocketReply, EgressFailure> {
         let stream = UnixStream::connect(&self.path).map_err(connect_failure)?;
 
         // BEFORE the first write. Moving this below the write hands prompt
@@ -264,7 +245,6 @@ impl Egress for SocketEgress {
             ));
         }
 
-        let frame = EgressFrame::Prompt(frame_of(req, self.timeout));
         // MEASURED FIRST, allocated second (#241, codex round 2 item C). The
         // counting pass serializes through a sink that stores nothing, so the
         // exact encoded length is known before a byte of frame content is
@@ -276,7 +256,7 @@ impl Egress for SocketEgress {
         // opaque `failed to write whole buffer` — no size, no cap, and none of
         // the operator line below. Now every over-cap size meets this
         // refusal, and the buffer needs no headroom to avoid shadowing it.
-        let len = maknae_proto::egress_frame_encoded_len(&frame).map_err(Self::transport)?;
+        let len = maknae_proto::egress_frame_encoded_len(frame).map_err(Self::transport)?;
         // BEFORE the first write, so an over-cap request is a pre-send failure
         // (`Failed`, nothing left) and never "outcome unknown" (the deputy
         // would refuse it as oversize only after reading it).
@@ -299,7 +279,7 @@ impl Egress for SocketEgress {
         // freed a partly-written copy of it on every realloc. The encode
         // cannot overflow — it was measured — and an `Encode` here would still
         // be pre-send: nothing written, nothing left with the peer.
-        let buf = encode_egress_frame(&frame, len).map_err(Self::transport)?;
+        let buf = encode_egress_frame(frame, len).map_err(Self::transport)?;
 
         let mut s = stream;
         Self::arm(&s, deadline_at)?;
@@ -340,23 +320,185 @@ impl Egress for SocketEgress {
         // decode drops this buffer just the same.
         let mut body = maknae_io::Zeroizing::new(vec![0u8; n]);
         Self::read_exact_by(&mut s, &mut body, deadline_at).map_err(Self::after_send)?;
-        match decode_egress_socket_reply(&body)
+        decode_egress_socket_reply(&body)
             .map_err(Self::transport)
-            .map_err(Self::after_send)?
-        {
+            .map_err(Self::after_send)
+    }
+}
+
+impl Egress for SocketEgress {
+    /// The configured `egress.deadline_ms`: a WALL-CLOCK budget over the whole
+    /// exchange — every non-blocking write is preceded by a `poll` for what is
+    /// left (`write_all_by`) and every read is preceded by a `poll` for what is
+    /// left (`read_exact_by`), so per-operation timers cannot be strung
+    /// together past it in either direction. The one step outside it is `connect`, which on a Unix socket
+    /// completes or fails at once unless the listener's backlog is full; the
+    /// kernel's outer `tokio::time::timeout` on the same value then abandons
+    /// the worker and the egress breaker counts the expiry.
+    fn deadline(&self) -> Duration {
+        self.timeout
+    }
+    fn ready(&self) -> Result<(), EgressFailure> {
+        if self.path.exists() {
+            Ok(())
+        } else {
+            Err(EgressFailure::NotConfigured)
+        }
+    }
+
+    fn send(
+        &self,
+        _intent: &DurableEgressIntent,
+        req: EgressRequest,
+    ) -> Result<EgressReply, EgressFailure> {
+        let deadline_at = Instant::now() + self.timeout;
+        let frame = EgressFrame::Prompt(frame_of(req, self.timeout));
+        match self.exchange(&frame, deadline_at)? {
             EgressSocketReply::Prompt(EgressFrameReply::Reply(reply)) => Ok(EgressReply { reply }),
             EgressSocketReply::Prompt(EgressFrameReply::Unusable { defect, usage }) => {
                 Err(EgressFailure::ReplyUnusable { defect, usage })
             }
             EgressSocketReply::RefusedBeforeSend => Err(EgressFailure::RefusedBeforeSend),
             EgressSocketReply::AtCapacity => Err(EgressFailure::DeputyAtCapacity),
-            EgressSocketReply::Mint(_) | EgressSocketReply::Revoke(_) => Err(Self::after_send(
-                Self::transport(maknae_proto::ProtoCodecError::Decode(
+            EgressSocketReply::Mint(_)
+            | EgressSocketReply::Revoke(_)
+            | EgressSocketReply::Reach(_) => Err(Self::after_send(Self::transport(
+                maknae_proto::ProtoCodecError::Decode(
                     "a credential reply to a prompt frame".into(),
-                )),
-            )),
+                ),
+            ))),
         }
     }
+}
+
+/// What became of one reach frame: the deputy's reach reply, or no reach reply at all.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReachOutcome {
+    Reply(ReachReply),
+    Unanswered(Unanswered),
+}
+
+/// Why a reach frame has no reach reply. Each refuses as [`ReachRefusal::Unanswered`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unanswered {
+    /// The deputy answered the generic `AtCapacity` before reading the frame.
+    AtCapacity,
+    /// Nothing reached the deputy: no socket, no deputy, or a peer that is not it.
+    NotSent(String),
+    /// The frame left and no reach reply came back.
+    Unknown(String),
+}
+
+impl Unanswered {
+    pub fn class(&self) -> ReachRefusal {
+        ReachRefusal::Unanswered
+    }
+
+    pub fn trail(&self) -> String {
+        match self {
+            Self::AtCapacity => "reach outcome unknown: at capacity".into(),
+            Self::NotSent(why) => format!("reach not sent: {why}"),
+            Self::Unknown(why) => format!("reach outcome unknown: {why}"),
+        }
+    }
+
+    fn of(e: EgressFailure) -> Self {
+        match e {
+            EgressFailure::Transport(m) | EgressFailure::DeputyUnreachable(m) => Self::NotSent(m),
+            EgressFailure::NotConfigured => Self::NotSent("no egress socket".into()),
+            EgressFailure::AfterSend(m) => Self::Unknown(m),
+            EgressFailure::DeadlineExpired => Self::Unknown("the socket wait expired".into()),
+            EgressFailure::DeputyAtCapacity => Self::AtCapacity,
+            EgressFailure::RefusedBeforeSend
+            | EgressFailure::KernelAtCapacity
+            | EgressFailure::CircuitOpen
+            | EgressFailure::ReplyUnusable { .. } => Self::Unknown(format!("{e:?}")),
+        }
+    }
+}
+
+/// How long the kernel waits on one reach frame: its `deadline_ms`, then one more forge call
+/// for the revokes the Egress Daemon makes on exit, then the deadline margin.
+pub fn reach_socket_wait(deadline_ms: u64) -> Duration {
+    Duration::from_millis(
+        deadline_ms
+            .saturating_add(maknae_config::FORGE_CALL_TIMEOUT_MS)
+            .saturating_add(maknae_config::DEADLINE_MARGIN_MS),
+    )
+}
+
+/// Observes reach through the Egress Daemon, one frame per call.
+pub trait ReachEgress: Send + Sync {
+    /// Whether the Egress Daemon's socket is there to ask; without it no reach is observed.
+    fn has_socket(&self) -> bool;
+    fn reach(&self, req: ReachRequest) -> ReachOutcome;
+}
+
+impl ReachEgress for SocketEgress {
+    fn has_socket(&self) -> bool {
+        self.path.exists()
+    }
+
+    fn reach(&self, req: ReachRequest) -> ReachOutcome {
+        let deadline_at = Instant::now() + reach_socket_wait(req.deadline_ms());
+        match self.exchange(&EgressFrame::Reach(req), deadline_at) {
+            Ok(EgressSocketReply::Reach(reply)) => ReachOutcome::Reply(reply),
+            Ok(EgressSocketReply::AtCapacity) => ReachOutcome::Unanswered(Unanswered::AtCapacity),
+            Ok(
+                EgressSocketReply::Prompt(_)
+                | EgressSocketReply::RefusedBeforeSend
+                | EgressSocketReply::Mint(_)
+                | EgressSocketReply::Revoke(_),
+            ) => ReachOutcome::Unanswered(Unanswered::Unknown(
+                "a non-reach reply to a reach frame".into(),
+            )),
+            Err(e) => ReachOutcome::Unanswered(Unanswered::of(e)),
+        }
+    }
+}
+
+/// The handle when the Egress Daemon's account is not there to check the socket against.
+struct NoReachSocket(String);
+
+impl ReachEgress for NoReachSocket {
+    fn has_socket(&self) -> bool {
+        false
+    }
+
+    fn reach(&self, _req: ReachRequest) -> ReachOutcome {
+        ReachOutcome::Unanswered(Unanswered::NotSent(self.0.clone()))
+    }
+}
+
+/// A reach handle that sends nothing, saying `why`.
+pub fn no_reach(why: &str) -> Arc<dyn ReachEgress> {
+    Arc::new(NoReachSocket(why.to_owned()))
+}
+
+/// The reach handle on `egress.socket_path`, whether or not any provider is authorized.
+pub fn production_reach_with(
+    cfg: &maknae_config::EgressConfig,
+    resolve_uid: impl FnOnce(&str) -> Result<Option<u32>, String>,
+) -> Arc<dyn ReachEgress> {
+    match resolve_uid(crate::egress::EGRESS_USER) {
+        Ok(Some(uid)) => Arc::new(SocketEgress::new(
+            cfg.socket_path.clone(),
+            uid,
+            Duration::from_millis(cfg.deadline_ms),
+            crate::egress::EGRESS_MAX_REPLY_FRAME_BYTES,
+        )),
+        Ok(None) => Arc::new(NoReachSocket(format!(
+            "the egress deputy's account '{}' does not exist on this host",
+            crate::egress::EGRESS_USER
+        ))),
+        Err(e) => Arc::new(NoReachSocket(format!(
+            "the egress deputy's account could not be resolved: {e}"
+        ))),
+    }
+}
+
+pub fn production_reach(cfg: &maknae_config::EgressConfig) -> Arc<dyn ReachEgress> {
+    production_reach_with(cfg, crate::egress::resolve_account_uid)
 }
 
 /// Only a deputy that is not running (refused, socket gone, backlog full) is
@@ -1264,6 +1406,230 @@ mod tests {
                 }
                 other => panic!("expected a post-send codec failure, got {other:?}"),
             }
+        }
+    }
+
+    fn reach_req(deadline_ms: u64) -> maknae_proto::ReachRequest {
+        maknae_proto::ReachRequest::new(
+            "github.com".into(),
+            "github".into(),
+            deadline_ms,
+            maknae_proto::ReachSide::Agent {
+                agent: "hobi".into(),
+                credentials: vec![maknae_proto::CredentialRef {
+                    kind: "github-app-installation".into(),
+                    name: "maknae-github-read".into(),
+                }],
+            },
+            vec![maknae_proto::RepoAsk {
+                base: "o/r".into(),
+                change: Some(7),
+                head: None,
+            }],
+        )
+        .unwrap()
+    }
+
+    fn observed() -> maknae_proto::ReachReply {
+        maknae_proto::ReachReply::Observed(
+            maknae_proto::Observations::new(vec![maknae_proto::RepoObservation::new(
+                [maknae_proto::ForgeOp::Read].into_iter().collect(),
+                None,
+                maknae_proto::ForgeOps::EMPTY,
+                false,
+                true,
+            )
+            .unwrap()])
+            .unwrap(),
+        )
+    }
+
+    fn reach_through(reply: EgressSocketReply) -> ReachOutcome {
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), Some(reply));
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024);
+        let out = e.reach(reach_req(1_000));
+        assert!(seen.load(Ordering::SeqCst) > 0);
+        out
+    }
+
+    #[test]
+    fn each_reach_reply_reaches_the_caller_as_sent() {
+        for reply in [
+            observed(),
+            maknae_proto::ReachReply::NoForgeCredential,
+            maknae_proto::ReachReply::Refused(maknae_proto::ReachRefusal::NotFound),
+            maknae_proto::ReachReply::Refused(maknae_proto::ReachRefusal::Unanswered),
+        ] {
+            let want = format!("{reply:?}");
+            match reach_through(EgressSocketReply::Reach(reply)) {
+                ReachOutcome::Reply(got) => assert_eq!(format!("{got:?}"), want),
+                other => panic!("expected the reply, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_reach_frame_is_what_the_deputy_reads() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        let got = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut len = [0u8; 4];
+            c.read_exact(&mut len).unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            c.read_exact(&mut body).unwrap();
+            body
+        });
+        let me = nix::unistd::getuid().as_raw();
+        let _ =
+            SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024).reach(reach_req(1_000));
+        let body = got.join().unwrap();
+        let want = EgressFrame::Reach(reach_req(1_000));
+        let len = maknae_proto::egress_frame_encoded_len(&want).unwrap();
+        assert_eq!(body, encode_egress_frame(&want, len).unwrap().to_vec());
+    }
+
+    #[test]
+    fn a_reach_at_capacity_is_unanswered_at_capacity() {
+        let out = reach_through(EgressSocketReply::AtCapacity);
+        assert_eq!(out, ReachOutcome::Unanswered(Unanswered::AtCapacity));
+        let ReachOutcome::Unanswered(u) = out else {
+            unreachable!()
+        };
+        assert_eq!(u.trail(), "reach outcome unknown: at capacity");
+        assert_eq!(u.class(), maknae_proto::ReachRefusal::Unanswered);
+    }
+
+    #[test]
+    fn a_non_reach_reply_to_a_reach_frame_is_outcome_unknown() {
+        for reply in [
+            EgressSocketReply::RefusedBeforeSend,
+            EgressSocketReply::Mint(maknae_proto::MintReply::Refused(
+                maknae_proto::MintRefusal::Request,
+            )),
+            EgressSocketReply::Revoke(maknae_proto::RevokeReply::Revoked),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(maknae_proto::PromptReply {
+                reasoning: None,
+                blocks: vec![],
+                tool_calls: vec![],
+                usage: None,
+            })),
+        ] {
+            match reach_through(reply) {
+                ReachOutcome::Unanswered(u @ Unanswered::Unknown(_)) => {
+                    assert!(u.trail().starts_with("reach outcome unknown: "), "{u:?}");
+                    assert_eq!(u.class(), maknae_proto::ReachRefusal::Unanswered);
+                }
+                other => panic!("expected outcome unknown, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_reach_connection_closed_with_no_reply_is_outcome_unknown() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), None);
+        let me = nix::unistd::getuid().as_raw();
+        let out =
+            SocketEgress::new(path, me, Duration::from_secs(2), 64 * 1024).reach(reach_req(1_000));
+        assert!(seen.load(Ordering::SeqCst) > 0);
+        assert!(
+            matches!(out, ReachOutcome::Unanswered(Unanswered::Unknown(_))),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_reach_frame_to_an_unexpected_peer_writes_nothing() {
+        let me = nix::unistd::getuid().as_raw();
+        if me == 0 {
+            eprintln!("skipped: running as root");
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_deputy(d.path(), Some(EgressSocketReply::Reach(observed())));
+        let e = SocketEgress::new(path, me.wrapping_add(1), Duration::from_secs(2), 64 * 1024);
+        let out = e.reach(reach_req(1_000));
+        assert!(
+            matches!(&out, ReachOutcome::Unanswered(u @ Unanswered::NotSent(_)) if u.trail().starts_with("reach not sent: ")),
+            "{out:?}"
+        );
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_reach_socket_wait_allows_egress_exit_revokes() {
+        assert_eq!(
+            reach_socket_wait(1_000),
+            Duration::from_millis(
+                1_000 + maknae_config::FORGE_CALL_TIMEOUT_MS + maknae_config::DEADLINE_MARGIN_MS
+            )
+        );
+        assert_eq!(reach_socket_wait(u64::MAX), Duration::from_millis(u64::MAX));
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("egress.sock");
+        let l = UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut len = [0u8; 4];
+                if c.read_exact(&mut len).is_ok() {
+                    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                    let _ = c.read_exact(&mut body);
+                    std::thread::sleep(Duration::from_millis(400));
+                    let out = maknae_proto::encode_egress_socket_reply(
+                        &EgressSocketReply::Reach(maknae_proto::ReachReply::NoForgeCredential),
+                        maknae_proto::EGRESS_REPLY_FRAME_ENCODE_BYTES,
+                    )
+                    .unwrap();
+                    let _ = c.write_all(&(out.len() as u32).to_be_bytes());
+                    let _ = c.write_all(&out);
+                }
+            }
+        });
+        let me = nix::unistd::getuid().as_raw();
+        let e = SocketEgress::new(path, me, Duration::from_millis(50), 64 * 1024);
+        assert_eq!(
+            e.reach(reach_req(100)),
+            ReachOutcome::Reply(maknae_proto::ReachReply::NoForgeCredential),
+            "a reply after the frame's deadline but within the revoke allowance is kept"
+        );
+    }
+
+    #[test]
+    fn the_reach_handle_is_built_without_providers_and_reports_its_socket() {
+        let d = tempfile::tempdir().unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let cfg = |p: PathBuf| maknae_config::EgressConfig {
+            socket_path: p,
+            ..Default::default()
+        };
+        let missing = production_reach_with(&cfg(d.path().join("none.sock")), |_| Ok(Some(me)));
+        assert!(!missing.has_socket());
+        assert!(matches!(
+            missing.reach(reach_req(1_000)),
+            ReachOutcome::Unanswered(Unanswered::NotSent(_))
+        ));
+
+        let (path, _seen) = fake_deputy(d.path(), Some(EgressSocketReply::Reach(observed())));
+        let present = production_reach_with(&cfg(path.clone()), |_| Ok(Some(me)));
+        assert!(present.has_socket());
+        assert_eq!(
+            present.reach(reach_req(1_000)),
+            ReachOutcome::Reply(observed())
+        );
+
+        for resolve in [Ok(None), Err("nss down".to_string())] {
+            let r = resolve.clone();
+            let no_account = production_reach_with(&cfg(path.clone()), move |_| r);
+            assert!(!no_account.has_socket(), "{resolve:?}");
+            assert!(matches!(
+                no_account.reach(reach_req(1_000)),
+                ReachOutcome::Unanswered(Unanswered::NotSent(_))
+            ));
         }
     }
 }

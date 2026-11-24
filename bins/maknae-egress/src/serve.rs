@@ -24,7 +24,7 @@ use maknae_deputy::mint::minter::LiveTokens;
 use maknae_deputy::unseal::OpenFailure;
 use maknae_proto::{
     EgressFrame, EgressFrameReply, EgressSocketReply, MintRefusal, MintReply, MintRequest,
-    RevokeReply, RevokeRequest,
+    ReachReply, ReachRequest, RevokeReply, RevokeRequest,
 };
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use std::io::{Read, Write};
@@ -73,6 +73,12 @@ pub trait MintFrames: Send + Sync {
     fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens);
     fn revoke(&self, req: &RevokeRequest, agent: &AgentId, app: &GithubAppConfig) -> RevokeReply;
     fn revoke_all(&self, live: LiveTokens);
+}
+
+/// Egress's reach exchanges, driven on the connection's own thread. Admission,
+/// the exchange, any revoke and the journal line are all inside `reach`.
+pub trait ReachFrames: Send + Sync {
+    fn reach(&self, req: &ReachRequest) -> ReachReply;
 }
 
 /// The one `FulfilError` mapping, shared by `main` and the tests.
@@ -185,6 +191,17 @@ fn write_all_by(stream: &mut UnixStream, buf: &[u8], by: Instant) -> Result<(), 
     out.and(stream.set_nonblocking(false).map_err(io))
 }
 
+pub struct Frames {
+    pub mint: Option<Arc<dyn MintFrames>>,
+    pub reach: Arc<dyn ReachFrames>,
+}
+
+#[derive(Clone, Copy)]
+pub struct FrameRefs<'a> {
+    pub mint: Option<&'a dyn MintFrames>,
+    pub reach: &'a dyn ReachFrames,
+}
+
 /// Serve exactly one connection: authenticate, read one frame, answer, close.
 ///
 /// `fulfil` is what turns an admitted frame into a provider call. It is passed
@@ -200,7 +217,7 @@ pub fn serve_one<F>(
     bounds: &EgressBounds,
     io_timeout: Duration,
     committed: &AtomicBool,
-    minting: Option<&dyn MintFrames>,
+    frames: FrameRefs<'_>,
     fulfil: F,
 ) -> Result<(), ServeError>
 where
@@ -213,10 +230,20 @@ where
     let req = match maknae_proto::decode_egress_frame(&body).map_err(io)? {
         EgressFrame::Prompt(req) => req,
         EgressFrame::Mint(req) => {
-            return serve_mint(&mut stream, &req, minting, io_timeout, committed)
+            return serve_mint(&mut stream, &req, frames.mint, io_timeout, committed)
         }
         EgressFrame::Revoke(req) => {
-            return serve_revoke(&mut stream, &req, minting, io_timeout, committed)
+            return serve_revoke(&mut stream, &req, frames.mint, io_timeout, committed)
+        }
+        EgressFrame::Reach(req) => {
+            committed.store(true, Ordering::Release);
+            let reply = frames.reach.reach(&req);
+            return write_reply(
+                &mut stream,
+                &EgressSocketReply::Reach(reply),
+                io_timeout,
+                committed,
+            );
         }
     };
     let admitted = match decide(&req, bounds) {
@@ -383,7 +410,7 @@ pub fn accept_loop<H>(
     expected_uid: u32,
     bounds: Arc<EgressBounds>,
     io_timeout: Duration,
-    minting: Option<Arc<dyn MintFrames>>,
+    frames: Frames,
     handler: Arc<H>,
 ) where
     H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
@@ -405,8 +432,12 @@ pub fn accept_loop<H>(
             continue;
         };
         let fallback = stream.try_clone();
-        let (bounds, handler, minting) =
-            (Arc::clone(&bounds), Arc::clone(&handler), minting.clone());
+        let (bounds, handler, minting, reach) = (
+            Arc::clone(&bounds),
+            Arc::clone(&handler),
+            frames.mint.clone(),
+            Arc::clone(&frames.reach),
+        );
         let spawned = spawn_contained(
             "maknae-egress-conn",
             slot,
@@ -420,7 +451,10 @@ pub fn accept_loop<H>(
                     &bounds,
                     io_timeout,
                     committed,
-                    minting.as_deref(),
+                    FrameRefs {
+                        mint: minting.as_deref(),
+                        reach: &*reach,
+                    },
                     |a| handler(a),
                 ) {
                     eprintln!("maknae-egress: connection refused: {e:?}");
@@ -574,7 +608,10 @@ mod tests {
             );
         }
     }
-    use crate::test_frames::{bounds, canned, encoded_frame, prefixed, request, ALICE};
+    use crate::test_frames::{
+        bounds, canned, encoded_frame, no_reach, prefixed, request, served_frame_reaching,
+        tasker_reach, CannedReach, ALICE,
+    };
     use maknae_deputy::call::{fulfil, CallBounds};
     use maknae_deputy::unseal::{KeyOpener, OpenRequest};
     use maknae_proto::{ContentBlock, EgressFrameRequest, ReplyDefect, SecretText};
@@ -596,7 +633,10 @@ mod tests {
             bounds,
             io_timeout,
             &AtomicBool::new(false),
-            None,
+            FrameRefs {
+                mint: None,
+                reach: &no_reach(),
+            },
             fulfil,
         )
     }
@@ -846,6 +886,20 @@ mod tests {
             + Sync
             + 'static,
     {
+        looping_reaching(cap, handler, Arc::new(no_reach()))
+    }
+
+    fn looping_reaching<H>(
+        cap: usize,
+        handler: H,
+        reach: Arc<dyn ReachFrames>,
+    ) -> (tempfile::TempDir, PathBuf, Arc<Slots>)
+    where
+        H: Fn(&maknae_deputy::handle::Admitted<'_>) -> Result<EgressFrameReply, ServeError>
+            + Send
+            + Sync
+            + 'static,
+    {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("egress.sock");
         let l = UnixListener::bind(&path).unwrap();
@@ -859,7 +913,7 @@ mod tests {
                 me,
                 Arc::new(bounds()),
                 Duration::from_secs(5),
-                None,
+                Frames { mint: None, reach },
                 Arc::new(handler),
             )
         });
@@ -1634,6 +1688,93 @@ mod tests {
         }
     }
 
+    fn reach_bytes() -> Vec<u8> {
+        prefixed(&encoded_frame(&EgressFrame::Reach(tasker_reach(
+            "github.com",
+        ))))
+    }
+
+    #[test]
+    fn a_reach_frame_is_served_after_the_peer_check() {
+        let reach = CannedReach::answering(|| ReachReply::NoForgeCredential);
+        let (a, b) = UnixStream::pair().unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let bytes = reach_bytes();
+        let mut writer = a;
+        writer.write_all(&bytes).unwrap();
+        let mut keep = b.try_clone().unwrap();
+        assert_eq!(
+            serve_one(
+                b,
+                me.wrapping_add(1),
+                &bounds(),
+                FRAME_IO_TIMEOUT,
+                &AtomicBool::new(false),
+                FrameRefs {
+                    mint: None,
+                    reach: &reach,
+                },
+                |_| panic!("a reach frame reached the provider path"),
+            ),
+            Err(ServeError::WrongPeer)
+        );
+        assert_eq!(reach.calls(), 0);
+        keep.set_nonblocking(true).unwrap();
+        let mut unread = vec![0u8; bytes.len()];
+        keep.read_exact(&mut unread).unwrap();
+        assert_eq!(unread, bytes, "the frame was left unread");
+
+        let (out, reply) = served_frame_reaching(
+            &EgressFrame::Reach(tasker_reach("github.com")),
+            None,
+            &reach,
+        );
+        assert_eq!(out, Ok(()));
+        assert_eq!(
+            reply,
+            Some(EgressSocketReply::Reach(ReachReply::NoForgeCredential))
+        );
+        assert_eq!(reach.calls(), 1);
+    }
+
+    #[test]
+    fn a_reach_frame_at_capacity_is_answered_at_capacity() {
+        let reach = Arc::new(CannedReach::answering(|| ReachReply::NoForgeCredential));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let (_d, path, slots) = looping_reaching(
+            1,
+            move |a| {
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+                canned(a)
+            },
+            Arc::clone(&reach) as Arc<dyn ReachFrames>,
+        );
+        let p = path.clone();
+        let held = std::thread::spawn(move || ask(&p));
+        eventually("the prompt never took its slot", || slots.in_use() == 1);
+        assert_eq!(
+            ask_with(&path, &reach_bytes()),
+            EgressSocketReply::AtCapacity
+        );
+        assert_eq!(reach.calls(), 0);
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            held.join().unwrap(),
+            EgressSocketReply::Prompt(EgressFrameReply::Reply(_))
+        ));
+        eventually("the slot was not given back", || slots.in_use() == 0);
+        assert_eq!(
+            ask_with(&path, &reach_bytes()),
+            EgressSocketReply::Reach(ReachReply::NoForgeCredential)
+        );
+        assert_eq!(reach.calls(), 1);
+        eventually("the reach frame kept its slot", || slots.in_use() == 0);
+    }
+
     mod minting {
         use super::*;
         use maknae_config::{ApiBase, MintVault};
@@ -1680,6 +1821,7 @@ mod tests {
                 let app = GithubAppConfig {
                     app_id: 5834363,
                     installation_id: 77,
+                    host: "github.example".into(),
                     api: ApiBase::parse("https://api.github.example").unwrap(),
                     transit_mount: "transit".into(),
                     transit_key: "deploy-app".into(),
@@ -1907,7 +2049,10 @@ mod tests {
                 &bounds(),
                 FRAME_IO_TIMEOUT,
                 &AtomicBool::new(false),
-                Some(m),
+                FrameRefs {
+                    mint: Some(m),
+                    reach: &no_reach(),
+                },
                 |_| panic!("a credential frame reached the provider path"),
             );
             let _ = done_tx.send(());

@@ -70,10 +70,15 @@ pub(crate) fn caller(stamp: &Stamp<'_>, uid: u32) -> Tasker {
 
 /// A task verb's operands, read once from the wire verb.
 pub(crate) enum TaskVerb<'a> {
-    Submit(&'a TaskSubmission),
+    Submit {
+        task: &'a TaskSubmission,
+        tokens: &'a maknae_proto::ForgeTokens,
+    },
     Add {
         task: TaskId,
         text: &'a SecretText,
+        bindings: &'a [maknae_proto::BindingRequest],
+        tokens: &'a maknae_proto::ForgeTokens,
     },
     Status(TaskId),
     List {
@@ -101,10 +106,20 @@ pub(crate) enum TaskVerb<'a> {
 
 pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
     match verb {
-        Verb::TaskSubmit { task } => Some(TaskVerb::Submit(task)),
-        Verb::TaskAdd { task, text } => Some(TaskVerb::Add {
+        Verb::TaskSubmit { task, forge_tokens } => Some(TaskVerb::Submit {
+            task,
+            tokens: forge_tokens,
+        }),
+        Verb::TaskAdd {
+            task,
+            text,
+            bindings,
+            forge_tokens,
+        } => Some(TaskVerb::Add {
             task: task.to_id(),
             text,
+            bindings,
+            tokens: forge_tokens,
         }),
         Verb::TaskStatus { task } => Some(TaskVerb::Status(task.to_id())),
         Verb::TaskList { agent, after } => Some(TaskVerb::List {
@@ -205,7 +220,7 @@ impl TaskVerb<'_> {
             | TaskVerb::Status(task)
             | TaskVerb::Stop(task)
             | TaskVerb::Drop(task) => Some(*task),
-            TaskVerb::Submit(_)
+            TaskVerb::Submit { .. }
             | TaskVerb::List { .. }
             | TaskVerb::Collect { .. }
             | TaskVerb::Claim { .. }
@@ -217,7 +232,7 @@ impl TaskVerb<'_> {
     /// The agent a submission, list or collect names.
     pub(crate) fn named_agent(&self) -> Option<&str> {
         match self {
-            TaskVerb::Submit(sub) => Some(&sub.agent),
+            TaskVerb::Submit { task, .. } => Some(&task.agent),
             TaskVerb::List { agent, .. } | TaskVerb::Collect { agent, .. } => Some(agent),
             TaskVerb::Add { .. }
             | TaskVerb::Status(_)
@@ -358,6 +373,7 @@ pub(crate) fn decided(said: &[String]) -> String {
 }
 
 pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
+    let bound = rec.bound();
     TaskView {
         task: TaskRef::from_id(&rec.signed.task.task_id),
         agent: rec.agent.as_str().to_owned(),
@@ -368,7 +384,12 @@ pub(crate) fn view(rec: &TaskRecord, hot: &Hot, now: i64) -> TaskView {
         actions: hot.actions,
         last_action_secs: hot.last_action,
         cursor: TaskCursor::from_seq(rec.tseq),
-        bindings: rec.signed.task.bindings.clone(),
+        bindings: bound.bindings.into_iter().cloned().collect(),
+        reach: bound
+            .reach
+            .into_iter()
+            .map(maknae_proto::ReachSummary::of)
+            .collect(),
     }
 }
 
@@ -608,6 +629,7 @@ mod tests {
             unseen: false,
             starts: 0,
             parent_start: None,
+            addendum: None,
         }
     }
 
@@ -840,6 +862,8 @@ mod tests {
             Verb::TaskAdd {
                 task: r.clone(),
                 text: SecretText(Zeroizing::new("x".into())),
+                bindings: vec![],
+                forge_tokens: maknae_proto::ForgeTokens::default(),
             },
             Verb::TaskStatus { task: r.clone() },
             Verb::TaskStop { task: r.clone() },
@@ -877,6 +901,7 @@ mod tests {
                 labels: maknae_proto::Labels {},
                 bindings: vec![],
             },
+            forge_tokens: maknae_proto::ForgeTokens::default(),
         };
         assert_eq!(task_verb(&sub).unwrap().object(), Some("agent:jin".into()));
         assert!(task_verb(&Verb::Ping).is_none());
@@ -979,9 +1004,54 @@ mod tests {
                 last_action_secs: Some(140),
                 cursor: TaskCursor::from_seq(7),
                 bindings: vec![],
+                reach: vec![],
             }
         );
         assert_eq!(view(&r, &hot, 50).elapsed_secs, 0);
+    }
+
+    #[test]
+    fn a_view_shows_each_bindings_effective_reach() {
+        use maknae_proto::{
+            AgentReach, Binding, BindingReach, EmptyReason, ForgeOp, GitBinding, GitReach,
+            SideReach, TaskerBasis,
+        };
+        let side = |base: &[ForgeOp]| {
+            SideReach::new(base.iter().copied().collect(), Default::default()).unwrap()
+        };
+        let mut r = rec(1, None, "");
+        let mut signed = (*r.signed).clone();
+        signed.task.bindings = ["o/r", "o/s"]
+            .map(|base| {
+                Binding::Git(GitBinding {
+                    server: "forge.example".into(),
+                    base: base.into(),
+                    head: None,
+                    change: None,
+                })
+            })
+            .to_vec();
+        signed.task.reach = vec![
+            BindingReach::Git(GitReach {
+                tasker: side(&[ForgeOp::Read, ForgeOp::Merge]),
+                basis: TaskerBasis::Token,
+                agent: AgentReach::Observed(side(&[ForgeOp::Read, ForgeOp::Review])),
+                why: None,
+            }),
+            BindingReach::Git(GitReach {
+                tasker: side(&[ForgeOp::Read]),
+                basis: TaskerBasis::Token,
+                agent: AgentReach::NoForgeCredential,
+                why: Some(EmptyReason::NoForgeCredential),
+            }),
+        ];
+        r.signed = std::sync::Arc::new(signed);
+        let v = view(&r, &Hot::default(), 100);
+        assert_eq!(v.reach.len(), 2);
+        assert_eq!(v.reach[0].base(), [ForgeOp::Read].into_iter().collect());
+        assert_eq!(v.reach[0].why(), None);
+        assert!(v.reach[1].base().is_empty());
+        assert_eq!(v.reach[1].why(), Some(EmptyReason::NoForgeCredential));
     }
 
     #[test]

@@ -43,8 +43,8 @@ MANIFEST=ci/gates/config-disclosure-manifest.txt
 # extractor cannot see all change a number a human must edit deliberately.
 SURFACE=(
   "crates/maknae-config/src/transport.rs|TransportConfig|transport|6|config"
-  # The `egress` section (#240): the deputy's socket and the provider deadline.
-  "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|2|config"
+  # The `egress` section (#240): the deputy's socket, the provider deadline and the reach deadline (#168).
+  "crates/maknae-config/src/egress_cfg.rs|EgressConfig|egress|3|config"
   "crates/maknae-config/src/audit_cfg.rs|AuditConfig|audit|4|config"
   "crates/maknae-config/src/principal.rs|Principal|principal|2|config"
   "crates/maknae-config/src/deployment.rs|Deployment|deployment|2|config"
@@ -96,23 +96,26 @@ SURFACE=(
   "crates/maknae-proto/src/wire.rs|StatView|stat|3|wire"
   "crates/maknae-proto/src/mutation.rs|ListGrant|list|2|wire"
   "crates/maknae-proto/src/mutation.rs|ListEntry|list.entries|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|task|10|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task|11|wire"
   "crates/maknae-proto/src/task.rs|GitBinding|task.bindings|4|wire"
+  "crates/maknae-proto/src/reach.rs|ReachSummary|task.reach|2|wire"
   "crates/maknae-proto/src/task.rs|TaskPage|task_list|2|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|10|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|task_list.entries|11|wire"
   "crates/maknae-proto/src/task.rs|GitBinding|task_list.entries.bindings|4|wire"
+  "crates/maknae-proto/src/reach.rs|ReachSummary|task_list.entries.reach|2|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_report|6|wire"
   "crates/maknae-proto/src/task.rs|TaskReportPage|task_reports|2|wire"
   "crates/maknae-proto/src/task.rs|TaskReportView|task_reports.entries|6|wire"
   "crates/maknae-proto/src/task.rs|TaskDelivery|task_delivery|3|wire"
-  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|3|wire"
+  "crates/maknae-proto/src/task.rs|TaskFollowUps|task_follow_ups|4|wire"
   "crates/maknae-proto/src/task.rs|AgentPage|agent_list|4|wire"
   "crates/maknae-proto/src/task.rs|AgentEntry|agent_list.entries|3|wire"
   "crates/maknae-proto/src/task.rs|BannerSpec|agent_list.banner|2|wire"
   "crates/maknae-proto/src/task.rs|HeldPage|held_list|2|wire"
   "crates/maknae-proto/src/task.rs|HeldView|held_list.entries|5|wire"
-  "crates/maknae-proto/src/task.rs|TaskView|held_list.entries.view|10|wire"
+  "crates/maknae-proto/src/task.rs|TaskView|held_list.entries.view|11|wire"
   "crates/maknae-proto/src/task.rs|GitBinding|held_list.entries.view.bindings|4|wire"
+  "crates/maknae-proto/src/reach.rs|ReachSummary|held_list.entries.view.reach|2|wire"
   "crates/maknae-proto/src/task.rs|ReleasePage|held_release|4|wire"
   "crates/maknae-proto/src/task.rs|ReleaseOutcome|held_release.outcomes|4|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
@@ -189,6 +192,7 @@ LEAF_SECRETS=(
   "task_report.text|crates/maknae-proto/src/wire.rs|SecretText"
   "task_reports.entries.text|crates/maknae-proto/src/wire.rs|SecretText"
   "task_follow_ups.items|crates/maknae-proto/src/wire.rs|SecretText"
+  "task_follow_ups.addendum|crates/maknae-proto/src/bytes.rs|Bytes"
 )
 
 secret_decl() { # <type>
