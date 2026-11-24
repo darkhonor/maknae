@@ -14,7 +14,7 @@ use crate::blocking_guard::{admit_blocking, Offload};
 use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore};
 use crate::board_store::{BoardKey, HeldFor, LabelValue, Report, Settings, Stored};
 use crate::boot::BootConfig;
-use crate::enrollment::EnrollmentView;
+use crate::enrollment::{EnrollmentView, Load};
 use crate::task::CitedTask;
 
 pub trait BoardSwitches: Send + Sync {
@@ -89,13 +89,15 @@ impl std::fmt::Display for Off {
     }
 }
 
-/// `Ok(None)` for an agent citing no task: the decision refuses it.
+/// `Ok(None)` for an agent citing no task: the decision refuses it. Otherwise the board
+/// and the policy load the switches were read from, in the same hold.
 pub(crate) fn gate(
     channel_agent: Option<&AgentId>,
     cited: Option<&CitedTask>,
     switches: &dyn BoardSwitches,
     board: &BoardStore,
-) -> Result<Option<BoardKey>, Off> {
+    view: &dyn EnrollmentView,
+) -> Result<Option<(BoardKey, Load)>, Off> {
     let agent = channel_agent.ok_or(Off::ClientChannel)?;
     let Some(cited) = cited else {
         return Ok(None);
@@ -104,15 +106,18 @@ pub(crate) fn gate(
     if !switches.site() {
         return Err(Off::Site);
     }
-    let (agent_on, tasker_on) = board.enabled_with(key, || switches.agent(agent));
+    let ((agent_on, load), tasker_on) =
+        board.enabled_with(key, || (switches.agent(agent), view.load()));
     if !agent_on {
         return Err(Off::Agent);
     }
     if !tasker_on {
         return Err(Off::Tasker);
     }
-    Ok(Some(key))
+    Ok(Some((key, load)))
 }
+
+pub(crate) const POLICY_CHANGED: &str = "board: the policy changed during the request";
 
 pub(crate) const ONLY_A_PERSON: &str = "board: only a person manages a board";
 
@@ -1057,6 +1062,93 @@ mod tests {
         }
     }
 
+    /// A view whose installed load is `current`. Reading the agent's switch starts an
+    /// install that replaces the load; reading the load first waits up to 300 ms for that
+    /// install to land, which it can only do while the board's memory lock is free.
+    struct SwapWhileRead {
+        current: Arc<std::sync::Mutex<Arc<dyn std::any::Any + Send + Sync>>>,
+        board: Arc<BoardStore>,
+        landed: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        swapper: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl BoardSwitches for SwapWhileRead {
+        fn site(&self) -> bool {
+            true
+        }
+
+        fn agent(&self, _: &AgentId) -> bool {
+            let (current, board) = (Arc::clone(&self.current), Arc::clone(&self.board));
+            let (done, landed) = std::sync::mpsc::channel();
+            *self.landed.lock().unwrap() = Some(landed);
+            *self.swapper.lock().unwrap() = Some(std::thread::spawn(move || {
+                board.install_and_mark(
+                    || *current.lock().unwrap() = Arc::new(2_u8),
+                    &crate::enrollment::FixedEnrollment(Default::default()),
+                );
+                let _ = done.send(());
+            }));
+            true
+        }
+    }
+
+    impl EnrollmentView for SwapWhileRead {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+        fn contained(&self, _: u32) -> bool {
+            false
+        }
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+        fn board(&self, _: &AgentId) -> bool {
+            true
+        }
+        fn load(&self) -> Load {
+            if let Some(landed) = self.landed.lock().unwrap().take() {
+                let _ = landed.recv_timeout(std::time::Duration::from_millis(300));
+            }
+            Load::installed(Arc::clone(&self.current.lock().unwrap()))
+        }
+    }
+
+    #[test]
+    fn the_gate_reads_the_policy_load_with_the_switches_and_sees_a_later_install() {
+        let first: Arc<dyn std::any::Any + Send + Sync> = Arc::new(1_u8);
+        let swap = SwapWhileRead {
+            current: Arc::new(std::sync::Mutex::new(Arc::clone(&first))),
+            board: Arc::new(enabled(true)),
+            landed: std::sync::Mutex::new(None),
+            swapper: std::sync::Mutex::new(None),
+        };
+        let person = cited(RootTasker::Person { uid: BOB.0 });
+        let got = gate(Some(&hobi()), Some(&person), &swap, &swap.board, &swap);
+        swap.swapper
+            .lock()
+            .unwrap()
+            .take()
+            .expect("reading the switch started the install")
+            .join()
+            .unwrap();
+        let (key, load) = got.expect("on").expect("a board");
+        assert_eq!(key, BOB);
+        assert_eq!(
+            load,
+            Load::installed(first),
+            "the load the switch was read on"
+        );
+        assert!(!swap.board.still_installed(&load, &swap));
+        assert!(swap.board.still_installed(&swap.load(), &swap));
+        assert_ne!(load, swap.load());
+    }
+
     #[test]
     fn the_gate_reads_the_agent_and_the_tasker_at_one_instant() {
         let switches = FlipWhileRead {
@@ -1065,7 +1157,13 @@ mod tests {
             flipper: std::sync::Mutex::new(None),
         };
         let person = cited(RootTasker::Person { uid: BOB.0 });
-        let got = gate(Some(&hobi()), Some(&person), &switches, &switches.board);
+        let got = gate(
+            Some(&hobi()),
+            Some(&person),
+            &switches,
+            &switches.board,
+            &crate::enrollment::FixedEnrollment(Default::default()),
+        );
         switches
             .flipper
             .lock()
@@ -1084,7 +1182,13 @@ mod tests {
             "the write landed after"
         );
         assert_eq!(
-            gate(Some(&hobi()), Some(&person), &switches, &switches.board),
+            gate(
+                Some(&hobi()),
+                Some(&person),
+                &switches,
+                &switches.board,
+                &crate::enrollment::FixedEnrollment(Default::default()),
+            ),
             Err(Off::Agent)
         );
         switches
@@ -1195,7 +1299,14 @@ mod tests {
             ),
         ];
         for (at, channel, task, sw, on, want) in table {
-            assert_eq!(gate(channel, task, &sw, &enabled(on)), want, "{at}");
+            let got = gate(
+                channel,
+                task,
+                &sw,
+                &enabled(on),
+                &crate::enrollment::FixedEnrollment(Default::default()),
+            );
+            assert_eq!(got.map(|g| g.map(|(key, _)| key)), want, "{at}");
         }
         assert_eq!(
             [

@@ -11,7 +11,7 @@ use crate::board_store::{
     load, Board, BoardFinding, BoardKey, CursorRecord, HeldFor, Name, PostLabels, PostRecord,
     ReadPlan, Settings, Stored, BOARD_OWED_MAX, BOARD_RETENTION, FIRST_SEQ,
 };
-use crate::enrollment::EnrollmentView;
+use crate::enrollment::{EnrollmentView, Load};
 use crate::task::{draw_id, ID_DRAWS, OUTCOME_UNKNOWN};
 use crate::task_store::{encode, Clock, StoreError, TaskBlobs};
 
@@ -456,13 +456,19 @@ impl BoardStore {
 
     /// `agent` and whether the tasker's board is enabled, read in one hold of the memory
     /// lock. `agent` reads only what an install swaps under that lock.
-    pub(crate) fn enabled_with(&self, key: BoardKey, agent: impl FnOnce() -> bool) -> (bool, bool) {
+    pub(crate) fn enabled_with<T>(&self, key: BoardKey, agent: impl FnOnce() -> T) -> (T, bool) {
         let held = self.held();
         let agent = agent();
         (
             agent,
             held.boards.get(&key).is_some_and(|b| b.settings.enabled),
         )
+    }
+
+    /// Whether `view`'s installed load is still `load`, read under the memory lock.
+    pub(crate) fn still_installed(&self, load: &Load, view: &dyn EnrollmentView) -> bool {
+        let _held = self.held();
+        view.load() == *load
     }
 
     pub fn settings(&self, key: BoardKey) -> Settings {

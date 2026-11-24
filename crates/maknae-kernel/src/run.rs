@@ -3803,9 +3803,10 @@ async fn serve_board_verb<S, E, P>(
         board.cited,
         &*board.agents.switches,
         store,
+        &*board.agents.view,
     );
-    let key = match gated {
-        Ok(key) => key,
+    let gated = match gated {
+        Ok(gated) => gated,
         Err(off) => {
             let rec = bv::on_board(
                 trail.record(action, "deny", &off.to_string(), "unavailable"),
@@ -3843,13 +3844,22 @@ async fn serve_board_verb<S, E, P>(
             }
         }
     }
-    let (Some(key), Some(cited), Some(agent)) = (key, board.cited, board.channel_agent) else {
+    let (Some((key, load)), Some(cited), Some(agent)) = (gated, board.cited, board.channel_agent)
+    else {
         let reason = bv::Off::NoTask.to_string();
         trail
             .unauthorized(stream, &decided("deny", &reason, "unavailable"))
             .await;
         return;
     };
+    let still = || store.still_installed(&load, &*board.agents.view);
+    if !still() {
+        let rec = decided("deny", bv::POLICY_CHANGED, "unauthorized");
+        trail
+            .refuse_board(stream, &rec, BoardDefect::TryAgain)
+            .await;
+        return;
+    }
     let deadline = || tokio::time::Instant::now() + timeout;
 
     if let Verb::BoardPost { post } = verb {
@@ -3878,6 +3888,13 @@ async fn serve_board_verb<S, E, P>(
                         == [bv::PostVerdict::Permit]
                 }
             };
+            if !still() {
+                let rec = described(decided("deny", bv::POLICY_CHANGED, "unauthorized"));
+                trail
+                    .refuse_board(stream, &rec, BoardDefect::TryAgain)
+                    .await;
+                return;
+            }
             if !visible {
                 let r = crate::board::BoardRefusal::NoSuchPost;
                 let rec = described(decided("deny", &r.to_string(), bv::posture(&r)));
@@ -3973,6 +3990,13 @@ async fn serve_board_verb<S, E, P>(
         .await;
         if !base_confirmed || (stalled && walk.page.posts.is_empty()) {
             let mut outcome = trail.outcome(&intent, bv::UNDECIDED, "unavailable");
+            outcome.outcome.result = "deny".into();
+            outcome.board = Some(bv::read_audit(&walk, cursor));
+            trail
+                .refuse_board(stream, &outcome, BoardDefect::TryAgain)
+                .await;
+        } else if !still() {
+            let mut outcome = trail.outcome(&intent, bv::POLICY_CHANGED, "unauthorized");
             outcome.outcome.result = "deny".into();
             outcome.board = Some(bv::read_audit(&walk, cursor));
             trail

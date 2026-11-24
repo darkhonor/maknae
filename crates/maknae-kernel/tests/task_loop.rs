@@ -6617,6 +6617,261 @@ mod board {
         assert_eq!(pdp.batches.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    mod one_snapshot {
+        use super::*;
+
+        const POLICY_CHANGED: &str = "board: the policy changed during the request";
+        const READ_ONLY: &str = "roles:\n  user:\n    allow: [\"session.task\", \"board.read\"]\n";
+
+        /// Runs `then` once, as the first decision of `action` begins (`batch`: the first
+        /// batch naming it), then decides with the real composition.
+        struct BeforeDeciding {
+            inner: Arc<Pdp>,
+            action: &'static str,
+            batch: bool,
+            then: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        }
+
+        impl BeforeDeciding {
+            fn new(
+                inner: &Arc<Pdp>,
+                action: &'static str,
+                batch: bool,
+                then: impl FnOnce() + Send + 'static,
+            ) -> Arc<Self> {
+                Arc::new(BeforeDeciding {
+                    inner: Arc::clone(inner),
+                    action,
+                    batch,
+                    then: std::sync::Mutex::new(Some(Box::new(then))),
+                })
+            }
+
+            fn run(&self) {
+                if let Some(then) = self.then.lock().unwrap().take() {
+                    then();
+                }
+            }
+        }
+
+        impl maknae_security::Authorizer for BeforeDeciding {
+            fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+                self.decide_cited(req).verdict
+            }
+            fn decide_reporting_role(
+                &self,
+                req: &maknae_security::Request,
+            ) -> (maknae_security::Verdict, Option<&'static str>) {
+                let d = self.decide_cited(req);
+                (d.verdict, d.role)
+            }
+            fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+                if !self.batch && req.action.0 == self.action {
+                    self.run();
+                }
+                self.inner.decide_cited(req)
+            }
+            fn decide_cited_all(
+                &self,
+                reqs: &[maknae_security::Request],
+            ) -> Vec<maknae_security::Decided> {
+                if self.batch && reqs.iter().any(|r| r.action.0 == self.action) {
+                    self.run();
+                }
+                self.inner.decide_cited_all(reqs)
+            }
+            fn subjects(&self) -> Option<Vec<maknae_security::SubjectBinding>> {
+                self.inner.subjects()
+            }
+            fn backend_name(&self) -> String {
+                self.inner.backend_name()
+            }
+        }
+
+        impl maknae_kernel::CatalogNow for BeforeDeciding {
+            fn catalog_now(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Result<
+                Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+                maknae_authz_basic::catalog::CatalogError,
+            > {
+                self.inner.catalog_now(uid, forges)
+            }
+            fn catalog_stamp(
+                &self,
+                uid: u32,
+                forges: &maknae_config::ForgeSet,
+            ) -> Option<maknae_proto::CatalogDigest> {
+                self.inner.catalog_stamp(uid, forges)
+            }
+            fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+                self.inner.forge_credentials(agent_uid)
+            }
+        }
+
+        impl maknae_kernel::SensitiveNow for BeforeDeciding {
+            fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+                self.inner.sensitive_now()
+            }
+        }
+
+        /// Site on, hobi's own switch on in its policy.yaml, the tasker on, and `roles`.
+        fn switched_world(tag: &str, roles: &str) -> World {
+            let mut w = world_of(
+                tag,
+                "user",
+                roles,
+                &[
+                    ("hobi", HOBI_UID, BOARD_ON),
+                    ("suga", SUGA_UID, PLAIN),
+                    ("jin", JIN_UID, PLAIN),
+                ],
+            );
+            w.configured("site-on", "board:\n  enabled: true\n");
+            w.enable(w.me, true);
+            w
+        }
+
+        impl World {
+            /// Writes hobi's policy.yaml and the role grants, then installs both as one load.
+            fn installs(&self, hobi: &'static str, roles: &'static str) -> impl FnOnce() + Send {
+                let policy = self
+                    .root
+                    .join(maknae_config::AGENTS_DIR)
+                    .join("hobi")
+                    .join(maknae_config::POLICY_FILE);
+                let authz = maknae_authz_basic::PolicyPaths::in_dir(&self.root).authz;
+                let pdp = Arc::clone(&self.pdp);
+                move || {
+                    common::write_0640(&policy, hobi);
+                    common::write_0640(
+                        &authz,
+                        &format!(
+                            "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n{roles}"
+                        ),
+                    );
+                    pdp.baseline().reload_from_file().unwrap();
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_post_whose_policy_is_installed_between_its_gate_and_its_decision_is_refused() {
+            let w = switched_world("board-one-snapshot-post", READ_ONLY);
+            let h = w.at_work("hobi");
+            let (answer, records) = w.board("hobi", post(note("sentinel-698-a")), h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(said(&records)[0].1, "role user: no rule for board.post");
+
+            let install = w.installs(BOARD_OFF, BOARD_ROLES);
+            let pdp = BeforeDeciding::new(&w.pdp, "board.post", false, install);
+            let (answer, records) = w
+                .board_as(&pdp, "hobi", post(note("sentinel-698-between")), h)
+                .await;
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+            assert_eq!(said(&records), one("deny", POLICY_CHANGED, "unauthorized"));
+            assert_eq!(records[0].object, Some(format!("board:users/{}", w.me)));
+            assert!(records[0].board.is_none(), "{records:?}");
+            assert!(w.agents.board.candidates(w.key(), 0, 10).is_empty());
+
+            let (answer, records) = w.board("hobi", post(note("sentinel-698-retry")), h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                one("deny", "board off: agent", "unavailable")
+            );
+            assert!(w.agents.board.candidates(w.key(), 0, 10).is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_post_decided_wholly_under_one_policy_completes_when_another_is_installed_after()
+        {
+            let w = switched_world("board-one-snapshot-after", BOARD_ROLES);
+            let h = w.at_work("hobi");
+            let install = w.installs(BOARD_OFF, READ_ONLY);
+            let (answer, records) = w
+                .board_during_intent("hobi", post(note("sentinel-698-whole")), h, install)
+                .await;
+            let id = posted(answer);
+            assert_eq!(
+                said(&records),
+                [
+                    (
+                        "permit".into(),
+                        "intent recorded".into(),
+                        "authorized".into()
+                    ),
+                    ("permit".into(), "done".into(), "authorized".into()),
+                ]
+            );
+            assert!(w.agents.board.get(w.key(), id).is_some());
+
+            let (answer, records) = w.board("hobi", post(note("sentinel-698-next")), h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                one("deny", "board off: agent", "unavailable")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_reply_whose_policy_is_installed_while_its_target_is_decided_is_refused() {
+            let w = switched_world("board-one-snapshot-reply", BOARD_ROLES);
+            let h = w.at_work("hobi");
+            let target = w.stored("suga", "sentinel-698-target", PostLabels::default());
+            let install = w.installs(BOARD_ON, BOARD_ROLES);
+            let pdp = BeforeDeciding::new(&w.pdp, "board.read", true, install);
+            let (answer, records) = w
+                .board_as(&pdp, "hobi", post(reply("sentinel-698-reply", target)), h)
+                .await;
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+            assert_eq!(said(&records), one("deny", POLICY_CHANGED, "unauthorized"));
+            let described = records[0].board.as_ref().expect("the post's shape");
+            assert_eq!(described.in_reply_to, Some(target.to_string()));
+            assert_eq!(described.post_id, None);
+            assert_eq!(
+                w.agents
+                    .board
+                    .candidates(w.key(), 0, 10)
+                    .iter()
+                    .map(|s| s.post.id)
+                    .collect::<Vec<_>>(),
+                [target]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_read_whose_policy_is_installed_during_its_post_batches_sends_nothing() {
+            let w = switched_world("board-one-snapshot-read", BOARD_ROLES);
+            let h = w.at_work("hobi");
+            for body in ["sentinel-698-r1", "sentinel-698-r2"] {
+                w.stored("suga", body, PostLabels::default());
+            }
+            let install = w.installs(BOARD_ON, BOARD_ROLES);
+            let pdp = BeforeDeciding::new(&w.pdp, "board.read", true, install);
+            let (answer, records) = w.board_as(&pdp, "hobi", read(None), h).await;
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                [
+                    (
+                        "permit".into(),
+                        "intent recorded".into(),
+                        "authorized".into()
+                    ),
+                    ("deny".into(), POLICY_CHANGED.into(), "unauthorized".into()),
+                ]
+            );
+            assert_eq!(w.cursor("hobi"), 0);
+            assert_eq!(
+                bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+                ["sentinel-698-r1", "sentinel-698-r2"]
+            );
+        }
+    }
+
     mod manage {
         use super::*;
         use maknae_audit_append::BoardAudit;
