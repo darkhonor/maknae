@@ -9,9 +9,9 @@ use maknae_proto::{Author, Labels, Post, PostDraft, PostId, TaskId};
 
 use crate::board_store::{
     load, Board, BoardFinding, BoardKey, CursorRecord, HeldFor, Name, PostLabels, PostRecord,
-    ReadPlan, Settings, Stored, BOARD_RETENTION, FIRST_SEQ,
+    ReadPlan, Settings, Stored, BOARD_OWED_MAX, BOARD_RETENTION, FIRST_SEQ,
 };
-use crate::enrollment::EnrollmentView;
+use crate::enrollment::{EnrollmentView, Load};
 use crate::task::{draw_id, ID_DRAWS, OUTCOME_UNKNOWN};
 use crate::task_store::{encode, Clock, StoreError, TaskBlobs};
 
@@ -60,6 +60,22 @@ pub(crate) struct Observed {
     pub in_range: BTreeSet<u64>,
 }
 
+/// What one [`BoardStore::write_settings`] did: the settings before it, those memory holds
+/// after it, and why it is not done, if it is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Written {
+    pub before: Settings,
+    pub now: Settings,
+    pub refused: Option<BoardRefusal>,
+}
+
+/// What [`BoardStore::clear`] removed, and why it stopped early, if it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Cleared {
+    pub removed: Vec<PostId>,
+    pub stopped: Option<BoardRefusal>,
+}
+
 /// What [`BoardStore::release`] did with a hold it lifted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lifted {
@@ -106,7 +122,7 @@ enum Item {
 #[derive(Default)]
 struct Held {
     boards: BTreeMap<BoardKey, Board>,
-    /// Post records written unsynced whose removal did not sync either.
+    /// Post records whose removal did not sync: a post's undo, or a cleared post's unlink.
     owed: BTreeSet<(BoardKey, PostId)>,
     boot: Vec<BoardFinding>,
     /// Holds not yet stored, by board and sequence.
@@ -158,6 +174,137 @@ impl Held {
         let s = self.boards.get(&key)?.posts.get(&seq)?;
         (Some(s.post.id) == id).then_some(s)
     }
+
+    /// Removals owed, and notices not yet recorded: what `BOARD_OWED_MAX` bounds.
+    fn owing(&self) -> usize {
+        self.owed
+            .len()
+            .saturating_add(self.notices.len())
+            .saturating_add(self.in_flight)
+    }
+
+    /// The record name of the post at `seq` with `id`, noted expiring, when `due` holds for
+    /// it, it is not held back, and `view` contains neither its author nor `key`'s person.
+    /// A post `view` contains is marked for its holds instead.
+    fn claim(
+        &mut self,
+        key: BoardKey,
+        seq: u64,
+        id: Option<PostId>,
+        view: &dyn EnrollmentView,
+        due: impl FnOnce(&Stored) -> bool,
+    ) -> Option<String> {
+        let (name, author_uid) = self
+            .at(key, seq, id)
+            .filter(|s| !self.held_back(key, s) && due(s))
+            .map(|s| (Name::Post(key, s.post.id).text(), s.author_uid))?;
+        let contained = contained_on(view, key, std::iter::once(author_uid));
+        let why = contained_for(key, author_uid, &contained);
+        if !why.is_empty() {
+            self.marked.entry((key, seq)).or_default().extend(why);
+            return None;
+        }
+        self.expiring.insert((key, seq));
+        Some(name)
+    }
+
+    /// The post at `seq` when it is now marked, or `view` now contains its author or `key`'s
+    /// person, in which case it is marked for those holds.
+    fn contained_since(
+        &mut self,
+        key: BoardKey,
+        seq: u64,
+        view: &dyn EnrollmentView,
+    ) -> Option<Arc<Stored>> {
+        let s = Arc::clone(self.boards.get(&key)?.posts.get(&seq)?);
+        let contained = contained_on(view, key, std::iter::once(s.author_uid));
+        let why = contained_for(key, s.author_uid, &contained);
+        if !why.is_empty() {
+            self.marked.entry((key, seq)).or_default().extend(why);
+        }
+        self.marked.contains_key(&(key, seq)).then_some(s)
+    }
+
+    /// See [`BoardStore::mark`].
+    fn mark(&mut self, view: &dyn EnrollmentView) {
+        let held = self;
+        let uids: BTreeSet<u32> = held
+            .boards
+            .iter()
+            .flat_map(|(key, b)| {
+                std::iter::once(key.0).chain(b.posts.values().filter_map(|s| s.author_uid))
+            })
+            .collect();
+        let among = view.contained_among(&uids);
+        let contained = |uid: u32| among.contains(&uid);
+        let mut marked = BTreeMap::new();
+        for (key, board) in &held.boards {
+            let person = contained(key.0);
+            for (seq, s) in &board.posts {
+                let mut why = BTreeSet::new();
+                if s.author_uid.is_some_and(contained) && !s.held.contains(&HeldFor::Author) {
+                    why.insert(HeldFor::Author);
+                }
+                if person && !s.held.contains(&HeldFor::Person) {
+                    why.insert(HeldFor::Person);
+                }
+                if !why.is_empty() {
+                    marked.insert((*key, *seq), why);
+                }
+            }
+        }
+        held.said.retain(|item| match item {
+            Item::Post(key, seq, BoardDueFor::Hold(f)) => {
+                marked.get(&(*key, *seq)).is_some_and(|w| w.contains(f))
+            }
+            Item::Post(_, _, BoardDueFor::Expire | BoardDueFor::DropCursor) | Item::Cursor(..) => {
+                true
+            }
+        });
+        held.marked = marked;
+
+        let gone: BTreeSet<AgentId> = held
+            .boards
+            .values()
+            .flat_map(|b| b.cursors.keys().chain(b.sent.keys()))
+            .filter(|agent| view.agent_uid(agent).is_none())
+            .cloned()
+            .collect();
+        for board in held.boards.values_mut() {
+            board.sent.retain(|agent, _| !gone.contains(agent));
+        }
+        held.noted = held
+            .boards
+            .iter()
+            .flat_map(|(key, b)| {
+                b.cursors
+                    .keys()
+                    .filter(|a| gone.contains(*a))
+                    .map(|a| (*key, a.clone()))
+            })
+            .collect();
+        let noted = &held.noted;
+        held.said.retain(|item| match item {
+            Item::Cursor(key, reader) => noted.contains(&(*key, reader.clone())),
+            Item::Post(..) => true,
+        });
+    }
+
+    /// Forgets the post at `seq` once its record is deleted.
+    fn forget(&mut self, key: BoardKey, seq: u64) {
+        if let Some(board) = self.boards.get_mut(&key) {
+            if let Some(gone) = board.posts.remove(&seq) {
+                board.ids.remove(&gone.post.id);
+            }
+            for sent in board.sent.values_mut() {
+                sent.remove(&seq);
+            }
+            board.sent.retain(|_, sent| !sent.is_empty());
+        }
+        self.marked.remove(&(key, seq));
+        self.said
+            .retain(|i| !matches!(i, Item::Post(k, s, _) if (*k, *s) == (key, seq)));
+    }
 }
 
 /// Clears an `expiring` entry if `expire` unwinds before it clears the entry itself.
@@ -173,6 +320,16 @@ impl Drop for Expiring<'_> {
             self.store.held().expiring.remove(&self.at);
         }
     }
+}
+
+/// What [`BoardStore::unlink_claimed`] left of a claimed post.
+enum After<'a> {
+    /// Neither marked nor contained since its claim: the caller acts on the delete's result.
+    Unlinked(std::sync::MutexGuard<'a, Held>, Result<(), StoreError>),
+    /// Kept in memory, marked, its record written back.
+    Kept,
+    /// Kept in memory and marked, its record not written back.
+    NotRestored(StoreError),
 }
 
 enum Step {
@@ -226,7 +383,12 @@ pub struct BoardStore {
     /// The highest time this store has read, so that its now never runs backwards.
     seen: std::sync::atomic::AtomicI64,
     caps: Caps,
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    after_settings: Mutex<Option<SettingsHook>>,
 }
+
+#[cfg(any(test, feature = "hermetic-test-seam"))]
+type SettingsHook = Box<dyn FnOnce(&BoardStore) + Send>;
 
 impl BoardStore {
     #[cfg(any(test, feature = "hermetic-test-seam"))]
@@ -269,6 +431,8 @@ impl BoardStore {
             clock,
             seen: std::sync::atomic::AtomicI64::new(i64::MIN),
             caps,
+            #[cfg(any(test, feature = "hermetic-test-seam"))]
+            after_settings: Mutex::new(None),
         })
     }
 
@@ -290,6 +454,23 @@ impl BoardStore {
         }
     }
 
+    /// `agent` and whether the tasker's board is enabled, read in one hold of the memory
+    /// lock. `agent` reads only what an install swaps under that lock.
+    pub(crate) fn enabled_with<T>(&self, key: BoardKey, agent: impl FnOnce() -> T) -> (T, bool) {
+        let held = self.held();
+        let agent = agent();
+        (
+            agent,
+            held.boards.get(&key).is_some_and(|b| b.settings.enabled),
+        )
+    }
+
+    /// Whether `view`'s installed load is still `load`, read under the memory lock.
+    pub(crate) fn still_installed(&self, load: &Load, view: &dyn EnrollmentView) -> bool {
+        let _held = self.held();
+        view.load() == *load
+    }
+
     pub fn settings(&self, key: BoardKey) -> Settings {
         self.held()
             .boards
@@ -297,16 +478,78 @@ impl BoardStore {
             .map_or_else(Settings::default, |b| b.settings)
     }
 
+    /// Writes `settings`: the settings before, those memory holds after, and why the write
+    /// is not done, if it is not. A write that does not sync leaves memory with each veto on
+    /// only where both values have it on, and the old `report`.
+    pub(crate) fn write_settings(&self, key: BoardKey, settings: Settings) -> Written {
+        let written = self.write_settings_alone(key, settings);
+        #[cfg(any(test, feature = "hermetic-test-seam"))]
+        {
+            let then = self
+                .after_settings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(then) = then {
+                then(self);
+            }
+        }
+        written
+    }
+
+    fn write_settings_alone(&self, key: BoardKey, settings: Settings) -> Written {
+        let _w = self.writing();
+        let mut rec = self.board_record(key);
+        let before = rec.settings;
+        rec.settings = settings;
+        match self.save_board(key, rec) {
+            Ok(()) => Written {
+                before,
+                now: settings,
+                refused: None,
+            },
+            Err(StoreError::NotDurable(why)) => {
+                let now = Settings {
+                    enabled: before.enabled && settings.enabled,
+                    participate: before.participate && settings.participate,
+                    report: before.report,
+                };
+                self.held().boards.entry(key).or_default().settings = now;
+                Written {
+                    before,
+                    now,
+                    refused: Some(BoardRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}"))),
+                }
+            }
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => Written {
+                before,
+                now: before,
+                refused: Some(store(e)),
+            },
+        }
+    }
+
+    /// [`Self::write_settings`], answering the settings before it.
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub(crate) fn set_settings(
         &self,
         key: BoardKey,
         settings: Settings,
-    ) -> Result<(), BoardRefusal> {
-        let _w = self.writing();
-        let mut rec = self.board_record(key);
-        rec.settings = settings;
-        self.save_board(key, rec)
+    ) -> Result<Settings, BoardRefusal> {
+        let written = self.write_settings(key, settings);
+        match written.refused {
+            None => Ok(written.before),
+            Some(why) => Err(why),
+        }
+    }
+
+    /// Runs `then` once, after the next settings write has returned its writer.
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn after_settings_write(&self, then: impl FnOnce(&BoardStore) + Send + 'static) {
+        *self
+            .after_settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(then));
     }
 
     /// `by` is the author and its uid. A post whose author uid or whose board's uid `view`
@@ -522,68 +765,16 @@ impl BoardStore {
     /// bears out; and notes each cursor, and forgets each walk, of a reader it no longer
     /// enrolls.
     pub(crate) fn mark(&self, view: &dyn EnrollmentView) {
-        let mut guard = self.held();
-        let held = &mut *guard;
-        let uids: BTreeSet<u32> = held
-            .boards
-            .iter()
-            .flat_map(|(key, b)| {
-                std::iter::once(key.0).chain(b.posts.values().filter_map(|s| s.author_uid))
-            })
-            .collect();
-        let among = view.contained_among(&uids);
-        let contained = |uid: u32| among.contains(&uid);
-        let mut marked = BTreeMap::new();
-        for (key, board) in &held.boards {
-            let person = contained(key.0);
-            for (seq, s) in &board.posts {
-                let mut why = BTreeSet::new();
-                if s.author_uid.is_some_and(contained) && !s.held.contains(&HeldFor::Author) {
-                    why.insert(HeldFor::Author);
-                }
-                if person && !s.held.contains(&HeldFor::Person) {
-                    why.insert(HeldFor::Person);
-                }
-                if !why.is_empty() {
-                    marked.insert((*key, *seq), why);
-                }
-            }
-        }
-        held.said.retain(|item| match item {
-            Item::Post(key, seq, BoardDueFor::Hold(f)) => {
-                marked.get(&(*key, *seq)).is_some_and(|w| w.contains(f))
-            }
-            Item::Post(_, _, BoardDueFor::Expire | BoardDueFor::DropCursor) | Item::Cursor(..) => {
-                true
-            }
-        });
-        held.marked = marked;
+        self.held().mark(view);
+    }
 
-        let gone: BTreeSet<AgentId> = held
-            .boards
-            .values()
-            .flat_map(|b| b.cursors.keys().chain(b.sent.keys()))
-            .filter(|agent| view.agent_uid(agent).is_none())
-            .cloned()
-            .collect();
-        for board in held.boards.values_mut() {
-            board.sent.retain(|agent, _| !gone.contains(agent));
-        }
-        held.noted = held
-            .boards
-            .iter()
-            .flat_map(|(key, b)| {
-                b.cursors
-                    .keys()
-                    .filter(|a| gone.contains(*a))
-                    .map(|a| (*key, a.clone()))
-            })
-            .collect();
-        let noted = &held.noted;
-        held.said.retain(|item| match item {
-            Item::Cursor(key, reader) => noted.contains(&(*key, reader.clone())),
-            Item::Post(..) => true,
-        });
+    /// Runs `install` and then [`Self::mark`] against it, in one hold of the memory lock, so
+    /// a check made under that lock sees the install with its marks or neither. `install`
+    /// swaps what `view` reads; it must not block, do I/O or take a board lock.
+    pub(crate) fn install_and_mark(&self, install: impl FnOnce(), view: &dyn EnrollmentView) {
+        let mut held = self.held();
+        install();
+        held.mark(view);
     }
 
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
@@ -673,50 +864,167 @@ impl BoardStore {
         let name = {
             let mut held = self.held();
             let now = self.now();
-            let found = held
-                .at(key, seq, id)
-                .filter(|s| !held.held_back(key, s) && expired(s, now))
-                .map(|s| (Name::Post(key, s.post.id).text(), s.author_uid));
-            let Some((name, author_uid)) = found else {
+            let Some(name) = held.claim(key, seq, id, view, |s| expired(s, now)) else {
                 held.said.remove(&item);
                 return Step::Skipped;
             };
-            let contained = contained_on(view, key, std::iter::once(author_uid));
-            let why = contained_for(key, author_uid, &contained);
-            if !why.is_empty() {
-                held.said.remove(&item);
-                held.marked.entry((key, seq)).or_default().extend(why);
-                return Step::Skipped;
-            }
             held.said.insert(item.clone());
-            held.expiring.insert((key, seq));
             name
         };
+        match self.unlink_claimed(key, seq, &name, view) {
+            After::Unlinked(mut held, Ok(())) => {
+                held.forget(key, seq);
+                Step::Done
+            }
+            After::Unlinked(
+                _,
+                Err(StoreError::Io(_) | StoreError::NotDurable(_) | StoreError::Counters(_)),
+            ) => Step::Refused,
+            After::Kept => {
+                self.held().said.remove(&item);
+                Step::Skipped
+            }
+            After::NotRestored(_) => {
+                self.held().said.remove(&item);
+                Step::Refused
+            }
+        }
+    }
+
+    /// [`Self::delete_claimed`], then the re-check: a post now marked, or whose author or
+    /// person `view` now contains, is kept in memory, marked, and its record written back.
+    fn unlink_claimed(
+        &self,
+        key: BoardKey,
+        seq: u64,
+        name: &str,
+        view: &dyn EnrollmentView,
+    ) -> After<'_> {
+        let (mut held, deleted) = self.delete_claimed(key, seq, name);
+        let kept = match &deleted {
+            Ok(()) | Err(StoreError::NotDurable(_)) => held.contained_since(key, seq, view),
+            Err(StoreError::Io(_) | StoreError::Counters(_)) => None,
+        };
+        let Some(kept) = kept else {
+            return After::Unlinked(held, deleted);
+        };
+        drop(held);
+        match self.restore(key, &kept) {
+            Ok(()) => After::Kept,
+            Err(why) => After::NotRestored(why),
+        }
+    }
+
+    /// Deletes the record `name` that [`Held::claim`] returned for `seq`, then ends the
+    /// claim; the caller decides what memory follows, under the guard returned.
+    fn delete_claimed(
+        &self,
+        key: BoardKey,
+        seq: u64,
+        name: &str,
+    ) -> (std::sync::MutexGuard<'_, Held>, Result<(), StoreError>) {
         let mut marker = Expiring {
             store: self,
             at: (key, seq),
             armed: true,
         };
-        let deleted = self.blobs.delete(&name);
+        let deleted = self.blobs.delete(name);
         let mut held = self.held();
         held.expiring.remove(&(key, seq));
         marker.armed = false;
-        if deleted.is_err() {
-            return Step::Refused;
+        (held, deleted)
+    }
+
+    /// Writes back the record of a post kept in memory after its delete.
+    fn restore(&self, key: BoardKey, kept: &Stored) -> Result<(), StoreError> {
+        let plain = encode(&PostRecord {
+            board: key.0,
+            stored: kept,
+        })?;
+        self.blobs
+            .save(&Name::Post(key, kept.post.id).text(), &plain)
+    }
+
+    /// Memory only: up to `BOARD_CLEAR_PAGE` posts of `key`'s board that are not withheld,
+    /// lowest sequence first, and whether more remain.
+    pub(crate) fn clearable(&self, key: BoardKey) -> (Vec<(u64, PostId)>, bool) {
+        let held = self.held();
+        let now = self.now();
+        let Some(board) = held.boards.get(&key) else {
+            return (Vec::new(), false);
+        };
+        let mut open = board
+            .posts
+            .values()
+            .filter(|s| !held.withheld(key, s, now))
+            .map(|s| (s.seq, s.post.id));
+        let page: Vec<(u64, PostId)> = open
+            .by_ref()
+            .take(crate::board_store::BOARD_CLEAR_PAGE)
+            .collect();
+        let more = open.next().is_some();
+        (page, more)
+    }
+
+    /// Under the writer: removes each of `posts` that is still on `key`'s board at that
+    /// sequence, not withheld, and whose author and person `view` does not contain; a post
+    /// `view` contains is marked for its holds instead. Takes at most `BOARD_CLEAR_PAGE`.
+    /// A post found marked or contained after its delete is kept and its record written
+    /// back. Stops at the first delete, or write-back, that fails.
+    pub(crate) fn clear(
+        &self,
+        key: BoardKey,
+        posts: &[(u64, PostId)],
+        view: &dyn EnrollmentView,
+    ) -> Cleared {
+        let _w = self.writing();
+        let mut cleared = Cleared {
+            removed: Vec::new(),
+            stopped: None,
+        };
+        if self.held().owing() >= BOARD_OWED_MAX {
+            cleared.stopped = Some(BoardRefusal::Store("removals are owed".into()));
+            return cleared;
         }
-        if let Some(board) = held.boards.get_mut(&key) {
-            if let Some(gone) = board.posts.remove(&seq) {
-                board.ids.remove(&gone.post.id);
+        for &(seq, id) in posts.iter().take(crate::board_store::BOARD_CLEAR_PAGE) {
+            let name = {
+                let mut held = self.held();
+                let now = self.now();
+                let Some(name) = held.claim(key, seq, Some(id), view, |s| !expired(s, now)) else {
+                    continue;
+                };
+                name
+            };
+            let (mut held, deleted) = match self.unlink_claimed(key, seq, &name, view) {
+                After::Unlinked(held, deleted) => (held, deleted),
+                After::Kept => continue,
+                After::NotRestored(why) => {
+                    cleared.stopped = Some(BoardRefusal::Unavailable(format!(
+                        "{OUTCOME_UNKNOWN}contained during the clear; the record is not restored: {why}"
+                    )));
+                    break;
+                }
+            };
+            match deleted {
+                Ok(()) => {
+                    held.forget(key, seq);
+                    cleared.removed.push(id);
+                }
+                Err(StoreError::NotDurable(why)) => {
+                    held.forget(key, seq);
+                    held.owed.insert((key, id));
+                    cleared.removed.push(id);
+                    cleared.stopped =
+                        Some(BoardRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}")));
+                    break;
+                }
+                Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => {
+                    cleared.stopped = Some(store(e));
+                    break;
+                }
             }
-            for sent in board.sent.values_mut() {
-                sent.remove(&seq);
-            }
-            board.sent.retain(|_, sent| !sent.is_empty());
         }
-        held.marked.remove(&(key, seq));
-        held.said
-            .retain(|i| !matches!(i, Item::Post(k, s, _) if (*k, *s) == (key, seq)));
-        Step::Done
+        cleared
     }
 
     fn hold(&self, key: BoardKey, seq: u64, id: Option<PostId>, f: HeldFor) -> Step {
@@ -925,14 +1233,7 @@ impl BoardStore {
         view: &dyn EnrollmentView,
     ) -> Result<Arc<Stored>, BoardRefusal> {
         let _w = self.writing();
-        let owing = {
-            let held = self.held();
-            held.owed
-                .len()
-                .saturating_add(held.notices.len())
-                .saturating_add(held.in_flight)
-        };
-        if owing >= crate::board_store::BOARD_OWED_MAX {
+        if self.held().owing() >= BOARD_OWED_MAX {
             return Err(BoardRefusal::Store("removals are owed".into()));
         }
         self.room(key, &author, draft.in_reply_to, view)?;
@@ -941,7 +1242,7 @@ impl BoardStore {
         rec.next_seq = seq
             .checked_add(1)
             .ok_or(BoardRefusal::Store("the sequence is exhausted".into()))?;
-        self.save_board(key, rec)?;
+        self.save_board(key, rec).map_err(store)?;
         let id = self.fresh_id(key, draw)?;
         let stored = Stored {
             post: Post {
@@ -1059,16 +1360,15 @@ impl BoardStore {
             .map_or_else(|| Board::default().record(key), |b| b.record(key))
     }
 
-    /// Any failure, unsynced included, changes nothing in memory.
+    /// Any failure, unsynced included, changes nothing in memory; the one exception is
+    /// [`Self::set_settings`], which on an unsynced write sets memory itself.
     fn save_board(
         &self,
         key: BoardKey,
         rec: crate::board_store::BoardRecord,
-    ) -> Result<(), BoardRefusal> {
-        let plain = encode(&rec).map_err(store)?;
-        self.blobs
-            .save(&Name::Board(key).text(), &plain)
-            .map_err(store)?;
+    ) -> Result<(), StoreError> {
+        let plain = encode(&rec)?;
+        self.blobs.save(&Name::Board(key).text(), &plain)?;
         let mut held = self.held();
         let board = held.boards.entry(key).or_default();
         board.next_seq = rec.next_seq;
@@ -1117,7 +1417,7 @@ pub trait BoardSeam {
 #[cfg(any(test, feature = "hermetic-test-seam"))]
 impl BoardSeam for BoardStore {
     fn set_settings(&self, key: BoardKey, settings: Settings) -> Result<(), BoardRefusal> {
-        BoardStore::set_settings(self, key, settings)
+        BoardStore::set_settings(self, key, settings).map(drop)
     }
 
     fn mark(&self, view: &dyn EnrollmentView) {
@@ -1960,10 +2260,17 @@ mod tests {
         b.fail(Some(Fail::Unsynced));
         let refused = store.set_settings(BOB, Settings::default());
         assert!(
-            matches!(refused, Err(BoardRefusal::Store(_))),
+            matches!(refused, Err(BoardRefusal::Unavailable(_))),
             "{refused:?}"
         );
-        assert_eq!(store.settings(BOB), on);
+        assert_eq!(
+            store.settings(BOB),
+            Settings {
+                enabled: false,
+                participate: false,
+                report: Report::Summary,
+            }
+        );
         b.fail(None);
         b.crash(0);
         let store = open_mem(&b, SMALL);
@@ -2643,6 +2950,10 @@ mod tests {
         fn unresolved(&self, _: u32) -> bool {
             false
         }
+
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
     }
 
     /// Answers each `contained` call from the next snapshot in turn, as if one were installed
@@ -2682,6 +2993,10 @@ mod tests {
         }
 
         fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+
+        fn board(&self, _: &AgentId) -> bool {
             false
         }
     }
@@ -3088,6 +3403,16 @@ mod tests {
         store: &Arc<BoardStore>,
         post: &Arc<Stored>,
     ) -> (usize, Vec<BoardDue>) {
+        contain_during_the_delete(b, store, post, &[2001])
+    }
+
+    /// [`mark_during_the_delete`], containing `uids`.
+    fn contain_during_the_delete(
+        b: &MemTaskBlobs,
+        store: &Arc<BoardStore>,
+        post: &Arc<Stored>,
+        uids: &[u32],
+    ) -> (usize, Vec<BoardDue>) {
         b.slow(Some(std::time::Duration::from_millis(300)));
         let performing = Arc::clone(store);
         let due = store.due(10);
@@ -3097,7 +3422,7 @@ mod tests {
         );
         let worker = std::thread::spawn(move || performing.perform(&due, &free()));
         b.await_stalls(1);
-        store.mark(&containing(&[], &[2001]));
+        store.mark(&containing(&[], uids));
         let during = store.due(10);
         assert!(store.get(BOB, post.post.id).is_none(), "being removed");
         assert!(store.candidates(BOB, 0, 10).is_empty());
@@ -3166,23 +3491,112 @@ mod tests {
     }
 
     #[test]
-    fn an_expiry_committed_at_its_check_wins_over_a_later_mark() {
+    fn a_containment_marked_during_an_expirys_unlink_keeps_the_post() {
+        for (uid, why) in [(2001, HeldFor::Author), (1000, HeldFor::Person)] {
+            let b = MemTaskBlobs::default();
+            let (store, clock) = clocked(&b);
+            let store = Arc::new(store);
+            let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-race");
+            clock.set(T0 + RETAIN);
+            let (done, during) = contain_during_the_delete(&b, &store, &post, &[uid]);
+            assert_eq!(
+                holds(&during),
+                0,
+                "{why:?}: no hold is listed while it is removed"
+            );
+            assert_eq!(done, 0, "{why:?}: the expiry is not done");
+            assert!(in_store(&store, BOB, post.post.id), "{why:?}");
+            assert!(store.get(BOB, post.post.id).is_none(), "{why:?}: withheld");
+            assert!(
+                b.has(&post_name(BOB, post.post.id)),
+                "{why:?}: written back"
+            );
+            assert!(store.held().expiring.is_empty());
+            assert!(
+                !store
+                    .held()
+                    .said
+                    .contains(&Item::Post(BOB, post.seq, BoardDueFor::Expire)),
+                "{why:?}: the expiry is no longer under way"
+            );
+            assert_eq!(
+                whys(&store.due(10)),
+                vec![(Some(post.post.id), None, BoardDueFor::Hold(why))],
+                "{why:?}"
+            );
+            assert_eq!(store.perform(&store.due(10), &free()), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, post.post.id).held,
+                [why].into_iter().collect(),
+                "{why:?}"
+            );
+            drop(store);
+            b.crash(0);
+            let (reloaded, _) = clocked(&b);
+            assert!(in_store(&reloaded, BOB, post.post.id), "{why:?}");
+            assert!(
+                reloaded.due(10).is_empty(),
+                "{why:?}: held, so not due to expire"
+            );
+        }
+    }
+
+    #[test]
+    fn a_containment_installed_after_an_expiry_does_not_bring_the_post_back() {
         let b = MemTaskBlobs::default();
         let (store, clock) = clocked(&b);
-        let store = Arc::new(store);
-        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-race");
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-698-expired");
         clock.set(T0 + RETAIN);
-        let (done, during) = mark_during_the_delete(&b, &store, &post);
-        assert_eq!(holds(&during), 0, "no hold is due for a post being removed");
-        assert_eq!(done, 1);
-        assert!(!b.has(&post_name(BOB, post.post.id)));
-        assert!(store.get(BOB, post.post.id).is_none());
-        assert!(
-            store.due(10).is_empty(),
-            "no mark is left for the deleted sequence"
-        );
-        store.mark(&containing(&[], &[2001]));
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
+        store.mark(&containing(&[], &[2001, 1000]));
         assert!(store.due(10).is_empty());
+        assert!(!in_store(&store, BOB, post.post.id));
+        assert!(!b.has(&post_name(BOB, post.post.id)));
+        drop(store);
+        let (store, _) = clocked(&b);
+        assert!(!in_store(&store, BOB, post.post.id));
+    }
+
+    #[test]
+    fn an_expiry_kept_whose_record_is_not_written_back_stops_the_sweep() {
+        for unsynced in [false, true] {
+            let b = MemTaskBlobs::default();
+            let (store, clock) = clocked(&b);
+            let post = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+            let name = post_name(BOB, post.post.id);
+            clock.set(T0 + RETAIN);
+            let view = ThenRefuse {
+                b: b.clone(),
+                name: name.clone(),
+                unsynced,
+                calls: Mutex::new(0),
+            };
+            let due = store.due(10);
+            assert_eq!(
+                whys(&due),
+                vec![(Some(post.post.id), None, BoardDueFor::Expire)]
+            );
+            assert_eq!(store.perform(&due, &view), 0, "unsynced {unsynced}");
+            b.fail(None);
+            b.stick(None);
+            assert_eq!(b.has(&name), unsynced, "unsynced {unsynced}");
+            assert!(in_store(&store, BOB, post.post.id));
+            assert!(store.get(BOB, post.post.id).is_none(), "marked");
+            assert!(store.held().owed.is_empty());
+            assert!(!store
+                .held()
+                .said
+                .contains(&Item::Post(BOB, post.seq, BoardDueFor::Expire)));
+            assert_eq!(
+                whys(&store.due(10)),
+                vec![(Some(post.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+            );
+            assert_eq!(store.perform(&store.due(10), &free()), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, post.post.id).held,
+                [HeldFor::Author].into_iter().collect()
+            );
+        }
     }
 
     #[test]
@@ -3451,6 +3865,9 @@ mod tests {
         fn unresolved(&self, _: u32) -> bool {
             false
         }
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
     }
 
     #[test]
@@ -3492,5 +3909,910 @@ mod tests {
     #[test]
     fn a_post_of_an_unlabelled_task_has_no_labels() {
         assert!(PostLabels::default().0.is_empty());
+    }
+
+    const WIDE: Caps = Caps {
+        board: 64,
+        author: 64,
+    };
+
+    fn wide(b: &MemTaskBlobs) -> (BoardStore, Arc<ManualClock>) {
+        let clock = Arc::new(ManualClock::at(T0));
+        let store = BoardStore::open_with(Box::new(b.clone()), clock.clone(), WIDE).unwrap();
+        (store, clock)
+    }
+
+    fn put_as(store: &BoardStore, key: BoardKey, id: u8, uid: u32) -> Arc<Stored> {
+        store
+            .post_with(
+                &mut fixed(vec![[id; 16]]),
+                key,
+                (hobi(), Some(uid)),
+                None,
+                PostLabels::default(),
+                draft("sentinel-698-clear"),
+                &free(),
+            )
+            .unwrap()
+    }
+
+    fn pairs<'a>(posts: impl IntoIterator<Item = &'a Arc<Stored>>) -> Vec<(u64, PostId)> {
+        posts.into_iter().map(|s| (s.seq, s.post.id)).collect()
+    }
+
+    fn cleared(removed: &[&Arc<Stored>], stopped: Option<BoardRefusal>) -> Cleared {
+        Cleared {
+            removed: removed.iter().map(|s| s.post.id).collect(),
+            stopped,
+        }
+    }
+
+    const UNSYNCED: &str = "outcome unknown: sentinel-628-unsynced";
+
+    #[test]
+    fn the_clear_page_is_32() {
+        assert_eq!(crate::board_store::BOARD_CLEAR_PAGE, 32);
+    }
+
+    #[test]
+    fn a_settings_write_returns_the_settings_before_it() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b, SMALL);
+        let first = Settings {
+            enabled: true,
+            participate: false,
+            report: Report::Every,
+        };
+        let second = Settings {
+            enabled: false,
+            participate: true,
+            report: Report::Summary,
+        };
+        assert_eq!(store.set_settings(BOB, first), Ok(Settings::default()));
+        assert_eq!(store.set_settings(BOB, second), Ok(first));
+        assert_eq!(store.settings(BOB), second);
+        assert_eq!(store.settings(ALICE), Settings::default());
+        b.crash(0);
+        assert_eq!(open_mem(&b, SMALL).settings(BOB), second);
+    }
+
+    #[test]
+    fn a_settings_write_the_disk_refuses_is_store_and_changes_nothing() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b, SMALL);
+        let on = Settings {
+            enabled: true,
+            participate: true,
+            report: Report::Every,
+        };
+        store.set_settings(BOB, on).unwrap();
+        b.fail(Some(Fail::Every));
+        let refused = store.set_settings(BOB, Settings::default());
+        assert_eq!(
+            refused,
+            Err(BoardRefusal::Store("sentinel-628-write-refused".into()))
+        );
+        assert_eq!(store.settings(BOB), on);
+        b.fail(None);
+        b.crash(0);
+        assert_eq!(open_mem(&b, SMALL).settings(BOB), on);
+    }
+
+    #[test]
+    fn an_unsynced_settings_write_keeps_off_each_veto_either_value_has_off() {
+        let s = |enabled, participate, report| Settings {
+            enabled,
+            participate,
+            report,
+        };
+        let cases = [
+            (
+                s(true, false, Report::Summary),
+                s(false, true, Report::Every),
+                s(false, false, Report::Summary),
+            ),
+            (
+                s(false, true, Report::Every),
+                s(true, false, Report::Off),
+                s(false, false, Report::Every),
+            ),
+            (
+                s(true, true, Report::Off),
+                s(true, true, Report::Summary),
+                s(true, true, Report::Off),
+            ),
+        ];
+        for (old, new, merged) in cases {
+            for crash in [None, Some(0), Some(1)] {
+                let b = MemTaskBlobs::default();
+                let store = open_mem(&b, SMALL);
+                store.set_settings(BOB, old).unwrap();
+                b.fail(Some(Fail::Unsynced));
+                assert_eq!(
+                    store.set_settings(BOB, new),
+                    Err(BoardRefusal::Unavailable(UNSYNCED.into())),
+                    "{old:?} -> {new:?}"
+                );
+                assert_eq!(store.settings(BOB), merged, "{old:?} -> {new:?}");
+                b.fail(None);
+                match crash {
+                    Some(kept) => {
+                        b.crash(kept);
+                        let on_disk = [old, new][kept];
+                        assert_eq!(open_mem(&b, SMALL).settings(BOB), on_disk);
+                    }
+                    None => {
+                        put(&store, BOB, hobi(), "after");
+                        b.crash(0);
+                        assert_eq!(open_mem(&b, SMALL).settings(BOB), merged);
+                        let plain = b.load("board.1000").unwrap();
+                        let rec: crate::board_store::BoardRecord =
+                            ciborium::from_reader(plain.as_slice()).unwrap();
+                        assert_eq!(rec.settings, merged);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clearable_pages_by_32_lowest_sequence_first() {
+        for (n, more) in [(0u8, false), (32, false), (33, true)] {
+            let b = MemTaskBlobs::default();
+            let (store, _) = wide(&b);
+            let posts: Vec<_> = (1..=n).map(|i| put_as(&store, BOB, i, 2001)).collect();
+            let page = usize::from(n).min(32);
+            assert_eq!(store.clearable(BOB), (pairs(&posts[..page]), more), "{n}");
+        }
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let posts: Vec<_> = (1..=32).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        put_as(&store, BOB, 33, 2010);
+        holding(&store, &[2010]);
+        assert_eq!(store.clearable(BOB), (pairs(&posts), false));
+        assert_eq!(store.clearable(ALICE), (Vec::new(), false));
+    }
+
+    #[test]
+    fn clearable_skips_held_marked_expiring_and_aged_posts() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = wide(&b);
+        let aged = put_as(&store, BOB, 0xe0, 2001);
+        clock.set(T0 + RETAIN - 1);
+        let held = put_as(&store, BOB, 0xe1, 2010);
+        let marked = put_as(&store, BOB, 0xe2, 2011);
+        let expiring = put_as(&store, BOB, 0xe3, 2012);
+        holding(&store, &[2010]);
+        clock.set(T0 + RETAIN);
+        store.held().expiring.insert((BOB, expiring.seq));
+        store.mark(&containing(&[], &[2011]));
+        let at = |s: &Arc<Stored>| store.held().boards[&BOB].posts[&s.seq].clone();
+        assert!(expired(&at(&aged), T0 + RETAIN));
+        assert!(at(&aged).held.is_empty());
+        for s in [&held, &marked, &expiring] {
+            assert!(!expired(&at(s), T0 + RETAIN));
+        }
+        assert!(!at(&held).held.is_empty());
+        assert!(store.held().marked.contains_key(&(BOB, marked.seq)));
+        let posts: Vec<_> = (1..=40).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        assert_eq!(store.clearable(BOB), (pairs(&posts[..32]), true));
+    }
+
+    #[test]
+    fn a_clear_removes_the_named_posts_and_frees_their_counts() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let suga = reader("suga");
+        let mine: Vec<_> = (1..=3).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        let other = by(&store, BOB, jin(), Some(2002), "sentinel-698-kept");
+        assert_eq!(
+            put_with(&store, vec![[9; 16]], "full").unwrap_err(),
+            BoardRefusal::Full
+        );
+        store.advance(BOB, &suga, 2).unwrap();
+        store.sent(BOB, &suga, &[3, 4]);
+        let (page, more) = store.clearable(BOB);
+        assert_eq!((page.len(), more), (4, false));
+        assert_eq!(
+            store.clear(BOB, &pairs(&mine), &free()),
+            cleared(&[&mine[0], &mine[1], &mine[2]], None)
+        );
+        for s in &mine {
+            assert!(!in_store(&store, BOB, s.post.id));
+            assert!(!b.has(&post_name(BOB, s.post.id)));
+        }
+        assert!(b.has(&post_name(BOB, other.post.id)));
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![other.post.id]);
+        assert_eq!(store.plan_read(BOB, &suga, None).cursor, 2);
+        assert_eq!(
+            sent_set(&store, BOB, &suga),
+            Some([4].into_iter().collect())
+        );
+        let again: Vec<_> = (11..=13).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        drop(store);
+        let (store, _) = clocked(&b);
+        for s in &mine {
+            assert!(!in_store(&store, BOB, s.post.id));
+        }
+        let mut want = vec![other.post.id];
+        want.extend(ids(&again));
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), want);
+    }
+
+    #[test]
+    fn a_post_held_aged_or_gone_since_the_page_was_taken_is_not_cleared() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = wide(&b);
+        let aged = put_as(&store, BOB, 1, 2012);
+        clock.set(T0 + 10);
+        let held = put_as(&store, BOB, 2, 2010);
+        let marked = put_as(&store, BOB, 3, 2011);
+        let gone = put_as(&store, BOB, 4, 2001);
+        let free_post = put_as(&store, BOB, 5, 2001);
+        let (page, more) = store.clearable(BOB);
+        assert_eq!(
+            (&page, more),
+            (&pairs([&aged, &held, &marked, &gone, &free_post]), false)
+        );
+        assert_eq!(
+            store.clear(BOB, &pairs([&gone]), &free()),
+            cleared(&[&gone], None)
+        );
+        holding(&store, &[2010]);
+        store.mark(&containing(&[], &[2011]));
+        clock.set(T0 + RETAIN);
+        assert_eq!(
+            store.clear(BOB, &page, &free()),
+            cleared(&[&free_post], None)
+        );
+        for s in [&aged, &held, &marked] {
+            assert!(in_store(&store, BOB, s.post.id));
+            assert!(b.has(&post_name(BOB, s.post.id)));
+        }
+        for s in [&gone, &free_post] {
+            assert!(!in_store(&store, BOB, s.post.id));
+            assert!(!b.has(&post_name(BOB, s.post.id)));
+        }
+    }
+
+    #[test]
+    fn a_post_whose_author_or_person_is_contained_since_the_page_is_marked_not_cleared() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let contained = put_as(&store, BOB, 1, 2010);
+        let free_post = put_as(&store, BOB, 2, 2001);
+        let alices = put_as(&store, ALICE, 3, 2001);
+        let page = store.clearable(BOB).0;
+        assert_eq!(page.len(), 2);
+        assert_eq!(
+            store.clear(BOB, &page, &containing(&[], &[2010])),
+            cleared(&[&free_post], None)
+        );
+        assert!(in_store(&store, BOB, contained.post.id));
+        assert!(b.has(&post_name(BOB, contained.post.id)));
+        assert!(store.get(BOB, contained.post.id).is_none());
+        assert_eq!(
+            store.held().marked.get(&(BOB, contained.seq)),
+            Some(&[HeldFor::Author].into_iter().collect())
+        );
+        let page = store.clearable(ALICE).0;
+        assert_eq!(page, pairs([&alices]));
+        assert_eq!(
+            store.clear(ALICE, &page, &containing(&[], &[1001])),
+            cleared(&[], None)
+        );
+        assert!(b.has(&post_name(ALICE, alices.post.id)));
+        assert_eq!(
+            store.held().marked.get(&(ALICE, alices.seq)),
+            Some(&[HeldFor::Person].into_iter().collect())
+        );
+    }
+
+    #[test]
+    fn a_pair_that_names_no_post_of_this_board_removes_nothing() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let bobs = put_as(&store, BOB, 1, 2001);
+        let alices = put_as(&store, ALICE, 2, 2001);
+        assert_eq!(bobs.seq, alices.seq);
+        let before = b.attempts();
+        for named in [
+            vec![(alices.seq, alices.post.id)],
+            vec![(bobs.seq, PostId([9; 16]))],
+            vec![(bobs.seq + 1, bobs.post.id)],
+        ] {
+            assert_eq!(store.clear(BOB, &named, &free()), cleared(&[], None));
+        }
+        assert_eq!(b.attempts(), before, "nothing is deleted");
+        assert!(in_store(&store, BOB, bobs.post.id));
+        assert!(in_store(&store, ALICE, alices.post.id));
+        assert_eq!(
+            store.clear(BOB, &pairs([&bobs]), &free()),
+            cleared(&[&bobs], None)
+        );
+        assert!(in_store(&store, ALICE, alices.post.id));
+    }
+
+    #[test]
+    fn a_clear_stops_at_the_first_delete_the_disk_refuses() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let posts: Vec<_> = (1..=5).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        b.stick(Some(post_name(BOB, posts[2].post.id)));
+        let got = store.clear(BOB, &pairs(&posts), &free());
+        b.stick(None);
+        assert_eq!(
+            got,
+            cleared(
+                &[&posts[0], &posts[1]],
+                Some(BoardRefusal::Store("sentinel-628-stuck".into()))
+            )
+        );
+        assert_eq!(
+            got.stopped.unwrap().to_string(),
+            "store: sentinel-628-stuck"
+        );
+        assert!(store.held().expiring.is_empty());
+        assert!(store.held().owed.is_empty());
+        for s in &posts[2..] {
+            assert!(store.get(BOB, s.post.id).is_some());
+            assert!(b.has(&post_name(BOB, s.post.id)));
+        }
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), ids(&posts[2..]));
+    }
+
+    #[test]
+    fn a_clear_whose_delete_does_not_sync_counts_the_post_removed_and_owes_it() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let posts: Vec<_> = (1..=2).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        b.fail(Some(Fail::UnsyncedUnlinks));
+        let got = store.clear(BOB, &pairs(&posts), &free());
+        b.fail(None);
+        assert_eq!(
+            got,
+            cleared(
+                &[&posts[0]],
+                Some(BoardRefusal::Unavailable(UNSYNCED.into()))
+            )
+        );
+        assert_eq!(
+            store.held().owed,
+            [(BOB, posts[0].post.id)].into_iter().collect()
+        );
+        assert!(store.held().expiring.is_empty());
+        assert!(!in_store(&store, BOB, posts[0].post.id));
+        assert!(store.get(BOB, posts[1].post.id).is_some());
+        b.crash(0);
+        assert!(
+            b.has(&post_name(BOB, posts[0].post.id)),
+            "the unlink was lost"
+        );
+        store.set_settings(BOB, Settings::default()).unwrap();
+        assert!(!b.has(&post_name(BOB, posts[0].post.id)));
+        assert!(store.held().owed.is_empty());
+        assert_eq!(
+            store.take_notices(),
+            vec![BoardNotice::Settled {
+                key: BOB,
+                id: posts[0].post.id
+            }]
+        );
+    }
+
+    #[test]
+    fn a_clear_deletes_nothing_while_the_owed_removals_are_at_their_bound() {
+        let max = crate::board_store::BOARD_OWED_MAX;
+        for below in [true, false] {
+            let b = MemTaskBlobs::default();
+            let (store, _) = wide(&b);
+            let victim = put_as(&store, BOB, 0xa0, 2001);
+            let n = max - usize::from(below);
+            b.fail(Some(Fail::Unlinks));
+            for i in 0..n {
+                let armed = b.clone();
+                b.after_save(move || armed.fail(Some(Fail::UnsyncedNoUnlink)));
+                let refused = put_with(&store, vec![[i as u8 + 1; 16]], "owed");
+                assert!(
+                    matches!(refused, Err(BoardRefusal::Unavailable(_))),
+                    "{refused:?}"
+                );
+                b.fail(Some(Fail::Unlinks));
+            }
+            assert_eq!(store.held().owed.len(), n);
+            b.fail(Some(Fail::UnsyncedUnlinks));
+            let got = store.clear(BOB, &pairs([&victim]), &free());
+            b.fail(None);
+            if below {
+                assert_eq!(
+                    got,
+                    cleared(&[&victim], Some(BoardRefusal::Unavailable(UNSYNCED.into())))
+                );
+                assert_eq!(store.held().owed.len(), max);
+                assert!(!in_store(&store, BOB, victim.post.id));
+            } else {
+                assert_eq!(
+                    got,
+                    cleared(&[], Some(BoardRefusal::Store("removals are owed".into())))
+                );
+                assert_eq!(store.held().owed.len(), max);
+                assert!(in_store(&store, BOB, victim.post.id));
+                assert!(b.has(&post_name(BOB, victim.post.id)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_clear_takes_at_most_a_page_whatever_it_is_passed() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let posts: Vec<_> = (1..=33).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        let got = store.clear(BOB, &pairs(&posts), &free());
+        assert_eq!(got.removed, ids(&posts[..32]));
+        assert_eq!(got.stopped, None);
+        assert!(in_store(&store, BOB, posts[32].post.id));
+        assert!(b.has(&post_name(BOB, posts[32].post.id)));
+    }
+
+    /// `clear` runs on another thread with every delete and save stalled; `during` runs
+    /// once its first delete has begun, after the claim and before the outcome.
+    fn clear_while(
+        b: &MemTaskBlobs,
+        store: &Arc<BoardStore>,
+        named: Vec<(u64, PostId)>,
+        during: impl FnOnce(),
+    ) -> Cleared {
+        b.slow(Some(std::time::Duration::from_millis(300)));
+        let clearing = Arc::clone(store);
+        let worker = std::thread::spawn(move || clearing.clear(BOB, &named, &free()));
+        b.await_stalls(1);
+        during();
+        let got = worker.join().unwrap();
+        b.slow(None);
+        got
+    }
+
+    #[test]
+    fn a_containment_marked_while_a_post_is_cleared_keeps_the_post() {
+        for (uid, why) in [(2001, HeldFor::Author), (1000, HeldFor::Person)] {
+            for unsynced in [false, true] {
+                let b = MemTaskBlobs::default();
+                let (store, _) = clocked(&b);
+                let store = Arc::new(store);
+                let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+                let other = by(&store, BOB, jin(), Some(2002), "sentinel-698-other");
+                if unsynced {
+                    b.fail(Some(Fail::UnsyncedUnlinks));
+                }
+                let got = clear_while(&b, &store, pairs([&kept, &other]), || {
+                    store.mark(&containing(&[], &[uid]))
+                });
+                b.fail(None);
+                let case = format!("{why:?} unsynced {unsynced}");
+                let removed: &[&Arc<Stored>] = match (why, unsynced) {
+                    (HeldFor::Author, _) => &[&other],
+                    (HeldFor::Person, _) => &[],
+                };
+                let stopped = (unsynced && why == HeldFor::Author)
+                    .then(|| BoardRefusal::Unavailable(UNSYNCED.into()));
+                assert_eq!(got, cleared(removed, stopped), "{case}");
+                assert!(!store.held().owed.contains(&(BOB, kept.post.id)), "{case}");
+                assert!(store.held().expiring.is_empty(), "{case}");
+                assert!(in_store(&store, BOB, kept.post.id), "{case}");
+                assert!(store.get(BOB, kept.post.id).is_none(), "{case}: withheld");
+                assert!(b.has(&post_name(BOB, kept.post.id)), "{case}: restored");
+                let due = store.due(10);
+                assert!(
+                    whys(&due).contains(&(Some(kept.post.id), None, BoardDueFor::Hold(why))),
+                    "{case}: {:?}",
+                    whys(&due)
+                );
+                assert_eq!(store.perform(&due, &free()), due.len(), "{case}");
+                assert_eq!(
+                    stored_on_disk(&b, BOB, kept.post.id).held,
+                    [why].into_iter().collect(),
+                    "{case}"
+                );
+                drop(due);
+                b.crash(0);
+                let (reloaded, _) = clocked(&b);
+                assert!(in_store(&reloaded, BOB, kept.post.id), "{case}");
+                assert!(reloaded.get(BOB, kept.post.id).is_none(), "{case}: held");
+            }
+        }
+    }
+
+    #[test]
+    fn a_containment_the_view_shows_after_the_unlink_keeps_the_post() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+        let got = store.clear(BOB, &pairs([&kept]), &installs(&[&[], &[2001]]));
+        assert_eq!(got, cleared(&[], None));
+        assert_eq!(
+            store.held().marked.get(&(BOB, kept.seq)),
+            Some(&[HeldFor::Author].into_iter().collect())
+        );
+        assert!(store.held().expiring.is_empty());
+        assert!(b.has(&post_name(BOB, kept.post.id)));
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
+        assert_eq!(
+            stored_on_disk(&b, BOB, kept.post.id).held,
+            [HeldFor::Author].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn a_containment_installed_after_the_clear_returned_does_not_bring_a_post_back() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let gone = by(&store, BOB, hobi(), Some(2001), "sentinel-698-gone");
+        assert_eq!(
+            store.clear(BOB, &pairs([&gone]), &free()),
+            cleared(&[&gone], None)
+        );
+        store.mark(&containing(&[], &[2001, 1000]));
+        assert!(store.due(10).is_empty());
+        assert!(!in_store(&store, BOB, gone.post.id));
+        assert!(!b.has(&post_name(BOB, gone.post.id)));
+        drop(store);
+        let (store, _) = clocked(&b);
+        assert!(!in_store(&store, BOB, gone.post.id));
+    }
+
+    /// Contains nobody at the first check and uid 2001 from the second, and makes the disk
+    /// refuse `name` (or stop syncing) as it first says so.
+    struct ThenRefuse {
+        b: MemTaskBlobs,
+        name: String,
+        unsynced: bool,
+        calls: Mutex<usize>,
+    }
+
+    impl EnrollmentView for ThenRefuse {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.contained_among(&[uid].into_iter().collect())
+                .contains(&uid)
+        }
+
+        fn contained_among(&self, uids: &BTreeSet<u32>) -> BTreeSet<u32> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls < 2 {
+                return BTreeSet::new();
+            }
+            match self.unsynced {
+                true => self.b.fail(Some(Fail::Unsynced)),
+                false => self.b.stick(Some(self.name.clone())),
+            }
+            uids.iter().copied().filter(|u| *u == 2001).collect()
+        }
+
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_kept_post_whose_record_is_not_restored_stops_the_clear_and_is_not_removed() {
+        for unsynced in [false, true] {
+            let b = MemTaskBlobs::default();
+            let (store, _) = clocked(&b);
+            let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+            let next = by(&store, BOB, jin(), Some(2002), "sentinel-698-next");
+            let name = post_name(BOB, kept.post.id);
+            let view = ThenRefuse {
+                b: b.clone(),
+                name: name.clone(),
+                unsynced,
+                calls: Mutex::new(0),
+            };
+            let got = store.clear(BOB, &pairs([&kept, &next]), &view);
+            b.fail(None);
+            b.stick(None);
+            let why = match unsynced {
+                true => "sentinel-628-unsynced",
+                false => "sentinel-628-stuck",
+            };
+            assert_eq!(
+                got,
+                cleared(
+                    &[],
+                    Some(BoardRefusal::Unavailable(format!(
+                        "outcome unknown: contained during the clear; the record is not restored: {why}"
+                    )))
+                ),
+                "unsynced {unsynced}"
+            );
+            assert_eq!(b.has(&name), unsynced);
+            assert!(in_store(&store, BOB, kept.post.id));
+            assert!(store.get(BOB, kept.post.id).is_none(), "marked");
+            assert!(store.held().owed.is_empty());
+            assert!(in_store(&store, BOB, next.post.id), "the clear stopped");
+            assert_eq!(store.perform(&store.due(10), &free()), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, kept.post.id).held,
+                [HeldFor::Author].into_iter().collect()
+            );
+        }
+    }
+
+    /// Answers from `installed`; at its second answer, the re-check after a clear's unlink,
+    /// it starts an install containing uid 2001 and gives it 300 ms before it answers what it
+    /// read first. `landed` says whether the install ran in that time.
+    struct InstallDuringTheRecheck {
+        installed: Installed,
+        store: Arc<BoardStore>,
+        calls: Mutex<usize>,
+        installer: Mutex<Option<std::thread::JoinHandle<()>>>,
+        landed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl EnrollmentView for InstallDuringTheRecheck {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.contained_among(&[uid].into_iter().collect())
+                .contains(&uid)
+        }
+
+        fn contained_among(&self, uids: &BTreeSet<u32>) -> BTreeSet<u32> {
+            let answer = self.installed.contained_among(uids);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 2 {
+                let (store, installed, landed) = (
+                    Arc::clone(&self.store),
+                    self.installed.clone(),
+                    Arc::clone(&self.landed),
+                );
+                let (done, wait) = std::sync::mpsc::channel();
+                *self.installer.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let view = installed.clone();
+                    store.install_and_mark(
+                        || {
+                            installed.0.lock().unwrap().insert(2001);
+                            landed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        },
+                        &view,
+                    );
+                    let _ = done.send(());
+                }));
+                let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
+            }
+            answer
+        }
+
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn an_install_cannot_land_between_a_clears_recheck_and_its_forget() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let store = Arc::new(store);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-698-raced");
+        let view = InstallDuringTheRecheck {
+            installed: Installed::default(),
+            store: Arc::clone(&store),
+            calls: Mutex::new(0),
+            installer: Mutex::new(None),
+            landed: Arc::default(),
+        };
+        let got = store.clear(BOB, &pairs([&post]), &view);
+        let landed = view.landed.load(std::sync::atomic::Ordering::SeqCst);
+        view.installer
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the re-check started the install")
+            .join()
+            .unwrap();
+        assert!(
+            !landed,
+            "the install landed while the clear held its check: contained and removed"
+        );
+        assert_eq!(got, cleared(&[&post], None), "the clear came first");
+        assert!(!in_store(&store, BOB, post.post.id));
+        assert!(!b.has(&post_name(BOB, post.post.id)));
+        assert!(store.due(10).is_empty(), "nothing is brought back to hold");
+
+        let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-kept");
+        let page = store.clearable(BOB).0;
+        assert_eq!(page, pairs([&kept]));
+        let installed = Installed::default();
+        store.install_and_mark(
+            || {
+                installed.0.lock().unwrap().insert(2001);
+            },
+            &installed,
+        );
+        assert_eq!(
+            store.clear(BOB, &page, &installed),
+            cleared(&[], None),
+            "the install came first"
+        );
+        assert!(in_store(&store, BOB, kept.post.id));
+        assert!(b.has(&post_name(BOB, kept.post.id)));
+        assert_eq!(
+            whys(&store.due(10)),
+            vec![(Some(kept.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+        );
+    }
+
+    #[test]
+    fn installs_and_every_board_call_run_together_without_a_deadlock() {
+        use maknae_authz_basic::Baseline;
+        let (_g, pdp) = crate::test_fixtures::shipped_composition();
+        let (_h, adversary) = crate::test_fixtures::shipped_composition_with(
+            "",
+            Some("schema_version: 1\nbindings:\n  adversary: [\"nobody\"]\n"),
+        );
+        let author = nix::unistd::User::from_name("nobody")
+            .unwrap()
+            .expect("the nobody account exists on every supported host")
+            .uid
+            .as_raw();
+        let pdp = Arc::new(pdp);
+        let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&pdp));
+        let snapshots = [pdp.baseline().snapshot(), adversary.baseline().snapshot()];
+        for (snapshot, contained) in snapshots.iter().zip([false, true]) {
+            pdp.baseline().install(Arc::clone(snapshot));
+            assert_eq!(view.contained(author), contained);
+        }
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let store = Arc::new(store);
+        let tasks = Arc::new(crate::task::TaskStore::new());
+        let (done, finished) = std::sync::mpsc::channel::<&str>();
+        let rounds = 200;
+        let mut workers = Vec::new();
+        let mut spawn = |name: &'static str, work: Box<dyn Fn(usize) + Send>| {
+            let done = done.clone();
+            workers.push(std::thread::spawn(move || {
+                for i in 0..rounds {
+                    work(i);
+                }
+                let _ = done.send(name);
+            }));
+        };
+        {
+            let (store, tasks, pdp, view) = (
+                Arc::clone(&store),
+                Arc::clone(&tasks),
+                Arc::clone(&pdp),
+                view.clone(),
+            );
+            let snapshots = snapshots.clone();
+            spawn(
+                "install",
+                Box::new(move |i| {
+                    let next = Arc::clone(&snapshots[i % 2]);
+                    store.install_and_mark(|| pdp.baseline().install(next), &view);
+                    tasks.mark_unenrolled(&view);
+                }),
+            );
+        }
+        {
+            let (store, view) = (Arc::clone(&store), view.clone());
+            spawn(
+                "post and clear",
+                Box::new(move |i| {
+                    let _ = store.post(
+                        BOB,
+                        (hobi(), Some(author)),
+                        None,
+                        PostLabels::default(),
+                        draft("sentinel-698-load"),
+                        &view,
+                    );
+                    if i % 8 == 0 {
+                        let page = store.clearable(BOB).0;
+                        store.clear(BOB, &page, &view);
+                    }
+                }),
+            );
+        }
+        {
+            let (store, view) = (Arc::clone(&store), view.clone());
+            spawn(
+                "read",
+                Box::new(move |_| {
+                    let seqs: Vec<u64> =
+                        store.candidates(BOB, 0, 32).iter().map(|s| s.seq).collect();
+                    store.observe(BOB, &seqs, (0, u64::MAX), &view);
+                }),
+            );
+        }
+        {
+            let store = Arc::clone(&store);
+            spawn(
+                "settings",
+                Box::new(move |i| {
+                    let _ = store.write_settings(
+                        BOB,
+                        Settings {
+                            enabled: i % 2 == 0,
+                            ..Settings::default()
+                        },
+                    );
+                }),
+            );
+        }
+        {
+            let (store, view) = (Arc::clone(&store), view.clone());
+            spawn(
+                "gate",
+                Box::new(move |_| {
+                    store.enabled_with(BOB, || view.board(&reader("hobi")));
+                }),
+            );
+        }
+        drop(done);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut ended = Vec::new();
+        while ended.len() < workers.len() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match finished.recv_timeout(left) {
+                Ok(name) => ended.push(name),
+                Err(_) => panic!("deadlocked: only {ended:?} finished"),
+            }
+        }
+        for w in workers {
+            w.join().unwrap();
+        }
+        assert!(
+            view.contained(author),
+            "the last install contains the author"
+        );
+        let left = store.held().boards[&BOB].posts.len();
+        assert!(left > 0);
+        assert!(
+            store.candidates(BOB, 0, 1024).is_empty(),
+            "every post left is marked"
+        );
+        store.install_and_mark(|| pdp.baseline().install(Arc::clone(&snapshots[0])), &view);
+        assert_eq!(
+            store.candidates(BOB, 0, 1024).len(),
+            left,
+            "every mark is dropped"
+        );
+        store.install_and_mark(|| pdp.baseline().install(Arc::clone(&snapshots[1])), &view);
+        assert!(
+            store.candidates(BOB, 0, 1024).is_empty(),
+            "every post is marked again"
+        );
     }
 }

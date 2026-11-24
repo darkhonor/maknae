@@ -1224,6 +1224,31 @@ mod tests {
     }
 
     #[test]
+    fn board_is_restart_only() {
+        let on = r#"{"enabled":true}"#;
+        let off = r#"{"enabled":false}"#;
+        let base = s(&[("core", CORE), ("principal", PRINCIPAL_A), ("board", off)]);
+        let with = |k: &str, v: &str| {
+            let mut b = base.clone();
+            b.insert(k.into(), v.into());
+            b
+        };
+        let without = |k: &str| {
+            let mut b = base.clone();
+            b.remove(k);
+            b
+        };
+        assert_eq!(apply_of(&base, &base), Apply::Live);
+        assert_eq!(apply_of(&base, &with("board", on)), Apply::Restart);
+        assert_eq!(apply_of(&with("board", on), &base), Apply::Restart);
+        assert_eq!(apply_of(&base, &without("board")), Apply::Restart);
+        assert_eq!(apply_of(&without("board"), &base), Apply::Restart);
+        let mut alongside_live = with("board", on);
+        alongside_live.insert("principal".into(), PRINCIPAL_B.into());
+        assert_eq!(apply_of(&base, &alongside_live), Apply::Restart);
+    }
+
+    #[test]
     fn every_core_change_is_restart_class_the_ceiling_level_included() {
         let us = r#"{"deployment_id":"d","handling":{"policy":"US"}}"#;
         let us_secret = r#"{"deployment_id":"d","handling":{"ceiling":{"classification":"SECRET"},"policy":"US"}}"#;

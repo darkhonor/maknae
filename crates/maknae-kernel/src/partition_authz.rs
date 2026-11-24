@@ -467,6 +467,27 @@ mod tests {
     }
 
     #[test]
+    fn partition_never_decides_board_manage_on_any_channel() {
+        assert_eq!(BOARD_ACTIONS, ["board.post", "board.read"]);
+        for channel in [Some(CHANNEL_AGENT), Some(CHANNEL_CLIENT), None] {
+            for root in [MINE, Some("users/1002"), Some("agents/hobi"), None] {
+                for k in [
+                    key("users/1000"),
+                    key("users/1002"),
+                    key("agents/hobi"),
+                    None,
+                ] {
+                    let mut r = asked(channel, Some(HOME), "board.manage", None, root);
+                    if let Some(k) = k {
+                        r.resource.0.insert(RESOURCE_BOARD, k);
+                    }
+                    assert_eq!(decide(&r), NA, "{channel:?} {root:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn partition_board_with_no_channel_is_indeterminate() {
         for action in BOARD_ACTIONS {
             for root in [MINE, None] {

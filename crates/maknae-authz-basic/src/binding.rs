@@ -1538,6 +1538,7 @@ mod tests {
             subjects: crate::decide::SubjectGrants::default(),
             agents: Default::default(),
             taskers: Default::default(),
+            boards: Default::default(),
             policy,
             sensitive: Default::default(),
             tools: Default::default(),

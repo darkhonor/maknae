@@ -1019,6 +1019,25 @@ mod tests {
         }
     }
 
+    fn manage_verbs() -> [maknae_proto::Verb; 3] {
+        use maknae_proto::{BoardOp, BoardReport, BoardSettings, Verb};
+        [
+            Verb::BoardManage {
+                op: BoardOp::Settings { set: None },
+            },
+            Verb::BoardManage {
+                op: BoardOp::Settings {
+                    set: Some(BoardSettings {
+                        enabled: true,
+                        participate: true,
+                        report: BoardReport::Every,
+                    }),
+                },
+            },
+            Verb::BoardManage { op: BoardOp::Clear },
+        ]
+    }
+
     fn board_decisions() -> String {
         use crate::handler::{build_authz_request, Stamp};
         let (_g, shipped) = crate::test_fixtures::shipped_composition();
@@ -1026,6 +1045,15 @@ mod tests {
             "",
             Some("schema_version: 1\nbindings:\n  guest: [\"daemon\"]\n"),
         );
+        let (_u, users) = crate::test_fixtures::shipped_composition_with(
+            "",
+            Some("schema_version: 1\nbindings:\n  user: [\"nobody\"]\n"),
+        );
+        let user = nix::unistd::User::from_name("nobody")
+            .unwrap()
+            .expect("the nobody account exists on every supported host")
+            .uid
+            .as_raw();
         let principal = nix::unistd::geteuid().as_raw();
         let guest = nix::unistd::User::from_name("daemon")
             .unwrap()
@@ -1091,6 +1119,51 @@ mod tests {
                 let board = r.resource.0.get(maknae_security::RESOURCE_BOARD);
                 out.push_str(&format!(
                     "{who} {} board={board:?} -> {:?} {:?} {rule:?} => {:?}\n",
+                    r.action.0,
+                    d.verdict,
+                    d.role,
+                    maknae_security::finalize(d.verdict.clone())
+                ));
+            }
+        }
+        out.push_str(
+            "# board.manage through the Composition: a person's own board (users/<uid>, shown as own), decided by the role's grant; denied to every agent; the partition operand abstains.\n",
+        );
+        rows.insert(3, ("user".into(), user, Stamp::Client, None));
+        for (who, uid, stamp, overwrite) in &rows {
+            let c = match who.as_str() {
+                "guest" => &guests,
+                "user" => &users,
+                _ => &shipped,
+            };
+            for verb in &manage_verbs() {
+                let mut r = build_authz_request(
+                    verb,
+                    *uid,
+                    None,
+                    maknae_security::Lane::Local,
+                    None,
+                    None,
+                    stamp,
+                );
+                if let Some(board) = overwrite {
+                    r.resource.0.insert(
+                        maknae_security::RESOURCE_BOARD,
+                        AttrValue::Str((*board).into()),
+                    );
+                }
+                let d = c.decide_cited(&r);
+                let rule = d.rule.map(|c| {
+                    let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                    format!("{} in #{section}", c.key)
+                });
+                let board = match r.resource.0.get(maknae_security::RESOURCE_BOARD) {
+                    Some(AttrValue::Str(b)) if *b == format!("users/{uid}") => "own".to_owned(),
+                    other => format!("{other:?}"),
+                };
+                let op = r.context.0.str(maknae_security::CONTEXT_BOARD_OP);
+                out.push_str(&format!(
+                    "{who} {} {op:?} board={board} -> {:?} {:?} {rule:?} => {:?}\n",
                     r.action.0,
                     d.verdict,
                     d.role,
@@ -1631,6 +1704,67 @@ mod tests {
             at_the_ceiling,
             "a task with no binding"
         );
+    }
+
+    #[test]
+    fn every_mandatory_operand_abstains_on_board_manage() {
+        use crate::handler::{build_authz_request, Stamp};
+        use maknae_security::{Authorizer, Verdict};
+        let task = board_task();
+        let agent = maknae_config::AgentId::parse("hobi").unwrap();
+        let host = maknae_config::SensitiveList::empty();
+        let ceiling = ceiling(Ceiling::baseline_for(US));
+        let sensitive = crate::sensitive_authz::SensitiveAuthorizer::new(&host);
+        let partition = crate::partition_authz::PartitionOperand;
+        let operands: [(&str, &dyn Authorizer); 3] = [
+            ("ceiling", &ceiling),
+            ("sensitive", &sensitive),
+            ("partition", &partition),
+        ];
+        let stamps = [
+            Stamp::Client,
+            Stamp::Agent {
+                agent: &agent,
+                task: None,
+            },
+            Stamp::Agent {
+                agent: &agent,
+                task: Some(&task),
+            },
+        ];
+        for stamp in &stamps {
+            for verb in &manage_verbs() {
+                for uid in [1000, 2001] {
+                    let r = build_authz_request(
+                        verb,
+                        uid,
+                        Some(std::path::Path::new("/home/hobi-svc")),
+                        maknae_security::Lane::Local,
+                        None,
+                        None,
+                        stamp,
+                    );
+                    for (name, operand) in operands {
+                        assert_eq!(
+                            operand.decide(&r),
+                            Verdict::NotApplicable { note: None },
+                            "{name} {verb:?}"
+                        );
+                    }
+                    let mut subject = maknae_security::Attributes::new();
+                    subject.insert("uid", AttrValue::Int(i64::from(uid)));
+                    let unstamped = maknae_security::Request {
+                        subject: maknae_security::Subject(subject),
+                        ..r.clone()
+                    };
+                    assert_eq!(
+                        partition.decide(&unstamped),
+                        Verdict::NotApplicable { note: None },
+                        "no channel {verb:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

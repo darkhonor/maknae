@@ -3748,6 +3748,52 @@ async fn serve_board_verb<S, E, P>(
 {
     use crate::board_verbs as bv;
     let action = verb_to_action(verb);
+    if let Verb::BoardManage { op } = verb {
+        let key = bv::manage_key(board.channel_agent, trail.uid);
+        let (_, _, generation) = live.admission();
+        let request = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
+        let (verdict, role, rule) =
+            decide_bounded(authorizer, live, request, generation, timeout).await;
+        let refused = |reason: &str| {
+            let mut rec = decision_record(
+                bv::on_board(trail.record(action, "deny", reason, "unauthorized"), key),
+                role,
+                rule.as_ref(),
+            );
+            rec.subject.board_op = crate::handler::board_op(verb).map(str::to_owned);
+            rec
+        };
+        match finalize(verdict) {
+            Decision::Deny { reason } => {
+                trail.unauthorized(stream, &refused(&reason)).await;
+                return;
+            }
+            Decision::Permit { obligations } => {
+                if let Err(unhonorable) = discharge_plan(&obligations) {
+                    let reason = format!("unhonorable obligation: {}", unhonorable.0);
+                    trail.unauthorized(stream, &refused(&reason)).await;
+                    return;
+                }
+            }
+        }
+        let Some(key) = key else {
+            trail
+                .unauthorized(stream, &refused(bv::ONLY_A_PERSON))
+                .await;
+            return;
+        };
+        let managed = Manage {
+            verb,
+            op: *op,
+            key,
+            agents: board.agents,
+            timeout,
+            role,
+            rule: rule.as_ref(),
+        };
+        serve_board_manage(stream, trail, managed).await;
+        return;
+    }
     let store = &board.agents.board;
     let known = board
         .cited
@@ -3757,9 +3803,10 @@ async fn serve_board_verb<S, E, P>(
         board.cited,
         &*board.agents.switches,
         store,
+        &*board.agents.view,
     );
-    let key = match gated {
-        Ok(key) => key,
+    let gated = match gated {
+        Ok(gated) => gated,
         Err(off) => {
             let rec = bv::on_board(
                 trail.record(action, "deny", &off.to_string(), "unavailable"),
@@ -3797,13 +3844,22 @@ async fn serve_board_verb<S, E, P>(
             }
         }
     }
-    let (Some(key), Some(cited), Some(agent)) = (key, board.cited, board.channel_agent) else {
+    let (Some((key, load)), Some(cited), Some(agent)) = (gated, board.cited, board.channel_agent)
+    else {
         let reason = bv::Off::NoTask.to_string();
         trail
             .unauthorized(stream, &decided("deny", &reason, "unavailable"))
             .await;
         return;
     };
+    let still = || store.still_installed(&load, &*board.agents.view);
+    if !still() {
+        let rec = decided("deny", bv::POLICY_CHANGED, "unauthorized");
+        trail
+            .refuse_board(stream, &rec, BoardDefect::TryAgain)
+            .await;
+        return;
+    }
     let deadline = || tokio::time::Instant::now() + timeout;
 
     if let Verb::BoardPost { post } = verb {
@@ -3832,6 +3888,13 @@ async fn serve_board_verb<S, E, P>(
                         == [bv::PostVerdict::Permit]
                 }
             };
+            if !still() {
+                let rec = described(decided("deny", bv::POLICY_CHANGED, "unauthorized"));
+                trail
+                    .refuse_board(stream, &rec, BoardDefect::TryAgain)
+                    .await;
+                return;
+            }
             if !visible {
                 let r = crate::board::BoardRefusal::NoSuchPost;
                 let rec = described(decided("deny", &r.to_string(), bv::posture(&r)));
@@ -3932,6 +3995,13 @@ async fn serve_board_verb<S, E, P>(
             trail
                 .refuse_board(stream, &outcome, BoardDefect::TryAgain)
                 .await;
+        } else if !still() {
+            let mut outcome = trail.outcome(&intent, bv::POLICY_CHANGED, "unauthorized");
+            outcome.outcome.result = "deny".into();
+            outcome.board = Some(bv::read_audit(&walk, cursor));
+            trail
+                .refuse_board(stream, &outcome, BoardDefect::TryAgain)
+                .await;
         } else {
             let mut outcome = trail.outcome(&intent, "done", "authorized");
             outcome.board = Some(bv::read_audit(&walk, cursor));
@@ -3950,6 +4020,168 @@ async fn serve_board_verb<S, E, P>(
     trail
         .unauthorized(stream, &decided("deny", "not a board verb", "unauthorized"))
         .await;
+}
+
+/// A permitted `board.manage` on the caller's own board.
+struct Manage<'a> {
+    verb: &'a Verb,
+    op: maknae_proto::BoardOp,
+    key: crate::board_store::BoardKey,
+    agents: &'a AgentAdmission,
+    timeout: Duration,
+    role: Option<&'static str>,
+    rule: Option<&'a RuleCitation>,
+}
+
+async fn serve_board_manage<S, E>(stream: &mut S, trail: &Trail<'_, E>, m: Manage<'_>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+{
+    use crate::board_verbs as bv;
+    use maknae_audit_append::BoardAudit;
+    use maknae_proto::BoardOp;
+    let action = verb_to_action(m.verb);
+    let (key, store) = (m.key, &m.agents.board);
+    let permitted = |reason: &str, audit: BoardAudit| {
+        let mut rec = decision_record(
+            bv::on_board(
+                trail.record(action, "permit", reason, "authorized"),
+                Some(key),
+            ),
+            m.role,
+            m.rule,
+        );
+        rec.subject.board_op = crate::handler::board_op(m.verb).map(str::to_owned);
+        rec.board = Some(audit);
+        rec
+    };
+    let deadline = tokio::time::Instant::now() + m.timeout;
+    match m.op {
+        BoardOp::Settings { set: None } => {
+            let now = store.settings(key);
+            let rec = permitted(
+                "done",
+                BoardAudit {
+                    settings_before: Some(bv::settings_text(now)),
+                    ..BoardAudit::default()
+                },
+            );
+            let payload = Payload::BoardSettings(bv::wire_settings(now));
+            trail
+                .deliver(stream, &rec, payload, m.role, m.rule, action)
+                .await;
+        }
+        BoardOp::Settings { set: Some(asked) } => {
+            let asked = bv::stored_settings(asked);
+            let intent = permitted(
+                "intent recorded",
+                BoardAudit {
+                    settings_after: Some(bv::settings_text(asked)),
+                    ..BoardAudit::default()
+                },
+            );
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let s = Arc::clone(store);
+            let done = bv::offload(
+                trail.uid,
+                deadline,
+                move || Ok(s.write_settings(key, asked)),
+            )
+            .await;
+            let (now, r) = match done {
+                Ok(crate::board::Written {
+                    before,
+                    now,
+                    refused: None,
+                }) => {
+                    let mut outcome = trail.outcome(&intent, "done", "authorized");
+                    outcome.board = Some(BoardAudit {
+                        settings_before: Some(bv::settings_text(before)),
+                        settings_after: Some(bv::settings_text(now)),
+                        ..BoardAudit::default()
+                    });
+                    let payload = Payload::BoardSettings(bv::wire_settings(now));
+                    trail
+                        .deliver(stream, &outcome, payload, m.role, m.rule, action)
+                        .await;
+                    return;
+                }
+                Ok(crate::board::Written {
+                    now,
+                    refused: Some(r),
+                    ..
+                }) => (now, r),
+                Err(r) => (store.settings(key), r),
+            };
+            let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+            outcome.board = Some(BoardAudit {
+                settings_after: Some(bv::settings_text(now)),
+                ..BoardAudit::default()
+            });
+            trail
+                .refuse_board(stream, &outcome, bv::defect_of(&r))
+                .await;
+        }
+        BoardOp::Clear => {
+            let (page, _) = store.clearable(key);
+            if page.is_empty() {
+                let rec = permitted("done", bv::removed_audit(&[]));
+                let payload = Payload::BoardCleared(maknae_proto::BoardCleared {
+                    removed: 0,
+                    more: false,
+                });
+                trail
+                    .deliver(stream, &rec, payload, m.role, m.rule, action)
+                    .await;
+                return;
+            }
+            let named: Vec<maknae_proto::PostId> = page.iter().map(|(_, id)| *id).collect();
+            let intent = permitted("intent recorded", bv::removed_audit(&named));
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let (s, view) = (Arc::clone(store), Arc::clone(&m.agents.view));
+            let done =
+                bv::offload(trail.uid, deadline, move || Ok(s.clear(key, &page, &*view))).await;
+            match done {
+                Ok(crate::board::Cleared {
+                    removed,
+                    stopped: None,
+                }) => {
+                    let more = !store.clearable(key).0.is_empty();
+                    let mut outcome = trail.outcome(&intent, "done", "authorized");
+                    outcome.board = Some(bv::removed_audit(&removed));
+                    let payload = Payload::BoardCleared(maknae_proto::BoardCleared {
+                        removed: u32::try_from(removed.len()).unwrap_or(u32::MAX),
+                        more,
+                    });
+                    trail
+                        .deliver(stream, &outcome, payload, m.role, m.rule, action)
+                        .await;
+                }
+                Ok(crate::board::Cleared {
+                    removed,
+                    stopped: Some(r),
+                }) => {
+                    let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    outcome.board = Some(bv::removed_audit(&removed));
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                }
+                Err(r) => {
+                    let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+                    outcome.board = None;
+                    trail
+                        .refuse_board(stream, &outcome, bv::defect_of(&r))
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 type StoreChange = Box<
@@ -4943,8 +5175,13 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
                 tv::collected(&collect, permitted)
             }
         };
-        said.push(format!("{}:{}", agent.as_str(), tv::label(standing)));
-        tv::place(&mut page, agent, standing, held);
+        let placed = page.entries.len();
+        tv::place(&mut page, agent, standing, held, view.board(agent));
+        let marked = page.entries.len() > placed && page.entries.last().is_some_and(|e| e.board);
+        said.push(match marked {
+            true => format!("{}:{}:board", agent.as_str(), tv::label(standing)),
+            false => format!("{}:{}", agent.as_str(), tv::label(standing)),
+        });
         if page.entries.len() == maknae_proto::AGENT_PAGE_MAX {
             if at + 1 < rest.len() {
                 page.next = page.entries.last().map(|e| e.agent.clone());
@@ -5713,7 +5950,7 @@ impl AgentAdmission {
             banner: Banner::default(),
             reach: crate::egress_socket::no_reach("no egress socket in this test"),
             board: Arc::new(crate::board::BoardStore::new()),
-            switches: Arc::new(crate::board_verbs::SwitchesOff),
+            switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
         }
     }
 }
@@ -7635,18 +7872,16 @@ where
         }
     }
 
-    /// Installs `snapshot`, or keeps the installed one when only the live values changed, then
-    /// marks every open task whose agent it no longer enrolls, and the board's posts to hold
-    /// and cursors to drop, without I/O. Called after the install's own locks are released:
-    /// `mark_unenrolled` and `mark` read the snapshot under their store's lock.
-    /// [`Reloader::settle_tasks`] follows once the turn is released.
+    /// The board installs and marks in one hold of its memory lock (ADR-0040 decision 3).
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
-        if let Some(snapshot) = snapshot {
-            self.authorizer.baseline().install(snapshot);
-        }
         let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer));
+        match snapshot {
+            Some(snapshot) => self
+                .board
+                .install_and_mark(|| self.authorizer.baseline().install(snapshot), &view),
+            None => self.board.mark(&view),
+        }
         self.tasks.mark_unenrolled(&view);
-        self.board.mark(&view);
     }
 
     /// Records and performs the closes `install_and_reconcile` marked, in a session of its
@@ -11460,7 +11695,12 @@ async fn boot_after_sink(
         containment: containment_status,
         tasks,
         board,
-        switches: Arc::new(crate::board_verbs::SwitchesOff),
+        switches: Arc::new(crate::board_verbs::ConfiguredSwitches::from_boot(
+            &boot,
+            Arc::new(crate::enrollment::SnapshotEnrollment(Arc::clone(
+                &authorizer,
+            ))),
+        )),
         banner: Arc::new(std::sync::RwLock::new(banner)),
         banner_load: seams.banner_load,
         #[cfg(test)]
@@ -13005,6 +13245,243 @@ mod record_widths {
             }
             all
         }
+    }
+
+    impl Who {
+        fn manage_case(
+            &self,
+            verb: &Verb,
+            (result, reason, posture): (&str, &str, &str),
+            board: Option<maknae_audit_append::BoardAudit>,
+            tag: &str,
+        ) -> Case {
+            let (role, rule) = self.decided(verb);
+            let action = crate::handler::verb_to_action(verb);
+            let op = crate::handler::board_op(verb);
+            let key = self
+                .person
+                .then_some(crate::board_store::BoardKey(u32::MAX));
+            let mut rec = decision_record(
+                crate::board_verbs::on_board(
+                    request_outcome_record(
+                        &host(),
+                        self.socket(),
+                        u32::MAX,
+                        None,
+                        Some(&widest_user()),
+                        None,
+                        None,
+                        u64::MAX,
+                        u64::MAX,
+                        (action, None, None),
+                        (result, reason, posture),
+                        &serde_json::Value::Null,
+                    ),
+                    key,
+                ),
+                role,
+                rule.as_ref(),
+            );
+            rec.subject.board_op = op.map(str::to_owned);
+            rec.board = board;
+            self.session().stamp(&mut rec);
+            Case {
+                label: format!("{action} {}: {result} {reason}{tag}", op.unwrap_or("")),
+                rec,
+                tasker: (!self.person).then(held_tasker),
+                task: (!self.person).then(|| TASK.to_string()),
+                parent: None,
+                op,
+            }
+        }
+
+        fn manage_cases(&self) -> Vec<Case> {
+            use crate::board::BoardRefusal as R;
+            use crate::board_store::{Report, Settings};
+            use crate::board_verbs as bv;
+            use maknae_audit_append::BoardAudit;
+            let widest = bv::settings_text(Settings {
+                enabled: false,
+                participate: false,
+                report: Report::Summary,
+            });
+            let settings = |before: bool, after: bool| {
+                Some(BoardAudit {
+                    settings_before: before.then(|| widest.clone()),
+                    settings_after: after.then(|| widest.clone()),
+                    ..BoardAudit::default()
+                })
+            };
+            let page = vec![maknae_proto::PostId([0xff; 16]); crate::board_store::BOARD_CLEAR_PAGE];
+            let removed = |n: usize| Some(bv::removed_audit(&page[..n]));
+            let read = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None },
+            };
+            let write = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings {
+                    set: Some(maknae_proto::BoardSettings::default()),
+                },
+            };
+            let clear = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear,
+            };
+            let busy = R::Store("not done: the board store was busy".into());
+            let late = R::Unavailable(format!(
+                "{}the board store did not answer in time",
+                crate::task::OUTCOME_UNKNOWN
+            ));
+            let owed = R::Store("removals are owed".into());
+            let at = |r: &R| ("permit", r.to_string(), bv::posture(r));
+            let mut all = vec![
+                self.manage_case(
+                    &read,
+                    ("permit", "done", "authorized"),
+                    settings(true, false),
+                    " (read)",
+                ),
+                self.manage_case(
+                    &write,
+                    ("permit", "intent recorded", "authorized"),
+                    settings(false, true),
+                    "",
+                ),
+                self.manage_case(
+                    &write,
+                    ("permit", "done", "authorized"),
+                    settings(true, true),
+                    "",
+                ),
+                self.manage_case(
+                    &clear,
+                    ("permit", "intent recorded", "authorized"),
+                    removed(32),
+                    "",
+                ),
+                self.manage_case(
+                    &clear,
+                    ("permit", "done", "authorized"),
+                    removed(32),
+                    " (32 ids)",
+                ),
+                self.manage_case(
+                    &clear,
+                    ("permit", "done", "authorized"),
+                    removed(0),
+                    " (empty)",
+                ),
+            ];
+            for r in [&busy, &late] {
+                let (result, reason, posture) = at(r);
+                all.push(self.manage_case(
+                    &write,
+                    (result, &reason, posture),
+                    settings(false, true),
+                    "",
+                ));
+                all.push(self.manage_case(
+                    &clear,
+                    (result, &reason, posture),
+                    removed(32),
+                    " (32 ids)",
+                ));
+            }
+            let (result, reason, posture) = at(&owed);
+            all.push(self.manage_case(&clear, (result, &reason, posture), removed(0), ""));
+            for verb in [&write, &clear] {
+                all.push(self.manage_case(
+                    verb,
+                    ("deny", "subject contained: role=adversary", "unauthorized"),
+                    None,
+                    "",
+                ));
+            }
+            all
+        }
+
+        fn agent_manage_cases(&self) -> Vec<Case> {
+            let clear = Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear,
+            };
+            let refused = format!(
+                "agent {}: board.manage is never permitted to an agent",
+                widest_agent_id()
+            );
+            vec![
+                self.manage_case(&clear, ("deny", &refused, "unauthorized"), None, ""),
+                self.manage_case(
+                    &clear,
+                    ("deny", crate::board_verbs::ONLY_A_PERSON, "unauthorized"),
+                    None,
+                    "",
+                ),
+            ]
+        }
+    }
+
+    #[test]
+    fn a_persons_board_manage_records_mirror_as_measured() {
+        let cases = Who::new(true).manage_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        let widest = format!(
+            "board.manage clear: permit {}the board store did not answer in time (32 ids)",
+            crate::task::OUTCOME_UNKNOWN
+        );
+        assert_eq!(widest_label(&cases), widest);
+        let c = cases
+            .iter()
+            .find(|c| c.label == widest)
+            .expect("the widest");
+        assert_eq!(macos_mirror(&c.rec).full_len, 2263);
+        let narrowest = cases
+            .iter()
+            .map(|c| macos_mirror(&c.rec).full_len)
+            .min()
+            .expect("cases");
+        assert_eq!(narrowest, 1092);
+    }
+
+    #[test]
+    fn an_agents_refused_board_manage_records_mirror_as_measured() {
+        let cases = Who::new(false).agent_manage_cases();
+        assert_each_case_mirrors_as_measured(&cases, &[]);
+        for c in &cases {
+            assert_eq!(c.rec.object, None, "{}", c.label);
+        }
+    }
+
+    #[test]
+    fn a_clear_naming_four_posts_mirrors_in_full_for_an_ordinary_person_and_five_do_not() {
+        let who = Who::new(true);
+        let clear = Verb::BoardManage {
+            op: maknae_proto::BoardOp::Clear,
+        };
+        let sized = |n: usize| {
+            let ids = vec![maknae_proto::PostId([0xff; 16]); n];
+            let mut c = who.manage_case(
+                &clear,
+                ("permit", "done", "authorized"),
+                Some(crate::board_verbs::removed_audit(&ids)),
+                "",
+            );
+            c.rec.subject.user = Some("alex".into());
+            c.rec.session_id = 42;
+            c.rec.seq = 1234;
+            c.rec.source.uid = 1000;
+            c.rec.object = Some("board:users/1000".into());
+            c.rec.where_.host = "maknaed-01".into();
+            c.rec.where_.socket = "/run/maknae/plane.sock".into();
+            macos_mirror(&c.rec)
+        };
+        let four = sized(4);
+        assert!(four.mirrored_in_full);
+        assert_eq!(four.full_len, 997);
+        assert!(four.full_line.contains(&"ff".repeat(16)));
+        let five = sized(5);
+        assert!(!five.mirrored_in_full);
+        assert!(five.full_len > MACOS_SYSLOG_MAX, "{}", five.full_len);
+        let page = sized(crate::board_store::BOARD_CLEAR_PAGE);
+        assert!(!page.mirrored_in_full);
+        assert_eq!(page.full_len, 1977);
     }
 
     #[test]
@@ -19127,11 +19604,8 @@ mod home_resolution_tests {
 
     #[tokio::test]
     async fn only_a_filesystem_verb_resolves_the_requesters_home() {
-        let uid = nix::unistd::geteuid().as_raw();
-        let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
-            .expect("NSS")
-            .expect("the test euid has a passwd entry")
-            .name;
+        let uid = 4_116_000;
+        let user = "operator-116";
         let raw = std::env::temp_dir().join(format!("run_home_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw);
         std::fs::create_dir(&raw).unwrap();
@@ -19148,11 +19622,11 @@ mod home_resolution_tests {
         let authorizer = authorizer_in(&dir.0, uid);
         let held = crate::authz::home_resolver()
             .claim(uid)
-            .expect("the euid's home slot is free");
+            .expect("the fixture uid's home slot is free");
 
         for verb in [Verb::Ping, Verb::Whoami] {
             let before = crate::authz::home_resolver().entered(uid);
-            let (result, _) = serve(verb.clone(), uid, &user, &dir.0, authorizer.clone()).await;
+            let (result, _) = serve(verb.clone(), uid, user, &dir.0, authorizer.clone()).await;
             assert!(
                 matches!(
                     result,
@@ -19174,7 +19648,7 @@ mod home_resolution_tests {
             conversation: None,
             page: None,
         };
-        let (result, records) = serve(read, uid, &user, &dir.0, authorizer).await;
+        let (result, records) = serve(read, uid, user, &dir.0, authorizer).await;
         assert!(matches!(result, RespResult::Err(_)), "{result:?}");
         assert_eq!(crate::authz::home_resolver().entered(uid), before + 1);
         assert_eq!(
@@ -21121,7 +21595,7 @@ mod reload_fixture {
                 .unwrap(),
                 None => crate::board::BoardStore::new(),
             }),
-            switches: Arc::new(crate::board_verbs::SwitchesOff),
+            switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
@@ -26457,6 +26931,135 @@ mod reload_tests {
         assert_eq!(pages.iter().map(counts).collect::<Vec<_>>(), [(2, 0, None)]);
     }
 
+    /// The installed snapshot; at its second answer, a clear's re-check after its unlink,
+    /// it starts a kernel containment of hobi and polls up to 5 s for that install to show,
+    /// then answers what it read first. `landed` says whether the install showed meanwhile.
+    struct ContainDuringTheRecheck {
+        installed: crate::enrollment::SnapshotEnrollment<maknae_authz_basic::HermeticAuthorizer>,
+        reloader: Arc<
+            Reloader<maknae_authz_basic::HermeticAuthorizer, super::reload_fixture::ReloadSink>,
+        >,
+        runtime: tokio::runtime::Handle,
+        calls: std::sync::Mutex<usize>,
+        landed: std::sync::atomic::AtomicBool,
+        edit: std::sync::Mutex<Option<tokio::task::JoinHandle<Result<LiveApplied, LiveRefusal>>>>,
+    }
+
+    impl crate::enrollment::EnrollmentView for ContainDuringTheRecheck {
+        fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+            self.installed.agent_uid(id)
+        }
+
+        fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+            self.installed.agents()
+        }
+
+        fn is_enrolled(&self, uid: u32) -> bool {
+            self.installed.is_enrolled(uid)
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.installed.contained(uid)
+        }
+
+        fn contained_among(
+            &self,
+            uids: &std::collections::BTreeSet<u32>,
+        ) -> std::collections::BTreeSet<u32> {
+            let answer = self.installed.contained_among(uids);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 2 {
+                let reloader = Arc::clone(&self.reloader);
+                *self.edit.lock().unwrap() = Some(self.runtime.spawn(async move {
+                    reloader
+                        .live_edit(LiveRequest {
+                            op: LiveOp::Edit(LiveEdit::Contain(BindingEntry::Uid(HOBI_UID))),
+                            who: LiveInitiator::Operator,
+                            check: LiveCheck::Contain {
+                                target: HOBI_UID,
+                                requester: 0,
+                            },
+                            note: LiveNote::none(),
+                            authorized: None,
+                        })
+                        .await
+                }));
+                let until = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.installed.contained(HOBI_UID) && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                self.landed.store(
+                    self.installed.contained(HOBI_UID),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
+            answer
+        }
+
+        fn unresolved(&self, uid: u32) -> bool {
+            self.installed.unresolved(uid)
+        }
+
+        fn board(&self, agent: &maknae_config::AgentId) -> bool {
+            self.installed.board(agent)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reloads_install_waits_for_a_clear_holding_its_check() {
+        let fx = fixture_with(
+            "board-clear-install",
+            Opts {
+                authz: CONTAIN_AND_RELEASE_TO_ADMIN,
+                board_blobs: Some(crate::task_store::MemTaskBlobs::default()),
+                ..Opts::default()
+            },
+        )
+        .await;
+        let fx = with_agents(fx, &[HOBI]).await;
+        let post = posted_by(&fx, 1002, HOBI);
+        let view = Arc::new(ContainDuringTheRecheck {
+            installed: crate::enrollment::SnapshotEnrollment(Arc::clone(&fx.reloader.authorizer)),
+            reloader: Arc::clone(&fx.reloader),
+            runtime: tokio::runtime::Handle::current(),
+            calls: std::sync::Mutex::new(0),
+            landed: false.into(),
+            edit: std::sync::Mutex::new(None),
+        });
+        let (board, clearing) = (Arc::clone(&fx.reloader.board), Arc::clone(&view));
+        let page = vec![(post.seq, post.id)];
+        let got = tokio::task::spawn_blocking(move || board.clear(post.key, &page, &*clearing))
+            .await
+            .unwrap();
+        let edit = view
+            .edit
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the re-check started the edit");
+        bounded(edit)
+            .await
+            .unwrap()
+            .expect("the containment is installed");
+        assert!(
+            !view.landed.load(std::sync::atomic::Ordering::SeqCst),
+            "the install landed while the clear held its check"
+        );
+        assert_eq!(got.removed, [post.id], "the clear came first");
+        assert!(crate::enrollment::EnrollmentView::contained(
+            &view.installed,
+            HOBI_UID
+        ));
+        assert!(!live(&fx, &post));
+        assert!(fx
+            .reloader
+            .board
+            .due(10)
+            .iter()
+            .all(|d| d.post != Some(post.id)));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn releasing_one_task_releases_no_posts() {
         use maknae_proto::{HeldTarget, ReleaseResult as R, TaskRef, TaskState};
@@ -29607,6 +30210,7 @@ mod task_sweep_tests {
                 agent: "hobi".into(),
                 standing: maknae_proto::AgentStanding::Undecided,
                 waiting: 0,
+                board: false,
             }]
         );
         assert_eq!((page.undecided, page.next), (1, None));
@@ -29845,6 +30449,9 @@ mod task_sweep_tests {
         }
         fn unresolved(&self, _uid: u32) -> bool {
             self.unresolves && self.swapped()
+        }
+        fn board(&self, agent: &maknae_config::AgentId) -> bool {
+            self.view.board(agent)
         }
         fn load(&self) -> crate::enrollment::Load {
             crate::enrollment::Load::installed(self.loads[usize::from(self.swapped())].clone())
