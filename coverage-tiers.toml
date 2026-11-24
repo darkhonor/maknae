@@ -338,6 +338,8 @@ files = [
   "crates/maknae-config/src/argpattern.rs",
   # #674: the tools.yaml catalog; a wrong arm enables an entry or credential class the file disabled.
   "crates/maknae-config/src/tools.rs",
+  # #674: the tool grammar file; a wrong arm enables a shape whose argv or slot constraint the file did not state.
+  "crates/maknae-config/src/grammar.rs",
   # #79: the posture marker enroll writes and maknaed reads; a mis-parse records a sealed boot as unverified, or the reverse.
   "crates/maknae-config/src/posture_marker.rs",
   "crates/maknae-audit-append/src/record.rs",

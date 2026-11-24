@@ -1170,6 +1170,7 @@ dependencies = [
  "maknae-io",
  "maknae-proto",
  "maknae-security",
+ "regex",
  "serde_json",
  "yaml-rust2",
 ]

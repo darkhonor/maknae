@@ -49,6 +49,7 @@ mod egress_cfg;
 mod egress_mint;
 mod error;
 mod forges;
+mod grammar;
 mod loader;
 pub mod mirror;
 mod policy;
@@ -139,6 +140,10 @@ pub use error::ConfigError;
 pub use forges::{
     forges_from_section, AuthorizedForge, ForgeKind, ForgeProvider, ForgeSet, FORGES_SECTION,
     FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
+};
+pub use grammar::{
+    shape_name_ok, ArgvToken, Constraint, ForgeNeed, Grammar, GrammarError, Shape, ShapeClass,
+    Slot, SlotAt, Tested,
 };
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
