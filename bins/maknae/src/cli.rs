@@ -845,24 +845,29 @@ async fn round_trip(
         }
         return Ok(true);
     }
-    if let Verb::BoardSettings { .. } | Verb::BoardClear = &verb {
-        let send = |v| async move {
-            send_verb(
-                v,
-                None,
-                maknae_loop::mutation::WriteCheck::Unchecked,
-                transport,
-                client,
-                trust,
-                &mut |l| errln!("{l}"),
-            )
-            .await
-            .map(maknae_agent::wire::WireOutcome::from)
-        };
-        let said = match verb {
-            Verb::BoardSettings { change } => maknae_agent::board::settings(change, send).await,
-            _ => maknae_agent::board::clear(send).await,
-        };
+    let board_send = |v| async move {
+        send_verb(
+            v,
+            None,
+            maknae_loop::mutation::WriteCheck::Unchecked,
+            transport,
+            client,
+            trust,
+            &mut |l| errln!("{l}"),
+        )
+        .await
+        .map(maknae_agent::wire::WireOutcome::from)
+    };
+    if let Verb::BoardSettings { change } = &verb {
+        let said = maknae_agent::board::settings(*change, board_send).await;
+        return Ok(print_said(
+            &said,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ));
+    }
+    if let Verb::BoardClear = &verb {
+        let said = maknae_agent::board::clear(board_send).await;
         return Ok(print_said(
             &said,
             &mut std::io::stdout(),
