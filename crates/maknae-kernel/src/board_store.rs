@@ -24,7 +24,8 @@ pub const BOARD_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The first sequence a board issues; a cursor of 0 has read nothing.
 pub const FIRST_SEQ: u64 = 1;
-/// The most post removals the store may owe; past it, a post is refused before any write.
+/// The most post removals the store may owe; past it, a post or a clear is refused before
+/// any write.
 pub const BOARD_OWED_MAX: usize = 32;
 /// The most posts one clear removes; equal to the read page.
 #[cfg(test)]

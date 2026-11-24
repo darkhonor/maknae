@@ -114,7 +114,7 @@ enum Item {
 #[derive(Default)]
 struct Held {
     boards: BTreeMap<BoardKey, Board>,
-    /// Post records written unsynced whose removal did not sync either.
+    /// Post records whose removal did not sync: a post's undo, or a cleared post's unlink.
     owed: BTreeSet<(BoardKey, PostId)>,
     boot: Vec<BoardFinding>,
     /// Holds not yet stored, by board and sequence.
@@ -198,6 +198,24 @@ impl Held {
         }
         self.expiring.insert((key, seq));
         Some(name)
+    }
+
+    /// The post at `seq` when it is now marked, or `view` now contains its author or `key`'s
+    /// person, in which case it is marked for those holds.
+    #[cfg(test)]
+    fn contained_since(
+        &mut self,
+        key: BoardKey,
+        seq: u64,
+        view: &dyn EnrollmentView,
+    ) -> Option<Arc<Stored>> {
+        let s = Arc::clone(self.boards.get(&key)?.posts.get(&seq)?);
+        let contained = contained_on(view, key, std::iter::once(s.author_uid));
+        let why = contained_for(key, s.author_uid, &contained);
+        if !why.is_empty() {
+            self.marked.entry((key, seq)).or_default().extend(why);
+        }
+        self.marked.contains_key(&(key, seq)).then_some(s)
     }
 
     /// Forgets the post at `seq` once its record is deleted.
@@ -779,6 +797,17 @@ impl BoardStore {
         (held, deleted)
     }
 
+    /// Writes back the record of a post kept in memory after its delete.
+    #[cfg(test)]
+    fn restore(&self, key: BoardKey, kept: &Stored) -> Result<(), StoreError> {
+        let plain = encode(&PostRecord {
+            board: key.0,
+            stored: kept,
+        })?;
+        self.blobs
+            .save(&Name::Post(key, kept.post.id).text(), &plain)
+    }
+
     /// Memory only: up to `BOARD_CLEAR_PAGE` posts of `key`'s board that are not withheld,
     /// lowest sequence first, and whether more remain.
     #[cfg(test)]
@@ -803,7 +832,9 @@ impl BoardStore {
 
     /// Under the writer: removes each of `posts` that is still on `key`'s board at that
     /// sequence, not withheld, and whose author and person `view` does not contain; a post
-    /// `view` contains is marked for its holds instead. Stops at the first delete that fails.
+    /// `view` contains is marked for its holds instead. Takes at most `BOARD_CLEAR_PAGE`.
+    /// A post found marked or contained after its delete is kept and its record written
+    /// back. Stops at the first delete, or write-back, that fails.
     #[cfg(test)]
     pub(crate) fn clear(
         &self,
@@ -820,7 +851,7 @@ impl BoardStore {
             cleared.stopped = Some(BoardRefusal::Store("removals are owed".into()));
             return cleared;
         }
-        for &(seq, id) in posts {
+        for &(seq, id) in posts.iter().take(crate::board_store::BOARD_CLEAR_PAGE) {
             let name = {
                 let mut held = self.held();
                 let now = self.now();
@@ -830,6 +861,20 @@ impl BoardStore {
                 name
             };
             let (mut held, deleted) = self.delete_claimed(key, seq, &name);
+            let kept = match &deleted {
+                Ok(()) | Err(StoreError::NotDurable(_)) => held.contained_since(key, seq, view),
+                Err(StoreError::Io(_) | StoreError::Counters(_)) => None,
+            };
+            if let Some(kept) = kept {
+                drop(held);
+                if let Err(why) = self.restore(key, &kept) {
+                    cleared.stopped = Some(BoardRefusal::Unavailable(format!(
+                        "{OUTCOME_UNKNOWN}contained during the clear; the record is not restored: {why}"
+                    )));
+                    break;
+                }
+                continue;
+            }
             match deleted {
                 Ok(()) => {
                     held.forget(key, seq);
@@ -3803,14 +3848,23 @@ mod tests {
     fn clearable_skips_held_marked_expiring_and_aged_posts() {
         let b = MemTaskBlobs::default();
         let (store, clock) = wide(&b);
-        put_as(&store, BOB, 0xe0, 2001);
-        put_as(&store, BOB, 0xe1, 2010);
-        put_as(&store, BOB, 0xe2, 2011);
+        let aged = put_as(&store, BOB, 0xe0, 2001);
+        clock.set(T0 + RETAIN - 1);
+        let held = put_as(&store, BOB, 0xe1, 2010);
+        let marked = put_as(&store, BOB, 0xe2, 2011);
+        let expiring = put_as(&store, BOB, 0xe3, 2012);
         holding(&store, &[2010]);
         clock.set(T0 + RETAIN);
-        let expiring = put_as(&store, BOB, 0xe3, 2012);
         store.held().expiring.insert((BOB, expiring.seq));
         store.mark(&containing(&[], &[2011]));
+        let at = |s: &Arc<Stored>| store.held().boards[&BOB].posts[&s.seq].clone();
+        assert!(expired(&at(&aged), T0 + RETAIN));
+        assert!(at(&aged).held.is_empty());
+        for s in [&held, &marked, &expiring] {
+            assert!(!expired(&at(s), T0 + RETAIN));
+        }
+        assert!(!at(&held).held.is_empty());
+        assert!(store.held().marked.contains_key(&(BOB, marked.seq)));
         let posts: Vec<_> = (1..=40).map(|i| put_as(&store, BOB, i, 2001)).collect();
         assert_eq!(store.clearable(BOB), (pairs(&posts[..32]), true));
     }
@@ -4056,6 +4110,217 @@ mod tests {
                 assert!(in_store(&store, BOB, victim.post.id));
                 assert!(b.has(&post_name(BOB, victim.post.id)));
             }
+        }
+    }
+
+    #[test]
+    fn a_clear_takes_at_most_a_page_whatever_it_is_passed() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let posts: Vec<_> = (1..=33).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        let got = store.clear(BOB, &pairs(&posts), &free());
+        assert_eq!(got.removed, ids(&posts[..32]));
+        assert_eq!(got.stopped, None);
+        assert!(in_store(&store, BOB, posts[32].post.id));
+        assert!(b.has(&post_name(BOB, posts[32].post.id)));
+    }
+
+    /// `clear` runs on another thread with every delete and save stalled; `during` runs
+    /// once its first delete has begun, after the claim and before the outcome.
+    fn clear_while(
+        b: &MemTaskBlobs,
+        store: &Arc<BoardStore>,
+        named: Vec<(u64, PostId)>,
+        during: impl FnOnce(),
+    ) -> Cleared {
+        b.slow(Some(std::time::Duration::from_millis(300)));
+        let clearing = Arc::clone(store);
+        let worker = std::thread::spawn(move || clearing.clear(BOB, &named, &free()));
+        b.await_stalls(1);
+        during();
+        let got = worker.join().unwrap();
+        b.slow(None);
+        got
+    }
+
+    #[test]
+    fn a_containment_marked_while_a_post_is_cleared_keeps_the_post() {
+        for (uid, why) in [(2001, HeldFor::Author), (1000, HeldFor::Person)] {
+            for unsynced in [false, true] {
+                let b = MemTaskBlobs::default();
+                let (store, _) = clocked(&b);
+                let store = Arc::new(store);
+                let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+                let other = by(&store, BOB, jin(), Some(2002), "sentinel-698-other");
+                if unsynced {
+                    b.fail(Some(Fail::UnsyncedUnlinks));
+                }
+                let got = clear_while(&b, &store, pairs([&kept, &other]), || {
+                    store.mark(&containing(&[], &[uid]))
+                });
+                b.fail(None);
+                let case = format!("{why:?} unsynced {unsynced}");
+                let removed: &[&Arc<Stored>] = match (why, unsynced) {
+                    (HeldFor::Author, _) => &[&other],
+                    (HeldFor::Person, _) => &[],
+                };
+                let stopped = (unsynced && why == HeldFor::Author)
+                    .then(|| BoardRefusal::Unavailable(UNSYNCED.into()));
+                assert_eq!(got, cleared(removed, stopped), "{case}");
+                assert!(!store.held().owed.contains(&(BOB, kept.post.id)), "{case}");
+                assert!(store.held().expiring.is_empty(), "{case}");
+                assert!(in_store(&store, BOB, kept.post.id), "{case}");
+                assert!(store.get(BOB, kept.post.id).is_none(), "{case}: withheld");
+                assert!(b.has(&post_name(BOB, kept.post.id)), "{case}: restored");
+                let due = store.due(10);
+                assert!(
+                    whys(&due).contains(&(Some(kept.post.id), None, BoardDueFor::Hold(why))),
+                    "{case}: {:?}",
+                    whys(&due)
+                );
+                assert_eq!(store.perform(&due, &free()), due.len(), "{case}");
+                assert_eq!(
+                    stored_on_disk(&b, BOB, kept.post.id).held,
+                    [why].into_iter().collect(),
+                    "{case}"
+                );
+                drop(due);
+                b.crash(0);
+                let (reloaded, _) = clocked(&b);
+                assert!(in_store(&reloaded, BOB, kept.post.id), "{case}");
+                assert!(reloaded.get(BOB, kept.post.id).is_none(), "{case}: held");
+            }
+        }
+    }
+
+    #[test]
+    fn a_containment_the_view_shows_after_the_unlink_keeps_the_post() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+        let got = store.clear(BOB, &pairs([&kept]), &installs(&[&[], &[2001]]));
+        assert_eq!(got, cleared(&[], None));
+        assert_eq!(
+            store.held().marked.get(&(BOB, kept.seq)),
+            Some(&[HeldFor::Author].into_iter().collect())
+        );
+        assert!(store.held().expiring.is_empty());
+        assert!(b.has(&post_name(BOB, kept.post.id)));
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
+        assert_eq!(
+            stored_on_disk(&b, BOB, kept.post.id).held,
+            [HeldFor::Author].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn a_containment_installed_after_the_clear_returned_does_not_bring_a_post_back() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let gone = by(&store, BOB, hobi(), Some(2001), "sentinel-698-gone");
+        assert_eq!(
+            store.clear(BOB, &pairs([&gone]), &free()),
+            cleared(&[&gone], None)
+        );
+        store.mark(&containing(&[], &[2001, 1000]));
+        assert!(store.due(10).is_empty());
+        assert!(!in_store(&store, BOB, gone.post.id));
+        assert!(!b.has(&post_name(BOB, gone.post.id)));
+        drop(store);
+        let (store, _) = clocked(&b);
+        assert!(!in_store(&store, BOB, gone.post.id));
+    }
+
+    /// Contains nobody at the first check and uid 2001 from the second, and makes the disk
+    /// refuse `name` (or stop syncing) as it first says so.
+    struct ThenRefuse {
+        b: MemTaskBlobs,
+        name: String,
+        unsynced: bool,
+        calls: Mutex<usize>,
+    }
+
+    impl EnrollmentView for ThenRefuse {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.contained_among(&[uid].into_iter().collect())
+                .contains(&uid)
+        }
+
+        fn contained_among(&self, uids: &BTreeSet<u32>) -> BTreeSet<u32> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls < 2 {
+                return BTreeSet::new();
+            }
+            match self.unsynced {
+                true => self.b.fail(Some(Fail::Unsynced)),
+                false => self.b.stick(Some(self.name.clone())),
+            }
+            uids.iter().copied().filter(|u| *u == 2001).collect()
+        }
+
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_kept_post_whose_record_is_not_restored_stops_the_clear_and_is_not_removed() {
+        for unsynced in [false, true] {
+            let b = MemTaskBlobs::default();
+            let (store, _) = clocked(&b);
+            let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+            let next = by(&store, BOB, jin(), Some(2002), "sentinel-698-next");
+            let name = post_name(BOB, kept.post.id);
+            let view = ThenRefuse {
+                b: b.clone(),
+                name: name.clone(),
+                unsynced,
+                calls: Mutex::new(0),
+            };
+            let got = store.clear(BOB, &pairs([&kept, &next]), &view);
+            b.fail(None);
+            b.stick(None);
+            let why = match unsynced {
+                true => "sentinel-628-unsynced",
+                false => "sentinel-628-stuck",
+            };
+            assert_eq!(
+                got,
+                cleared(
+                    &[],
+                    Some(BoardRefusal::Unavailable(format!(
+                        "outcome unknown: contained during the clear; the record is not restored: {why}"
+                    )))
+                ),
+                "unsynced {unsynced}"
+            );
+            assert_eq!(b.has(&name), unsynced);
+            assert!(in_store(&store, BOB, kept.post.id));
+            assert!(store.get(BOB, kept.post.id).is_none(), "marked");
+            assert!(store.held().owed.is_empty());
+            assert!(in_store(&store, BOB, next.post.id), "the clear stopped");
+            assert_eq!(store.perform(&store.due(10), &free()), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, kept.post.id).held,
+                [HeldFor::Author].into_iter().collect()
+            );
         }
     }
 }
