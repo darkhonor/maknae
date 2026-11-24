@@ -113,14 +113,15 @@ const SLOT_KEYS: &[&str] = &["at", "enum", "pattern", "description"];
 impl Grammar {
     pub fn parse(stem: &str, text: &str) -> Result<Self, GrammarError> {
         let invalid = |reason: &str| GrammarError::Invalid(reason.to_string());
-        let Value::Map(top) = crate::load_str(text).map_err(GrammarError::Config)? else {
+        let doc = crate::load_str(text).map_err(GrammarError::Config)?;
+        let Value::Map(top) = &doc else {
             return Err(invalid("the document must be a mapping"));
         };
-        closed("grammar", &top, TOP_KEYS)?;
-        if !matches!(get(&top, "schema_version"), Some(Value::Int(1))) {
+        closed("grammar", top, TOP_KEYS)?;
+        if !matches!(get(top, "schema_version"), Some(Value::Int(1))) {
             return Err(invalid("schema_version must be 1"));
         }
-        let program = match get(&top, "program") {
+        let program = match get(top, "program") {
             Some(Value::Str(p)) if crate::tools::tool_program_name_ok(p) => p.clone(),
             _ => return Err(invalid("program must be a program name")),
         };
@@ -129,19 +130,16 @@ impl Grammar {
                 "program `{program}` must equal the file name `{stem}`"
             )));
         }
-        let tested = parse_tested(get(&top, "tested"))?;
-        let Some(Value::Map(shape_nodes)) = get(&top, "shapes") else {
+        let tested = parse_tested(get(top, "tested"))?;
+        let Some(Value::Map(shape_nodes)) = get(top, "shapes") else {
             return Err(invalid("shapes must be a mapping"));
         };
-        for (_, node) in shape_nodes {
-            check_shape_keys(node)?;
-        }
         let mut grammar = Self {
             program,
             tested,
             shapes: BTreeMap::new(),
             disabled: Vec::new(),
-            canonical: crate::canonical_json(&Value::Map(top.clone())),
+            canonical: crate::canonical_json(&doc),
         };
         for (name, node) in shape_nodes {
             match parse_shape(name, node) {
@@ -179,22 +177,8 @@ fn closed(section: &str, map: &Fields, allowed: &[&str]) -> Result<(), GrammarEr
     crate::reject_unknown_keys(section, map, allowed).map_err(GrammarError::Config)
 }
 
-fn check_shape_keys(node: &Value) -> Result<(), GrammarError> {
-    let Value::Map(shape) = node else {
-        return Ok(());
-    };
-    closed("grammar.shapes", shape, SHAPE_KEYS)?;
-    if let Some(Value::Map(forge)) = get(shape, "forge") {
-        closed("grammar.shapes.forge", forge, FORGE_KEYS)?;
-    }
-    if let Some(Value::Map(slots)) = get(shape, "slots") {
-        for (_, slot) in slots {
-            if let Value::Map(slot) = slot {
-                closed("grammar.shapes.slots", slot, SLOT_KEYS)?;
-            }
-        }
-    }
-    Ok(())
+fn closed_in_shape(section: &str, map: &Fields, allowed: &[&str]) -> Result<(), String> {
+    crate::reject_unknown_keys(section, map, allowed).map_err(|e| e.to_string())
 }
 
 fn parse_tested(node: Option<&Value>) -> Result<Tested, GrammarError> {
@@ -231,6 +215,7 @@ fn parse_shape(name: &str, node: &Value) -> Result<Shape, String> {
     let Value::Map(map) = node else {
         return Err("the shape must be a mapping".into());
     };
+    closed_in_shape("grammar.shapes", map, SHAPE_KEYS)?;
     let description = text(get(map, "description"), "description")?.to_string();
     let class = match text(get(map, "class"), "class")? {
         "read" => ShapeClass::Read,
@@ -266,6 +251,7 @@ fn parse_forge(node: Option<&Value>) -> Result<ForgeNeed, String> {
     let Value::Map(map) = node else {
         return Err("forge must be a mapping".into());
     };
+    closed_in_shape("grammar.shapes.forge", map, FORGE_KEYS)?;
     let side = |key: &str| -> Result<ForgeOps, String> {
         match get(map, key) {
             None => Ok(ForgeOps::EMPTY),
@@ -308,7 +294,8 @@ fn parse_slot(name: &str, node: &Value) -> Result<Slot, String> {
     let Value::Map(map) = node else {
         return Err(format!("slot `{name}` must be a mapping"));
     };
-    let at = match text(get(map, "at"), "at")? {
+    closed_in_shape("grammar.shapes.slots", map, SLOT_KEYS)?;
+    let at = match text(get(map, "at"), "at").map_err(|e| format!("slot `{name}`: {e}"))? {
         "token" => SlotAt::Token,
         "option" => SlotAt::Option,
         "stdin" => SlotAt::Stdin,
@@ -442,9 +429,6 @@ fn check_slot_use(argv: &[ArgvToken], slots: &BTreeMap<String, Slot>) -> Result<
                 stdin += 1;
                 if stdin > 1 {
                     return Err("at most one stdin slot".into());
-                }
-                if used != 0 {
-                    return Err(format!("stdin slot `{name}` must not appear in argv"));
                 }
             }
             SlotAt::Token | SlotAt::Option | SlotAt::File => {
@@ -592,33 +576,62 @@ shapes:
     }
 
     #[test]
-    fn unknown_key_refuses_the_file() {
+    fn unknown_top_level_key_refuses_the_file() {
         let top = PR_COMMENT_AND_ISSUE_LIST.replacen("shapes:", "extra: 1\nshapes:", 1);
-        let shape = PR_COMMENT_AND_ISSUE_LIST.replacen(
-            "    class: read",
-            "    class: read\n    cost: 1",
-            1,
-        );
-        let slot = PR_COMMENT_AND_ISSUE_LIST.replacen("at: stdin,", "at: stdin, size: 3,", 1);
-        let forge = PR_COMMENT_AND_ISSUE_LIST.replacen(
-            "forge: { base: [read] }",
-            "forge: { base: [read], tail: [] }",
-            1,
-        );
+        assert!(matches!(
+            Grammar::parse("gh", &top),
+            Err(GrammarError::Config(ConfigError::UnknownKey { ref key, .. })) if key == "extra"
+        ));
+    }
+
+    #[test]
+    fn unknown_tested_key_refuses_the_file() {
         let tested = PR_COMMENT_AND_ISSUE_LIST.replacen(
             "date: 2026-11-24 }",
             "date: 2026-11-24, by: x }",
             1,
         );
-        for doc in [top, shape, slot, forge, tested] {
-            assert!(
-                matches!(
-                    Grammar::parse("gh", &doc),
-                    Err(GrammarError::Config(ConfigError::UnknownKey { .. }))
+        assert!(matches!(
+            Grammar::parse("gh", &tested),
+            Err(GrammarError::Config(ConfigError::UnknownKey { ref key, .. })) if key == "by"
+        ));
+    }
+
+    #[test]
+    fn unknown_key_inside_a_shape_slot_or_forge_disables_only_that_shape() {
+        let doc = PR_COMMENT_AND_ISSUE_LIST;
+        for (bad, key) in [
+            (
+                doc.replacen("    class: read", "    class: read\n    cost: 1", 1),
+                "cost",
+            ),
+            (doc.replacen("at: stdin,", "at: stdin, size: 3,", 1), "size"),
+            (
+                doc.replacen(
+                    "forge: { base: [read] }",
+                    "forge: { base: [read], tail: [] }",
+                    1,
                 ),
-                "{doc}"
-            );
+                "tail",
+            ),
+        ] {
+            let g = parse(&bad);
+            assert_eq!(g.disabled.len(), 1, "{key}");
+            assert!(g.disabled[0].1.contains(key), "{}", g.disabled[0].1);
+            assert_eq!(g.shapes.len(), 1, "{key}");
         }
+    }
+
+    #[test]
+    fn canonical_is_the_canonical_json_of_the_whole_authored_document() {
+        let text = with_shape("bad.x", &body("    argv: [\"{n}\"]\n"));
+        let g = parse(&text);
+        assert_eq!(g.disabled.len(), 1);
+        assert_eq!(
+            g.canonical,
+            crate::canonical_json(&crate::load_str(&text).unwrap())
+        );
+        assert!(g.canonical.contains("bad.x"));
     }
 
     #[test]
