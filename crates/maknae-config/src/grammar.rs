@@ -1,6 +1,6 @@
 //! A tool grammar file (#674 PR 3): the argv shapes one program may be called with.
 
-use crate::{ConfigError, Value};
+use crate::{Bound, ConfigError, Value};
 use maknae_proto::{ForgeOp, ForgeOps, SideReach};
 use regex::{Regex, RegexBuilder};
 use std::collections::{BTreeMap, BTreeSet};
@@ -439,6 +439,211 @@ fn check_slot_use(argv: &[ArgvToken], slots: &BTreeMap<String, Slot>) -> Result<
                 }
             }
         }
+    }
+    Ok(())
+}
+
+const SLOT_FILE_DIR: &str = "/run/maknae/slots";
+const TOKEN_MAX: usize = 256;
+const OPTION_MAX: usize = 4096;
+const BODY_MAX: usize = 65_536;
+const OPEN_TOKENS_MAX: usize = 64;
+const OPEN_TOKEN_MAX: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallRefusal {
+    MissingSlot(String),
+    UnexpectedSlot(String),
+    Invariant { slot: String, rule: &'static str },
+    Constraint { slot: String },
+    UnresolvedBound(String),
+    BadBound(String),
+    OpenToken { index: usize, rule: &'static str },
+    OpenTooMany,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlotFile {
+    pub path: String,
+    pub content: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered {
+    pub argv: Vec<String>,
+    pub stdin: Option<Vec<u8>>,
+    pub files: Vec<SlotFile>,
+}
+
+fn is_control_char(c: char) -> bool {
+    c.is_control()
+}
+
+fn check_value(name: &str, slot: &Slot, value: &str) -> Result<(), CallRefusal> {
+    let refuse = |rule| {
+        Err(CallRefusal::Invariant {
+            slot: name.to_string(),
+            rule,
+        })
+    };
+    match slot.at {
+        SlotAt::Token => {
+            if value.is_empty() {
+                return refuse("empty");
+            }
+            if value.len() > TOKEN_MAX {
+                return refuse("too_long");
+            }
+            if value.starts_with('-') {
+                return refuse("leading_dash");
+            }
+            if value.chars().any(is_control_char) {
+                return refuse("control");
+            }
+        }
+        SlotAt::Option => {
+            if value.len() > OPTION_MAX {
+                return refuse("too_long");
+            }
+            if value.contains('\0') {
+                return refuse("nul");
+            }
+        }
+        SlotAt::Stdin | SlotAt::File => {
+            if value.len() > BODY_MAX {
+                return refuse("too_long");
+            }
+        }
+    }
+    match &slot.constraint {
+        None => Ok(()),
+        Some(Constraint::Enum(members)) if members.contains(value) => Ok(()),
+        Some(Constraint::Pattern(re)) if re.is_match(value) => Ok(()),
+        Some(Constraint::Enum(_)) | Some(Constraint::Pattern(_)) => Err(CallRefusal::Constraint {
+            slot: name.to_string(),
+        }),
+    }
+}
+
+fn bound_value<'a>(kind: &str, field: &str, bound: &'a Bound) -> Result<&'a str, CallRefusal> {
+    let key = || format!("{kind}.{field}");
+    let value = bound
+        .get(kind, field)
+        .ok_or_else(|| CallRefusal::UnresolvedBound(key()))?;
+    if value.is_empty() || value.starts_with('-') || value.chars().any(is_control_char) {
+        return Err(CallRefusal::BadBound(key()));
+    }
+    Ok(value)
+}
+
+fn slot_file_path(slot: &str) -> String {
+    format!("{SLOT_FILE_DIR}/{slot}")
+}
+
+impl Shape {
+    pub fn render(
+        &self,
+        slots: &BTreeMap<String, String>,
+        bound: &Bound,
+    ) -> Result<Rendered, CallRefusal> {
+        if let Some(extra) = slots.keys().find(|k| !self.slots.contains_key(*k)) {
+            return Err(CallRefusal::UnexpectedSlot(extra.clone()));
+        }
+        for (name, slot) in &self.slots {
+            let value = slots
+                .get(name)
+                .ok_or_else(|| CallRefusal::MissingSlot(name.clone()))?;
+            check_value(name, slot, value)?;
+        }
+        let position = |name: &str| CallRefusal::Invariant {
+            slot: name.to_string(),
+            rule: "position",
+        };
+        let mut argv = Vec::with_capacity(self.argv.len());
+        for token in &self.argv {
+            match token {
+                ArgvToken::Literal(text) => argv.push(text.clone()),
+                ArgvToken::Bound { kind, field } => {
+                    argv.push(bound_value(kind, field, bound)?.to_string());
+                }
+                ArgvToken::Slot(name) => {
+                    let slot = self.slots.get(name).ok_or_else(|| position(name))?;
+                    match slot.at {
+                        SlotAt::Token => argv.push(slots[name].clone()),
+                        SlotAt::File => argv.push(slot_file_path(name)),
+                        SlotAt::Option | SlotAt::Stdin => return Err(position(name)),
+                    }
+                }
+                ArgvToken::OptionSlot { prefix, slot: name } => {
+                    let slot = self.slots.get(name).ok_or_else(|| position(name))?;
+                    match slot.at {
+                        SlotAt::Option => argv.push(format!("{prefix}{}", slots[name])),
+                        SlotAt::Token | SlotAt::File | SlotAt::Stdin => {
+                            return Err(position(name));
+                        }
+                    }
+                }
+            }
+        }
+        let mut stdin = None;
+        let mut files = Vec::new();
+        for (name, slot) in &self.slots {
+            match slot.at {
+                SlotAt::Stdin => stdin = Some(slots[name].clone().into_bytes()),
+                SlotAt::File => files.push(SlotFile {
+                    path: slot_file_path(name),
+                    content: slots[name].clone().into_bytes(),
+                }),
+                SlotAt::Token | SlotAt::Option => {}
+            }
+        }
+        Ok(Rendered { argv, stdin, files })
+    }
+
+    pub fn matches_argv(&self, argv: &[String], bound: &Bound) -> bool {
+        if argv.len() != self.argv.len() {
+            return false;
+        }
+        self.argv
+            .iter()
+            .zip(argv)
+            .all(|(token, actual)| match token {
+                ArgvToken::Literal(text) => text == actual,
+                ArgvToken::Bound { kind, field } => {
+                    bound_value(kind, field, bound).is_ok_and(|v| v == actual)
+                }
+                ArgvToken::Slot(name) => self.slots.get(name).is_some_and(|slot| match slot.at {
+                    SlotAt::Token => check_value(name, slot, actual).is_ok(),
+                    SlotAt::File => *actual == slot_file_path(name),
+                    SlotAt::Option | SlotAt::Stdin => false,
+                }),
+                ArgvToken::OptionSlot { prefix, slot: name } => {
+                    self.slots.get(name).is_some_and(|slot| match slot.at {
+                        SlotAt::Option => actual
+                            .strip_prefix(prefix.as_str())
+                            .is_some_and(|value| check_value(name, slot, value).is_ok()),
+                        SlotAt::Token | SlotAt::File | SlotAt::Stdin => false,
+                    })
+                }
+            })
+    }
+}
+
+pub fn check_open_argv(argv: &[String]) -> Result<(), CallRefusal> {
+    if argv.len() > OPEN_TOKENS_MAX {
+        return Err(CallRefusal::OpenTooMany);
+    }
+    for (index, token) in argv.iter().enumerate() {
+        let rule = if token.len() > OPEN_TOKEN_MAX {
+            "too_long"
+        } else if token.contains('\0') {
+            "nul"
+        } else if token.chars().any(|c| c != '\t' && is_control_char(c)) {
+            "control"
+        } else {
+            continue;
+        };
+        return Err(CallRefusal::OpenToken { index, rule });
     }
     Ok(())
 }
@@ -1202,6 +1407,459 @@ shapes:
         assert!(e.to_string().starts_with("grammar: schema_version"));
         let e = Grammar::parse("gh", "a: [\n").unwrap_err();
         assert!(e.to_string().starts_with("grammar: "));
+    }
+
+    fn slots(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn git_bound() -> Bound {
+        let mut b = Bound::empty();
+        b.insert("git.change", "12");
+        b.insert("git.base", "o/r");
+        b
+    }
+
+    const RENDER_GRAMMAR: &str = r#"
+schema_version: 1
+program: gh
+tested: { version: "2.105.0", date: 2026-11-24 }
+shapes:
+  pr.comment:
+    description: Comment.
+    class: write
+    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      body: { at: stdin, description: b }
+  issue.list:
+    description: List.
+    class: read
+    argv: [issue, list, -R, "{git.base}", "--state={state}"]
+    slots:
+      state: { at: option, enum: [open, closed, all], description: s }
+  issue.view:
+    description: View.
+    class: read
+    argv: [issue, view, "{number}"]
+    slots:
+      number: { at: token, pattern: "[1-9][0-9]{0,9}", description: n }
+  issue.edit:
+    description: Edit.
+    class: write
+    argv: [issue, edit, "{number}", "--title={title}"]
+    slots:
+      number: { at: token, enum: ["1", "2"], description: n }
+      title: { at: option, description: t }
+  issue.file:
+    description: File.
+    class: write
+    argv: [issue, create, --body-file, "{body}"]
+    slots:
+      body: { at: file, description: b }
+  issue.word:
+    description: Word.
+    class: read
+    argv: [search, "{word}"]
+    slots:
+      word: { at: token, pattern: ".*", description: w }
+"#;
+
+    fn shape(name: &str) -> Shape {
+        let g = parse(RENDER_GRAMMAR);
+        assert!(g.disabled.is_empty(), "{:?}", g.disabled);
+        g.shapes[name].clone()
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|t| (*t).to_string()).collect()
+    }
+
+    #[test]
+    fn pr_comment_renders_with_bound_values_and_stdin() {
+        let r = shape("pr.comment")
+            .render(&slots(&[("body", "hello")]), &git_bound())
+            .unwrap();
+        assert_eq!(
+            r.argv,
+            s(&["pr", "comment", "12", "-R", "o/r", "--body-file", "-"])
+        );
+        assert_eq!(r.stdin, Some(b"hello".to_vec()));
+        assert!(r.files.is_empty());
+        let r = shape("issue.list")
+            .render(&slots(&[("state", "open")]), &git_bound())
+            .unwrap();
+        assert_eq!(r.stdin, None);
+    }
+
+    #[test]
+    fn option_slot_starting_with_dash_renders_as_one_token() {
+        let r = shape("issue.edit")
+            .render(&slots(&[("number", "1"), ("title", "-x")]), &Bound::empty())
+            .unwrap();
+        assert_eq!(r.argv, s(&["issue", "edit", "1", "--title=-x"]));
+        let r = shape("issue.edit")
+            .render(&slots(&[("number", "1"), ("title", "")]), &Bound::empty())
+            .unwrap();
+        assert_eq!(r.argv[3], "--title=");
+    }
+
+    #[test]
+    fn token_slot_leading_dash_is_refused() {
+        let e = shape("issue.word")
+            .render(&slots(&[("word", "--exec=x")]), &Bound::empty())
+            .unwrap_err();
+        assert_eq!(
+            e,
+            CallRefusal::Invariant {
+                slot: "word".into(),
+                rule: "leading_dash"
+            }
+        );
+        for (v, rule) in [("", "empty"), ("a\nb", "control"), ("a\u{7f}", "control")] {
+            let e = shape("issue.word")
+                .render(&slots(&[("word", v)]), &Bound::empty())
+                .unwrap_err();
+            assert_eq!(
+                e,
+                CallRefusal::Invariant {
+                    slot: "word".into(),
+                    rule
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn enum_slot_outside_members_is_refused() {
+        let e = shape("issue.list")
+            .render(&slots(&[("state", "merged")]), &git_bound())
+            .unwrap_err();
+        assert_eq!(
+            e,
+            CallRefusal::Constraint {
+                slot: "state".into()
+            }
+        );
+    }
+
+    #[test]
+    fn pattern_slot_must_match_fully() {
+        let view = shape("issue.view");
+        assert!(view
+            .render(&slots(&[("number", "12")]), &Bound::empty())
+            .is_ok());
+        for bad in ["12a", "a12", "012", "12345678901"] {
+            let e = view
+                .render(&slots(&[("number", bad)]), &Bound::empty())
+                .unwrap_err();
+            assert_eq!(
+                e,
+                CallRefusal::Constraint {
+                    slot: "number".into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn slot_at_limit_accepted_one_over_refused_multibyte() {
+        let euro = "\u{20ac}";
+        let stdin_ok = format!("a{}", euro.repeat(21_845));
+        assert_eq!(stdin_ok.len(), 65_536);
+        let r = shape("pr.comment")
+            .render(&slots(&[("body", &stdin_ok)]), &git_bound())
+            .unwrap();
+        assert_eq!(r.stdin.unwrap(), stdin_ok.as_bytes());
+        let over = format!("{stdin_ok}a");
+        assert_eq!(over.len(), 65_537);
+        let e = shape("pr.comment")
+            .render(&slots(&[("body", &over)]), &git_bound())
+            .unwrap_err();
+        assert_eq!(
+            e,
+            CallRefusal::Invariant {
+                slot: "body".into(),
+                rule: "too_long"
+            }
+        );
+        let split = format!("{}{euro}", "a".repeat(65_535));
+        assert_eq!(split.len(), 65_538);
+        assert!(shape("pr.comment")
+            .render(&slots(&[("body", &split)]), &git_bound())
+            .is_err());
+
+        let tok_ok = format!("a{}", euro.repeat(85));
+        assert_eq!(tok_ok.len(), 256);
+        assert!(shape("issue.word")
+            .render(&slots(&[("word", &tok_ok)]), &Bound::empty())
+            .is_ok());
+        let tok_over = format!("{tok_ok}a");
+        assert!(shape("issue.word")
+            .render(&slots(&[("word", &tok_over)]), &Bound::empty())
+            .is_err());
+        let tok_split = format!("aa{}", euro.repeat(85));
+        assert_eq!(tok_split.len(), 257);
+        assert_eq!(
+            shape("issue.word")
+                .render(&slots(&[("word", &tok_split)]), &Bound::empty())
+                .unwrap_err(),
+            CallRefusal::Invariant {
+                slot: "word".into(),
+                rule: "too_long"
+            }
+        );
+
+        let opt_ok = format!("a{}", euro.repeat(1365));
+        assert_eq!(opt_ok.len(), 4096);
+        let edit = shape("issue.edit");
+        assert!(edit
+            .render(
+                &slots(&[("number", "1"), ("title", &opt_ok)]),
+                &Bound::empty()
+            )
+            .is_ok());
+        let opt_over = format!("{opt_ok}a");
+        assert!(edit
+            .render(
+                &slots(&[("number", "1"), ("title", &opt_over)]),
+                &Bound::empty()
+            )
+            .is_err());
+        assert!(edit
+            .render(
+                &slots(&[("number", "1"), ("title", "a\0b")]),
+                &Bound::empty()
+            )
+            .is_err());
+        assert!(edit
+            .render(
+                &slots(&[("number", "1"), ("title", "a\tb\nc")]),
+                &Bound::empty()
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn missing_and_unexpected_slots_are_refused() {
+        let e = shape("issue.list")
+            .render(&slots(&[]), &git_bound())
+            .unwrap_err();
+        assert_eq!(e, CallRefusal::MissingSlot("state".into()));
+        let e = shape("issue.list")
+            .render(&slots(&[("state", "open"), ("extra", "x")]), &git_bound())
+            .unwrap_err();
+        assert_eq!(e, CallRefusal::UnexpectedSlot("extra".into()));
+    }
+
+    #[test]
+    fn unresolved_and_dash_bound_values_are_refused() {
+        let pr = shape("pr.comment");
+        let given = slots(&[("body", "x")]);
+        let mut only_base = Bound::empty();
+        only_base.insert("git.base", "o/r");
+        assert_eq!(
+            pr.render(&given, &only_base).unwrap_err(),
+            CallRefusal::UnresolvedBound("git.change".into())
+        );
+        for bad in ["-12", "1\n2", ""] {
+            let mut b = git_bound();
+            b.insert("git.change", bad);
+            assert_eq!(
+                pr.render(&given, &b).unwrap_err(),
+                CallRefusal::BadBound("git.change".into())
+            );
+        }
+    }
+
+    #[test]
+    fn file_slot_gets_maknae_path() {
+        let r = shape("issue.file")
+            .render(&slots(&[("body", "text")]), &Bound::empty())
+            .unwrap();
+        assert_eq!(
+            r.argv,
+            s(&["issue", "create", "--body-file", "/run/maknae/slots/body"])
+        );
+        assert_eq!(
+            r.files,
+            vec![SlotFile {
+                path: "/run/maknae/slots/body".into(),
+                content: b"text".to_vec()
+            }]
+        );
+        assert_eq!(r.stdin, None);
+    }
+
+    #[test]
+    fn open_argv_limits() {
+        let n = |k: usize| vec!["a".to_string(); k];
+        assert_eq!(check_open_argv(&[]), Ok(()));
+        assert_eq!(check_open_argv(&n(64)), Ok(()));
+        assert_eq!(check_open_argv(&n(65)), Err(CallRefusal::OpenTooMany));
+        let ok = vec!["a".repeat(4096)];
+        assert_eq!(check_open_argv(&ok), Ok(()));
+        let over = vec!["ok".to_string(), "a".repeat(4097)];
+        assert_eq!(
+            check_open_argv(&over),
+            Err(CallRefusal::OpenToken {
+                index: 1,
+                rule: "too_long"
+            })
+        );
+        let multi = vec![format!("a{}", "\u{20ac}".repeat(1365))];
+        assert_eq!(multi[0].len(), 4096);
+        assert_eq!(check_open_argv(&multi), Ok(()));
+        assert!(check_open_argv(&[format!("{}a", multi[0])]).is_err());
+        assert_eq!(
+            check_open_argv(&s(&["a\0b"])),
+            Err(CallRefusal::OpenToken {
+                index: 0,
+                rule: "nul"
+            })
+        );
+        assert_eq!(
+            check_open_argv(&s(&["ok", "a\nb"])),
+            Err(CallRefusal::OpenToken {
+                index: 1,
+                rule: "control"
+            })
+        );
+        assert_eq!(check_open_argv(&s(&["a\tb"])), Ok(()));
+    }
+
+    #[test]
+    fn refusals_never_carry_the_value() {
+        let probe = "PROBE-VALUE";
+        let word = shape("issue.word");
+        let list = shape("issue.list");
+        let mut refusals = vec![
+            word.render(&slots(&[("word", &format!("-{probe}"))]), &Bound::empty())
+                .unwrap_err(),
+            list.render(&slots(&[("state", probe)]), &git_bound())
+                .unwrap_err(),
+            list.render(&slots(&[("state", "open"), (probe, "x")]), &git_bound())
+                .unwrap_err(),
+            list.render(&slots(&[]), &git_bound()).unwrap_err(),
+            check_open_argv(&[format!("{probe}\0")]).unwrap_err(),
+            check_open_argv(&vec![probe.to_string(); 65]).unwrap_err(),
+        ];
+        let mut b = git_bound();
+        b.insert("git.base", &format!("-{probe}"));
+        refusals.push(list.render(&slots(&[("state", "open")]), &b).unwrap_err());
+        refusals.push(
+            list.render(&slots(&[("state", "open")]), &Bound::empty())
+                .unwrap_err(),
+        );
+        assert_eq!(refusals.len(), 8);
+        for r in &refusals {
+            let shown = format!("{r:?}");
+            assert!(
+                !shown.contains(probe) || matches!(r, CallRefusal::UnexpectedSlot(_)),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_argv_accepts_what_render_produces() {
+        let cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
+            ("pr.comment", vec![("body", "hi")]),
+            ("issue.list", vec![("state", "closed")]),
+            ("issue.view", vec![("number", "42")]),
+            ("issue.edit", vec![("number", "2"), ("title", "-x y")]),
+            ("issue.file", vec![("body", "t")]),
+            ("issue.word", vec![("word", "needle")]),
+        ];
+        for (name, given) in cases {
+            let sh = shape(name);
+            let given = slots(&given);
+            let r = sh.render(&given, &git_bound()).unwrap();
+            assert!(sh.matches_argv(&r.argv, &git_bound()), "{name}");
+        }
+    }
+
+    #[test]
+    fn matches_argv_refuses_a_changed_literal() {
+        let sh = shape("pr.comment");
+        let mut argv = sh
+            .render(&slots(&[("body", "x")]), &git_bound())
+            .unwrap()
+            .argv;
+        argv[1] = "close".into();
+        assert!(!sh.matches_argv(&argv, &git_bound()));
+    }
+
+    #[test]
+    fn matches_argv_refuses_a_different_bound_value() {
+        let sh = shape("pr.comment");
+        let argv = sh
+            .render(&slots(&[("body", "x")]), &git_bound())
+            .unwrap()
+            .argv;
+        let mut other = git_bound();
+        other.insert("git.change", "13");
+        assert!(!sh.matches_argv(&argv, &other));
+        assert!(!sh.matches_argv(&argv, &Bound::empty()));
+        let mut dash = git_bound();
+        dash.insert("git.change", "-12");
+        let mut dashed = argv.clone();
+        dashed[2] = "-12".into();
+        assert!(!sh.matches_argv(&dashed, &dash));
+    }
+
+    #[test]
+    fn matches_argv_refuses_a_slot_failing_its_constraint() {
+        let list = shape("issue.list");
+        let argv = s(&["issue", "list", "-R", "o/r", "--state=merged"]);
+        assert!(!list.matches_argv(&argv, &git_bound()));
+        let view = shape("issue.view");
+        assert!(!view.matches_argv(&s(&["issue", "view", "12a"]), &Bound::empty()));
+        assert!(!view.matches_argv(&s(&["issue", "view", "-1"]), &Bound::empty()));
+        let word = shape("issue.word");
+        assert!(!word.matches_argv(&s(&["search", "--exec=x"]), &Bound::empty()));
+        assert!(!word.matches_argv(&s(&["search", ""]), &Bound::empty()));
+        let edit = shape("issue.edit");
+        assert!(!edit.matches_argv(&s(&["issue", "edit", "1", "--title=a\0b"]), &Bound::empty()));
+        assert!(!edit.matches_argv(&s(&["issue", "edit", "1", "title=a"]), &Bound::empty()));
+        assert!(edit.matches_argv(&s(&["issue", "edit", "1", "--title="]), &Bound::empty()));
+    }
+
+    #[test]
+    fn matches_argv_refuses_extra_or_missing_tokens() {
+        let sh = shape("issue.view");
+        let good = s(&["issue", "view", "7"]);
+        assert!(sh.matches_argv(&good, &Bound::empty()));
+        let mut extra = good.clone();
+        extra.push("x".into());
+        assert!(!sh.matches_argv(&extra, &Bound::empty()));
+        assert!(!sh.matches_argv(&good[..2], &Bound::empty()));
+        assert!(!sh.matches_argv(&[], &Bound::empty()));
+        let pr = shape("pr.comment");
+        let mut full = pr
+            .render(&slots(&[("body", "x")]), &git_bound())
+            .unwrap()
+            .argv;
+        full.push("--extra".into());
+        assert!(!pr.matches_argv(&full, &git_bound()));
+    }
+
+    #[test]
+    fn matches_argv_refuses_a_file_slot_path_other_than_maknaes() {
+        let sh = shape("issue.file");
+        let ok = s(&["issue", "create", "--body-file", "/run/maknae/slots/body"]);
+        assert!(sh.matches_argv(&ok, &Bound::empty()));
+        for bad in [
+            "/etc/passwd",
+            "/run/maknae/slots/other",
+            "/run/maknae/slots/body/",
+            "body",
+        ] {
+            let argv = s(&["issue", "create", "--body-file", bad]);
+            assert!(!sh.matches_argv(&argv, &Bound::empty()), "{bad}");
+        }
     }
 }
 

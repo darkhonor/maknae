@@ -54,7 +54,7 @@ impl Bound {
         self.0.insert(key.to_string(), value.to_string());
     }
 
-    fn get(&self, kind: &str, field: &str) -> Option<&str> {
+    pub(crate) fn get(&self, kind: &str, field: &str) -> Option<&str> {
         self.0.get(&format!("{kind}.{field}")).map(String::as_str)
     }
 }

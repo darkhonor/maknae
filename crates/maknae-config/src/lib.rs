@@ -142,9 +142,9 @@ pub use forges::{
     FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
 };
 pub use grammar::{
-    load_grammars, shape_name_ok, ArgvToken, Constraint, DisabledGrammar, ForgeNeed, Grammar,
-    GrammarError, GrammarLoadError, GrammarSet, Shape, ShapeClass, Slot, SlotAt, Tested,
-    GRAMMARS_DIR, VENDOR_GRAMMAR_DIR,
+    check_open_argv, load_grammars, shape_name_ok, ArgvToken, CallRefusal, Constraint,
+    DisabledGrammar, ForgeNeed, Grammar, GrammarError, GrammarLoadError, GrammarSet, Rendered,
+    Shape, ShapeClass, Slot, SlotAt, SlotFile, Tested, GRAMMARS_DIR, VENDOR_GRAMMAR_DIR,
 };
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use grammar::{load_grammars_with_requirement, GrammarRequirement};
