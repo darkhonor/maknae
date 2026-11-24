@@ -225,6 +225,71 @@ impl Held {
         self.marked.contains_key(&(key, seq)).then_some(s)
     }
 
+    /// See [`BoardStore::mark`].
+    fn mark(&mut self, view: &dyn EnrollmentView) {
+        let held = self;
+        let uids: BTreeSet<u32> = held
+            .boards
+            .iter()
+            .flat_map(|(key, b)| {
+                std::iter::once(key.0).chain(b.posts.values().filter_map(|s| s.author_uid))
+            })
+            .collect();
+        let among = view.contained_among(&uids);
+        let contained = |uid: u32| among.contains(&uid);
+        let mut marked = BTreeMap::new();
+        for (key, board) in &held.boards {
+            let person = contained(key.0);
+            for (seq, s) in &board.posts {
+                let mut why = BTreeSet::new();
+                if s.author_uid.is_some_and(contained) && !s.held.contains(&HeldFor::Author) {
+                    why.insert(HeldFor::Author);
+                }
+                if person && !s.held.contains(&HeldFor::Person) {
+                    why.insert(HeldFor::Person);
+                }
+                if !why.is_empty() {
+                    marked.insert((*key, *seq), why);
+                }
+            }
+        }
+        held.said.retain(|item| match item {
+            Item::Post(key, seq, BoardDueFor::Hold(f)) => {
+                marked.get(&(*key, *seq)).is_some_and(|w| w.contains(f))
+            }
+            Item::Post(_, _, BoardDueFor::Expire | BoardDueFor::DropCursor) | Item::Cursor(..) => {
+                true
+            }
+        });
+        held.marked = marked;
+
+        let gone: BTreeSet<AgentId> = held
+            .boards
+            .values()
+            .flat_map(|b| b.cursors.keys().chain(b.sent.keys()))
+            .filter(|agent| view.agent_uid(agent).is_none())
+            .cloned()
+            .collect();
+        for board in held.boards.values_mut() {
+            board.sent.retain(|agent, _| !gone.contains(agent));
+        }
+        held.noted = held
+            .boards
+            .iter()
+            .flat_map(|(key, b)| {
+                b.cursors
+                    .keys()
+                    .filter(|a| gone.contains(*a))
+                    .map(|a| (*key, a.clone()))
+            })
+            .collect();
+        let noted = &held.noted;
+        held.said.retain(|item| match item {
+            Item::Cursor(key, reader) => noted.contains(&(*key, reader.clone())),
+            Item::Post(..) => true,
+        });
+    }
+
     /// Forgets the post at `seq` once its record is deleted.
     fn forget(&mut self, key: BoardKey, seq: u64) {
         if let Some(board) = self.boards.get_mut(&key) {
@@ -377,6 +442,17 @@ impl BoardStore {
         match finding {
             BoardFinding::Quarantined { name, .. } => self.blobs.quarantine(name),
         }
+    }
+
+    /// `agent` and whether the tasker's board is enabled, read in one hold of the memory
+    /// lock. `agent` reads only what an install swaps under that lock.
+    pub(crate) fn enabled_with(&self, key: BoardKey, agent: impl FnOnce() -> bool) -> (bool, bool) {
+        let held = self.held();
+        let agent = agent();
+        (
+            agent,
+            held.boards.get(&key).is_some_and(|b| b.settings.enabled),
+        )
     }
 
     pub fn settings(&self, key: BoardKey) -> Settings {
@@ -673,68 +749,16 @@ impl BoardStore {
     /// bears out; and notes each cursor, and forgets each walk, of a reader it no longer
     /// enrolls.
     pub(crate) fn mark(&self, view: &dyn EnrollmentView) {
-        let mut guard = self.held();
-        let held = &mut *guard;
-        let uids: BTreeSet<u32> = held
-            .boards
-            .iter()
-            .flat_map(|(key, b)| {
-                std::iter::once(key.0).chain(b.posts.values().filter_map(|s| s.author_uid))
-            })
-            .collect();
-        let among = view.contained_among(&uids);
-        let contained = |uid: u32| among.contains(&uid);
-        let mut marked = BTreeMap::new();
-        for (key, board) in &held.boards {
-            let person = contained(key.0);
-            for (seq, s) in &board.posts {
-                let mut why = BTreeSet::new();
-                if s.author_uid.is_some_and(contained) && !s.held.contains(&HeldFor::Author) {
-                    why.insert(HeldFor::Author);
-                }
-                if person && !s.held.contains(&HeldFor::Person) {
-                    why.insert(HeldFor::Person);
-                }
-                if !why.is_empty() {
-                    marked.insert((*key, *seq), why);
-                }
-            }
-        }
-        held.said.retain(|item| match item {
-            Item::Post(key, seq, BoardDueFor::Hold(f)) => {
-                marked.get(&(*key, *seq)).is_some_and(|w| w.contains(f))
-            }
-            Item::Post(_, _, BoardDueFor::Expire | BoardDueFor::DropCursor) | Item::Cursor(..) => {
-                true
-            }
-        });
-        held.marked = marked;
+        self.held().mark(view);
+    }
 
-        let gone: BTreeSet<AgentId> = held
-            .boards
-            .values()
-            .flat_map(|b| b.cursors.keys().chain(b.sent.keys()))
-            .filter(|agent| view.agent_uid(agent).is_none())
-            .cloned()
-            .collect();
-        for board in held.boards.values_mut() {
-            board.sent.retain(|agent, _| !gone.contains(agent));
-        }
-        held.noted = held
-            .boards
-            .iter()
-            .flat_map(|(key, b)| {
-                b.cursors
-                    .keys()
-                    .filter(|a| gone.contains(*a))
-                    .map(|a| (*key, a.clone()))
-            })
-            .collect();
-        let noted = &held.noted;
-        held.said.retain(|item| match item {
-            Item::Cursor(key, reader) => noted.contains(&(*key, reader.clone())),
-            Item::Post(..) => true,
-        });
+    /// Runs `install` and then [`Self::mark`] against it, in one hold of the memory lock, so
+    /// a check made under that lock sees the install with its marks or neither. `install`
+    /// swaps what `view` reads; it must not block, do I/O or take a board lock.
+    pub(crate) fn install_and_mark(&self, install: impl FnOnce(), view: &dyn EnrollmentView) {
+        let mut held = self.held();
+        install();
+        held.mark(view);
     }
 
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
@@ -4380,6 +4404,233 @@ mod tests {
                 stored_on_disk(&b, BOB, kept.post.id).held,
                 [HeldFor::Author].into_iter().collect()
             );
+        }
+    }
+
+    /// Answers from `installed`; at its second answer, the re-check after a clear's unlink,
+    /// it starts an install containing uid 2001 and gives it 300 ms before it answers what it
+    /// read first. `landed` says whether the install ran in that time.
+    struct InstallDuringTheRecheck {
+        installed: Installed,
+        store: Arc<BoardStore>,
+        calls: Mutex<usize>,
+        installer: Mutex<Option<std::thread::JoinHandle<()>>>,
+        landed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl EnrollmentView for InstallDuringTheRecheck {
+        fn agent_uid(&self, _: &AgentId) -> Option<u32> {
+            None
+        }
+
+        fn agents(&self) -> Vec<(AgentId, u32)> {
+            Vec::new()
+        }
+
+        fn is_enrolled(&self, _: u32) -> bool {
+            false
+        }
+
+        fn contained(&self, uid: u32) -> bool {
+            self.contained_among(&[uid].into_iter().collect())
+                .contains(&uid)
+        }
+
+        fn contained_among(&self, uids: &BTreeSet<u32>) -> BTreeSet<u32> {
+            let answer = self.installed.contained_among(uids);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 2 {
+                let (store, installed, landed) = (
+                    Arc::clone(&self.store),
+                    self.installed.clone(),
+                    Arc::clone(&self.landed),
+                );
+                let (done, wait) = std::sync::mpsc::channel();
+                *self.installer.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let view = installed.clone();
+                    store.install_and_mark(
+                        || {
+                            installed.0.lock().unwrap().insert(2001);
+                            landed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        },
+                        &view,
+                    );
+                    let _ = done.send(());
+                }));
+                let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
+            }
+            answer
+        }
+
+        fn unresolved(&self, _: u32) -> bool {
+            false
+        }
+
+        fn board(&self, _: &AgentId) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn an_install_cannot_land_between_a_clears_recheck_and_its_forget() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = clocked(&b);
+        let store = Arc::new(store);
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-698-raced");
+        let view = InstallDuringTheRecheck {
+            installed: Installed::default(),
+            store: Arc::clone(&store),
+            calls: Mutex::new(0),
+            installer: Mutex::new(None),
+            landed: Arc::default(),
+        };
+        let got = store.clear(BOB, &pairs([&post]), &view);
+        let landed = view.landed.load(std::sync::atomic::Ordering::SeqCst);
+        view.installer
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the re-check started the install")
+            .join()
+            .unwrap();
+        assert!(
+            !landed,
+            "the install landed while the clear held its check: contained and removed"
+        );
+        assert_eq!(got, cleared(&[&post], None), "the clear came first");
+        assert!(!in_store(&store, BOB, post.post.id));
+        assert!(!b.has(&post_name(BOB, post.post.id)));
+        assert!(store.due(10).is_empty(), "nothing is brought back to hold");
+
+        let kept = by(&store, BOB, hobi(), Some(2001), "sentinel-698-kept");
+        let page = store.clearable(BOB).0;
+        assert_eq!(page, pairs([&kept]));
+        let installed = Installed::default();
+        store.install_and_mark(
+            || {
+                installed.0.lock().unwrap().insert(2001);
+            },
+            &installed,
+        );
+        assert_eq!(
+            store.clear(BOB, &page, &installed),
+            cleared(&[], None),
+            "the install came first"
+        );
+        assert!(in_store(&store, BOB, kept.post.id));
+        assert!(b.has(&post_name(BOB, kept.post.id)));
+        assert_eq!(
+            whys(&store.due(10)),
+            vec![(Some(kept.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+        );
+    }
+
+    #[test]
+    fn installs_and_every_board_call_run_together_without_a_deadlock() {
+        use maknae_authz_basic::Baseline;
+        let (_g, pdp) = crate::test_fixtures::shipped_composition();
+        let pdp = Arc::new(pdp);
+        let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&pdp));
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let store = Arc::new(store);
+        let tasks = Arc::new(crate::task::TaskStore::new());
+        let (done, finished) = std::sync::mpsc::channel::<&str>();
+        let rounds = 200;
+        let mut workers = Vec::new();
+        let mut spawn = |name: &'static str, work: Box<dyn Fn(usize) + Send>| {
+            let done = done.clone();
+            workers.push(std::thread::spawn(move || {
+                for i in 0..rounds {
+                    work(i);
+                }
+                let _ = done.send(name);
+            }));
+        };
+        {
+            let (store, tasks, pdp, view) = (
+                Arc::clone(&store),
+                Arc::clone(&tasks),
+                Arc::clone(&pdp),
+                view.clone(),
+            );
+            spawn(
+                "install",
+                Box::new(move |_| {
+                    let next = pdp.baseline().snapshot();
+                    store.install_and_mark(|| pdp.baseline().install(next), &view);
+                    tasks.mark_unenrolled(&view);
+                }),
+            );
+        }
+        {
+            let (store, view) = (Arc::clone(&store), view.clone());
+            spawn(
+                "post and clear",
+                Box::new(move |i| {
+                    let _ = store.post(
+                        BOB,
+                        (hobi(), Some(2001)),
+                        None,
+                        PostLabels::default(),
+                        draft("sentinel-698-load"),
+                        &view,
+                    );
+                    if i % 8 == 0 {
+                        let page = store.clearable(BOB).0;
+                        store.clear(BOB, &page, &view);
+                    }
+                }),
+            );
+        }
+        {
+            let (store, view) = (Arc::clone(&store), view.clone());
+            spawn(
+                "read",
+                Box::new(move |_| {
+                    let seqs: Vec<u64> =
+                        store.candidates(BOB, 0, 32).iter().map(|s| s.seq).collect();
+                    store.observe(BOB, &seqs, (0, u64::MAX), &view);
+                }),
+            );
+        }
+        {
+            let store = Arc::clone(&store);
+            spawn(
+                "settings",
+                Box::new(move |i| {
+                    let _ = store.write_settings(
+                        BOB,
+                        Settings {
+                            enabled: i % 2 == 0,
+                            ..Settings::default()
+                        },
+                    );
+                }),
+            );
+        }
+        {
+            let (store, view) = (Arc::clone(&store), view.clone());
+            spawn(
+                "gate",
+                Box::new(move |_| {
+                    store.enabled_with(BOB, || view.board(&reader("hobi")));
+                }),
+            );
+        }
+        drop(done);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut ended = Vec::new();
+        while ended.len() < workers.len() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match finished.recv_timeout(left) {
+                Ok(name) => ended.push(name),
+                Err(_) => panic!("deadlocked: only {ended:?} finished"),
+            }
+        }
+        for w in workers {
+            w.join().unwrap();
         }
     }
 }

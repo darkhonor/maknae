@@ -104,10 +104,11 @@ pub(crate) fn gate(
     if !switches.site() {
         return Err(Off::Site);
     }
-    if !switches.agent(agent) {
+    let (agent_on, tasker_on) = board.enabled_with(key, || switches.agent(agent));
+    if !agent_on {
         return Err(Off::Agent);
     }
-    if !board.settings(key).enabled {
+    if !tasker_on {
         return Err(Off::Tasker);
     }
     Ok(Some(key))
@@ -1015,6 +1016,85 @@ mod tests {
             )
             .unwrap();
         board
+    }
+
+    /// The agent's switch, read first; reading it starts an install that turns it off and
+    /// a write that turns the tasker on, and gives both 300 ms before it answers.
+    struct FlipWhileRead {
+        agent_on: Arc<std::sync::atomic::AtomicBool>,
+        board: Arc<BoardStore>,
+        flipper: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl BoardSwitches for FlipWhileRead {
+        fn site(&self) -> bool {
+            true
+        }
+
+        fn agent(&self, _: &AgentId) -> bool {
+            use std::sync::atomic::Ordering::SeqCst;
+            let on = self.agent_on.load(SeqCst);
+            let (agent_on, board) = (Arc::clone(&self.agent_on), Arc::clone(&self.board));
+            let (done, wait) = std::sync::mpsc::channel();
+            *self.flipper.lock().unwrap() = Some(std::thread::spawn(move || {
+                board.install_and_mark(
+                    || agent_on.store(false, SeqCst),
+                    &crate::enrollment::FixedEnrollment(Default::default()),
+                );
+                board
+                    .set_settings(
+                        BOB,
+                        Settings {
+                            enabled: true,
+                            ..Settings::default()
+                        },
+                    )
+                    .unwrap();
+                let _ = done.send(());
+            }));
+            let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
+            on
+        }
+    }
+
+    #[test]
+    fn the_gate_reads_the_agent_and_the_tasker_at_one_instant() {
+        let switches = FlipWhileRead {
+            agent_on: Arc::new(true.into()),
+            board: Arc::new(enabled(false)),
+            flipper: std::sync::Mutex::new(None),
+        };
+        let person = cited(RootTasker::Person { uid: BOB.0 });
+        let got = gate(Some(&hobi()), Some(&person), &switches, &switches.board);
+        switches
+            .flipper
+            .lock()
+            .unwrap()
+            .take()
+            .expect("reading the switch started the flip")
+            .join()
+            .unwrap();
+        assert_eq!(
+            got,
+            Err(Off::Tasker),
+            "agent on and tasker off, read together"
+        );
+        assert!(
+            switches.board.settings(BOB).enabled,
+            "the write landed after"
+        );
+        assert_eq!(
+            gate(Some(&hobi()), Some(&person), &switches, &switches.board),
+            Err(Off::Agent)
+        );
+        switches
+            .flipper
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

@@ -7854,12 +7854,14 @@ where
     /// `mark_unenrolled` and `mark` read the snapshot under their store's lock.
     /// [`Reloader::settle_tasks`] follows once the turn is released.
     fn install_and_reconcile(&self, snapshot: Option<Arc<maknae_authz_basic::snapshot::Snapshot>>) {
-        if let Some(snapshot) = snapshot {
-            self.authorizer.baseline().install(snapshot);
-        }
         let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&self.authorizer));
+        match snapshot {
+            Some(snapshot) => self
+                .board
+                .install_and_mark(|| self.authorizer.baseline().install(snapshot), &view),
+            None => self.board.mark(&view),
+        }
         self.tasks.mark_unenrolled(&view);
-        self.board.mark(&view);
     }
 
     /// Records and performs the closes `install_and_reconcile` marked, in a session of its
