@@ -944,6 +944,64 @@ shapes:
     }
 
     #[test]
+    fn malformed_names_name_their_fault() {
+        for (tok, needle) in [
+            ("{A}", "not a slot name"),
+            ("{a b}", "not a slot name"),
+            ("{A.b}", "not `{kind.field}`"),
+            ("{a.B}", "not `{kind.field}`"),
+            ("{1a.b}", "not `{kind.field}`"),
+            ("{a.1b}", "not `{kind.field}`"),
+        ] {
+            assert_disabled(
+                "bad.name",
+                &body(&format!("    argv: [\"{tok}\"]\n")),
+                needle,
+            );
+        }
+        for slot in ["aB", "1a", "a.b", "a b", "_a"] {
+            assert_disabled(
+                "bad.slotname",
+                &body(&format!(
+                    "    argv: [view]\n    slots:\n      '{slot}': {{ at: stdin, description: a }}\n"
+                )),
+                "slot name",
+            );
+        }
+    }
+
+    #[test]
+    fn program_and_tested_must_be_well_formed() {
+        let doc = PR_COMMENT_AND_ISSUE_LIST;
+        for bad in ["a/b", "a b", ""] {
+            let text = doc.replacen("program: gh", &format!("program: \"{bad}\""), 1);
+            assert!(Grammar::parse(bad, &text).is_err(), "{bad:?}");
+        }
+        assert!(Grammar::parse(
+            "g+h.1_x-y",
+            &doc.replacen("program: gh", "program: g+h.1_x-y", 1)
+        )
+        .is_ok());
+        for field in ["version: \"2.105.0\"", "date: 2026-11-24"] {
+            let key = field.split(':').next().unwrap();
+            let text = doc.replacen(field, &format!("{key}: \"\""), 1);
+            assert!(Grammar::parse("gh", &text).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn constraints_compare_by_kind_members_and_pattern_text() {
+        let re = |p: &str| Constraint::Pattern(Regex::new(p).unwrap());
+        let en = |m: &[&str]| Constraint::Enum(m.iter().map(|s| s.to_string()).collect());
+        assert_eq!(re("a"), re("a"));
+        assert_ne!(re("a"), re("b"));
+        assert_eq!(en(&["a", "b"]), en(&["b", "a"]));
+        assert_ne!(en(&["a"]), en(&["b"]));
+        assert_ne!(en(&["a"]), re("a"));
+        assert_ne!(re("a"), en(&["a"]));
+    }
+
+    #[test]
     fn display_names_the_fault() {
         let e = Grammar::parse("gh", "schema_version: 2\n").unwrap_err();
         assert!(e.to_string().starts_with("grammar: schema_version"));
