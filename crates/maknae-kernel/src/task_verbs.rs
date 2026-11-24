@@ -355,7 +355,12 @@ pub(crate) fn place(
             agent: agent.as_str().to_owned(),
             standing,
             waiting: held.map_or(0, |h| h.waiting),
-            board: board && matches!(standing, AgentStanding::Enrolled | AgentStanding::Contained),
+            board: match standing {
+                AgentStanding::Enrolled | AgentStanding::Contained => board,
+                AgentStanding::Withdrawn | AgentStanding::Removed | AgentStanding::Undecided => {
+                    false
+                }
+            },
         }),
     }
 }

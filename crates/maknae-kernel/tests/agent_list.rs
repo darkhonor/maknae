@@ -581,6 +581,44 @@ async fn an_agent_whose_board_switch_is_on_is_listed_with_it() {
 }
 
 #[tokio::test]
+async fn the_listed_board_switch_is_the_agents_own_whatever_the_site_and_the_person_say() {
+    use maknae_kernel::{BoardKey, BoardSeam, FixedSwitches, Settings};
+    for site in [true, false] {
+        for enabled in [true, false] {
+            let mut w = world(
+                &format!("board-own-{site}-{enabled}"),
+                &[
+                    agent("hobi", HOBI_UID, BOARDING),
+                    agent("jin", JIN_UID, PLAIN),
+                ],
+            );
+            w.agents.switches = Arc::new(FixedSwitches {
+                site,
+                agents: Default::default(),
+            });
+            w.agents
+                .board
+                .set_settings(
+                    BoardKey(w.me),
+                    Settings {
+                        enabled,
+                        ..Settings::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                w.list(None).await.entries,
+                [
+                    boarded("hobi", AgentStanding::Enrolled, 0),
+                    entry("jin", AgentStanding::Enrolled, 0)
+                ],
+                "site {site}, person {enabled}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_contained_agent_keeps_its_board_switch_in_the_list() {
     let user = common::euid_name();
     let w = world_bound(
