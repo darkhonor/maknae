@@ -19604,11 +19604,8 @@ mod home_resolution_tests {
 
     #[tokio::test]
     async fn only_a_filesystem_verb_resolves_the_requesters_home() {
-        let uid = nix::unistd::geteuid().as_raw();
-        let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
-            .expect("NSS")
-            .expect("the test euid has a passwd entry")
-            .name;
+        let uid = 4_116_000;
+        let user = "operator-116";
         let raw = std::env::temp_dir().join(format!("run_home_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw);
         std::fs::create_dir(&raw).unwrap();
@@ -19625,11 +19622,11 @@ mod home_resolution_tests {
         let authorizer = authorizer_in(&dir.0, uid);
         let held = crate::authz::home_resolver()
             .claim(uid)
-            .expect("the euid's home slot is free");
+            .expect("the fixture uid's home slot is free");
 
         for verb in [Verb::Ping, Verb::Whoami] {
             let before = crate::authz::home_resolver().entered(uid);
-            let (result, _) = serve(verb.clone(), uid, &user, &dir.0, authorizer.clone()).await;
+            let (result, _) = serve(verb.clone(), uid, user, &dir.0, authorizer.clone()).await;
             assert!(
                 matches!(
                     result,
@@ -19651,7 +19648,7 @@ mod home_resolution_tests {
             conversation: None,
             page: None,
         };
-        let (result, records) = serve(read, uid, &user, &dir.0, authorizer).await;
+        let (result, records) = serve(read, uid, user, &dir.0, authorizer).await;
         assert!(matches!(result, RespResult::Err(_)), "{result:?}");
         assert_eq!(crate::authz::home_resolver().entered(uid), before + 1);
         assert_eq!(
