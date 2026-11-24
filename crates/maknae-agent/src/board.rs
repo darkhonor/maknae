@@ -15,6 +15,7 @@ pub const BOARD_CLEAR_REQUESTS_MAX: u32 = 64;
 pub const CONFIRM_ANSWER_MAX_BYTES: u64 = 64;
 const CONFIRM_PROMPT: &[u8] = b"clear every post on your board that is not held? [y/N] ";
 const NOT_A_BOARD_REPLY: &str = "protocol error: the kernel's answer was not a board reply";
+const HELD_OTHER: &str = "the kernel holds settings other than the ones asked for";
 
 /// The settings a person named; `None` leaves that setting as it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -140,8 +141,13 @@ where
         }
     };
     match settings_reply(send(manage(BoardOp::Settings { set })).await) {
-        Ok(settings) => Said {
-            out: board_settings_lines(&settings),
+        Ok(held) if set.is_some_and(|asked| asked != held) => Said {
+            out: board_settings_lines(&held),
+            err: vec![HELD_OTHER.into()],
+            ok: false,
+        },
+        Ok(held) => Said {
+            out: board_settings_lines(&held),
             err: vec![],
             ok: true,
         },
@@ -188,6 +194,31 @@ where
     }
 }
 
+/// Whether a clear may be sent; otherwise what is said and how the command exits.
+pub fn clear_gate(confirmed: std::io::Result<Confirm>) -> Result<(), Said> {
+    match confirmed {
+        Ok(Confirm::Go) => Ok(()),
+        Ok(Confirm::Declined) => Err(Said {
+            out: vec!["nothing was cleared".into()],
+            err: vec![],
+            ok: true,
+        }),
+        Ok(Confirm::NeedsYes) => Err(Said {
+            out: vec![],
+            err: vec!["board clear needs --yes when not run on a terminal".into()],
+            ok: false,
+        }),
+        Err(error) => Err(Said {
+            out: vec![],
+            err: vec![format!(
+                "cannot ask for confirmation: {}",
+                one_line(&error.to_string())
+            )],
+            ok: false,
+        }),
+    }
+}
+
 /// `yes` skips the question; off a terminal the question cannot be asked.
 pub fn confirm(
     yes: bool,
@@ -204,16 +235,18 @@ pub fn confirm(
     prompt.write_all(CONFIRM_PROMPT)?;
     prompt.flush()?;
     let mut bytes = Vec::new();
-    let read = answer
+    answer
         .take(CONFIRM_ANSWER_MAX_BYTES)
         .read_until(b'\n', &mut bytes)?;
-    let cut = read == CONFIRM_ANSWER_MAX_BYTES as usize && !bytes.ends_with(b"\n");
-    let Ok(line) = std::str::from_utf8(&bytes) else {
+    let Some(entered) = bytes.strip_suffix(b"\n") else {
+        return Ok(Confirm::Declined);
+    };
+    let Ok(line) = std::str::from_utf8(entered) else {
         return Ok(Confirm::Declined);
     };
     let line = line.trim();
     Ok(
-        if !cut && (line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes")) {
+        if line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes") {
             Confirm::Go
         } else {
             Confirm::Declined
@@ -232,6 +265,7 @@ mod tests {
         "the outcome is unknown; run maknae board settings to see what is in force";
     const CLEAR_UNKNOWN: &str = "the outcome is unknown; run maknae board clear again";
     const MORE: &str = "; more remain, run maknae board clear again";
+    const HELD_OTHER: &str = "the kernel holds settings other than the ones asked for";
 
     fn s(enabled: bool, participate: bool, report: BoardReport) -> BoardSettings {
         BoardSettings {
@@ -506,6 +540,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_write_whose_reply_differs_is_not_a_success() {
+        let (said_, sent) = run_settings(
+            change(Some(true), None, None),
+            vec![settled(s(false, false, Off)), settled(s(false, false, Off))],
+        )
+        .await;
+        assert_eq!(sent, vec![read(), write(s(true, false, Off))]);
+        assert_eq!(
+            said_,
+            said(
+                &["enabled      off", "participate  off", "report       off"],
+                &[HELD_OTHER],
+                false
+            )
+        );
+        let (said_, sent) = run_settings(
+            change(Some(true), Some(true), Some(Every)),
+            vec![settled(s(true, true, Summary))],
+        )
+        .await;
+        assert_eq!(sent, vec![write(s(true, true, Every))]);
+        assert_eq!(
+            said_,
+            said(
+                &["enabled      on", "participate  on", "report       summary"],
+                &[HELD_OTHER],
+                false
+            )
+        );
+        let (said_, _) = run_settings(
+            change(Some(true), Some(true), Some(Every)),
+            vec![settled(s(true, true, Every))],
+        )
+        .await;
+        assert_eq!(
+            said_,
+            said(
+                &["enabled      on", "participate  on", "report       every"],
+                &[],
+                true
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn the_lines_after_a_write_are_the_writes_reply() {
         let (said_, sent) = run_settings(
             change(Some(true), None, None),
@@ -524,8 +603,8 @@ mod tests {
                     "participate  on",
                     "report       summary"
                 ],
-                &[],
-                true
+                &[HELD_OTHER],
+                false
             )
         );
     }
@@ -933,7 +1012,14 @@ mod tests {
 
     #[test]
     fn y_and_yes_in_any_case_go() {
-        for a in [&b"y\n"[..], b"Y\n", b"yes\n", b" YES \n", b"yEs", b"y"] {
+        for a in [
+            &b"y\n"[..],
+            b"Y\n",
+            b"yes\n",
+            b" YES \n",
+            b"yEs\n",
+            b"YES\r\n",
+        ] {
             let (got, prompt) = ask(a);
             assert_eq!(got, Confirm::Go, "{a:?}");
             assert_eq!(
@@ -945,7 +1031,17 @@ mod tests {
 
     #[test]
     fn anything_else_declines() {
-        for a in [&b"n\n"[..], b"\n", b"yy\n", b"", b"no\n", b"yes please\n"] {
+        for a in [
+            &b"n\n"[..],
+            b"\n",
+            b"yy\n",
+            b"",
+            b"no\n",
+            b"yes please\n",
+            b"y",
+            b"yes",
+            b"Y",
+        ] {
             assert_eq!(ask(a).0, Confirm::Declined, "{a:?}");
         }
         assert_eq!(ask(&[b'y'; 65]).0, Confirm::Declined);
@@ -1013,5 +1109,30 @@ mod tests {
         assert_eq!(err.to_string(), "flush broke");
         let err = confirm(false, true, &mut BrokenRead, &mut Vec::new()).unwrap_err();
         assert_eq!(err.to_string(), "read broke");
+    }
+
+    #[test]
+    fn the_clear_gate_says_what_each_answer_means() {
+        assert_eq!(clear_gate(Ok(Confirm::Go)), Ok(()));
+        assert_eq!(
+            clear_gate(Ok(Confirm::Declined)),
+            Err(said(&["nothing was cleared"], &[], true))
+        );
+        assert_eq!(
+            clear_gate(Ok(Confirm::NeedsYes)),
+            Err(said(
+                &[],
+                &["board clear needs --yes when not run on a terminal"],
+                false
+            ))
+        );
+        assert_eq!(
+            clear_gate(Err(std::io::Error::other("input\u{7}gone\nmaknae: done"))),
+            Err(said(
+                &[],
+                &["cannot ask for confirmation: input\\u{0007}gone maknae: done"],
+                false
+            ))
+        );
     }
 }

@@ -453,30 +453,13 @@ fn clear_gate(
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> Option<ExitCode> {
-    match maknae_agent::board::confirm(yes, terminal, answer, prompt) {
-        Ok(maknae_agent::board::Confirm::Go) => None,
-        Ok(maknae_agent::board::Confirm::Declined) => {
-            crate::stderr::line(out, format_args!("nothing was cleared"));
-            Some(ExitCode::SUCCESS)
-        }
-        Ok(maknae_agent::board::Confirm::NeedsYes) => {
-            crate::stderr::line(
-                err,
-                format_args!("maknae: board clear needs --yes when not run on a terminal"),
-            );
-            Some(ExitCode::FAILURE)
-        }
-        Err(e) => {
-            crate::stderr::line(
-                err,
-                format_args!(
-                    "maknae: cannot ask for confirmation: {}",
-                    terminal_safe(&e.to_string())
-                ),
-            );
-            Some(ExitCode::FAILURE)
-        }
-    }
+    let confirmed = maknae_agent::board::confirm(yes, terminal, answer, prompt);
+    let said = maknae_agent::board::clear_gate(confirmed).err()?;
+    Some(if print_said(&said, out, err) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// The verbs the wire path can issue (mirrors `maknae_proto::Verb`).
@@ -2062,7 +2045,7 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(
             err,
-            b"maknae: cannot ask for confirmation: input\\u{7}gone\n"
+            b"maknae: cannot ask for confirmation: input\\u{0007}gone\n"
         );
     }
 
