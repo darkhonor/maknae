@@ -5138,8 +5138,13 @@ async fn agent_page<P: Authorizer + Send + Sync + 'static>(
                 tv::collected(&collect, permitted)
             }
         };
-        said.push(format!("{}:{}", agent.as_str(), tv::label(standing)));
+        let placed = page.entries.len();
         tv::place(&mut page, agent, standing, held, view.board(agent));
+        let marked = page.entries.len() > placed && page.entries.last().is_some_and(|e| e.board);
+        said.push(match marked {
+            true => format!("{}:{}:board", agent.as_str(), tv::label(standing)),
+            false => format!("{}:{}", agent.as_str(), tv::label(standing)),
+        });
         if page.entries.len() == maknae_proto::AGENT_PAGE_MAX {
             if at + 1 < rest.len() {
                 page.next = page.entries.last().map(|e| e.agent.clone());

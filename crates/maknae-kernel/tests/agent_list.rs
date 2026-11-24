@@ -651,6 +651,38 @@ async fn a_withdrawn_agent_is_listed_without_its_board_switch() {
 }
 
 #[tokio::test]
+async fn the_lists_record_says_which_entries_carried_the_board_marker() {
+    let w = world(
+        "board-record",
+        &[
+            agent("hobi", HOBI_UID, BOARDING),
+            agent("ivy", MANY_UID + 1, NOT_PEOPLE),
+            agent("jin", JIN_UID, PLAIN),
+            agent("suga", MANY_UID, BOARDING),
+        ],
+    );
+    w.submit("suga").await;
+    w.agent_policy("suga", "schema_version: 1\ntaskers: []\nboard: true\n");
+    let records = Records::new(0);
+    let page = match w.ask_with(list(None), &records).await {
+        RespResult::Ok(Payload::Agents(page)) => page,
+        other => panic!("{other:?}: {:?}", reasons(&records)),
+    };
+    assert_eq!(
+        page.entries,
+        [
+            boarded("hobi", AgentStanding::Enrolled, 0),
+            entry("jin", AgentStanding::Enrolled, 0),
+            entry("suga", AgentStanding::Withdrawn, 0)
+        ]
+    );
+    assert_eq!(
+        reasons(&records),
+        ["permit listed 3 agents, 0 undecided: hobi:enrolled:board,ivy:refused,jin:enrolled,suga:withdrawn"]
+    );
+}
+
+#[tokio::test]
 async fn a_caller_whose_grant_is_revoked_sees_no_contained_agent() {
     let user = common::euid_name();
     let w = world_bound(
