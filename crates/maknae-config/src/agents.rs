@@ -1915,6 +1915,40 @@ mod tests {
     }
 
     #[test]
+    fn the_board_switch_takes_the_yaml_boolean_spellings() {
+        for (spelling, on) in [
+            ("true", true),
+            ("True", true),
+            ("TRUE", true),
+            ("false", false),
+            ("False", false),
+            ("FALSE", false),
+        ] {
+            assert_eq!(
+                board_of(&format!("board: {spelling}\n")),
+                Ok(on),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_board_value_refuses_the_load_naming_the_file() {
+        let f = Fixture::new("board-bad");
+        f.enroll("hobi", &enrollment("hobi", "hobi-svc", 990, "user"));
+        f.file(
+            &format!("hobi/{POLICY_FILE}"),
+            "schema_version: 1\nboard: yes\n",
+            0o640,
+        );
+        let err = f.load().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "agent configuration refused: agents/hobi/policy.yaml: invalid board config: board: not a boolean"
+        );
+    }
+
+    #[test]
     fn the_board_key_moves_the_canonical_text() {
         let on = parse_agent_policy(&hobi(), "schema_version: 1\nboard: true\n").unwrap();
         let off = parse_agent_policy(&hobi(), "schema_version: 1\nboard: false\n").unwrap();

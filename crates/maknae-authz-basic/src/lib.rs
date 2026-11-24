@@ -9341,6 +9341,27 @@ mod tests {
         }
 
         #[test]
+        fn an_agent_a_live_identity_edit_drops_no_longer_has_its_board_switch() {
+            let mut src = source(
+                Some("schema_version: 1\nbindings:\n  admin: [\"root\"]\n"),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(
+                    vec![hobi()],
+                    &[("hobi", "schema_version: 1\nboard: true\n")],
+                ),
+            );
+            assert!(compiled(&src).agent_board("hobi"));
+            src.set_account_lookup(unanswered_account);
+            let dropped = src
+                .with_live_bindings(bound(
+                    "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  user: [\"hobi-svc\"]\n",
+                ))
+                .unwrap();
+            assert_eq!(dropped.agent_uid("hobi"), None);
+            assert!(!compiled(&dropped).agent_board("hobi"));
+        }
+
+        #[test]
         fn flipping_an_agents_board_switch_moves_its_digest_and_the_policy_digest() {
             let with = |board: &str| {
                 source(

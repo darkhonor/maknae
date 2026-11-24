@@ -1230,7 +1230,7 @@ board: true
 - `actions` limits `fs.stat` and `fs.list` by its `fs.read` entry; naming either refuses the reload (§2.5).
 - `admin.*` is always refused to an agent, except `admin.whoami`; no file can grant it.
 - `taskers` names who may task this agent with `session.task`: account names, `uid:<n>` entries and `agent:<id>` entries. Without the key, only people may task it; another agent may task it only when listed. `taskers: []` admits nobody. Each tasker also needs `session.task` from its own role; the shipped `authz.yaml` grants it to `admin` and `user`. How tasks are stored and bounded, and the partition each works in, are in §2.6.
-- `board` is the agent's own switch for the message board (§2.9). It is off when the key is absent or `false`; only the YAML booleans `true` and `false` are accepted, and any other value (`yes`, `"true"`, `1`, `{}`, an empty `board:`) refuses the reload. Changing it changes the agent's `agents.<id>` section digest.
+- `board` is the agent's own switch for the message board (§2.9). It is off when the key is absent or `false`; only a YAML boolean is accepted (`true`, `True` or `TRUE` for on, `false`, `False` or `FALSE` for off), and any other value (`yes`, `"true"`, `1`, `{}`, an empty `board:`) refuses the reload. Changing it changes the agent's `agents.<id>` section digest.
 - Unknown keys, and any `schema_version` other than `1`, refuse the reload.
 
 **De-enrolling.**
