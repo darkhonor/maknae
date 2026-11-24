@@ -2110,6 +2110,28 @@ pub fn load_authz(path: &Path) -> Result<AuthzPolicy, AuthzError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tool_permissions_expose_their_allow_and_deny_patterns() {
+        let tool = |spec: &str| match parse_pattern(spec).unwrap() {
+            Pattern::Tool(t) => t,
+            other => panic!("{other:?}"),
+        };
+        let perms = ToolPermissions::of(
+            vec![tool("Tool(a-tool echo hi *)")],
+            vec![tool("Tool(b-tool echo bye *)")],
+            vec!["Tool(a-tool echo hi *)".to_string()],
+            vec!["Tool(b-tool echo bye *)".to_string()],
+        );
+        assert_eq!(
+            perms.allow(),
+            [Pattern::Tool(tool("Tool(a-tool echo hi *)"))]
+        );
+        assert_eq!(
+            perms.deny(),
+            [Pattern::Tool(tool("Tool(b-tool echo bye *)"))]
+        );
+    }
+
     const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
     fn parse_dest(body: &str) -> Result<AuthzPolicy, AuthzError> {
         parse_authz(body)

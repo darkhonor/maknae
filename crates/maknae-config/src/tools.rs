@@ -1949,6 +1949,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_tool_enum_spelling_round_trips_and_unknown_is_none() {
+        for v in ToolIsolation::ALL {
+            assert_eq!(ToolIsolation::parse(v.as_str()), Some(v));
+        }
+        for v in ToolWorkspaceAccess::ALL {
+            assert_eq!(ToolWorkspaceAccess::parse(v.as_str()), Some(v));
+        }
+        for v in ToolVolumeAccess::ALL {
+            assert_eq!(ToolVolumeAccess::parse(v.as_str()), Some(v));
+        }
+        for v in ToolVolumeScope::ALL {
+            assert_eq!(ToolVolumeScope::parse(v.as_str()), Some(v));
+        }
+        for v in OutputToModel::ALL {
+            assert_eq!(OutputToModel::parse(v.as_str()), Some(v));
+        }
+        for bad in ["", "bogus", "RW", "Container"] {
+            assert_eq!(ToolIsolation::parse(bad), None);
+            assert_eq!(ToolWorkspaceAccess::parse(bad), None);
+            assert_eq!(ToolVolumeAccess::parse(bad), None);
+            assert_eq!(ToolVolumeScope::parse(bad), None);
+            assert_eq!(OutputToModel::parse(bad), None);
+        }
+    }
+
+    #[test]
+    fn names_of_harvests_class_and_tool_keys_only() {
+        assert_eq!(
+            names_of("credential_classes:\n  c1: 1\n  c2: 2\ntools:\n  t1: 1\n  t2: 2\n"),
+            (
+                vec!["c1".to_string(), "c2".to_string()],
+                vec!["t1".to_string(), "t2".to_string()]
+            )
+        );
+        assert_eq!(
+            names_of("tools:\n  t1: 1\n"),
+            (Vec::new(), vec!["t1".to_string()])
+        );
+        assert_eq!(
+            names_of("credential_classes: 3\ntools: [a]\n"),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(names_of("tools: [\n"), (Vec::new(), Vec::new()));
+    }
+
+    #[cfg(unix)]
+    mod anchored {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn own() -> maknae_io::TargetRequired {
+            maknae_io::TargetRequired {
+                owner: None,
+                ..crate::authz::root_policy_file_required()
+            }
+        }
+
+        fn dir(tag: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!("tools_anch_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+            d.canonicalize().unwrap()
+        }
+
+        fn put(path: &Path, body: &str) {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+
+        fn loaded(tag: &str, main: Option<&str>, dropins: &[(&str, &str)]) -> ToolsCatalog {
+            let d = dir(tag);
+            if let Some(main) = main {
+                put(&d.join(TOOLS_FILE), main);
+            }
+            if !dropins.is_empty() {
+                let sub = d.join(TOOLS_DROPIN_DIR);
+                std::fs::create_dir(&sub).unwrap();
+                std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o750)).unwrap();
+                for (name, body) in dropins {
+                    put(&sub.join(name), body);
+                }
+            }
+            let got = load_required(&d, own(), &crate::grammar::shipped_grammars());
+            let _ = std::fs::remove_dir_all(&d);
+            got.unwrap()
+        }
+
+        fn entry_doc(name: &str) -> String {
+            format!(
+                "schema_version: 1\ntools:\n  {name}:\n    executes_workspace: false\n    image: {{ ref: \"{IMAGE}\" }}\n    output_to_model: redacted\n    commands:\n      echo: {{ subcommands: [\"hi *\"] }}\n"
+            )
+        }
+
+        #[test]
+        fn a_dropin_in_tools_d_loads_its_entry() {
+            let c = loaded(
+                "dropin_loads",
+                None,
+                &[("50-extra.yaml", &entry_doc("sentinel-674-extra"))],
+            );
+            assert!(c.disabled().is_empty(), "{:?}", c.disabled());
+            assert!(c.entry("sentinel-674-extra").is_some());
+        }
+
+        #[test]
+        fn a_schema_failed_dropin_disables_a_name_defined_elsewhere() {
+            let bad =
+                entry_doc("sentinel-674-main").replace("schema_version: 1", "schema_version: 2");
+            let c = loaded(
+                "dropin_dup_bad",
+                Some(&entry_doc("sentinel-674-main")),
+                &[("a.yaml", &bad)],
+            );
+            assert!(c.entry("sentinel-674-main").is_none(), "{:?}", c.disabled());
+            assert!(c.disabled().iter().any(|d| d.entry == "sentinel-674-main"
+                && d.reason.contains("more than one file")
+                && d.reason.contains("tools.d/a.yaml")));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_production_door_refuses_a_file_root_does_not_own() {

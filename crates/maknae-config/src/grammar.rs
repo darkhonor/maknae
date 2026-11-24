@@ -922,6 +922,13 @@ shapes:
       state: { at: option, enum: [open, closed, all], description: Which issues to list. }
 "#;
 
+    #[test]
+    fn grammar_name_exposes_and_displays_its_text() {
+        let name = GrammarName::of("state");
+        assert_eq!(name.as_str(), "state");
+        assert_eq!(name.to_string(), "state");
+    }
+
     fn parse(text: &str) -> Grammar {
         Grammar::parse("gh", text).unwrap()
     }
@@ -2461,5 +2468,70 @@ mod shipped_gh_tests {
             "issue.edit.title",
             &[("number", "1"), ("title", "--force")]
         ));
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod anchored_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const GH: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2.105.0\", date: 2026-11-24 }\nshapes:\n  issue.list:\n    description: List issues.\n    class: read\n    forge: { base: [read] }\n    argv: [issue, list, -R, \"{git.base}\"]\n";
+
+    fn set_mode(p: &std::path::Path, mode: u32) {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn load_errors_display_their_exact_text() {
+        assert_eq!(
+            GrammarLoadError::Directory(std::path::PathBuf::from("/etc/maknae/grammars")).to_string(),
+            "the grammar directory /etc/maknae/grammars must be owned by root (uid 0), not group-writable and with no world access"
+        );
+        assert_eq!(
+            GrammarLoadError::Io("boom".into()).to_string(),
+            "grammar directory: boom"
+        );
+    }
+
+    #[test]
+    fn hidden_and_non_yaml_members_are_ignored_and_a_yaml_member_loads() {
+        let root = std::env::temp_dir().join(format!("grammar_anch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let config = root.join("etc");
+        let vendor = root.join("vendor");
+        let grammars = config.join(GRAMMARS_DIR);
+        for d in [&config, &vendor, &grammars] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        set_mode(&root, 0o755);
+        set_mode(&config, 0o750);
+        set_mode(&vendor, 0o755);
+        set_mode(&grammars, 0o750);
+        for (name, body) in [
+            ("gh.yaml", GH),
+            (".hidden.yaml", GH),
+            ("README", "x"),
+            ("notes.txt", "x"),
+        ] {
+            let p = grammars.join(name);
+            std::fs::write(&p, body).unwrap();
+            set_mode(&p, 0o640);
+        }
+        let req = GrammarRequirement::from_member(maknae_io::TargetRequired {
+            owner: None,
+            mode_mask: Some(0o027),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        });
+        let got = load_required(&config, &vendor, &req);
+        let _ = std::fs::remove_dir_all(&root);
+        let set = got.unwrap();
+        assert!(set.disabled.is_empty(), "{:?}", set.disabled);
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["gh"]);
     }
 }
