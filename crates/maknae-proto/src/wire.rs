@@ -1391,7 +1391,9 @@ pub fn takes_task_request_cap(verb: &Verb) -> bool {
         | Verb::TaskCollect { .. }
         | Verb::TaskClaim { .. }
         | Verb::TaskReport { .. }
-        | Verb::AgentList { .. } => false,
+        | Verb::AgentList { .. }
+        | Verb::BoardPost { .. }
+        | Verb::BoardRead { .. } => false,
     }
 }
 

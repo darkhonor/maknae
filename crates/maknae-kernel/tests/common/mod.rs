@@ -1867,6 +1867,10 @@ macro_rules! board_double {
             ) -> Option<maknae_proto::CatalogDigest> {
                 self.inner.catalog_stamp(uid, forges)
             }
+
+            fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+                self.inner.forge_credentials(agent_uid)
+            }
         }
 
         impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for $name<P> {
@@ -2193,6 +2197,10 @@ impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for BaseOnlyInFirst
     ) -> Option<maknae_proto::CatalogDigest> {
         self.inner.catalog_stamp(uid, forges)
     }
+
+    fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        self.inner.forge_credentials(agent_uid)
+    }
 }
 
 impl<P: maknae_kernel::SensitiveNow> maknae_kernel::SensitiveNow for BaseOnlyInFirstBatch<P> {
@@ -2265,6 +2273,10 @@ impl<P: maknae_kernel::CatalogNow> maknae_kernel::CatalogNow for OtherBoard<P> {
         forges: &maknae_config::ForgeSet,
     ) -> Option<maknae_proto::CatalogDigest> {
         self.inner.catalog_stamp(uid, forges)
+    }
+
+    fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+        self.inner.forge_credentials(agent_uid)
     }
 }
 
