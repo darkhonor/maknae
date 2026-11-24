@@ -6638,6 +6638,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_lone_star_grant_permits_only_what_the_positional_ceiling_admits() {
+        let lp = lp_tool(
+            "permissions:\n  allow: [\"Tool(sentinel-674-build cargo *)\"]\n",
+            &["user"],
+            &[],
+        );
+        for argv in [&["build"][..], &["build", "--release"], &["test", "x"]] {
+            assert_eq!(
+                tool_decided(&lp, &build(TOOL_USER, argv)).verdict,
+                permit_with_audit(),
+                "{argv:?}"
+            );
+        }
+        for argv in [&["run", "x"][..], &["publish"], &["Build"], &[]] {
+            assert_eq!(
+                tool_decided(&lp, &build(TOOL_USER, argv)).verdict,
+                deny("tool: arguments outside entry sentinel-674-build's subcommands"),
+                "{argv:?}"
+            );
+        }
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build", "--config=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-build/cargo"),
+        );
+    }
+
     const GH_V1: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view, \"{git.change}\", -R, \"{git.base}\"]\n  issue.view:\n    description: View.\n    class: read\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"[1-9][0-9]{0,9}\", description: n }\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n";
     const GH_V2: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view, \"{git.change}\", --repo, \"{git.base}\"]\n  issue.view:\n    description: View.\n    class: read\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"[1-9][0-9]{0,9}\", description: n }\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n";
     const FORMS_TOOLS: &str = "schema_version: 1\ntools:\n  sentinel-674-open:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      sh: { open: true, deny_args: [\"--exec*\"] }\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    binds: { git: { resolver: git } }\n    commands:\n      gh: { grammar: gh, shapes: [pr.view, issue.view], deny_args: [\"--web*\"] }\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo:\n        subcommands: [\"build *\"]\n        deny_args: [\"--config*\"]\n";

@@ -1055,6 +1055,7 @@ mod tests {
         }
         out.push_str(&tool_invoke_decisions());
         out.push_str(&workspace_mount_decisions());
+        out.push_str(&tool_launch_decisions());
         out.push_str(&board_decisions());
         out
     }
@@ -1380,6 +1381,306 @@ mod tests {
                     maknae_security::finalize(d.verdict.clone())
                 ));
             }
+        }
+        out
+    }
+
+    fn tool_launch_decisions() -> String {
+        use crate::handler::{Stamp, TaskStamp};
+        use crate::tool_call::{decide_tool_call, CallInput, ToolCallDecision, ToolCallRequest};
+        use crate::workspace::SubjectFacts;
+        use maknae_proto::{Binding, GitBinding};
+        let (_g, c) = crate::test_fixtures::homelab_launch_composition("tool-launch-golden");
+        let git = |change: Option<u64>| {
+            vec![Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base: "octo/repo".into(),
+                head: None,
+                change,
+            })]
+        };
+        let of = crate::test_fixtures::cited_task_of;
+        let hobi_task = of("hobi", 2001, git(Some(42)));
+        let jin_task = of("jin", 2002, git(Some(42)));
+        let changeless = of("hobi", 2001, git(None));
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let jin = maknae_config::AgentId::parse("jin").unwrap();
+        let hobi_stamp = TaskStamp::of(&hobi_task);
+        let jin_stamp = TaskStamp::of(&jin_task);
+        let changeless_stamp = TaskStamp::of(&changeless);
+        struct Who<'a> {
+            label: &'a str,
+            uid: u32,
+            home: &'a str,
+            stamp: Stamp<'a>,
+        }
+        let principal = Who {
+            label: "principal",
+            uid: nix::unistd::geteuid().as_raw(),
+            home: "/home/operator",
+            stamp: Stamp::Client,
+        };
+        let agent_hobi = |task| Who {
+            label: "agent hobi tasked",
+            uid: 2001,
+            home: "/var/lib/maknae-agents/hobi",
+            stamp: Stamp::Agent {
+                agent: &hobi,
+                task: Some(task),
+            },
+        };
+        let agent_jin = Who {
+            label: "agent jin tasked",
+            uid: 2002,
+            home: "/var/lib/maknae-agents/jin",
+            stamp: Stamp::Agent {
+                agent: &jin,
+                task: Some(&jin_stamp),
+            },
+        };
+        let shape = |entry: &str, name: &str, slots: &[(&str, &str)]| ToolCallRequest {
+            entry: entry.into(),
+            program: "gh".into(),
+            binding: None,
+            call: CallInput::Shape {
+                shape: name.into(),
+                slots: slots
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            },
+        };
+        let open = |entry: &str, program: &str, argv: &[&str]| ToolCallRequest {
+            entry: entry.into(),
+            program: program.into(),
+            binding: None,
+            call: CallInput::Open {
+                argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+            },
+        };
+        let shape_to = |entry: &str, program: &str, name: &str| {
+            let mut r = shape(entry, name, &[]);
+            r.program = program.into();
+            r
+        };
+        let hobi_who = agent_hobi(&hobi_stamp);
+        let changeless_who = agent_hobi(&changeless_stamp);
+        const SRV: &str = "/srv/work/x";
+        const HOBI_ROOT: &str = "/var/lib/maknae-agents/hobi/tasks/users/1000";
+        let body = [("body", "LGTM")];
+        let rows: Vec<(
+            &str,
+            &Who,
+            Option<&crate::task::CitedTask>,
+            ToolCallRequest,
+            &str,
+        )> = vec![
+            (
+                "role grant",
+                &principal,
+                Some(&hobi_task),
+                shape("github-post", "pr.comment", &body),
+                SRV,
+            ),
+            (
+                "not granted",
+                &principal,
+                Some(&hobi_task),
+                shape("github-post", "pr.review.approve", &body),
+                SRV,
+            ),
+            (
+                "own policy grant",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-post", "pr.comment", &body),
+                HOBI_ROOT,
+            ),
+            (
+                "not granted",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-post", "pr.review.approve", &body),
+                HOBI_ROOT,
+            ),
+            (
+                "role deny over site allow",
+                &principal,
+                Some(&hobi_task),
+                shape("github-post", "pr.review.comment", &body),
+                SRV,
+            ),
+            (
+                "no role grant for an agent",
+                &agent_jin,
+                Some(&jin_task),
+                shape("github-post", "pr.comment", &body),
+                "/var/lib/maknae-agents/jin/tasks/users/1000",
+            ),
+            (
+                "shape not enabled in the ceiling",
+                &principal,
+                Some(&hobi_task),
+                shape("github-read", "pr.comment", &body),
+                SRV,
+            ),
+            (
+                "shape not in the grammar",
+                &principal,
+                Some(&hobi_task),
+                shape("github-issues-write", "issue.transfer", &[]),
+                SRV,
+            ),
+            (
+                "position invariant",
+                &principal,
+                Some(&hobi_task),
+                shape("github-issues-read", "issue.view", &[("number", "-1")]),
+                SRV,
+            ),
+            (
+                "enum",
+                &principal,
+                Some(&hobi_task),
+                shape("github-issues-read", "issue.list", &[("state", "merged")]),
+                SRV,
+            ),
+            (
+                "pattern",
+                &principal,
+                Some(&hobi_task),
+                shape("github-issues-read", "issue.view", &[("number", "1e3")]),
+                SRV,
+            ),
+            (
+                "missing bound value",
+                &changeless_who,
+                Some(&changeless),
+                shape("github-post", "pr.comment", &body),
+                HOBI_ROOT,
+            ),
+            (
+                "open call",
+                &principal,
+                None,
+                open("rust-scratch", "cargo", &["build", "--release"]),
+                SRV,
+            ),
+            (
+                "open with a credential",
+                &principal,
+                None,
+                open("open-credential", "cargo", &["build"]),
+                SRV,
+            ),
+            (
+                "shape call to an open command",
+                &principal,
+                None,
+                shape_to("rust-scratch", "cargo", "pr.comment"),
+                SRV,
+            ),
+            (
+                "open call to a grammar command",
+                &principal,
+                Some(&hobi_task),
+                open("github-post", "gh", &["pr", "comment", "42"]),
+                SRV,
+            ),
+            (
+                "positional command, open call",
+                &principal,
+                None,
+                open("rust-build", "cargo", &["build"]),
+                SRV,
+            ),
+            (
+                "positional command, shape call",
+                &principal,
+                None,
+                shape_to("rust-build", "cargo", "build"),
+                SRV,
+            ),
+            (
+                "option slot with a leading dash",
+                &principal,
+                Some(&hobi_task),
+                shape(
+                    "github-issues-write",
+                    "issue.edit.title",
+                    &[("number", "7"), ("title", "-x")],
+                ),
+                SRV,
+            ),
+            (
+                "open call in the task",
+                &hobi_who,
+                Some(&hobi_task),
+                open("rust-scratch", "cargo", &["build"]),
+                HOBI_ROOT,
+            ),
+            (
+                "mount outside the partition",
+                &hobi_who,
+                Some(&hobi_task),
+                open("rust-scratch", "cargo", &["build"]),
+                "/var/lib/maknae-agents/hobi/tasks/users/1001",
+            ),
+        ];
+        let mut out = String::from(
+            "# tool.launch: decide_tool_call through the Composition, with the shipped gh grammar and tools-homelab.yaml, a site policy granting Tool(...) per site, role and agent, and role tool.invoke injected (grantable with #479). A Permit shows the mask, the launch's digest and its call fields.\n",
+        );
+        for (case, who, cited, req, root) in rows {
+            let call = match &req.call {
+                CallInput::Shape { shape, slots } => format!("shape {shape} {slots:?}"),
+                CallInput::Open { argv } => format!("open {argv:?}"),
+            };
+            let head = format!(
+                "{} [{case}] {} {} {call} root={root}",
+                who.label, req.entry, req.program
+            );
+            let subject = SubjectFacts {
+                lane: maknae_security::Lane::Local,
+                uid: who.uid,
+                home: Some(std::path::Path::new(who.home)),
+                conversation: None,
+                personal: None,
+                stamp: &who.stamp,
+            };
+            let outcome = match decide_tool_call(&c, &subject, cited, req, root) {
+                ToolCallDecision::Refused { audit, wire, cited } => {
+                    let rule = cited.rule.map(|c| {
+                        let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                        format!("{} in #{section}", c.key)
+                    });
+                    format!("Refused {audit:?} wire={wire:?} {:?} {rule:?}", cited.role)
+                }
+                ToolCallDecision::Permitted { obligations } => {
+                    let mut shown = Vec::new();
+                    for ob in &obligations {
+                        let fields: &[&str] = if ob.id == crate::workspace::MASK {
+                            &[crate::workspace::PATTERNS]
+                        } else {
+                            &[
+                                "mode",
+                                "shape",
+                                "argv",
+                                "stdin.sha256",
+                                "credential",
+                                "workspace.mode",
+                                "shape.sha256",
+                            ]
+                        };
+                        let params: Vec<String> = fields
+                            .iter()
+                            .filter_map(|k| ob.params.get(k).map(|v| format!("{k}={v:?}")))
+                            .collect();
+                        shown.push(format!("{} {{{}}}", ob.id, params.join(", ")));
+                    }
+                    format!("Permitted {}", shown.join(" "))
+                }
+            };
+            out.push_str(&format!("{head} => {outcome}\n"));
         }
         out
     }

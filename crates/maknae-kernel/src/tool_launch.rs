@@ -849,6 +849,474 @@ tools:
         assert_eq!(wire_attr(&AttrValue::Bool(false)), WireAttr::Bool(false));
     }
 
+    struct Masked {
+        path: String,
+        dir: bool,
+    }
+
+    struct Staged<'a> {
+        empty_file: &'a str,
+        empty_dir: &'a str,
+        slot_dir: &'a str,
+        masked: &'a dyn Fn(&str) -> Vec<Masked>,
+    }
+
+    fn podman_memory(value: &str) -> Result<String, String> {
+        for (iec, podman) in [("Ki", "k"), ("Mi", "m"), ("Gi", "g")] {
+            if let Some(n) = value.strip_suffix(iec) {
+                if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
+                    return Ok(format!("{n}{podman}"));
+                }
+            }
+        }
+        Err(format!("memory {value}"))
+    }
+
+    fn podman_render(obligations: &[Obligation], staged: &Staged) -> Result<Vec<String>, String> {
+        let mut launches = obligations.iter().filter(|o| o.id == "tool.launch");
+        let (Some(launch), None) = (launches.next(), launches.next()) else {
+            return Err("one tool.launch".into());
+        };
+        let p = &launch.params;
+        let need = |key: &str| p.str(key).ok_or_else(|| format!("missing {key}"));
+        match need("isolation")? {
+            "container" => {}
+            other => return Err(format!("isolation {other}")),
+        }
+        let image = need("image.ref")?;
+        if !image.contains("@sha256:") {
+            return Err("image not by digest".into());
+        }
+        let Some(AttrValue::Int(uid)) = p.get("subject.uid") else {
+            return Err("missing subject.uid".into());
+        };
+        let mut args: Vec<String> = ["run", "--rm", "--network=none", "--userns=keep-id"]
+            .map(String::from)
+            .to_vec();
+        args.push(format!("--user={uid}"));
+        if p.get("stdin.sha256").is_some() {
+            args.push("--interactive".into());
+        }
+        let bind = |src: &str, dst: &str, mode: &str| format!("--volume={src}:{dst}:{mode}");
+        match need("workspace.mode")? {
+            "none" => {}
+            mode @ ("ro" | "rw") => {
+                let root = need("workspace.root")?;
+                args.push(bind(root, root, mode));
+            }
+            other => return Err(format!("workspace.mode {other}")),
+        }
+        for mask in obligations
+            .iter()
+            .filter(|o| o.id == crate::workspace::MASK)
+        {
+            let Some(AttrValue::List(patterns)) = mask.params.get(crate::workspace::PATTERNS)
+            else {
+                return Err("mask without patterns".into());
+            };
+            for pattern in patterns {
+                for hit in (staged.masked)(pattern) {
+                    let src = if hit.dir {
+                        staged.empty_dir
+                    } else {
+                        staged.empty_file
+                    };
+                    args.push(bind(src, &hit.path, "ro"));
+                }
+            }
+        }
+        let list = |key: &str| match p.get(key) {
+            None => Ok(Vec::new()),
+            Some(AttrValue::List(items)) => Ok(items.clone()),
+            Some(
+                AttrValue::Str(_) | AttrValue::Int(_) | AttrValue::Bool(_) | AttrValue::Set(_),
+            ) => Err(format!("{key} is not a list")),
+        };
+        let (paths, hashes) = (list("files.path")?, list("files.sha256")?);
+        if paths.len() != hashes.len() {
+            return Err("files.path and files.sha256 differ in length".into());
+        }
+        for (path, hash) in paths.iter().zip(&hashes) {
+            args.push(bind(&format!("{}/{hash}", staged.slot_dir), path, "ro"));
+        }
+        if let Some(cpus) = p.str("resources.cpus") {
+            args.push(format!("--cpus={cpus}"));
+        }
+        if let Some(memory) = p.str("resources.memory") {
+            args.push(format!("--memory={}", podman_memory(memory)?));
+        }
+        args.push(image.to_string());
+        args.push(need("program")?.to_string());
+        args.extend(list("argv")?);
+        Ok(args)
+    }
+
+    const RENDERED: [&str; 13] = [
+        "image.ref",
+        "isolation",
+        "network.via",
+        "workspace.mode",
+        "workspace.root",
+        "resources.cpus",
+        "resources.memory",
+        "subject.uid",
+        "program",
+        "argv",
+        "stdin.sha256",
+        "files.path",
+        "files.sha256",
+    ];
+
+    const NOT_RENDERED: [&str; 17] = [
+        "entry",
+        "mode",
+        "shape",
+        "grammar.sha256",
+        "shape.sha256",
+        "forge.base",
+        "forge.head",
+        "network.sites",
+        "credential",
+        "lifetime.max",
+        "timeout",
+        "output",
+        "output_to_model",
+        "volumes.name",
+        "volumes.access",
+        "volumes.scope",
+        "task",
+    ];
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Parsed {
+        flags: Vec<String>,
+        volumes: Vec<(String, String, String)>,
+        image: String,
+        program: String,
+        argv: Vec<String>,
+    }
+
+    fn parse_podman(args: &[String]) -> Parsed {
+        let mut it = args.iter();
+        assert_eq!(it.next().map(String::as_str), Some("run"));
+        let mut p = Parsed::default();
+        for arg in it.by_ref() {
+            let Some(flag) = arg.strip_prefix("--") else {
+                p.image = arg.clone();
+                break;
+            };
+            match flag.strip_prefix("volume=") {
+                Some(spec) => {
+                    let parts: Vec<&str> = spec.split(':').collect();
+                    let [src, dst, mode] = parts[..] else {
+                        panic!("volume {spec}");
+                    };
+                    p.volumes.push((src.into(), dst.into(), mode.into()));
+                }
+                None => p.flags.push(flag.to_string()),
+            }
+        }
+        p.program = it.next().expect("program").clone();
+        p.argv = it.cloned().collect();
+        p
+    }
+
+    fn strs(v: Option<&AttrValue>) -> Vec<String> {
+        match v {
+            Some(AttrValue::List(items)) => items.clone(),
+            Some(AttrValue::Set(items)) => items.iter().cloned().collect(),
+            None => Vec::new(),
+            Some(other) => panic!("not a list: {other:?}"),
+        }
+    }
+
+    fn assert_parity(obligations: &[Obligation], staged: &Staged) {
+        let launch = &obligations
+            .iter()
+            .find(|o| o.id == "tool.launch")
+            .expect("a tool.launch obligation")
+            .params;
+        for key in keys(launch) {
+            assert!(
+                RENDERED.contains(&key) ^ NOT_RENDERED.contains(&key),
+                "{key} is not classified as rendered or not"
+            );
+        }
+        let rendered = podman_render(obligations, staged).unwrap();
+        let p = parse_podman(&rendered);
+        let uid = match launch.get("subject.uid") {
+            Some(AttrValue::Int(n)) => *n,
+            other => panic!("subject.uid {other:?}"),
+        };
+        let mut flags = vec![
+            "rm".to_string(),
+            "network=none".to_string(),
+            "userns=keep-id".to_string(),
+            format!("user={uid}"),
+        ];
+        if launch.get("stdin.sha256").is_some() {
+            flags.push("interactive".into());
+        }
+        let memory = launch.str("resources.memory").map(|m| {
+            let (n, unit) = m.split_at(m.len() - 2);
+            let unit = match unit {
+                "Ki" => "k",
+                "Mi" => "m",
+                "Gi" => "g",
+                other => panic!("memory unit {other}"),
+            };
+            format!("memory={n}{unit}")
+        });
+        flags.extend(launch.str("resources.cpus").map(|c| format!("cpus={c}")));
+        flags.extend(memory);
+        let mut got = p.flags.clone();
+        got.sort();
+        flags.sort();
+        assert_eq!(got, flags);
+        assert_eq!(launch.str("isolation"), Some("container"));
+        assert!(matches!(
+            launch.str("network.via"),
+            Some("none" | "maknae-proxy")
+        ));
+        let image = launch.str("image.ref").unwrap();
+        assert!(image.contains("@sha256:"), "{image}");
+        assert_eq!(p.image, image);
+        assert_eq!(Some(p.program.as_str()), launch.str("program"));
+        assert_eq!(p.argv, strs(launch.get("argv")));
+
+        let mut want = Vec::new();
+        match launch.str("workspace.mode").unwrap() {
+            "none" => assert_eq!(launch.get("workspace.root"), None),
+            mode => {
+                let root = launch.str("workspace.root").unwrap();
+                want.push((root.to_string(), root.to_string(), mode.to_string()));
+            }
+        }
+        let masks: Vec<&Obligation> = obligations
+            .iter()
+            .filter(|o| o.id == crate::workspace::MASK)
+            .collect();
+        assert!(masks.len() <= 1);
+        for pattern in masks
+            .iter()
+            .flat_map(|m| strs(m.params.get(crate::workspace::PATTERNS)))
+        {
+            let hits = (staged.masked)(&pattern);
+            assert!(!hits.is_empty(), "{pattern} resolved to nothing");
+            for hit in hits {
+                let src = if hit.dir {
+                    staged.empty_dir
+                } else {
+                    staged.empty_file
+                };
+                want.push((src.to_string(), hit.path, "ro".to_string()));
+            }
+        }
+        let paths = strs(launch.get("files.path"));
+        let hashes = strs(launch.get("files.sha256"));
+        assert_eq!(paths.len(), hashes.len());
+        for (path, hash) in paths.iter().zip(&hashes) {
+            assert!(path.starts_with("/run/maknae/slots/"), "{path}");
+            want.push((
+                format!("{}/{hash}", staged.slot_dir),
+                path.clone(),
+                "ro".to_string(),
+            ));
+        }
+        assert_eq!(p.volumes, want);
+    }
+
+    fn staged_masks(pattern: &str) -> Vec<Masked> {
+        match pattern {
+            "/**/.env" => vec![
+                Masked {
+                    path: "/srv/work/x/.env".into(),
+                    dir: false,
+                },
+                Masked {
+                    path: "/srv/work/x/app/.env".into(),
+                    dir: false,
+                },
+            ],
+            "/srv/work/x/secrets/**" => vec![Masked {
+                path: "/srv/work/x/secrets".into(),
+                dir: true,
+            }],
+            other => panic!("no staged match for {other}"),
+        }
+    }
+
+    const STAGED: Staged = Staged {
+        empty_file: "/run/user/1000/maknae/empty",
+        empty_dir: "/run/user/1000/maknae/empty.d",
+        slot_dir: "/run/user/1000/maknae/slots",
+        masked: &staged_masks,
+    };
+
+    fn homelab_decided(req: crate::tool_call::ToolCallRequest) -> Vec<Obligation> {
+        use crate::handler::Stamp;
+        use crate::tool_call::{decide_tool_call, ToolCallDecision};
+        use crate::workspace::SubjectFacts;
+        let (_g, c) = crate::test_fixtures::homelab_launch_composition("podman-render");
+        let task = crate::test_fixtures::cited_task(vec![maknae_proto::Binding::Git(
+            maknae_proto::GitBinding {
+                server: "github.com".into(),
+                base: "octo/repo".into(),
+                head: None,
+                change: Some(42),
+            },
+        )]);
+        let subject = SubjectFacts {
+            lane: maknae_security::Lane::Local,
+            uid: nix::unistd::geteuid().as_raw(),
+            home: Some(std::path::Path::new("/home/operator")),
+            conversation: None,
+            personal: None,
+            stamp: &Stamp::Client,
+        };
+        match decide_tool_call(&c, &subject, Some(&task), req, "/srv/work/x") {
+            ToolCallDecision::Permitted { obligations } => obligations,
+            ToolCallDecision::Refused { audit, .. } => panic!("refused: {audit}"),
+        }
+    }
+
+    #[test]
+    fn podman_render_matches_the_obligation() {
+        use crate::tool_call::{CallInput, ToolCallRequest};
+        let comment = homelab_decided(ToolCallRequest {
+            entry: "github-post".into(),
+            program: "gh".into(),
+            binding: None,
+            call: CallInput::Shape {
+                shape: "pr.comment".into(),
+                slots: slots(&[("body", "LGTM")]),
+            },
+        });
+        assert_eq!(
+            comment.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            ["workspace.mask", "tool.launch"]
+        );
+        assert_parity(&comment, &STAGED);
+        let rendered = podman_render(&comment, &STAGED).unwrap();
+        let user = format!("--user={}", nix::unistd::geteuid().as_raw());
+        assert_eq!(
+            rendered,
+            [
+                "run",
+                "--rm",
+                "--network=none",
+                "--userns=keep-id",
+                user.as_str(),
+                "--interactive",
+                "--volume=/srv/work/x:/srv/work/x:ro",
+                "--volume=/run/user/1000/maknae/empty:/srv/work/x/.env:ro",
+                "--volume=/run/user/1000/maknae/empty:/srv/work/x/app/.env:ro",
+                "--cpus=1",
+                "--memory=512m",
+                "ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "gh",
+                "pr",
+                "comment",
+                "42",
+                "-R",
+                "octo/repo",
+                "--body-file",
+                "-",
+            ]
+        );
+
+        let scratch = homelab_decided(ToolCallRequest {
+            entry: "rust-scratch".into(),
+            program: "cargo".into(),
+            binding: None,
+            call: CallInput::Open {
+                argv: vec!["build".into(), "--release".into()],
+            },
+        });
+        assert_parity(&scratch, &STAGED);
+        let rendered = podman_render(&scratch, &STAGED).unwrap();
+        assert!(rendered.contains(&"--volume=/srv/work/x:/srv/work/x:rw".to_string()));
+        assert!(!rendered.contains(&"--interactive".to_string()));
+        assert_eq!(
+            rendered[rendered.len() - 3..],
+            ["cargo", "build", "--release"]
+        );
+
+        let c = catalog();
+        let created = shape_call(
+            &c,
+            "issue.create",
+            &[("title", "-t"), ("body", "the body"), ("notes", "n")],
+            "1",
+        );
+        let mut container = c.entry("gh-post").unwrap().clone();
+        container.isolation = maknae_config::ToolIsolation::Container;
+        let mut mask = Attributes::new();
+        mask.insert(
+            crate::workspace::PATTERNS,
+            s(&["/**/.env", "/srv/work/x/secrets/**"]),
+        );
+        let obligations = [
+            Obligation {
+                id: crate::workspace::MASK.into(),
+                params: mask,
+            },
+            launch_obligation(
+                &container,
+                "gh",
+                &created,
+                &per_call("/srv/work/x", None, 7),
+            )
+            .unwrap(),
+        ];
+        assert_parity(&obligations, &STAGED);
+        let rendered = podman_render(&obligations, &STAGED).unwrap();
+        for bind in [
+            "--volume=/run/user/1000/maknae/empty.d:/srv/work/x/secrets:ro".to_string(),
+            format!(
+                "--volume=/run/user/1000/maknae/slots/{}:/run/maknae/slots/body:ro",
+                hex(b"the body")
+            ),
+            format!(
+                "--volume=/run/user/1000/maknae/slots/{}:/run/maknae/slots/notes:ro",
+                hex(b"n")
+            ),
+        ] {
+            assert!(rendered.contains(&bind), "{bind}");
+        }
+    }
+
+    #[test]
+    fn podman_render_refuses_what_it_cannot_launch() {
+        let c = catalog();
+        let entry = c.entry("gh-post").unwrap();
+        let call = comment(&c, "b", "1");
+        let vm = launch_obligation(entry, "gh", &call, &per_call("/w", None, 1)).unwrap();
+        assert_eq!(
+            podman_render(std::slice::from_ref(&vm), &STAGED),
+            Err("isolation vm".to_string())
+        );
+        let mut container = entry.clone();
+        container.isolation = maknae_config::ToolIsolation::Container;
+        let ok = launch_obligation(&container, "gh", &call, &per_call("/w", None, 1)).unwrap();
+        let mut tagged = ok.clone();
+        tagged
+            .params
+            .insert("image.ref", str_("registry.example/gh:latest"));
+        assert_eq!(
+            podman_render(&[tagged], &STAGED),
+            Err("image not by digest".to_string())
+        );
+        assert_eq!(
+            podman_render(&[], &STAGED),
+            Err("one tool.launch".to_string())
+        );
+        assert_eq!(
+            podman_render(&[ok.clone(), ok], &STAGED),
+            Err("one tool.launch".to_string())
+        );
+    }
+
     #[test]
     fn json_value_keeps_each_attr_kind() {
         assert_eq!(json_value(&AttrValue::Int(-3)), Value::Int(-3));

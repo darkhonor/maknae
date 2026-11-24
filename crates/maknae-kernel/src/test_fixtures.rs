@@ -564,8 +564,17 @@ pub(crate) fn build_tool_request_in_mode(
 
 /// hobi's `Working` task, tasked by uid 1000 with `bindings`, as the store resolves it.
 pub(crate) fn cited_task(bindings: Vec<maknae_proto::Binding>) -> crate::task::CitedTask {
+    cited_task_of("hobi", 2001, bindings)
+}
+
+/// `agent`'s `Working` task, tasked by uid 1000 with `bindings`.
+pub(crate) fn cited_task_of(
+    agent: &str,
+    agent_uid: u32,
+    bindings: Vec<maknae_proto::Binding>,
+) -> crate::task::CitedTask {
     use crate::task::TaskObjectForTest;
-    let mut task = maknae_proto::TaskObject::for_test("hobi", 1000);
+    let mut task = maknae_proto::TaskObject::for_test(agent, 1000);
     task.bindings = bindings;
     let signed = maknae_proto::SignedTask {
         task,
@@ -577,9 +586,93 @@ pub(crate) fn cited_task(bindings: Vec<maknae_proto::Binding>) -> crate::task::C
         },
     };
     let store = crate::task::TaskStore::new();
-    let id = store.insert_for_test(signed, 2001).task.task_id;
+    let id = store.insert_for_test(signed, agent_uid).task.task_id;
     store.start_for_test(&id);
     store
-        .working(&id, &maknae_config::AgentId::parse("hobi").unwrap(), 2001)
+        .working(
+            &id,
+            &maknae_config::AgentId::parse(agent).unwrap(),
+            agent_uid,
+        )
         .unwrap()
+}
+
+pub(crate) const LAUNCH_SITE_POLICY: &str = concat!(
+    "schema_version: 1\n",
+    "permissions:\n",
+    "  allow: [\"Read(/srv/**)\", \"Write(/srv/**)\", \"Tool(github-post gh:pr.review.comment)\", \"Tool(github-read gh:pr.*)\", \"Tool(github-issues-read gh:issue.*)\", \"Tool(github-issues-write gh:issue.edit.title)\", \"Tool(rust-scratch cargo *)\", \"Tool(rust-build cargo build *)\", \"Tool(open-credential cargo *)\"]\n",
+    "  deny: [\"Read(/**/.env)\"]\n",
+    "roles:\n",
+    "  admin:\n",
+    "    allow: [\"session.new\"]\n",
+    "    permissions:\n",
+    "      allow: [\"Tool(github-post gh:pr.comment)\"]\n",
+    "      deny: [\"Tool(github-post gh:pr.review.comment)\"]\n",
+    "  user:\n",
+    "    allow: [\"session.new\"]\n",
+    "    permissions:\n",
+    "      allow: [\"Tool(github-post gh:pr.comment)\"]\n",
+);
+
+pub(crate) const LAUNCH_HOBI_POLICY: &str = concat!(
+    "schema_version: 1\n",
+    "permissions:\n",
+    "  allow: [\"Read(~/**)\", \"Write(~/**)\", \"Tool(github-post gh:pr.comment)\", \"Tool(rust-scratch cargo *)\"]\n",
+);
+
+pub(crate) const LAUNCH_JIN_POLICY: &str = concat!(
+    "schema_version: 1\n",
+    "permissions:\n",
+    "  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+);
+
+pub(crate) const OPEN_CREDENTIAL_DROPIN: &str = concat!(
+    "schema_version: 1\n",
+    "tools:\n",
+    "  open-credential:\n",
+    "    executes_workspace: true\n",
+    "    image: { ref: \"ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n",
+    "    output_to_model: redacted\n",
+    "    credential: github-read\n",
+    "    commands:\n",
+    "      cargo: { open: true }\n",
+);
+
+/// The shipped `gh` grammar and HomeLab `tools.yaml` under [`LAUNCH_SITE_POLICY`], agents hobi
+/// and jin, and the role `tool.invoke` test-injected for admin and user (grantable with #479).
+pub(crate) fn homelab_launch_composition(
+    tag: &str,
+) -> (
+    DirGuard,
+    crate::composition::Composition<HermeticAuthorizer>,
+) {
+    use maknae_authz_basic::Baseline;
+    let (g, basic) = fixture(tag, LAUNCH_SITE_POLICY, None);
+    write_sensitive(
+        &g.0,
+        include_str!("../../../packaging/common/sensitive.yaml"),
+    );
+    write_tools(
+        &g.0,
+        include_str!("../../../packaging/common/tools-homelab.yaml"),
+    );
+    write_shipped_gh_grammar(&g.0);
+    write_tools_dropin(&g.0, "open-credential.yaml", OPEN_CREDENTIAL_DROPIN);
+    basic.set_hosts(BTS_HOSTS);
+    for (id, uid, policy) in [
+        ("hobi", 2001, LAUNCH_HOBI_POLICY),
+        ("jin", 2002, LAUNCH_JIN_POLICY),
+    ] {
+        write_agent(&g.0, id, &format!("{id}-svc"), uid, "user");
+        write_agent_policy(&g.0, id, policy);
+    }
+    basic.install(
+        basic
+            .compile_granting_tool_invoke(&["admin", "user"])
+            .unwrap(),
+    );
+    (
+        g,
+        crate::composition::Composition::with_us_baseline_ceiling(basic),
+    )
 }
