@@ -1045,6 +1045,15 @@ mod tests {
             "",
             Some("schema_version: 1\nbindings:\n  guest: [\"daemon\"]\n"),
         );
+        let (_u, users) = crate::test_fixtures::shipped_composition_with(
+            "",
+            Some("schema_version: 1\nbindings:\n  user: [\"nobody\"]\n"),
+        );
+        let user = nix::unistd::User::from_name("nobody")
+            .unwrap()
+            .expect("the nobody account exists on every supported host")
+            .uid
+            .as_raw();
         let principal = nix::unistd::geteuid().as_raw();
         let guest = nix::unistd::User::from_name("daemon")
             .unwrap()
@@ -1120,8 +1129,13 @@ mod tests {
         out.push_str(
             "# board.manage through the Composition: a person's own board (users/<uid>, shown as own), decided by the role's grant; denied to every agent; the partition operand abstains.\n",
         );
+        rows.insert(3, ("user".into(), user, Stamp::Client, None));
         for (who, uid, stamp, overwrite) in &rows {
-            let c = if who == "guest" { &guests } else { &shipped };
+            let c = match who.as_str() {
+                "guest" => &guests,
+                "user" => &users,
+                _ => &shipped,
+            };
             for verb in &manage_verbs() {
                 let mut r = build_authz_request(
                     verb,
