@@ -458,6 +458,7 @@ pub struct PolicyPaths {
     pub bindings: PathBuf,
     pub sensitive: PathBuf,
     pub config_dir: PathBuf,
+    pub grammar_vendor: PathBuf,
 }
 
 impl PolicyPaths {
@@ -467,7 +468,13 @@ impl PolicyPaths {
             bindings: dir.join(maknae_config::BINDINGS_FILE),
             sensitive: dir.join(maknae_config::SENSITIVE_FILE),
             config_dir: dir.to_path_buf(),
+            grammar_vendor: PathBuf::from(maknae_config::VENDOR_GRAMMAR_DIR),
         }
+    }
+
+    pub fn with_grammar_vendor(mut self, vendor: impl Into<PathBuf>) -> Self {
+        self.grammar_vendor = vendor.into();
+        self
     }
 
     fn agent_policy(&self, id: &str) -> PathBuf {
@@ -2739,6 +2746,18 @@ mod tests {
 
     fn paths() -> PolicyPaths {
         PolicyPaths::in_dir(Path::new(DIR))
+    }
+
+    #[test]
+    fn grammar_vendor_defaults_per_os_and_is_overridable() {
+        assert_eq!(
+            paths().grammar_vendor,
+            PathBuf::from(maknae_config::VENDOR_GRAMMAR_DIR)
+        );
+        assert_eq!(
+            paths().with_grammar_vendor("/v").grammar_vendor,
+            PathBuf::from("/v")
+        );
     }
 
     fn source_with(authz: &str, bindings: Option<&str>, uids: &[(&str, u32)]) -> PolicySource {
@@ -5638,6 +5657,7 @@ mod tests {
                 bindings: "/x/bindings.yaml".into(),
                 sensitive: "/x/sensitive.yaml".into(),
                 config_dir: "/x".into(),
+                grammar_vendor: maknae_config::VENDOR_GRAMMAR_DIR.into(),
             }
         );
     }

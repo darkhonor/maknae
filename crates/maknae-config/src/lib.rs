@@ -142,9 +142,12 @@ pub use forges::{
     FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
 };
 pub use grammar::{
-    shape_name_ok, ArgvToken, Constraint, ForgeNeed, Grammar, GrammarError, Shape, ShapeClass,
-    Slot, SlotAt, Tested,
+    load_grammars, shape_name_ok, ArgvToken, Constraint, DisabledGrammar, ForgeNeed, Grammar,
+    GrammarError, GrammarLoadError, GrammarSet, Shape, ShapeClass, Slot, SlotAt, Tested,
+    GRAMMARS_DIR, VENDOR_GRAMMAR_DIR,
 };
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use grammar::{load_grammars_with_requirement, GrammarRequirement};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};

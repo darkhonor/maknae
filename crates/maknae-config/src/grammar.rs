@@ -443,6 +443,164 @@ fn check_slot_use(argv: &[ArgvToken], slots: &BTreeMap<String, Slot>) -> Result<
     Ok(())
 }
 
+pub const GRAMMARS_DIR: &str = "grammars";
+
+#[cfg(target_os = "macos")]
+pub const VENDOR_GRAMMAR_DIR: &str = "/usr/local/share/maknae/grammars";
+#[cfg(not(target_os = "macos"))]
+pub const VENDOR_GRAMMAR_DIR: &str = "/usr/share/maknae/grammars";
+
+const GRAMMAR_SUFFIX: &str = ".yaml";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisabledGrammar {
+    pub file: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GrammarSet {
+    pub grammars: BTreeMap<String, Grammar>,
+    pub disabled: Vec<DisabledGrammar>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GrammarLoadError {
+    Directory(std::path::PathBuf),
+    Io(String),
+}
+
+impl fmt::Display for GrammarLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Directory(dir) => write!(
+                f,
+                "the grammar directory {} must be owned by root (uid 0) and not group- or other-writable",
+                dir.display()
+            ),
+            Self::Io(reason) => write!(f, "grammar directory: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for GrammarLoadError {}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrammarRequirement {
+    pub dir: maknae_io::AnchorRequired,
+    pub member: maknae_io::TargetRequired,
+    pub vendor: maknae_io::AnchorRequired,
+}
+
+#[cfg(unix)]
+impl GrammarRequirement {
+    pub fn from_member(member: maknae_io::TargetRequired) -> Self {
+        Self {
+            dir: maknae_io::AnchorRequired {
+                owner: member.owner,
+                mode_mask: Some(0o027),
+            },
+            vendor: maknae_io::AnchorRequired {
+                owner: member.owner,
+                mode_mask: Some(0o022),
+            },
+            member,
+        }
+    }
+}
+
+pub fn load_grammars(
+    config_dir: &std::path::Path,
+    vendor_dir: &std::path::Path,
+) -> Result<GrammarSet, GrammarLoadError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (config_dir, vendor_dir);
+        Err(GrammarLoadError::Io(
+            "grammar permission enforcement is unavailable on this platform".into(),
+        ))
+    }
+    #[cfg(unix)]
+    {
+        load_required(
+            config_dir,
+            vendor_dir,
+            &GrammarRequirement::from_member(crate::authz::root_policy_file_required()),
+        )
+    }
+}
+
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub fn load_grammars_with_requirement(
+    config_dir: &std::path::Path,
+    vendor_dir: &std::path::Path,
+    req: GrammarRequirement,
+) -> Result<GrammarSet, GrammarLoadError> {
+    load_required(config_dir, vendor_dir, &req)
+}
+
+#[cfg(unix)]
+fn load_required(
+    config_dir: &std::path::Path,
+    vendor_dir: &std::path::Path,
+    req: &GrammarRequirement,
+) -> Result<GrammarSet, GrammarLoadError> {
+    use maknae_io::{IoError, IoKind, Kind, StrategyPref};
+    let io_err = |e: std::io::Error| GrammarLoadError::Io(e.to_string());
+    let dir = std::path::absolute(config_dir.join(GRAMMARS_DIR)).map_err(io_err)?;
+    let vendor_path = std::path::absolute(vendor_dir).map_err(io_err)?;
+    let anchor = match maknae_io::open_anchor(&dir, req.dir.clone(), StrategyPref::Auto) {
+        Ok(anchor) => anchor,
+        Err(IoError::Io {
+            kind: IoKind::NotFound,
+            path,
+        }) if path == dir => return Ok(GrammarSet::default()),
+        Err(IoError::InsecurePermissions { .. } | IoError::NotOwned { .. }) => {
+            return Err(GrammarLoadError::Directory(dir))
+        }
+        Err(other) => return Err(GrammarLoadError::Io(other.to_string())),
+    };
+    let mut entries = anchor
+        .enumerate(std::path::Path::new(""), None)
+        .map_err(|e| GrammarLoadError::Io(e.to_string()))?
+        .value;
+    entries.retain(|entry| entry.name.to_string_lossy().ends_with(GRAMMAR_SUFFIX));
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let vendor =
+        maknae_io::open_anchor_resolved(&vendor_path, req.vendor.clone(), StrategyPref::Auto);
+    let mut set = GrammarSet::default();
+    for entry in entries {
+        let file = entry.name.to_string_lossy().into_owned();
+        let stem = file.trim_end_matches(GRAMMAR_SUFFIX);
+        let read = match &vendor {
+            Ok(vendor) => anchor
+                .read_enabled_member(&file, vendor, &vendor_path, req.member.clone())
+                .map(|member| match member {
+                    maknae_io::EnabledMember::Local(bytes)
+                    | maknae_io::EnabledMember::Vendor(bytes) => bytes,
+                })
+                .map_err(|e| e.to_string()),
+            Err(_) if entry.kind == Kind::File => anchor
+                .read(std::path::Path::new(&file), None, req.member.clone())
+                .map(|outcome| outcome.value)
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(format!("the vendor grammar directory is unavailable: {e}")),
+        };
+        let parsed = read.and_then(|bytes| {
+            let text = std::str::from_utf8(&bytes).map_err(|e| format!("invalid UTF-8: {e}"))?;
+            Grammar::parse(stem, text).map_err(|e| e.to_string())
+        });
+        match parsed {
+            Ok(grammar) => {
+                set.grammars.insert(stem.to_owned(), grammar);
+            }
+            Err(reason) => set.disabled.push(DisabledGrammar { file, reason }),
+        }
+    }
+    Ok(set)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,5 +1178,329 @@ shapes:
         assert!(e.to_string().starts_with("grammar: schema_version"));
         let e = Grammar::parse("gh", "a: [\n").unwrap_err();
         assert!(e.to_string().starts_with("grammar: "));
+    }
+}
+
+#[cfg(test)]
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+mod load_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+
+    const GH: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2.105.0\", date: 2026-11-24 }\nshapes:\n  issue.list:\n    description: List issues.\n    class: read\n    forge: { base: [read] }\n    argv: [issue, list, -R, \"{git.base}\"]\n";
+
+    struct Fixture {
+        root: PathBuf,
+        config: PathBuf,
+        vendor: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("grammar_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let config = root.join("etc");
+            let vendor = root.join("vendor");
+            for d in [&root, &config, &vendor] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            let config = root.join("etc");
+            let vendor = root.join("vendor");
+            set_mode(&root, 0o755);
+            set_mode(&config, 0o750);
+            set_mode(&vendor, 0o755);
+            Self {
+                root,
+                config,
+                vendor,
+            }
+        }
+
+        fn grammars(&self) -> PathBuf {
+            let d = self.config.join(GRAMMARS_DIR);
+            if !d.exists() {
+                std::fs::create_dir(&d).unwrap();
+                set_mode(&d, 0o750);
+            }
+            d
+        }
+
+        fn local(&self, name: &str, text: &str) {
+            let p = self.grammars().join(name);
+            std::fs::write(&p, text).unwrap();
+            set_mode(&p, 0o640);
+        }
+
+        fn vendor_file(&self, name: &str, text: &str) {
+            let p = self.vendor.join(name);
+            std::fs::write(&p, text).unwrap();
+            set_mode(&p, 0o644);
+        }
+
+        fn link(&self, name: &str) {
+            std::os::unix::fs::symlink(self.vendor.join(name), self.grammars().join(name)).unwrap();
+        }
+
+        fn requirement(&self) -> GrammarRequirement {
+            GrammarRequirement::from_member(member(std::fs::metadata(&self.root).unwrap().uid()))
+        }
+
+        fn load(&self) -> Result<GrammarSet, GrammarLoadError> {
+            load_grammars_with_requirement(&self.config, &self.vendor, self.requirement())
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn member(owner: u32) -> maknae_io::TargetRequired {
+        maknae_io::TargetRequired {
+            owner: Some(owner),
+            mode_mask: Some(0o027),
+            nlink_exactly_one: false,
+            regular_file: true,
+            max_bytes: None,
+        }
+    }
+
+    fn set_mode(p: &Path, mode: u32) {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn only_disabled(set: &GrammarSet) -> &DisabledGrammar {
+        assert_eq!(set.disabled.len(), 1, "{:?}", set.disabled);
+        &set.disabled[0]
+    }
+
+    #[test]
+    fn requirement_derives_dir_and_vendor_masks_from_the_member() {
+        let m = member(7);
+        let got = GrammarRequirement::from_member(m.clone());
+        assert_eq!(
+            got.dir,
+            maknae_io::AnchorRequired {
+                owner: Some(7),
+                mode_mask: Some(0o027)
+            }
+        );
+        assert_eq!(
+            got.vendor,
+            maknae_io::AnchorRequired {
+                owner: Some(7),
+                mode_mask: Some(0o022)
+            }
+        );
+        assert_eq!(got.member, m);
+    }
+
+    #[test]
+    fn vendor_dir_default_is_the_per_os_path() {
+        assert!(Path::new(VENDOR_GRAMMAR_DIR).is_absolute());
+        assert!(VENDOR_GRAMMAR_DIR.ends_with("/maknae/grammars"));
+    }
+
+    #[test]
+    fn absent_grammar_dir_is_empty() {
+        let f = Fixture::new("absent");
+        assert_eq!(f.load(), Ok(GrammarSet::default()));
+    }
+
+    #[test]
+    fn linked_and_local_grammars_load() {
+        let f = Fixture::new("both");
+        f.vendor_file("gh.yaml", GH);
+        f.link("gh.yaml");
+        f.local("glab.yaml", &GH.replace("program: gh", "program: glab"));
+        let set = f.load().unwrap();
+        assert!(set.disabled.is_empty(), "{:?}", set.disabled);
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["gh", "glab"]);
+        assert_eq!(set.grammars["gh"].program, "gh");
+        assert!(set.grammars["gh"].shapes.contains_key("issue.list"));
+    }
+
+    #[test]
+    fn local_file_overrides_by_being_the_member() {
+        let f = Fixture::new("override");
+        f.vendor_file("gh.yaml", GH);
+        f.local("gh.yaml", &GH.replace("List issues.", "Local text."));
+        let set = f.load().unwrap();
+        assert!(set.disabled.is_empty(), "{:?}", set.disabled);
+        assert_eq!(
+            set.grammars["gh"].shapes["issue.list"].description,
+            "Local text."
+        );
+    }
+
+    #[test]
+    fn members_without_the_yaml_suffix_are_ignored() {
+        let f = Fixture::new("suffix");
+        f.local("gh.yaml.bak", "not: [a grammar");
+        f.local("README", "x");
+        f.local("gh.yml", "x");
+        assert_eq!(f.load(), Ok(GrammarSet::default()));
+    }
+
+    #[test]
+    fn dangling_link_disables_only_that_grammar() {
+        let f = Fixture::new("dangling");
+        f.link("gh.yaml");
+        f.local("glab.yaml", &GH.replace("program: gh", "program: glab"));
+        let set = f.load().unwrap();
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["glab"]);
+        assert_eq!(only_disabled(&set).file, "gh.yaml");
+    }
+
+    #[test]
+    fn absent_vendor_dir_disables_links_keeps_local_files() {
+        let f = Fixture::new("novendor");
+        f.link("gh.yaml");
+        f.local("glab.yaml", &GH.replace("program: gh", "program: glab"));
+        std::fs::remove_dir(&f.vendor).unwrap();
+        let set = f.load().unwrap();
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["glab"]);
+        let d = only_disabled(&set);
+        assert_eq!(d.file, "gh.yaml");
+        assert!(
+            d.reason.contains("vendor grammar directory"),
+            "{}",
+            d.reason
+        );
+    }
+
+    #[test]
+    fn wrong_link_target_disables_only_that_grammar() {
+        let f = Fixture::new("wrong");
+        f.vendor_file("gh.yaml", GH);
+        let elsewhere = f.root.join("elsewhere.yaml");
+        std::fs::write(&elsewhere, GH).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, f.grammars().join("gh.yaml")).unwrap();
+        f.local("glab.yaml", &GH.replace("program: gh", "program: glab"));
+        let set = f.load().unwrap();
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["glab"]);
+        assert_eq!(only_disabled(&set).file, "gh.yaml");
+    }
+
+    #[test]
+    fn unparseable_grammar_disables_only_that_grammar() {
+        let f = Fixture::new("bad");
+        f.local("gh.yaml", "schema_version: 1\nprogram: other\n");
+        f.local("glab.yaml", &GH.replace("program: gh", "program: glab"));
+        let set = f.load().unwrap();
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["glab"]);
+        let d = only_disabled(&set);
+        assert_eq!(d.file, "gh.yaml");
+        assert!(
+            d.reason.contains("must equal the file name"),
+            "{}",
+            d.reason
+        );
+    }
+
+    #[test]
+    fn non_utf8_grammar_disables_only_that_grammar() {
+        let f = Fixture::new("utf8");
+        let p = f.grammars().join("gh.yaml");
+        std::fs::write(&p, [0xff, 0xfe]).unwrap();
+        set_mode(&p, 0o640);
+        let set = f.load().unwrap();
+        assert!(set.grammars.is_empty());
+        assert!(only_disabled(&set).reason.contains("invalid UTF-8"));
+    }
+
+    #[test]
+    fn group_writable_grammar_dir_refuses_the_load() {
+        let f = Fixture::new("gw");
+        f.local("gh.yaml", GH);
+        set_mode(&f.grammars(), 0o770);
+        assert_eq!(f.load(), Err(GrammarLoadError::Directory(f.grammars())));
+    }
+
+    #[test]
+    fn world_readable_grammar_dir_refuses_the_load() {
+        let f = Fixture::new("wr");
+        f.local("gh.yaml", GH);
+        set_mode(&f.grammars(), 0o754);
+        assert_eq!(f.load(), Err(GrammarLoadError::Directory(f.grammars())));
+    }
+
+    #[test]
+    fn group_writable_grammar_member_is_disabled() {
+        let f = Fixture::new("memberw");
+        f.local("gh.yaml", GH);
+        set_mode(&f.grammars().join("gh.yaml"), 0o660);
+        let set = f.load().unwrap();
+        assert!(set.grammars.is_empty());
+        assert_eq!(only_disabled(&set).file, "gh.yaml");
+    }
+
+    #[test]
+    fn insecure_vendor_dir_disables_links_keeps_local_files() {
+        let f = Fixture::new("vendorw");
+        f.vendor_file("gh.yaml", GH);
+        f.link("gh.yaml");
+        f.local("glab.yaml", &GH.replace("program: gh", "program: glab"));
+        set_mode(&f.vendor, 0o775);
+        let set = f.load().unwrap();
+        assert_eq!(set.grammars.keys().collect::<Vec<_>>(), ["glab"]);
+        assert_eq!(only_disabled(&set).file, "gh.yaml");
+    }
+
+    #[test]
+    fn directory_member_is_disabled() {
+        let f = Fixture::new("dirmember");
+        std::fs::create_dir(f.grammars().join("gh.yaml")).unwrap();
+        let set = f.load().unwrap();
+        assert_eq!(only_disabled(&set).file, "gh.yaml");
+    }
+
+    #[test]
+    fn foreign_owned_grammar_dir_refuses_the_load() {
+        let f = Fixture::new("owner");
+        f.local("gh.yaml", GH);
+        let mut req = f.requirement();
+        req.dir.owner = Some(std::fs::metadata(&f.root).unwrap().uid().wrapping_add(1));
+        assert_eq!(
+            load_grammars_with_requirement(&f.config, &f.vendor, req),
+            Err(GrammarLoadError::Directory(f.grammars()))
+        );
+    }
+
+    #[test]
+    fn absent_config_dir_is_an_io_error() {
+        let f = Fixture::new("noconfig");
+        std::fs::remove_dir(&f.config).unwrap();
+        assert!(matches!(f.load(), Err(GrammarLoadError::Io(_))));
+    }
+
+    #[test]
+    fn grammars_dir_that_is_a_file_is_an_io_error() {
+        let f = Fixture::new("notdir");
+        std::fs::write(f.config.join(GRAMMARS_DIR), "x").unwrap();
+        assert!(matches!(f.load(), Err(GrammarLoadError::Io(_))));
+    }
+
+    #[test]
+    fn production_door_refuses_a_dir_root_does_not_own() {
+        let f = Fixture::new("prod");
+        f.local("gh.yaml", GH);
+        crate::tests::test_owner::hand_to_nobody_when_root(&[&f.config, &f.grammars()]);
+        assert_eq!(
+            load_grammars(&f.config, &f.vendor),
+            Err(GrammarLoadError::Directory(f.grammars()))
+        );
+    }
+
+    #[test]
+    fn load_error_names_the_directory() {
+        let dir = GrammarLoadError::Directory(PathBuf::from("/etc/maknae/grammars"));
+        assert!(dir.to_string().contains("/etc/maknae/grammars"));
+        assert!(GrammarLoadError::Io("boom".into())
+            .to_string()
+            .contains("boom"));
     }
 }
