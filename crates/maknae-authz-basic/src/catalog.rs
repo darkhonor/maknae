@@ -992,7 +992,7 @@ mod tests {
                         ],
                     },
                     CatalogShape {
-                        name: "c".into(),
+                        name: "cccc".into(),
                         description: String::new(),
                         access: CatalogAccess::Write,
                         slots: vec![],
@@ -1003,7 +1003,7 @@ mod tests {
         let open = (1 + 1 + 2) + (1 + 1 + 4);
         let key = 1 + 1 + 2 + 1;
         let slots = (1 + 5 + 1 + 2 + 3) + (2 + 4 + 3);
-        let shapes = (key + 3 * 2 + 2 + slots) + (key + 2);
+        let shapes = (key + 3 * 2 + 2 + slots) + (key + 4 * 2);
         assert_eq!(graph_text(&entry), open + shapes);
     }
 
