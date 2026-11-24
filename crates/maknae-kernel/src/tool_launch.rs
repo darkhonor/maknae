@@ -39,12 +39,27 @@ enum Form<'a> {
     },
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchRefusal {
+    NoProgram,
+    FormMismatch,
+    UnknownShape,
+    NoImage,
+}
+
 fn resolve<'a>(
     entry: &'a ToolEntry,
     program: &str,
     call: &'a LaunchCall,
-) -> Option<(&'a ToolCommand, Form<'a>)> {
-    let command = entry.commands.get(program)?;
+) -> Result<(&'a ToolCommand, Form<'a>), LaunchRefusal> {
+    let command = entry
+        .commands
+        .get(program)
+        .ok_or(LaunchRefusal::NoProgram)?;
     let form = match (&command.form, call) {
         (
             CommandForm::Grammar {
@@ -55,16 +70,16 @@ fn resolve<'a>(
             LaunchCall::Shape { shape, rendered },
         ) => Form::Shape {
             name: shape,
-            shape: shapes.get(shape)?,
+            shape: shapes.get(shape).ok_or(LaunchRefusal::UnknownShape)?,
             grammar_canonical,
             rendered,
         },
         (CommandForm::Open, LaunchCall::Open { argv }) => Form::Open { argv },
         (CommandForm::Positional(_), LaunchCall::Shape { .. } | LaunchCall::Open { .. })
         | (CommandForm::Grammar { .. }, LaunchCall::Open { .. })
-        | (CommandForm::Open, LaunchCall::Shape { .. }) => return None,
+        | (CommandForm::Open, LaunchCall::Shape { .. }) => return Err(LaunchRefusal::FormMismatch),
     };
-    Some((command, form))
+    Ok((command, form))
 }
 
 fn text(v: impl Into<String>) -> AttrValue {
@@ -94,7 +109,7 @@ fn fixed(
     program: &str,
     command: &ToolCommand,
     form: &Form,
-) -> Option<Attributes> {
+) -> Result<Attributes, LaunchRefusal> {
     let mut p = Attributes::new();
     p.insert("entry", text(&entry.name));
     p.insert("program", text(program));
@@ -105,7 +120,16 @@ fn fixed(
         }
         Form::Open { .. } => p.insert("mode", text("open")),
     }
-    p.insert("image.ref", text(&entry.image.as_ref()?.reference));
+    p.insert(
+        "image.ref",
+        text(
+            &entry
+                .image
+                .as_ref()
+                .ok_or(LaunchRefusal::NoImage)?
+                .reference,
+        ),
+    );
     p.insert(
         "isolation",
         text(match entry.isolation {
@@ -170,7 +194,7 @@ fn fixed(
             Some(ToolVolumeScope::Tasker) => "tasker",
         })),
     );
-    Some(p)
+    Ok(p)
 }
 
 fn json_value(v: &AttrValue) -> Value {
@@ -222,7 +246,7 @@ pub(crate) fn launch_obligation(
     program: &str,
     call: &LaunchCall,
     per_call: &PerCall,
-) -> Option<Obligation> {
+) -> Result<Obligation, LaunchRefusal> {
     let (command, form) = resolve(entry, program, call)?;
     let mut p = fixed(entry, program, command, &form)?;
     p.insert("shape.sha256", text(digest(&p, &form)));
@@ -274,7 +298,7 @@ pub(crate) fn launch_obligation(
         "subject.uid",
         AttrValue::Int(i64::from(per_call.subject_uid)),
     );
-    Some(Obligation {
+    Ok(Obligation {
         id: "tool.launch".to_string(),
         params: p,
     })
@@ -284,9 +308,13 @@ pub(crate) fn launch_obligation(
     not(test),
     expect(dead_code, reason = "called by the tool-invocation verb, #479")
 )]
-pub(crate) fn shape_sha256(entry: &ToolEntry, program: &str, call: &LaunchCall) -> Option<String> {
+pub(crate) fn shape_sha256(
+    entry: &ToolEntry,
+    program: &str,
+    call: &LaunchCall,
+) -> Result<String, LaunchRefusal> {
     let (command, form) = resolve(entry, program, call)?;
-    Some(digest(&fixed(entry, program, command, &form)?, &form))
+    Ok(digest(&fixed(entry, program, command, &form)?, &form))
 }
 
 #[cfg_attr(
@@ -336,7 +364,7 @@ shapes:
     description: Create.
     class: write
     forge: { base: [issue-write] }
-    argv: [issue, create, "--title={title}", --body-file, "{body}", --notes, "{notes}"]
+    argv: [issue, create, "--title={title}", --notes, "{notes}", --body-file, "{body}"]
     slots:
       title: { at: option, description: t }
       notes: { at: file, description: n }
@@ -591,24 +619,24 @@ tools:
                 LaunchCall::Open { .. } => unreachable!(),
             },
         };
-        for (entry, program, call) in [
-            (post, "gh", &open),
-            (post, "gh", &unknown_shape),
-            (post, "git", &shaped),
-            (post, "git", &open),
-            (post, "absent", &shaped),
-            (scratch, "cargo", &shaped),
-        ] {
-            assert!(
-                launch_obligation(entry, program, call, &pc).is_none(),
-                "{program}"
-            );
-            assert!(shape_sha256(entry, program, call).is_none(), "{program}");
-        }
         let mut imageless = scratch.clone();
         imageless.image = None;
-        assert!(launch_obligation(&imageless, "cargo", &open, &pc).is_none());
-        assert!(shape_sha256(&imageless, "cargo", &open).is_none());
+        for (entry, program, call, why) in [
+            (post, "gh", &open, LaunchRefusal::FormMismatch),
+            (post, "gh", &unknown_shape, LaunchRefusal::UnknownShape),
+            (post, "git", &shaped, LaunchRefusal::FormMismatch),
+            (post, "git", &open, LaunchRefusal::FormMismatch),
+            (post, "absent", &shaped, LaunchRefusal::NoProgram),
+            (scratch, "cargo", &shaped, LaunchRefusal::FormMismatch),
+            (&imageless, "cargo", &open, LaunchRefusal::NoImage),
+        ] {
+            assert_eq!(
+                launch_obligation(entry, program, call, &pc).map(|o| o.id),
+                Err(why),
+                "{program}"
+            );
+            assert_eq!(shape_sha256(entry, program, call), Err(why), "{program}");
+        }
     }
 
     #[test]
@@ -747,10 +775,10 @@ tools:
                 "issue",
                 "create",
                 "--title=-t",
-                "--body-file",
-                "/run/maknae/slots/body",
                 "--notes",
                 "/run/maknae/slots/notes",
+                "--body-file",
+                "/run/maknae/slots/body",
             ]))
         );
         assert_eq!(p.get("forge.base"), Some(&set(&["issue-write"])));

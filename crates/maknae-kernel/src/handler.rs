@@ -737,8 +737,11 @@ pub(crate) struct ToolCallDischarge {
 pub(crate) fn discharge_for_tool_call(
     obligations: &[maknae_security::Obligation],
 ) -> Result<ToolCallDischarge, UnhonorableObligation> {
-    let mut forward = Vec::new();
+    let mut forward: Vec<maknae_security::Obligation> = Vec::new();
     for ob in obligations {
+        if ob.id == FORWARDED[0] && forward.iter().any(|f| f.id == ob.id) {
+            return Err(UnhonorableObligation(ob.id.clone()));
+        }
         if FORWARDED.contains(&ob.id.as_str()) {
             forward.push(ob.clone());
         } else {
@@ -2247,6 +2250,21 @@ mod tests {
         assert_eq!(discharge_for_tool_call(&[audit_ob()]).unwrap().forward, []);
         assert_eq!(discharge_for_tool_call(&[]).unwrap().forward, []);
         assert_eq!(FORWARDED, ["tool.launch", "workspace.mask"]);
+    }
+
+    #[test]
+    fn tool_call_discharge_refuses_two_launches() {
+        let launch = ob_with("tool.launch", "argv");
+        let other = ob_with("tool.launch", "files.path");
+        let mask = ob_with("workspace.mask", "patterns");
+        for second in [other, launch.clone()] {
+            assert_eq!(
+                discharge_for_tool_call(&[launch.clone(), mask.clone(), second]).map(|d| d.forward),
+                Err(UnhonorableObligation("tool.launch".into()))
+            );
+        }
+        let masks = discharge_for_tool_call(&[mask.clone(), launch, mask]).unwrap();
+        assert_eq!(masks.forward.len(), 3);
     }
 
     #[test]
