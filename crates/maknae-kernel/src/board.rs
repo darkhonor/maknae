@@ -322,6 +322,16 @@ impl Drop for Expiring<'_> {
     }
 }
 
+/// What [`BoardStore::unlink_claimed`] left of a claimed post.
+enum After<'a> {
+    /// Neither marked nor contained since its claim: the caller acts on the delete's result.
+    Unlinked(std::sync::MutexGuard<'a, Held>, Result<(), StoreError>),
+    /// Kept in memory, marked, its record written back.
+    Kept,
+    /// Kept in memory and marked, its record not written back.
+    NotRestored(StoreError),
+}
+
 enum Step {
     Skipped,
     Done,
@@ -852,15 +862,51 @@ impl BoardStore {
                 held.said.remove(&item);
                 return Step::Skipped;
             };
-            held.said.insert(item);
+            held.said.insert(item.clone());
             name
         };
-        let (mut held, deleted) = self.delete_claimed(key, seq, &name);
-        if deleted.is_err() {
-            return Step::Refused;
+        match self.unlink_claimed(key, seq, &name, view) {
+            After::Unlinked(mut held, Ok(())) => {
+                held.forget(key, seq);
+                Step::Done
+            }
+            After::Unlinked(
+                _,
+                Err(StoreError::Io(_) | StoreError::NotDurable(_) | StoreError::Counters(_)),
+            ) => Step::Refused,
+            After::Kept => {
+                self.held().said.remove(&item);
+                Step::Skipped
+            }
+            After::NotRestored(_) => {
+                self.held().said.remove(&item);
+                Step::Refused
+            }
         }
-        held.forget(key, seq);
-        Step::Done
+    }
+
+    /// [`Self::delete_claimed`], then the re-check: a post now marked, or whose author or
+    /// person `view` now contains, is kept in memory, marked, and its record written back.
+    fn unlink_claimed(
+        &self,
+        key: BoardKey,
+        seq: u64,
+        name: &str,
+        view: &dyn EnrollmentView,
+    ) -> After<'_> {
+        let (mut held, deleted) = self.delete_claimed(key, seq, name);
+        let kept = match &deleted {
+            Ok(()) | Err(StoreError::NotDurable(_)) => held.contained_since(key, seq, view),
+            Err(StoreError::Io(_) | StoreError::Counters(_)) => None,
+        };
+        let Some(kept) = kept else {
+            return After::Unlinked(held, deleted);
+        };
+        drop(held);
+        match self.restore(key, &kept) {
+            Ok(()) => After::Kept,
+            Err(why) => After::NotRestored(why),
+        }
     }
 
     /// Deletes the record `name` that [`Held::claim`] returned for `seq`, then ends the
@@ -943,21 +989,16 @@ impl BoardStore {
                 };
                 name
             };
-            let (mut held, deleted) = self.delete_claimed(key, seq, &name);
-            let kept = match &deleted {
-                Ok(()) | Err(StoreError::NotDurable(_)) => held.contained_since(key, seq, view),
-                Err(StoreError::Io(_) | StoreError::Counters(_)) => None,
-            };
-            if let Some(kept) = kept {
-                drop(held);
-                if let Err(why) = self.restore(key, &kept) {
+            let (mut held, deleted) = match self.unlink_claimed(key, seq, &name, view) {
+                After::Unlinked(held, deleted) => (held, deleted),
+                After::Kept => continue,
+                After::NotRestored(why) => {
                     cleared.stopped = Some(BoardRefusal::Unavailable(format!(
                         "{OUTCOME_UNKNOWN}contained during the clear; the record is not restored: {why}"
                     )));
                     break;
                 }
-                continue;
-            }
+            };
             match deleted {
                 Ok(()) => {
                     held.forget(key, seq);
@@ -3356,6 +3397,16 @@ mod tests {
         store: &Arc<BoardStore>,
         post: &Arc<Stored>,
     ) -> (usize, Vec<BoardDue>) {
+        contain_during_the_delete(b, store, post, &[2001])
+    }
+
+    /// [`mark_during_the_delete`], containing `uids`.
+    fn contain_during_the_delete(
+        b: &MemTaskBlobs,
+        store: &Arc<BoardStore>,
+        post: &Arc<Stored>,
+        uids: &[u32],
+    ) -> (usize, Vec<BoardDue>) {
         b.slow(Some(std::time::Duration::from_millis(300)));
         let performing = Arc::clone(store);
         let due = store.due(10);
@@ -3365,7 +3416,7 @@ mod tests {
         );
         let worker = std::thread::spawn(move || performing.perform(&due, &free()));
         b.await_stalls(1);
-        store.mark(&containing(&[], &[2001]));
+        store.mark(&containing(&[], uids));
         let during = store.due(10);
         assert!(store.get(BOB, post.post.id).is_none(), "being removed");
         assert!(store.candidates(BOB, 0, 10).is_empty());
@@ -3434,23 +3485,112 @@ mod tests {
     }
 
     #[test]
-    fn an_expiry_committed_at_its_check_wins_over_a_later_mark() {
+    fn a_containment_marked_during_an_expirys_unlink_keeps_the_post() {
+        for (uid, why) in [(2001, HeldFor::Author), (1000, HeldFor::Person)] {
+            let b = MemTaskBlobs::default();
+            let (store, clock) = clocked(&b);
+            let store = Arc::new(store);
+            let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-race");
+            clock.set(T0 + RETAIN);
+            let (done, during) = contain_during_the_delete(&b, &store, &post, &[uid]);
+            assert_eq!(
+                holds(&during),
+                0,
+                "{why:?}: no hold is listed while it is removed"
+            );
+            assert_eq!(done, 0, "{why:?}: the expiry is not done");
+            assert!(in_store(&store, BOB, post.post.id), "{why:?}");
+            assert!(store.get(BOB, post.post.id).is_none(), "{why:?}: withheld");
+            assert!(
+                b.has(&post_name(BOB, post.post.id)),
+                "{why:?}: written back"
+            );
+            assert!(store.held().expiring.is_empty());
+            assert!(
+                !store
+                    .held()
+                    .said
+                    .contains(&Item::Post(BOB, post.seq, BoardDueFor::Expire)),
+                "{why:?}: the expiry is no longer under way"
+            );
+            assert_eq!(
+                whys(&store.due(10)),
+                vec![(Some(post.post.id), None, BoardDueFor::Hold(why))],
+                "{why:?}"
+            );
+            assert_eq!(store.perform(&store.due(10), &free()), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, post.post.id).held,
+                [why].into_iter().collect(),
+                "{why:?}"
+            );
+            drop(store);
+            b.crash(0);
+            let (reloaded, _) = clocked(&b);
+            assert!(in_store(&reloaded, BOB, post.post.id), "{why:?}");
+            assert!(
+                reloaded.due(10).is_empty(),
+                "{why:?}: held, so not due to expire"
+            );
+        }
+    }
+
+    #[test]
+    fn a_containment_installed_after_an_expiry_does_not_bring_the_post_back() {
         let b = MemTaskBlobs::default();
         let (store, clock) = clocked(&b);
-        let store = Arc::new(store);
-        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-695-race");
+        let post = by(&store, BOB, hobi(), Some(2001), "sentinel-698-expired");
         clock.set(T0 + RETAIN);
-        let (done, during) = mark_during_the_delete(&b, &store, &post);
-        assert_eq!(holds(&during), 0, "no hold is due for a post being removed");
-        assert_eq!(done, 1);
-        assert!(!b.has(&post_name(BOB, post.post.id)));
-        assert!(store.get(BOB, post.post.id).is_none());
-        assert!(
-            store.due(10).is_empty(),
-            "no mark is left for the deleted sequence"
-        );
-        store.mark(&containing(&[], &[2001]));
+        assert_eq!(store.perform(&store.due(10), &free()), 1);
+        store.mark(&containing(&[], &[2001, 1000]));
         assert!(store.due(10).is_empty());
+        assert!(!in_store(&store, BOB, post.post.id));
+        assert!(!b.has(&post_name(BOB, post.post.id)));
+        drop(store);
+        let (store, _) = clocked(&b);
+        assert!(!in_store(&store, BOB, post.post.id));
+    }
+
+    #[test]
+    fn an_expiry_kept_whose_record_is_not_written_back_stops_the_sweep() {
+        for unsynced in [false, true] {
+            let b = MemTaskBlobs::default();
+            let (store, clock) = clocked(&b);
+            let post = by(&store, BOB, hobi(), Some(2001), "sentinel-698-evidence");
+            let name = post_name(BOB, post.post.id);
+            clock.set(T0 + RETAIN);
+            let view = ThenRefuse {
+                b: b.clone(),
+                name: name.clone(),
+                unsynced,
+                calls: Mutex::new(0),
+            };
+            let due = store.due(10);
+            assert_eq!(
+                whys(&due),
+                vec![(Some(post.post.id), None, BoardDueFor::Expire)]
+            );
+            assert_eq!(store.perform(&due, &view), 0, "unsynced {unsynced}");
+            b.fail(None);
+            b.stick(None);
+            assert_eq!(b.has(&name), unsynced, "unsynced {unsynced}");
+            assert!(in_store(&store, BOB, post.post.id));
+            assert!(store.get(BOB, post.post.id).is_none(), "marked");
+            assert!(store.held().owed.is_empty());
+            assert!(!store
+                .held()
+                .said
+                .contains(&Item::Post(BOB, post.seq, BoardDueFor::Expire)));
+            assert_eq!(
+                whys(&store.due(10)),
+                vec![(Some(post.post.id), None, BoardDueFor::Hold(HeldFor::Author))]
+            );
+            assert_eq!(store.perform(&store.due(10), &free()), 1);
+            assert_eq!(
+                stored_on_disk(&b, BOB, post.post.id).held,
+                [HeldFor::Author].into_iter().collect()
+            );
+        }
     }
 
     #[test]
