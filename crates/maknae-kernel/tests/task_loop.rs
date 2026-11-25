@@ -7124,19 +7124,20 @@ mod board {
             let w = manage_world("manage-participate", "user");
             w.enable(w.me, true);
             let held = w.settings_of(w.me);
-            for participate in [true, false] {
+            let body_setting = |extra: Option<bool>| {
                 let mut request: Value =
                     ciborium::from_reader(request_body(read_settings(), None).as_slice()).unwrap();
-                let set = Value::Map(vec![
-                    (text("enabled"), Value::Bool(false)),
-                    (text("participate"), Value::Bool(participate)),
-                    (text("report"), text("every")),
-                ]);
-                assert!(put_set(&mut request, &set));
+                let mut set = vec![(text("enabled"), Value::Bool(false))];
+                set.extend(extra.map(|p| (text("participate"), Value::Bool(p))));
+                set.push((text("report"), text("every")));
+                assert!(put_set(&mut request, &Value::Map(set)));
                 let mut body = Vec::new();
                 ciborium::into_writer(&request, &mut body).unwrap();
+                body
+            };
+            for participate in [true, false] {
                 let records = Records::new(0);
-                let raw = w.raw_body(body, &records).await;
+                let raw = w.raw_body(body_setting(Some(participate)), &records).await;
                 assert!(raw.is_empty(), "closed with no reply: {raw:?}");
                 let records = records.snapshot();
                 let refused: Vec<_> = records
@@ -7151,6 +7152,19 @@ mod board {
                 );
                 assert_eq!(w.settings_of(w.me), held, "participate={participate}");
             }
+            let records = Records::new(0);
+            let raw = w.raw_body(body_setting(None), &records).await;
+            assert!(
+                !raw.is_empty(),
+                "the same request without the key is answered"
+            );
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: false,
+                    report: maknae_kernel::Report::Every
+                }
+            );
         }
 
         #[tokio::test]
