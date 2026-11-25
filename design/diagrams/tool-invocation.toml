@@ -1,14 +1,14 @@
-# One tool invocation by either front end. Steps cite decisions, not code: none of it is built.
+# One tool call, as built and as decided. The same steps for maknae and maknae-agentd; a task only changes the inputs.
 
-title = "One tool invocation — who decides, who runs it, what the model sees"
+title = "One tool call: who decides, who runs it, where the credential comes from, what the model sees"
 subtitle = [
-  "The model asks; the front end (maknae, or maknae-agentd) asks maknaed, then starts the tool in a container as the subject and carries out the decision.",
-  "The container's only route is the relay to maknae-proxy, which asks maknaed about every CONNECT. Decided by ADR-0035 and ADR-0036; not built.",
+  "The same steps for a person's maknae and for maknae-agentd working a task. A task changes only the inputs: the uid, the workspace, bindings and reach, the credential.",
+  "Each step is marked with its build state. Today a model is offered only the six file tools and task_agent, so no gh, git or cargo call is made; the decision core has no caller until #479.",
 ]
 svg_title = "Maknae tool invocation"
-svg_desc = "UML sequence diagram of one tool invocation by either front end: the kernel's decision, the container launch, the per-connection proxy decision, and redacted output to the model."
-pitch = 170
-wrap_cols = 30
+svg_desc = "UML sequence diagram of one tool invocation by either front end, each step marked live, unreachable, decided or planned: the catalog, the kernel's decision, the reach check, the workspace mount, the credential mint and relay, the container launch, the per-connection proxy decision, redaction and release to the model."
+pitch = 175
+wrap_cols = 34
 
 [[boundary]]
 before = "kernel"
@@ -31,19 +31,25 @@ kind = "external"
 [[participant]]
 id = "front"
 label = "front end"
-stereo = "«untrusted» maknae · agentd"
+stereo = "«untrusted» maknae · maknae-agentd"
 kind = "untrusted"
 
 [[participant]]
 id = "tool"
 label = "tool container"
-stereo = "«untrusted»"
+stereo = "«untrusted» rootless Podman"
 kind = "untrusted"
 
 [[participant]]
 id = "kernel"
 label = "maknaed"
 stereo = "«trusted» sole PDP"
+kind = "trusted"
+
+[[participant]]
+id = "egress"
+label = "maknae-egress"
+stereo = "«trusted» deputy · minter"
 kind = "trusted"
 
 [[participant]]
@@ -55,104 +61,245 @@ kind = "trusted"
 [[participant]]
 id = "site"
 label = "site"
-stereo = "«external»"
+stereo = "«external» github.com …"
 kind = "external"
 
 # --- the sequence ---------------------------------------------------------
 
 [[step]]
+from = "front"
+to = "kernel"
+kind = "call"
+label = "tool.catalog: the subject's tools, shapes and forges"
+status = "live"
+evidence = "ADR-0039 decision 4 · crates/maknae-kernel/src/run.rs"
+test = "crates/maknae-kernel/tests/conversation_loop.rs::tool_catalog_returns_the_subjects_graph_and_its_digest"
+note = "maknae-agentd refetches when a TaskClaim reply's digest changes; maknae fetches on demand (maknae tools). The catalog is a hint and never authority."
+
+[[step]]
+from = "front"
+to = "model"
+kind = "call"
+label = "offer the menu: granted entries and shapes, bound values filled in"
+status = "#479"
+evidence = "#479 · ADR-0037 decision 5 · crates/maknae-llm/prompt/baseline-tools.json"
+test = "crates/maknae-llm/src/wire.rs::baseline_catalog_is_exactly_the_seven_maknae_tools"
+note = "Today the model is offered the six file tools and task_agent only; any other tool name is answered 'unknown tool' by the front end."
+
+[[step]]
 from = "model"
 to = "front"
 kind = "call"
-label = "tool call: gh pr view 42"
-evidence = "ADR-0036 decision 21"
-note = "The model only asks. It runs nothing, and a front end is the PEP that stands between it and the host (ADR-0035 decision 1)."
+label = "invoke: entry, program, shape and slot values"
+status = "#479"
+evidence = "#479 · ADR-0036 decision 21"
 
 [[step]]
 from = "front"
 to = "kernel"
 kind = "call"
-label = "request: entry, subcommand, workspace, task"
-evidence = "ADR-0036 decision 1"
+label = "tool request: the call, the workspace root, the cited task"
+status = "#479"
+evidence = "#479 · ADR-0036 decision 1 · crates/maknae-kernel/src/tool_call.rs"
+note = "A person cites no task, so no bindings or reach; an agent cites its task. Bindings on session.new for a person's own session are #479."
 
 [[step]]
 from = "kernel"
 to = "kernel"
 kind = "self"
-label = "decide the tool and the workspace mount: tools.yaml ceiling, grants, mandatory operands; record intent"
-evidence = "ADR-0036 decision 7 · ADR-0008"
-note = "tools.yaml is the ceiling; policy grants within it (Tool(rust-fetch gh pr view *)); deny-overrides with the mandatory operands."
+label = "resolve and render; a slot or argv refusal stops before the PDP"
+status = "unreachable"
+evidence = "ADR-0036 decision 7"
+test = "crates/maknae-kernel/src/tool_call.rs::slot_refusal_never_reaches_the_pdp"
+
+[[step]]
+from = "kernel"
+to = "kernel"
+kind = "self"
+label = "decide tool.invoke: containment, tools.yaml ceiling, role, Tool(...) grants"
+decide = [
+  "ADR-0036's Built and Owed lists predate #674 PR 3a. Grammars, shapes (in place of tool-aware deny_args matching) and binds: are parsed in production and served by tool.catalog, and binds: also selects the agent's forge credentials for the reach check at intake, but no call is decided on them until #479; the tool-call decision, the obligations with the mask set and the Podman renderer are built and reached from tests only. Recommendation: add a dated as-built status line to ADR-0036's Consequences.",
+]
+status = "unreachable"
+evidence = "ADR-0036 decision 7 · ADR-0037 decision 10"
+test = "crates/maknae-authz-basic/src/decide.rs::role_without_tool_invoke_grant_is_not_permitted"
+note = "tool.invoke is not grantable to any role until #479. In a task, an entry whose credential kind has no reach check is refused."
+
+[[step]]
+from = "kernel"
+to = "kernel"
+kind = "self"
+label = "the shape's forge needs must lie within the task's reach"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+note = "The tool-call path (unreachable) stamps reach.git.base and reach.git.head on the request; nothing reads them. #168 PR C adds the refusal."
+
+[[step]]
+from = "kernel"
+to = "kernel"
+kind = "self"
+label = "decide the workspace mount; denies become the mask set"
+decide = [
+  "Does the front end mount the workspace noexec when the entry does not run workspace code (ADR-0036 decision 6 leaves it to #479)? Recommendation: yes, with executes_workspace carried in tool.launch so the front end never reads tools.yaml.",
+]
+status = "unreachable"
+evidence = "ADR-0036 decision 5 · crates/maknae-kernel/src/workspace.rs"
+test = "crates/maknae-kernel/src/workspace.rs::refuses_home_and_above"
+note = "Person: current or path, never home or above, the personal sensitive.yaml added. Agent: the task's own directory, the host list only (per-task layout #476)."
 
 [[step]]
 from = "kernel"
 to = "front"
 kind = "reply"
-label = "Permit + launch-shape obligation (workspace, mask set) + proxy identity"
-evidence = "ADR-0035 decision 3 · ADR-0036 decision 6"
-note = "A PEP that cannot carry out an obligation must deny."
+label = "Permit + tool.launch and workspace.mask obligations"
+decide = [
+  "ADR-0035's Consequences still list the obligation wire field and the forward class as owed; both are built (#674 PR 3a, discharge_for_tool_call). Recommendation: add a dated as-built status line to ADR-0035.",
+]
+status = "unreachable"
+evidence = "#479 · ADR-0035 decision 3 · crates/maknae-kernel/src/tool_launch.rs"
+test = "crates/maknae-kernel/src/tool_launch.rs::launch_obligation_carries_every_spec_field"
+note = "Built and tested, sent by no verb until #479. A front end that cannot carry out an obligation denies. The per-invocation proxy identity joins the obligation with #566."
+
+[[step]]
+from = "front"
+to = "kernel"
+kind = "call"
+label = "launch-time credential request for the entry's class"
+decide = [
+  "How does a person's own credential reach a tool container? ADR-0037 decision 6 says the person's own credential, and tools.yaml has no credential source for it. Recommendation: a subject source, read by the front end with the person's own Vault login from the token maknae forge login stores, so both callers deliver through credential classes.",
+]
+status = "#479"
+evidence = "#479 · ADR-0036 decision 13"
+note = "Agent in a task: the class's minted token (below), or for a machine-user kind its own stored token, which the front end delivers (ADR-0038 decision 2). Person: the person's own credential (ADR-0037 decision 6)."
+
+[[step]]
+from = "kernel"
+to = "egress"
+kind = "call"
+label = "Mint frame, lazily: a permission set the task does not hold yet, or one near expiry"
+decide = [
+  "ADR-0036 decision 13 and ADR-0037 decision 7 say the token is minted at hand-out, ADR-0038's Consequences owe 'the kernel's call at task claim', and #168's close-out scope item 2 says at TaskClaim, lazily per permission set; the maintainer ruled 2026-11-25 to mint lazily at the first launch that needs the set. Recommendation: amend all three ADRs and the #168 banner in #168 PR C, when the lazy mint is built.",
+  "The kernel's deadline on a Mint frame (ADR-0038 residual 2): close the egress socket when it passes, or size it to the 1280 s worst case? Recommendation: close the socket, so a late reply's write fails and egress revokes; a lazy mint asks for one set, whose worst case is 160 s (140 s plus its revoke) rather than 1280 s.",
+]
+status = "#168"
+evidence = "#168 · ADR-0038 decision 4"
+note = "Maintainer, 2026-11-25: minted at the first launch that needs the set, not at claim. How the kernel's wait is bounded is open (D6)."
+
+[[step]]
+from = "egress"
+to = "site"
+kind = "call"
+label = "Transit-signed App JWT; one installation token per set"
+decide = [
+  "ADR-0037 decision 7 still says one token or one per set stays open; ADR-0038 decision 3 and the code mint one per set. Recommendation: amend ADR-0037 decision 7 to record it settled.",
+]
+status = "unreachable"
+evidence = "ADR-0038 decision 3 · crates/maknae-deputy/src/mint/minter.rs"
+test = "bins/maknae-egress/src/serve.rs::a_delivered_mint_reply_keeps_its_tokens_live"
+
+[[step]]
+from = "egress"
+to = "kernel"
+kind = "reply"
+label = "token sealed to the agent + for_revocation sealed to egress"
+status = "unreachable"
+evidence = "ADR-0038 decision 4 · crates/maknae-deputy/src/mint/minter.rs"
+test = "crates/maknae-deputy/src/mint/minter.rs::for_revocation_opens_only_with_egress_own_key_as_to_revoke"
+note = "The kernel cannot open either blob. It stores for_revocation with the task, for the revoke when the task ends (#168 PR C; lifecycle D4)."
+
+[[step]]
+from = "kernel"
+to = "front"
+kind = "reply"
+label = "relay the sealed token, unopened"
+status = "#168"
+evidence = "#168 · ADR-0038 decision 4"
 
 [[step]]
 from = "front"
 to = "tool"
 kind = "call"
-label = "start as the subject's uid: image by digest, workspace, internal network, credential by class"
-evidence = "ADR-0036 decision 4 · ADR-0036 decision 5 · ADR-0036 decision 13"
-note = "Agent: the agent's own uid, only the task's own directory mounted. Operator: current or path; never home; protected folders masked."
+label = "start as the subject's uid: image by digest, workspace from the held descriptor, masks, internal network, credential by its class"
+decide = [
+  "How may maknae-agentd launch containers: drop NoNewPrivileges from its unit, or a launch helper outside its process tree that runs as the agent's uid and starts only what an obligation describes (ADR-0036 decision 19)? Recommendation: the launch helper, so the daemon keeps NoNewPrivileges and its SELinux domain stays narrow.",
+  "#168's acceptance item that the gh tool container holds no token was superseded by ADR-0036 decision 13 (the container gets a narrowed token). Recommendation: strike it in #168 with a dated note when PR C lands.",
+]
+status = "#479"
+evidence = "#479 · ADR-0036 decision 4 · ADR-0036 decision 6"
+test = "crates/maknae-kernel/src/tool_launch.rs::podman_render_matches_the_obligation"
+note = "Only a test renderer exists. maknae-agentd cannot launch containers until its unit and SELinux confinement change (ADR-0036 decision 19)."
 
 [[step]]
 from = "tool"
 to = "proxy"
 kind = "call"
-label = "CONNECT api.github.com:443, through the front end's relay"
-evidence = "ADR-0036 decision 9"
-note = "The container has no other route: no DNS, no direct TCP (measured 2026-11-18)."
+label = "CONNECT api.github.com:443 through the front end's relay"
+decide = [
+  "#168's destinations: item (a GitHub destination class in authz.yaml): ADR-0039 decision 6 leaves per-role forge grants unbuilt because reach already bounds a task, and the proxy decides each CONNECT by site. Recommendation: strike it in #168 as superseded, with a dated note when PR C lands.",
+]
+status = "#566"
+evidence = "#566 · ADR-0036 decision 9"
+note = "The container's only route: an internal Podman network and a relay in the rootless network namespace (measured 2026-11-18)."
 
 [[step]]
 from = "proxy"
 to = "kernel"
 kind = "call"
-label = "decide this CONNECT: identity, host, port"
-evidence = "ADR-0035 decision 5"
+label = "decide this CONNECT: invocation identity, host, port"
+status = "#566"
+evidence = "#566 · ADR-0035 decision 5"
 
 [[step]]
 from = "kernel"
 to = "proxy"
 kind = "reply"
-label = "Permit or Deny; connection recorded"
-evidence = "ADR-0035 decision 5"
+label = "Permit or Deny; the connection is recorded"
+status = "#566"
+evidence = "#566 · ADR-0035 decision 5"
 
 [[step]]
 from = "proxy"
 to = "site"
 kind = "call"
 label = "tunnel; TLS end to end"
-note = "The proxy sees the host and port only, never content."
+decide = [
+  "Classification checks on tool traffic (ADR-0022 decision 6) are owed to a later ADR (ADR-0036 decision 9). Recommendation: no ruling now; take it up with the disclosure model, #147.",
+]
+status = "#566"
+evidence = "#566 · ADR-0036 decision 9"
+note = "Content-blind: the proxy sees host and port only, so classification checks do not run on tool traffic (ADR-0036 decision 9, owed to a later ADR)."
 
 [[step]]
 from = "tool"
 to = "front"
 kind = "reply"
 label = "exit status + output"
+status = "#479"
+evidence = "#479 · ADR-0036 decision 1"
 
 [[step]]
 from = "front"
 to = "front"
 kind = "self"
 label = "redact every credential value it delivered"
-evidence = "ADR-0036 decision 14"
-note = "Default redacted, with a marker saying a Maknae-managed credential was used; status only for secret-reading entries."
+status = "#479"
+evidence = "#479 · ADR-0036 decision 14"
+note = "redacted by default, status_only for entries that read secrets. Redaction prevents accident; it does not stop workspace code that holds the credential."
 
 [[step]]
 from = "front"
 to = "kernel"
 kind = "call"
-label = "outcome + redacted output; per-invocation credential revoked"
-evidence = "ADR-0036 decision 1 · ADR-0036 decision 13"
+label = "record the outcome"
+status = "#479"
+evidence = "#479 · ADR-0036 decision 1"
+note = "Task tokens live for the task: re-minted before expiry and revoked when the task ends (generated-task-tool-lifecycle.svg, D3 and D4). A Vault child token is revoked per invocation."
 
 [[step]]
 from = "kernel"
 to = "model"
 kind = "reply"
-label = "released in the next model turn: redacted, or status only"
-evidence = "ADR-0023 decision 3 · ADR-0036 decision 14"
-note = "The release is a kernel decision. Today only the front end's redaction screens tool output: category detection is not built, and the ceiling treats it as unmarked. In full it travels maknaed → maknae-egress → the provider, with the next session.prompt."
+label = "output released in the next model turn"
+status = "decided"
+evidence = "ADR-0036 decision 14 · ADR-0023"
+note = "The release is a kernel decision. The transport is live for file-tool results; category detection is not built, so tool output counts as unmarked."

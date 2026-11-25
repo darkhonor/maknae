@@ -317,6 +317,40 @@ def check_tests(rows: list, field: str, where: str) -> None:
         sys.exit(f"{where}: test citations do not resolve:\n{lines}")
 
 
+STATUS_LEGEND = ("«live» built, reachable in production · «unreachable» built, no production "
+                 "caller · «decided» in an ADR, not built · «#N» planned in that issue")
+_ISSUE = re.compile(r"#\d+")
+
+
+def check_status(rows: list, where: str) -> None:
+    """A sequence that marks build status marks every step, and each mark cites its proof:
+    `live` and `unreachable` a source path or a test, `decided` an ADR, `#N` that issue."""
+    if not any("status" in r for r in rows):
+        return
+    bad = []
+    for r in rows:
+        st, ev = r.get("status"), f'{r.get("evidence", "")} {r.get("test", "")}'
+        if st is None:
+            bad.append((r, "no status"))
+        elif not isinstance(st, str):
+            bad.append((r, f"status {st!r} is not a string"))
+        elif st in ("live", "unreachable"):
+            src = [t.split(":")[0] for t in _PATH.findall(ev) if t.startswith(("crates/", "bins/"))]
+            if not (r.get("test", "").strip() or any((ROOT / t).is_file() for t in src)):
+                bad.append((r, f"{st} cites no source path or test"))
+        elif st == "decided":
+            if not _ADR.search(ev):
+                bad.append((r, "decided cites no ADR"))
+        elif _ISSUE.fullmatch(st):
+            if not re.search(rf"{re.escape(st)}\b", ev):
+                bad.append((r, f"{st} is not in its evidence"))
+        else:
+            bad.append((r, f"unknown status {st!r}"))
+    if bad:
+        lines = "\n".join(f"    {r.get('label', '?')}: {t}" for r, t in bad)
+        sys.exit(f"{where}: status marks do not resolve:\n{lines}")
+
+
 # --- facts: the internal crate graph and each crate's direct externals -----
 
 def crate_graph() -> dict:
@@ -853,6 +887,17 @@ def sequence(name: str) -> str:
     parts, steps = doc["participant"], doc["step"]
     check_evidence(steps, "evidence", name)
     check_tests(steps, "test", name)
+    check_status(steps, name)
+    marked = any("status" in s for s in steps)
+    decisions, dtag = [], {}
+    for n, s in enumerate(steps):
+        qs = s.get("decide", [])
+        if not (isinstance(qs, list) and all(isinstance(q, str) and q.strip() for q in qs)):
+            sys.exit(f"{name}: step {n + 1}: decide must be a list of non-empty strings")
+        for q in qs:
+            decisions.append((len(decisions) + 1, n + 1, q))
+            dtag.setdefault(n, []).append(f"D{len(decisions)}")
+    check_evidence([{"label": f"D{d}", "decide": q} for d, _, q in decisions], "decide", name)
     idx = {p["id"]: i for i, p in enumerate(parts)}
     for pa in parts:
         if pa["kind"] not in SEQ_STYLE:
@@ -872,16 +917,20 @@ def sequence(name: str) -> str:
     W = xs[-1] + 100
 
     lines, ys, cur = [], [], HEAD + 34
-    for s in steps:
-        lab = (_wrap_words(s["label"], wrap)
-               if wrap and s["kind"] != "self" and len(s["label"]) > wrap else [s["label"]])
+    shown = [f'«{s["status"]}» {s["label"]}' if marked else s["label"] for s in steps]
+    for s, label in zip(steps, shown):
+        lab = (_wrap_words(label, wrap)
+               if wrap and s["kind"] != "self" and len(label) > wrap else [label])
         lines.append(lab)
         up = len(lab) - 1
         ys.append(cur + 12 * up)
-        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")))
+        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide")))
     body_h = cur - 34 + 26
     notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
-    H = body_h + 34 + len(notes) * 27 + 58
+    DCOLS = int((W - 2 * (LEFT - 52)) / 5.6)
+    dlines = [_wrap_words(f"D{d} (step {st}). {q}", DCOLS) for d, st, q in decisions]
+    H = (body_h + 34 + len(notes) * 27 + 58 + (22 if marked else 0)
+         + ((40 + sum(18 + 14 * (len(ls) - 1) for ls in dlines)) if decisions else 0))
 
     p = ['<defs>'
          f'<marker id="call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" '
@@ -938,7 +987,7 @@ def sequence(name: str) -> str:
             # A self-message on a right-hand lifeline can run its evidence off
             # the canvas -- fully-qualified paths are long. Flip it to the left
             # of the lifeline when it will not fit to the right.
-            need = max(len(f'{n+1}. {s["label"]}') * 5.6,
+            need = max(len(f'{n+1}. {shown[n]}') * 5.6,
                        len(s.get("evidence", "")) * 4.6,
                        len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
                        len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
@@ -949,7 +998,12 @@ def sequence(name: str) -> str:
         else:
             p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
-            lx, anc = (a + b) / 2, "middle"
+            half = max(max(len(ln) for ln in lab) * 5.6,
+                       len(s.get("evidence", "")) * 4.6,
+                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
+            lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
+            anc = "middle"
         for k, ln in enumerate(lab):
             up = len(lab) - 1 - k
             p.append(text(lx, y - 2 - 12 * up, f'{n+1}. {ln}' if k == 0 else ln, 10,
@@ -968,13 +1022,29 @@ def sequence(name: str) -> str:
             last += 12
             p.append(text(lx, last, f'test: {s["test"]}', 7.5, fill=MUTED, anchor=anc,
                           mono=True, halo="#FFFFFF"))
+        if n in dtag:
+            last += 12
+            p.append(text(lx, last, "open decision " + ", ".join(dtag[n]), 8.5, "600",
+                          fill=WARN, anchor=anc, halo="#FFFFFF"))
 
     y = body_h + 44
+    if marked:
+        p.append(text(LEFT - 52, y, STATUS_LEGEND, 9.5, fill=MUTED))
+        y += 22
     p.append(text(LEFT - 52, y, "Notes", 12, "600"))
     for num, nt in notes:
         y += 27
         p.append(text(LEFT - 52, y, f"{num}.", 9.5, "600", fill=WARN))
         p.append(text(LEFT - 32, y, nt, 9.5, fill=INK))
+    if decisions:
+        y += 40
+        p.append(text(LEFT - 52, y, "Open decisions, each with a recommendation for the maintainer's ruling", 12, "600", fill=WARN))
+        for (d, _, _), ls in zip(decisions, dlines):
+            y += 18
+            for k, ln in enumerate(ls):
+                p.append(text(LEFT - 52 + (0 if k == 0 else 22), y + 14 * k, ln, 9.5,
+                              "600" if k == 0 else "400", fill=INK))
+            y += 14 * (len(ls) - 1)
 
     p = ([text(LEFT - 52, 44, doc["title"], 16, "600")]
          + [text(LEFT - 52, 64 + 15 * k, ln, 11, fill=MUTED) for k, ln in enumerate(subtitle)]
@@ -2051,6 +2121,7 @@ def main(argv: list) -> None:
         ("generated-read-path.svg", lambda: d5_readpath(prov)),
         ("generated-credential-path.svg", lambda: sequence("credential-path.toml")),
         ("generated-tool-invocation.svg", lambda: sequence("tool-invocation.toml")),
+        ("generated-task-tool-lifecycle.svg", lambda: sequence("task-tool-lifecycle.toml")),
         ("generated-isolation-matrix.svg", lambda: matrix("isolation-matrix.toml")),
         ("generated-decision-cycle.svg", lambda: d6_decision(prov)),
         ("generated-data-model.svg", lambda: d7_datamodel(prov)),

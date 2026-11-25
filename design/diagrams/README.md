@@ -87,7 +87,8 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
 | `generated-credential-path.svg` | UML sequence (≈ DoDAF SV-10c) | *What can each hop see of a user's model key on one turn, and what enforces it?* | security assessor, accreditor | generated |
-| `generated-tool-invocation.svg` | UML sequence (≈ DoDAF SV-10c) | *Who decides a tool invocation, who runs it, what does the tool's network reach, and what does the model see?* Decided by ADR-0035 and ADR-0036; not built | security assessor, contributor | generated |
+| `generated-tool-invocation.svg` | UML sequence (≈ DoDAF SV-10c) | *Who decides one tool call, who runs it, where does its credential come from, what does its network reach, and what does the model see?* The same steps for `maknae` and `maknae-agentd`; each step marked `«live»`, `«unreachable»`, `«decided»` or `«#N»` | security assessor, contributor | generated |
+| `generated-task-tool-lifecycle.svg` | UML sequence (≈ DoDAF SV-10c) | *How does an agent's task start, bound and end its tool calls: bindings, reach, the claim, the credential's life, the outcome?* Each step marked as above | security assessor, contributor | generated |
 | `generated-isolation-matrix.svg` | access-control matrix (Lampson 1974) | *Which subject can read, carry or unwrap which user's credential, and by what control?* | security assessor, accreditor | generated |
 | `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
@@ -199,16 +200,16 @@ is understood and accepted: `check_evidence` and byte-stable regeneration fire f
 whoever regenerates, so a stale diagram can be committed and no gate will object.
 Regenerate with the command above and commit the result; that is the whole contract.
 
-### Ten products are curated, not derived
+### Twelve products are curated, not derived
 
 `standards-profile.toml`, `read-path.toml`, `credential-path.toml`, `isolation-matrix.toml`, `decision-cycle.toml`, `data-model.toml`,
-`system-interfaces.toml`, `operational-concept.toml`, `service-architecture.toml` and `agentic-patterns.toml` are hand-maintained inputs.
+`system-interfaces.toml`, `operational-concept.toml`, `service-architecture.toml`, `agentic-patterns.toml`, `tool-invocation.toml` and `task-tool-lifecycle.toml` are hand-maintained inputs.
 A conformance claim, a call sequence, an access-control matrix, a precedence ladder, a normalization judgement,
 an interface register, a statement of intent and a deployment inventory are none of them readable out of a
-manifest, so all ten are kept as reviewable data files in which **every row names
+manifest, so all twelve are kept as reviewable data files in which **every row names
 something a reader can check**.
 
-None of the ten is part of the provenance stamp, deliberately. The stamp names the last
+None of the twelve is part of the provenance stamp, deliberately. The stamp names the last
 commit to touch an *enforcing* input (`ci/gates/lib.sh`, the manifests); a curated file
 travels in the same commit as the SVG it produces, so including it would make the stamp
 chase itself and break `regenerate → diff` — the failure [#202](https://github.com/darkhonor/maknae/pull/202)
@@ -230,6 +231,24 @@ Two rules the file enforces on itself:
   that blurs those is a wish list.**
 - **`evidence` must name a file, gate or ADR a reader can open.** A claim with no
   evidence does not belong in the profile.
+
+### Sequence steps carry their build state
+
+A sequence TOML may give each `[[step]]` a `status`, drawn as a UML stereotype ahead of
+the step's label: `live` (built and reachable in production), `unreachable` (built, with
+no production caller), `decided` (in an ADR, not built) or `#N` (planned in that issue).
+`check_status` fails generation when one step is marked and another is not, and when a
+mark lacks its citation: `live` and `unreachable` cite a source path under `crates/` or
+`bins/`, or a test, `decided` an ADR, `#N` that issue. It checks that the citation exists,
+not that the mark is true; that is the reviewer's job. `tool-invocation.toml` and `task-tool-lifecycle.toml` use it, so
+the two pictures show what the code does today beside what the ADRs and issues still owe.
+
+A step may also carry `decide`, a list of open decisions in context: a question, or a
+place where an ADR no longer matches the code, each with a recommendation. They are
+numbered D1, D2, … in step order, flagged under their step, and listed in full under
+"Open decisions". The ADR and path citations in them must resolve, as evidence does; issue
+numbers are not checked, since generation makes no network call. A ruling is
+then recorded in the ADR, and its `decide` entry removed.
 
 ## Adding a diagram
 
