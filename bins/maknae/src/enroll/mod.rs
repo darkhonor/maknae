@@ -18,7 +18,7 @@
 //! final operator-context child and reporting — monotonic descent by flow order.
 
 mod agent;
-mod agent_access;
+pub(crate) mod agent_access;
 mod agent_apparmor;
 #[cfg(any(target_os = "macos", test))]
 mod agent_launchd;

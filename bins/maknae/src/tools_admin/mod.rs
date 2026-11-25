@@ -1,11 +1,13 @@
 mod template;
 
-use crate::cli::terminal_safe;
-use crate::policy_sync::RELOAD;
+use crate::cli::{terminal_safe, ToolsCommand};
+use crate::enroll::agent_access::{Host, Platform, Ran, Run};
+use crate::policy_sync::{kernel_gid, CONFIG_DIR, RELOAD};
 use maknae_config::{
     defined_names, grammar_uses, tool_entry_name_ok, tool_program_name_ok, Grammar, GRAMMARS_DIR,
-    TOOLS_DROPIN_DIR, TOOLS_FILE,
+    TOOLS_DROPIN_DIR, TOOLS_FILE, VENDOR_GRAMMAR_DIR, VENDOR_TOOLS_DIR,
 };
+use maknae_io::program::Program;
 use maknae_io::{
     open_anchor, Anchor, AnchorLock, AnchorRequired, Entry, FileOwner, IoError, IoKind, Kind,
     MemberState, Mode, StrategyPref, TargetRequired,
@@ -13,6 +15,7 @@ use maknae_io::{
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 const LOCKED: &str = "another maknae tools command is running";
 
@@ -388,7 +391,6 @@ fn dropin_path(p: &Paths, file: &str) -> PathBuf {
     p.config.join(TOOLS_DROPIN_DIR).join(file)
 }
 
-#[allow(dead_code)]
 pub(crate) fn available(p: &Paths, o: &Owners, out: &mut dyn Write) -> Result<(), String> {
     let d = Dirs::open(p, o)?;
     let vendor = stems(&open(&p.vendor_grammars, o.dir, 0o022)?, &p.vendor_grammars)?;
@@ -446,7 +448,6 @@ pub(crate) fn available(p: &Paths, o: &Owners, out: &mut dyn Write) -> Result<()
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(crate) fn enable(
     p: &Paths,
     o: &Owners,
@@ -596,7 +597,6 @@ fn enable_with(
     finish(&done, req.reload, r, out)
 }
 
-#[allow(dead_code)]
 pub(crate) fn disable(
     p: &Paths,
     o: &Owners,
@@ -702,6 +702,130 @@ fn disable_with(
         pending.join("; ")
     ));
     Err(terminal_safe(&problems.join("; ")))
+}
+
+fn preflight(euid: u32, sub: &str) -> Result<(), String> {
+    if euid == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "maknae tools {sub} must run as root: run `sudo maknae tools {sub}`"
+        ))
+    }
+}
+
+fn reload_call(platform: Platform) -> (Program, Vec<String>) {
+    let (program, args): (Program, &[&str]) = match platform {
+        Platform::Linux => (Program::Systemctl, &["reload", "maknaed"]),
+        Platform::Macos => (
+            Program::Launchctl,
+            &["kill", "SIGHUP", "system/io.maknae.maknaed"],
+        ),
+    };
+    (program, args.iter().map(|a| (*a).to_string()).collect())
+}
+
+struct HostReload<'a>(&'a dyn Run);
+
+impl Reload for HostReload<'_> {
+    fn reload(&self) -> Result<(), String> {
+        let (program, args) = reload_call(Platform::HOST);
+        let ran: Ran = self.0.run(program, &args)?;
+        if ran.ok {
+            Ok(())
+        } else {
+            Err(ran.stderr.trim_end().to_string())
+        }
+    }
+}
+
+fn production_paths() -> Paths {
+    Paths {
+        config: PathBuf::from(CONFIG_DIR),
+        vendor_grammars: PathBuf::from(VENDOR_GRAMMAR_DIR),
+        vendor_templates: PathBuf::from(VENDOR_TOOLS_DIR),
+    }
+}
+
+fn production_owners(kernel_gid: u32) -> Owners {
+    Owners {
+        dir: 0,
+        file: FileOwner {
+            uid: 0,
+            gid: kernel_gid,
+        },
+    }
+}
+
+fn sub_name(cmd: &ToolsCommand) -> &'static str {
+    match cmd {
+        ToolsCommand::Available => "available",
+        ToolsCommand::Enable { .. } => "enable",
+        ToolsCommand::Disable { .. } => "disable",
+    }
+}
+
+fn dispatch(
+    cmd: ToolsCommand,
+    p: &Paths,
+    o: &Owners,
+    r: &dyn Reload,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    match cmd {
+        ToolsCommand::Available => available(p, o, out),
+        ToolsCommand::Enable {
+            program,
+            image,
+            shapes,
+            entry,
+            no_reload,
+        } => {
+            let req = Enable {
+                program,
+                image,
+                shapes,
+                entry,
+                reload: !no_reload,
+            };
+            enable(p, o, &req, r, out)
+        }
+        ToolsCommand::Disable { entry, no_reload } => disable(p, o, &entry, !no_reload, r, out),
+    }
+}
+
+fn production(euid: u32, cmd: ToolsCommand, out: &mut dyn Write) -> Result<(), String> {
+    preflight(euid, sub_name(&cmd))?;
+    let o = production_owners(kernel_gid()?);
+    dispatch(cmd, &production_paths(), &o, &HostReload(&Host), out)
+}
+
+fn finish_run(result: Result<(), String>, err: &mut dyn Write) -> u8 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            let _ = writeln!(err, "maknae: {}", terminal_safe(&e));
+            1
+        }
+    }
+}
+
+pub(crate) fn run_with(
+    euid: u32,
+    cmd: ToolsCommand,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> u8 {
+    finish_run(production(euid, cmd, out), err)
+}
+
+pub(crate) fn run(euid: u32, cmd: ToolsCommand) -> ExitCode {
+    ExitCode::from(run_with(
+        euid,
+        cmd,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    ))
 }
 
 #[cfg(test)]
@@ -1723,5 +1847,195 @@ mod tests {
         result.unwrap();
         assert!(!out.contains('\x1b'), "{out:?}");
         assert!(out.contains("maknae-github-post\\u{1b}[31m"), "{out}");
+    }
+
+    struct Spawn {
+        ran: std::cell::RefCell<Vec<(Program, Vec<String>)>>,
+        reply: Result<Ran, String>,
+    }
+
+    impl Run for Spawn {
+        fn run(&self, program: Program, args: &[String]) -> Result<Ran, String> {
+            self.ran.borrow_mut().push((program, args.to_vec()));
+            self.reply.clone()
+        }
+    }
+
+    fn spawn(reply: Result<Ran, String>) -> Spawn {
+        Spawn {
+            ran: Default::default(),
+            reply,
+        }
+    }
+
+    fn ran(ok: bool, stderr: &str) -> Ran {
+        Ran {
+            ok,
+            code: Some(if ok { 0 } else { 1 }),
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    fn run_as(euid: u32, cmd: ToolsCommand) -> (u8, String) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run_with(euid, cmd, &mut out, &mut err);
+        (code, String::from_utf8(err).unwrap())
+    }
+
+    #[test]
+    fn run_refuses_unless_root() {
+        let disable = || ToolsCommand::Disable {
+            entry: "x".into(),
+            no_reload: true,
+        };
+        let enable = || ToolsCommand::Enable {
+            program: "gh".into(),
+            image: "i".into(),
+            shapes: None,
+            entry: None,
+            no_reload: true,
+        };
+        for (cmd, sub) in [
+            (ToolsCommand::Available, "available"),
+            (enable(), "enable"),
+            (disable(), "disable"),
+        ] {
+            let (code, err) = run_as(1000, cmd);
+            assert_eq!(code, 1);
+            assert_eq!(
+                err,
+                format!(
+                    "maknae: maknae tools {sub} must run as root: run `sudo maknae tools {sub}`\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn run_reports_a_refusal_as_exit_one() {
+        let (code, err) = run_as(
+            0,
+            ToolsCommand::Enable {
+                program: "Bad Name".into(),
+                image: "i".into(),
+                shapes: None,
+                entry: None,
+                no_reload: true,
+            },
+        );
+        assert_eq!(code, 1);
+        assert!(err.starts_with("maknae: "), "{err}");
+    }
+
+    #[test]
+    fn finish_maps_success_and_failure() {
+        let mut err = Vec::new();
+        assert_eq!(finish_run(Ok(()), &mut err), 0);
+        assert!(err.is_empty());
+        assert_eq!(finish_run(Err("bad\x1b[31m".into()), &mut err), 1);
+        let text = String::from_utf8(err).unwrap();
+        assert!(text.starts_with("maknae: bad"), "{text}");
+        assert!(!text.contains('\x1b'), "{text:?}");
+    }
+
+    #[test]
+    fn reload_call_names_each_platform_command() {
+        assert_eq!(
+            reload_call(Platform::Linux),
+            (Program::Systemctl, vec!["reload".into(), "maknaed".into()])
+        );
+        assert_eq!(
+            reload_call(Platform::Macos),
+            (
+                Program::Launchctl,
+                vec![
+                    "kill".into(),
+                    "SIGHUP".into(),
+                    "system/io.maknae.maknaed".into()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn host_reload_runs_the_host_call_and_reports_stderr() {
+        let ok = spawn(Ok(ran(true, "")));
+        assert_eq!(HostReload(&ok).reload(), Ok(()));
+        let (program, args) = reload_call(Platform::HOST);
+        assert_eq!(*ok.ran.borrow(), vec![(program, args)]);
+
+        let failed = spawn(Ok(ran(false, "Unit maknaed.service not loaded.")));
+        assert_eq!(
+            HostReload(&failed).reload(),
+            Err("Unit maknaed.service not loaded.".to_string())
+        );
+
+        let missing = spawn(Err("/usr/bin/systemctl not found".into()));
+        assert_eq!(
+            HostReload(&missing).reload(),
+            Err("/usr/bin/systemctl not found".to_string())
+        );
+    }
+
+    #[test]
+    fn production_paths_and_owners_are_the_installed_ones() {
+        let p = production_paths();
+        assert_eq!(p.config, Path::new("/etc/maknae"));
+        assert_eq!(p.vendor_grammars, Path::new(VENDOR_GRAMMAR_DIR));
+        assert_eq!(p.vendor_templates, Path::new(VENDOR_TOOLS_DIR));
+        let o = production_owners(77);
+        assert_eq!(o.dir, 0);
+        assert_eq!(o.file.uid, 0);
+        assert_eq!(o.file.gid, 77);
+    }
+
+    fn enable_cmd(no_reload: bool) -> ToolsCommand {
+        ToolsCommand::Enable {
+            program: "gh".into(),
+            image: img(),
+            shapes: None,
+            entry: None,
+            no_reload,
+        }
+    }
+
+    #[test]
+    fn dispatch_reloads_unless_no_reload() {
+        for (no_reload, calls) in [(true, 0), (false, 1)] {
+            let fx = Fx::new();
+            let r = FakeReload::ok();
+            let mut out = Vec::new();
+            dispatch(enable_cmd(no_reload), &fx.paths(), &me(), &r, &mut out).unwrap();
+            assert_eq!(r.calls.get(), calls, "enable no_reload={no_reload}");
+
+            let r = FakeReload::ok();
+            let cmd = ToolsCommand::Disable {
+                entry: "github-post".into(),
+                no_reload,
+            };
+            dispatch(cmd, &fx.paths(), &me(), &r, &mut out).unwrap();
+            assert_eq!(r.calls.get(), calls, "disable no_reload={no_reload}");
+        }
+    }
+
+    #[test]
+    fn dispatch_available_lists_the_grammars() {
+        let fx = Fx::new();
+        let mut out = Vec::new();
+        dispatch(
+            ToolsCommand::Available,
+            &fx.paths(),
+            &me(),
+            &FakeReload::ok(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), fx.available());
+    }
+
+    #[test]
+    fn run_exits_one_for_a_non_root_caller() {
+        assert_eq!(run(1000, ToolsCommand::Available), ExitCode::from(1));
     }
 }
