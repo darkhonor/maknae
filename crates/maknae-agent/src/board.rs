@@ -21,23 +21,21 @@ const HELD_OTHER: &str = "the kernel holds settings other than the ones asked fo
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SettingsChange {
     pub enabled: Option<bool>,
-    pub participate: Option<bool>,
     pub report: Option<BoardReport>,
 }
 
 impl SettingsChange {
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.participate.is_none() && self.report.is_none()
+        self.enabled.is_none() && self.report.is_none()
     }
 
     pub fn is_whole(&self) -> bool {
-        self.enabled.is_some() && self.participate.is_some() && self.report.is_some()
+        self.enabled.is_some() && self.report.is_some()
     }
 
     pub fn over(&self, current: BoardSettings) -> BoardSettings {
         BoardSettings {
             enabled: self.enabled.unwrap_or(current.enabled),
-            participate: self.participate.unwrap_or(current.participate),
             report: self.report.unwrap_or(current.report),
         }
     }
@@ -267,12 +265,8 @@ mod tests {
     const MORE: &str = "; more remain, run maknae board clear again";
     const HELD_OTHER: &str = "the kernel holds settings other than the ones asked for";
 
-    fn s(enabled: bool, participate: bool, report: BoardReport) -> BoardSettings {
-        BoardSettings {
-            enabled,
-            participate,
-            report,
-        }
+    fn s(enabled: bool, report: BoardReport) -> BoardSettings {
+        BoardSettings { enabled, report }
     }
 
     fn read() -> Verb {
@@ -323,16 +317,8 @@ mod tests {
         Ok(WireOutcome::ReadDone { read: None })
     }
 
-    fn change(
-        enabled: Option<bool>,
-        participate: Option<bool>,
-        report: Option<BoardReport>,
-    ) -> SettingsChange {
-        SettingsChange {
-            enabled,
-            participate,
-            report,
-        }
+    fn change(enabled: Option<bool>, report: Option<BoardReport>) -> SettingsChange {
+        SettingsChange { enabled, report }
     }
 
     fn lines(l: &[&str]) -> Vec<String> {
@@ -374,27 +360,20 @@ mod tests {
         (said, sent)
     }
 
-    const ALL: [BoardSettings; 12] = {
-        const fn s(e: bool, p: bool, r: BoardReport) -> BoardSettings {
+    const ALL: [BoardSettings; 6] = {
+        const fn s(e: bool, r: BoardReport) -> BoardSettings {
             BoardSettings {
                 enabled: e,
-                participate: p,
                 report: r,
             }
         }
         [
-            s(false, false, Off),
-            s(false, false, Summary),
-            s(false, false, Every),
-            s(false, true, Off),
-            s(false, true, Summary),
-            s(false, true, Every),
-            s(true, false, Off),
-            s(true, false, Summary),
-            s(true, false, Every),
-            s(true, true, Off),
-            s(true, true, Summary),
-            s(true, true, Every),
+            s(false, Off),
+            s(false, Summary),
+            s(false, Every),
+            s(true, Off),
+            s(true, Summary),
+            s(true, Every),
         ]
     };
 
@@ -403,23 +382,16 @@ mod tests {
         for current in ALL {
             for v in [false, true] {
                 assert_eq!(
-                    change(Some(v), None, None).over(current),
+                    change(Some(v), None).over(current),
                     BoardSettings {
                         enabled: v,
-                        ..current
-                    }
-                );
-                assert_eq!(
-                    change(None, Some(v), None).over(current),
-                    BoardSettings {
-                        participate: v,
                         ..current
                     }
                 );
             }
             for r in [Off, Summary, Every] {
                 assert_eq!(
-                    change(None, None, Some(r)).over(current),
+                    change(None, Some(r)).over(current),
                     BoardSettings {
                         report: r,
                         ..current
@@ -429,25 +401,20 @@ mod tests {
             assert_eq!(SettingsChange::default().over(current), current);
         }
         assert_eq!(
-            change(Some(true), Some(false), Some(Every)).over(s(false, true, Off)),
-            s(true, false, Every)
+            change(Some(true), Some(Every)).over(s(false, Off)),
+            s(true, Every)
         );
     }
 
     #[test]
     fn is_empty_and_is_whole_truth_tables() {
         let e = Some(true);
-        let p = Some(false);
         let r = Some(Summary);
         let table = [
-            (change(None, None, None), true, false),
-            (change(e, None, None), false, false),
-            (change(None, p, None), false, false),
-            (change(None, None, r), false, false),
-            (change(e, p, None), false, false),
-            (change(e, None, r), false, false),
-            (change(None, p, r), false, false),
-            (change(e, p, r), false, true),
+            (change(None, None), true, false),
+            (change(e, None), false, false),
+            (change(None, r), false, false),
+            (change(e, r), false, true),
         ];
         for (c, empty, whole) in table {
             assert_eq!(c.is_empty(), empty, "{c:?}");
@@ -457,152 +424,115 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_change_reads_once_and_prints_the_reply() {
-        let (said_, sent) = run_settings(
-            SettingsChange::default(),
-            vec![settled(s(true, false, Every))],
-        )
-        .await;
+        let (said_, sent) =
+            run_settings(SettingsChange::default(), vec![settled(s(true, Every))]).await;
         assert_eq!(sent, vec![read()]);
         assert_eq!(
             said_,
-            said(
-                &["enabled      on", "participate  off", "report       every"],
-                &[],
-                true
-            )
+            said(&["enabled      on", "report       every"], &[], true)
         );
     }
 
     #[tokio::test]
     async fn a_whole_change_writes_once_with_no_read() {
         let (said_, sent) = run_settings(
-            change(Some(true), Some(true), Some(Summary)),
-            vec![settled(s(true, true, Summary))],
+            change(Some(true), Some(Summary)),
+            vec![settled(s(true, Summary))],
         )
         .await;
-        assert_eq!(sent, vec![write(s(true, true, Summary))]);
+        assert_eq!(sent, vec![write(s(true, Summary))]);
         assert_eq!(
             said_,
-            said(
-                &["enabled      on", "participate  on", "report       summary"],
-                &[],
-                true
-            )
+            said(&["enabled      on", "report       summary"], &[], true)
         );
-        let (_, sent) = run_settings(
-            change(Some(false), Some(false), Some(Off)),
-            vec![settled(s(false, false, Off))],
-        )
-        .await;
-        assert_eq!(sent, vec![write(s(false, false, Off))]);
+        let (_, sent) =
+            run_settings(change(Some(false), Some(Off)), vec![settled(s(false, Off))]).await;
+        assert_eq!(sent, vec![write(s(false, Off))]);
     }
 
     #[tokio::test]
-    async fn report_every_keeps_enabled_and_participate_as_read() {
-        for (e, p) in [(false, false), (false, true), (true, false), (true, true)] {
+    async fn report_every_keeps_enabled_as_read() {
+        for e in [false, true] {
             let (said_, sent) = run_settings(
-                change(None, None, Some(Every)),
-                vec![settled(s(e, p, Summary)), settled(s(e, p, Every))],
+                change(None, Some(Every)),
+                vec![settled(s(e, Summary)), settled(s(e, Every))],
             )
             .await;
-            assert_eq!(sent, vec![read(), write(s(e, p, Every))]);
+            assert_eq!(sent, vec![read(), write(s(e, Every))]);
             assert!(said_.ok);
-            assert_eq!(said_.out[2], "report       every");
+            assert_eq!(said_.out[1], "report       every");
         }
     }
 
     #[tokio::test]
     async fn each_single_field_change_reads_then_writes_only_that_field() {
         let (_, sent) = run_settings(
-            change(Some(true), None, None),
-            vec![
-                settled(s(false, true, Summary)),
-                settled(s(true, true, Summary)),
-            ],
+            change(Some(true), None),
+            vec![settled(s(false, Summary)), settled(s(true, Summary))],
         )
         .await;
-        assert_eq!(sent, vec![read(), write(s(true, true, Summary))]);
+        assert_eq!(sent, vec![read(), write(s(true, Summary))]);
         let (_, sent) = run_settings(
-            change(None, Some(false), None),
-            vec![
-                settled(s(true, true, Every)),
-                settled(s(true, false, Every)),
-            ],
+            change(None, Some(Off)),
+            vec![settled(s(true, Every)), settled(s(true, Off))],
         )
         .await;
-        assert_eq!(sent, vec![read(), write(s(true, false, Every))]);
-        let (_, sent) = run_settings(
-            change(Some(false), None, Some(Off)),
-            vec![settled(s(true, true, Every)), settled(s(false, true, Off))],
-        )
-        .await;
-        assert_eq!(sent, vec![read(), write(s(false, true, Off))]);
+        assert_eq!(sent, vec![read(), write(s(true, Off))]);
     }
 
     #[tokio::test]
     async fn a_write_whose_reply_differs_is_not_a_success() {
         let (said_, sent) = run_settings(
-            change(Some(true), None, None),
-            vec![settled(s(false, false, Off)), settled(s(false, false, Off))],
+            change(Some(true), None),
+            vec![settled(s(false, Off)), settled(s(false, Off))],
         )
         .await;
-        assert_eq!(sent, vec![read(), write(s(true, false, Off))]);
+        assert_eq!(sent, vec![read(), write(s(true, Off))]);
         assert_eq!(
             said_,
             said(
-                &["enabled      off", "participate  off", "report       off"],
+                &["enabled      off", "report       off"],
                 &[HELD_OTHER],
                 false
             )
         );
         let (said_, sent) = run_settings(
-            change(Some(true), Some(true), Some(Every)),
-            vec![settled(s(true, true, Summary))],
+            change(Some(true), Some(Every)),
+            vec![settled(s(true, Summary))],
         )
         .await;
-        assert_eq!(sent, vec![write(s(true, true, Every))]);
+        assert_eq!(sent, vec![write(s(true, Every))]);
         assert_eq!(
             said_,
             said(
-                &["enabled      on", "participate  on", "report       summary"],
+                &["enabled      on", "report       summary"],
                 &[HELD_OTHER],
                 false
             )
         );
         let (said_, _) = run_settings(
-            change(Some(true), Some(true), Some(Every)),
-            vec![settled(s(true, true, Every))],
+            change(Some(true), Some(Every)),
+            vec![settled(s(true, Every))],
         )
         .await;
         assert_eq!(
             said_,
-            said(
-                &["enabled      on", "participate  on", "report       every"],
-                &[],
-                true
-            )
+            said(&["enabled      on", "report       every"], &[], true)
         );
     }
 
     #[tokio::test]
     async fn the_lines_after_a_write_are_the_writes_reply() {
         let (said_, sent) = run_settings(
-            change(Some(true), None, None),
-            vec![
-                settled(s(false, false, Off)),
-                settled(s(false, true, Summary)),
-            ],
+            change(Some(true), None),
+            vec![settled(s(false, Off)), settled(s(false, Summary))],
         )
         .await;
-        assert_eq!(sent, vec![read(), write(s(true, false, Off))]);
+        assert_eq!(sent, vec![read(), write(s(true, Off))]);
         assert_eq!(
             said_,
             said(
-                &[
-                    "enabled      off",
-                    "participate  on",
-                    "report       summary"
-                ],
+                &["enabled      off", "report       summary"],
                 &[HELD_OTHER],
                 false
             )
@@ -612,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_read_sends_no_write() {
         let (said_, sent) = run_settings(
-            change(Some(true), None, None),
+            change(Some(true), None),
             vec![refused(
                 ProtoErrCode::BoardRefused(BoardDefect::TryAgain),
                 "try again",
@@ -629,9 +559,9 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_write_prints_no_settings_and_the_unknown_sentence() {
         let (said_, sent) = run_settings(
-            change(Some(true), None, None),
+            change(Some(true), None),
             vec![
-                settled(s(false, false, Off)),
+                settled(s(false, Off)),
                 refused(
                     ProtoErrCode::BoardRefused(BoardDefect::OutcomeUnknown),
                     "outcome unknown",
@@ -639,14 +569,14 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(sent, vec![read(), write(s(true, false, Off))]);
+        assert_eq!(sent, vec![read(), write(s(true, Off))]);
         assert_eq!(said_, said(&[], &[SETTINGS_UNKNOWN], false));
     }
 
     #[tokio::test]
     async fn a_send_error_on_the_read_is_one_line_and_on_a_write_two() {
         let (said_, sent) = run_settings(
-            change(Some(true), None, None),
+            change(Some(true), None),
             vec![Err("connection reset".into())],
         )
         .await;
@@ -662,11 +592,8 @@ mod tests {
         assert_eq!(said_, said(&[], &["connection reset"], false));
 
         let (said_, sent) = run_settings(
-            change(Some(true), None, None),
-            vec![
-                settled(s(false, false, Off)),
-                Err("broken\u{1b}pipe".into()),
-            ],
+            change(Some(true), None),
+            vec![settled(s(false, Off)), Err("broken\u{1b}pipe".into())],
         )
         .await;
         assert_eq!(sent.len(), 2);
@@ -676,11 +603,11 @@ mod tests {
         );
 
         let (said_, sent) = run_settings(
-            change(Some(true), Some(true), Some(Every)),
+            change(Some(true), Some(Every)),
             vec![Err("connection reset".into())],
         )
         .await;
-        assert_eq!(sent, vec![write(s(true, true, Every))]);
+        assert_eq!(sent, vec![write(s(true, Every))]);
         assert_eq!(
             said_,
             said(&[], &["connection reset", SETTINGS_UNKNOWN], false)
@@ -716,9 +643,9 @@ mod tests {
             )
         );
         let (said_, _) = run_settings(
-            change(None, None, Some(Every)),
+            change(None, Some(Every)),
             vec![
-                settled(s(false, false, Off)),
+                settled(s(false, Off)),
                 refused(ProtoErrCode::BoardRefused(BoardDefect::Full), "board full"),
             ],
         )
@@ -771,11 +698,8 @@ mod tests {
             assert_eq!(said_, said(&[], &[NOT_A_BOARD_REPLY], false));
         }
         for bad in [cleared(1, false), write_done(), read_done()] {
-            let (said_, sent) = run_settings(
-                change(None, Some(true), None),
-                vec![settled(s(false, false, Off)), bad],
-            )
-            .await;
+            let (said_, sent) =
+                run_settings(change(Some(true), None), vec![settled(s(false, Off)), bad]).await;
             assert_eq!(sent.len(), 2);
             assert_eq!(
                 said_,
@@ -783,16 +707,14 @@ mod tests {
             );
         }
         for bad in [cleared(1, false), write_done(), read_done()] {
-            let (said_, sent) =
-                run_settings(change(Some(true), Some(true), Some(Every)), vec![bad]).await;
-            assert_eq!(sent, vec![write(s(true, true, Every))]);
+            let (said_, sent) = run_settings(change(Some(true), Some(Every)), vec![bad]).await;
+            assert_eq!(sent, vec![write(s(true, Every))]);
             assert_eq!(
                 said_,
                 said(&[], &[NOT_A_BOARD_REPLY, SETTINGS_UNKNOWN], false)
             );
         }
-        let (said_, sent) =
-            run_settings(change(None, Some(true), None), vec![cleared(0, false)]).await;
+        let (said_, sent) = run_settings(change(Some(true), None), vec![cleared(0, false)]).await;
         assert_eq!(sent, vec![read()]);
         assert_eq!(said_, said(&[], &[NOT_A_BOARD_REPLY], false));
     }
@@ -921,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_clear_reply_that_is_not_board_cleared_is_a_protocol_error() {
-        for bad in [settled(s(true, true, Every)), write_done(), read_done()] {
+        for bad in [settled(s(true, Every)), write_done(), read_done()] {
             let (said_, sent) = run_clear(vec![bad]).await;
             assert_eq!(sent.len(), 1);
             assert_eq!(said_, said(&[], &[NOT_A_BOARD_REPLY, CLEAR_UNKNOWN], false));

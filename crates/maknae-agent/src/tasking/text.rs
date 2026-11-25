@@ -184,7 +184,6 @@ pub fn board_settings_lines(s: &BoardSettings) -> Vec<String> {
     };
     vec![
         format!("enabled      {}", on_off(s.enabled)),
-        format!("participate  {}", on_off(s.participate)),
         format!("report       {report}"),
     ]
 }
@@ -388,29 +387,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn board_settings_print_enabled_and_report_only() {
+        assert_eq!(
+            board_settings_lines(&BoardSettings::default()),
+            ["enabled      off", "report       off"]
+        );
+    }
+
+    #[test]
     fn board_settings_print_one_padded_line_each() {
-        let lines = |enabled, participate, report| {
-            board_settings_lines(&BoardSettings {
-                enabled,
-                participate,
-                report,
-            })
-        };
+        let lines = |enabled, report| board_settings_lines(&BoardSettings { enabled, report });
         assert_eq!(
-            lines(false, false, BoardReport::Off),
-            ["enabled      off", "participate  off", "report       off"]
+            lines(false, BoardReport::Off),
+            ["enabled      off", "report       off"]
         );
         assert_eq!(
-            lines(true, false, BoardReport::Summary),
-            [
-                "enabled      on",
-                "participate  off",
-                "report       summary"
-            ]
+            lines(true, BoardReport::Summary),
+            ["enabled      on", "report       summary"]
         );
         assert_eq!(
-            lines(false, true, BoardReport::Every),
-            ["enabled      off", "participate  on", "report       every"]
+            lines(false, BoardReport::Every),
+            ["enabled      off", "report       every"]
         );
     }
 

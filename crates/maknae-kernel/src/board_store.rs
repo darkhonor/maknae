@@ -77,7 +77,6 @@ pub struct Stored {
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub enabled: bool,
-    pub participate: bool,
     pub report: Report,
 }
 

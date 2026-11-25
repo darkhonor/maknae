@@ -121,7 +121,7 @@ SURFACE=(
   "crates/maknae-proto/src/task.rs|ReleasePage|held_release|4|wire"
   "crates/maknae-proto/src/task.rs|ReleaseOutcome|held_release.outcomes|4|wire"
   # board.manage (#698): a person's own board settings, and what one clear removed.
-  "crates/maknae-proto/src/board.rs|BoardSettings|board_settings|3|wire"
+  "crates/maknae-proto/src/board.rs|BoardSettings|board_settings|2|wire"
   "crates/maknae-proto/src/board.rs|BoardCleared|board_cleared|2|wire"
   "crates/maknae-vault/src/config.rs|VaultConfig|vault|9|config"
   "crates/maknae-vault/src/config.rs|UserAuthConfig|vault.user_auth|2|config"

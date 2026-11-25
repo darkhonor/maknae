@@ -1096,7 +1096,6 @@ mod tests {
                 op: BoardOp::Settings {
                     set: Some(BoardSettings {
                         enabled: true,
-                        participate: true,
                         report: BoardReport::Every,
                     }),
                 },

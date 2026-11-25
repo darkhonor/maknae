@@ -132,7 +132,6 @@ pub(crate) fn manage_key(channel_agent: Option<&AgentId>, uid: u32) -> Option<Bo
 pub(crate) fn wire_settings(s: Settings) -> maknae_proto::BoardSettings {
     maknae_proto::BoardSettings {
         enabled: s.enabled,
-        participate: s.participate,
         report: match s.report {
             Report::Off => maknae_proto::BoardReport::Off,
             Report::Summary => maknae_proto::BoardReport::Summary,
@@ -144,7 +143,6 @@ pub(crate) fn wire_settings(s: Settings) -> maknae_proto::BoardSettings {
 pub(crate) fn stored_settings(s: maknae_proto::BoardSettings) -> Settings {
     Settings {
         enabled: s.enabled,
-        participate: s.participate,
         report: match s.report {
             maknae_proto::BoardReport::Off => Report::Off,
             maknae_proto::BoardReport::Summary => Report::Summary,
@@ -153,17 +151,14 @@ pub(crate) fn stored_settings(s: maknae_proto::BoardSettings) -> Settings {
     }
 }
 
-/// `enabled=<bool> participate=<bool> report=<off|summary|every>`.
+/// `enabled=<bool> report=<off|summary|every>`.
 pub(crate) fn settings_text(s: Settings) -> String {
     let report = match s.report {
         Report::Off => "off",
         Report::Summary => "summary",
         Report::Every => "every",
     };
-    format!(
-        "enabled={} participate={} report={report}",
-        s.enabled, s.participate
-    )
+    format!("enabled={} report={report}", s.enabled)
 }
 
 pub(crate) fn removed_audit(ids: &[PostId]) -> BoardAudit {
@@ -860,47 +855,34 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_text_names_enabled_and_report_only() {
+        assert_eq!(
+            settings_text(Settings::default()),
+            "enabled=false report=off"
+        );
+    }
+
+    #[test]
     fn the_settings_convert_both_ways_and_read_as_pinned() {
         use maknae_proto::{BoardReport as W, BoardSettings};
         let mut seen = BTreeSet::new();
-        for (enabled, participate, stored, wire, said) in [
-            (
-                false,
-                false,
-                Report::Off,
-                W::Off,
-                "enabled=false participate=false report=off",
-            ),
+        for (enabled, stored, wire, said) in [
+            (false, Report::Off, W::Off, "enabled=false report=off"),
             (
                 true,
-                false,
                 Report::Summary,
                 W::Summary,
-                "enabled=true participate=false report=summary",
+                "enabled=true report=summary",
             ),
-            (
-                false,
-                true,
-                Report::Every,
-                W::Every,
-                "enabled=false participate=true report=every",
-            ),
-            (
-                true,
-                true,
-                Report::Off,
-                W::Off,
-                "enabled=true participate=true report=off",
-            ),
+            (false, Report::Every, W::Every, "enabled=false report=every"),
+            (true, Report::Off, W::Off, "enabled=true report=off"),
         ] {
             let kernel = Settings {
                 enabled,
-                participate,
                 report: stored,
             };
             let on_wire = BoardSettings {
                 enabled,
-                participate,
                 report: wire,
             };
             assert_eq!(wire_settings(kernel), on_wire);

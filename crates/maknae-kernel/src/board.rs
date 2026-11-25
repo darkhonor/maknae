@@ -479,7 +479,7 @@ impl BoardStore {
     }
 
     /// Writes `settings`: the settings before, those memory holds after, and why the write
-    /// is not done, if it is not. A write that does not sync leaves memory with each veto on
+    /// is not done, if it is not. A write that does not sync leaves memory with `enabled` on
     /// only where both values have it on, and the old `report`.
     pub(crate) fn write_settings(&self, key: BoardKey, settings: Settings) -> Written {
         let written = self.write_settings_alone(key, settings);
@@ -511,7 +511,6 @@ impl BoardStore {
             Err(StoreError::NotDurable(why)) => {
                 let now = Settings {
                     enabled: before.enabled && settings.enabled,
-                    participate: before.participate && settings.participate,
                     report: before.report,
                 };
                 self.held().boards.entry(key).or_default().settings = now;
@@ -2230,7 +2229,6 @@ mod tests {
                 ALICE,
                 Settings {
                     enabled: true,
-                    participate: true,
                     report: Report::Every,
                 },
             )
@@ -2243,13 +2241,9 @@ mod tests {
         let b = MemTaskBlobs::default();
         let store = open_mem(&b, SMALL);
         let off = store.settings(BOB);
-        assert_eq!(
-            (off.enabled, off.participate, off.report),
-            (false, false, Report::Off)
-        );
+        assert_eq!((off.enabled, off.report), (false, Report::Off));
         let on = Settings {
             enabled: true,
-            participate: false,
             report: Report::Summary,
         };
         let first = put(&store, BOB, hobi(), "before");
@@ -2267,7 +2261,6 @@ mod tests {
             store.settings(BOB),
             Settings {
                 enabled: false,
-                participate: false,
                 report: Report::Summary,
             }
         );
@@ -2415,6 +2408,72 @@ mod tests {
         let store = open_mem(&lone, SMALL);
         assert_eq!(store.settings(BOB), Settings::default());
         assert_eq!(store.take_boot_findings().len(), 1);
+    }
+
+    fn board_record_with_participate(next_seq: u64) -> Zeroizing<Vec<u8>> {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        encode(&Value::Map(vec![
+            (text("board"), Value::Integer(1000.into())),
+            (text("next_seq"), Value::Integer(next_seq.into())),
+            (
+                text("settings"),
+                Value::Map(vec![
+                    (text("enabled"), Value::Bool(true)),
+                    (text("participate"), Value::Bool(true)),
+                    (text("report"), text("Every")),
+                ]),
+            ),
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_board_record_with_participate_on_a_board_with_nothing_else_is_quarantined() {
+        let b = MemTaskBlobs::default();
+        b.put("board.1000", &board_record_with_participate(7));
+        let store = open_mem(&b, SMALL);
+        let found = store.take_boot_findings();
+        assert_eq!(
+            found,
+            [BoardFinding::Quarantined {
+                name: "board.1000".into(),
+                why: "the record does not decode".into(),
+            }]
+        );
+        assert_eq!(store.settings(BOB), Settings::default());
+        store.settle(&found[0]).unwrap();
+        assert_eq!(b.aside(), ["board.1000"]);
+        assert_eq!(put(&store, BOB, hobi(), "after").seq, 1);
+    }
+
+    #[test]
+    fn a_board_record_with_participate_beside_a_post_or_a_cursor_refuses_boot() {
+        let refusal = |b: &MemTaskBlobs| match BoardStore::open(
+            Box::new(b.clone()),
+            Arc::new(ManualClock::at(T0)),
+        ) {
+            Ok(_) => "opened".to_string(),
+            Err(e) => e.to_string(),
+        };
+        const BEHIND: &str =
+            "task counters of board 1000 are missing or behind a stored post or cursor";
+
+        let posts = MemTaskBlobs::default();
+        let store = open_mem(&posts, SMALL);
+        let p = put(&store, BOB, hobi(), "kept");
+        drop(store);
+        posts.put("board.1000", &board_record_with_participate(p.seq + 1));
+        assert_eq!(refusal(&posts), BEHIND);
+
+        let cursors = MemTaskBlobs::default();
+        let store = open_mem(&cursors, SMALL);
+        let p = put(&store, BOB, hobi(), "read");
+        store.advance(BOB, &reader("rm"), p.seq).unwrap();
+        drop(store);
+        cursors.put(&post_name(BOB, p.post.id), b"sentinel-719-unreadable");
+        cursors.put("board.1000", &board_record_with_participate(p.seq + 1));
+        assert_eq!(refusal(&cursors), BEHIND);
     }
 
     #[test]
@@ -3960,12 +4019,10 @@ mod tests {
         let store = open_mem(&b, SMALL);
         let first = Settings {
             enabled: true,
-            participate: false,
             report: Report::Every,
         };
         let second = Settings {
             enabled: false,
-            participate: true,
             report: Report::Summary,
         };
         assert_eq!(store.set_settings(BOB, first), Ok(Settings::default()));
@@ -3982,7 +4039,6 @@ mod tests {
         let store = open_mem(&b, SMALL);
         let on = Settings {
             enabled: true,
-            participate: true,
             report: Report::Every,
         };
         store.set_settings(BOB, on).unwrap();
@@ -3999,27 +4055,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unsynced_settings_write_keeps_off_each_veto_either_value_has_off() {
-        let s = |enabled, participate, report| Settings {
-            enabled,
-            participate,
-            report,
-        };
+    fn an_unsynced_settings_write_keeps_enabled_off_where_either_value_has_it_off() {
+        let s = |enabled, report| Settings { enabled, report };
         let cases = [
             (
-                s(true, false, Report::Summary),
-                s(false, true, Report::Every),
-                s(false, false, Report::Summary),
+                s(true, Report::Summary),
+                s(false, Report::Every),
+                s(false, Report::Summary),
             ),
             (
-                s(false, true, Report::Every),
-                s(true, false, Report::Off),
-                s(false, false, Report::Every),
+                s(false, Report::Every),
+                s(true, Report::Off),
+                s(false, Report::Every),
             ),
             (
-                s(true, true, Report::Off),
-                s(true, true, Report::Summary),
-                s(true, true, Report::Off),
+                s(true, Report::Off),
+                s(true, Report::Summary),
+                s(true, Report::Off),
             ),
         ];
         for (old, new, merged) in cases {

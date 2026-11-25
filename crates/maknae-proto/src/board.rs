@@ -364,12 +364,11 @@ pub enum BoardReport {
     Every,
 }
 
-/// A tasker's three board settings, each off by default.
+/// A tasker's two board settings, each off by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardSettings {
     pub enabled: bool,
-    pub participate: bool,
     pub report: BoardReport,
 }
 
@@ -469,14 +468,12 @@ mod tests {
         use ciborium::Value;
         let settings = BoardSettings {
             enabled: true,
-            participate: false,
             report: BoardReport::Summary,
         };
         let as_value = |b: &[u8]| ciborium::from_reader::<Value, _>(b).unwrap();
         let text = |s: &str| Value::Text(s.into());
         let settings_value = Value::Map(vec![
             (text("enabled"), Value::Bool(true)),
-            (text("participate"), Value::Bool(false)),
             (text("report"), text("summary")),
         ]);
         assert_eq!(as_value(&enc(&settings)), settings_value);
@@ -493,7 +490,6 @@ mod tests {
             BoardSettings::default(),
             BoardSettings {
                 enabled: false,
-                participate: false,
                 report: BoardReport::Off
             }
         );
@@ -571,12 +567,30 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_op_carrying_participate_is_refused_at_decode() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        for participate in [true, false] {
+            let set = Value::Map(vec![
+                (text("enabled"), Value::Bool(true)),
+                (text("participate"), Value::Bool(participate)),
+                (text("report"), text("every")),
+            ]);
+            let op = Value::Map(vec![(
+                text("settings"),
+                Value::Map(vec![(text("set"), set)]),
+            )]);
+            let refused = dec::<BoardOp>(&enc(&op)).unwrap_err();
+            assert!(refused.contains("unknown field `participate`"), "{refused}");
+        }
+    }
+
+    #[test]
     fn board_settings_refuse_an_unknown_or_missing_key() {
         use ciborium::Value;
         let text = |s: &str| Value::Text(s.into());
         let mut fields = vec![
             (text("enabled"), Value::Bool(true)),
-            (text("participate"), Value::Bool(true)),
             (text("report"), text("every")),
         ];
         let decoded = |f: &[(Value, Value)]| dec::<BoardSettings>(&enc(&Value::Map(f.to_vec())));
@@ -584,26 +598,23 @@ mod tests {
             decoded(&fields),
             Ok(BoardSettings {
                 enabled: true,
-                participate: true,
                 report: BoardReport::Every
             })
         );
         fields.push((text("hidden"), Value::Bool(true)));
         let extra = decoded(&fields).unwrap_err();
         assert!(extra.contains("unknown field `hidden`"), "{extra}");
-        fields.truncate(2);
+        fields.truncate(1);
         let missing = decoded(&fields).unwrap_err();
         assert!(missing.contains("missing field `report`"), "{missing}");
         let loud = decoded(&[
             (text("enabled"), Value::Bool(true)),
-            (text("participate"), Value::Bool(true)),
             (text("report"), text("Every")),
         ])
         .unwrap_err();
         assert!(loud.contains("unknown variant `Every`"), "{loud}");
         let truthy = decoded(&[
             (text("enabled"), Value::Integer(1.into())),
-            (text("participate"), Value::Bool(true)),
             (text("report"), text("off")),
         ]);
         assert!(truthy.is_err(), "{truthy:?}");
