@@ -717,6 +717,10 @@ impl Anchor {
     /// Creates the symlink `name` whose target text is exactly `vendor_path/name`, then
     /// syncs the directory. `Ok(false)` when that exact link is already there; any other
     /// existing entry is refused (`AlreadyExists`) and left as it is.
+    ///
+    /// An error after the link was created (`PublishedNotDurable`) leaves the link in place,
+    /// and `Ok(false)` does not sync: a caller that rolls back decides from the state it saw
+    /// before this call, not from the return value.
     pub fn link_member(&self, name: &str, vendor_path: &Path) -> Result<Outcome<bool>, IoError> {
         check_member_name(name)?;
         let full = self.path.join(name);
@@ -3453,7 +3457,7 @@ mod tests {
         let d = dir(0o750);
         let a = anchor_at(d.path(), "cfg");
         let v = Path::new(VENDOR);
-        let state = |n: &str| a.enabled_member_state(n, v).unwrap();
+        let state = |n: &str| -> crate::MemberState { a.enabled_member_state(n, v).unwrap() };
         assert_eq!(state("gh.yaml"), MemberState::Absent);
         std::os::unix::fs::symlink("/usr/share/maknae/grammars/gh.yaml", a.path.join("gh.yaml"))
             .unwrap();
