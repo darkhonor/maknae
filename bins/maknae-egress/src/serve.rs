@@ -1801,6 +1801,8 @@ mod tests {
             rt: tokio::runtime::Runtime,
             mints: AtomicUsize,
             minting_started: std::sync::Arc<AtomicBool>,
+            peer_closed: std::sync::Arc<AtomicBool>,
+            hold_until_peer_closed: AtomicBool,
             revoke_alls: AtomicUsize,
             journal: Mutex<Vec<String>>,
         }
@@ -1840,6 +1842,8 @@ mod tests {
                     rt: runtime(),
                     mints: AtomicUsize::new(0),
                     minting_started: std::sync::Arc::new(AtomicBool::new(false)),
+                    peer_closed: std::sync::Arc::new(AtomicBool::new(false)),
+                    hold_until_peer_closed: AtomicBool::new(false),
                     revoke_alls: AtomicUsize::new(0),
                     journal: Mutex::new(Vec::new()),
                 };
@@ -1859,6 +1863,12 @@ mod tests {
             fn mint(&self, admitted: &AdmittedMint<'_>) -> (MintReply, LiveTokens) {
                 self.mints.fetch_add(1, Ordering::SeqCst);
                 self.minting_started.store(true, Ordering::SeqCst);
+                if self.hold_until_peer_closed.load(Ordering::SeqCst) {
+                    let by = Instant::now() + Duration::from_secs(10);
+                    while !self.peer_closed.load(Ordering::SeqCst) && Instant::now() < by {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
                 let mut journal = self.record();
                 let mut d = MintDeps {
                     signer: &self.signer,
@@ -2021,7 +2031,7 @@ mod tests {
         fn served_minting(
             frame: &EgressFrame,
             m: &dyn MintFrames,
-            close_once_minting: Option<std::sync::Arc<AtomicBool>>,
+            close_once_minting: Option<(std::sync::Arc<AtomicBool>, std::sync::Arc<AtomicBool>)>,
         ) -> (Result<(), ServeError>, Option<EgressSocketReply>) {
             let (a, b) = UnixStream::pair().unwrap();
             let bytes = prefixed(&encoded_frame(frame));
@@ -2030,12 +2040,13 @@ mod tests {
                 let mut c = a;
                 c.write_all(&bytes).unwrap();
                 let mut back = Vec::new();
-                if let Some(started) = close_once_minting {
+                if let Some((started, closed)) = close_once_minting {
                     let by = Instant::now() + Duration::from_secs(10);
                     while !started.load(Ordering::SeqCst) && Instant::now() < by {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                     drop(c);
+                    closed.store(true, Ordering::SeqCst);
                 } else {
                     c.read_to_end(&mut back).unwrap();
                 }
@@ -2074,10 +2085,11 @@ mod tests {
                 revoked(),
             ]);
             let (m, _agent) = TestMinting::new(&base);
+            m.hold_until_peer_closed.store(true, Ordering::SeqCst);
             let (out, reply) = served_minting(
                 &mint_frame(vec![set("a"), set("b")]),
                 &m,
-                Some(m.minting_started.clone()),
+                Some((m.minting_started.clone(), m.peer_closed.clone())),
             );
             assert!(matches!(out, Err(ServeError::Io(_))), "{out:?}");
             assert_eq!(reply, None);
