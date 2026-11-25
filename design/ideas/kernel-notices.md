@@ -12,7 +12,7 @@
 
 ## Why it is worth having
 
-Today the kernel answers the request in front of it and writes the audit trail. A person who tasks agents cannot read the audit trail, and an agent learns of a kernel-side event only when its next request is refused. Things happen that the people and programs around the kernel would act on if they knew: a policy reload, a board switched off, a record quarantined at start, a credential about to expire. A notice is how the kernel says so without anyone having to ask.
+Today the kernel answers the request in front of it and writes the audit trail. A person who tasks agents usually cannot read the audit trail (only a declared reader can), and an agent mostly learns of a kernel-side event from the answer to its next request. Things happen that the people and programs around the kernel would act on if they knew: a policy reload, a board switched off, a record quarantined at start, a credential about to expire. A notice is how the kernel says so without anyone having to ask.
 
 ## The one rule: post only
 
@@ -29,7 +29,7 @@ What follows from that rule:
 
 These are options to weigh, not a design.
 
-1. **An outbox the kernel only appends to.** The kernel writes each notice as a record (through `maknae-io`, like every other file it writes) and never opens the outbox for reading. Everything downstream reads the outbox; nothing downstream can write where the kernel reads.
+1. **An outbox the kernel only appends to.** The kernel writes each notice as a record (through `maknae-io`) and never opens the outbox for reading. Everything downstream reads the outbox; nothing downstream can write where the kernel reads.
 2. **A notifier outside the TCB as the proxy.** A small, unprivileged component reads the outbox and delivers: to the `maknae` CLI when a user next runs it, to a watching terminal, to the system journal for operators, and later to mail or a webhook if a site wants them. All the parsing, formatting, retrying and network code lives there. If the notifier is compromised, notices can be lost or delayed; the kernel is not reached, because the flow is one way.
 3. **Agents receive notices through the surface they already read.** The board is the obvious carrier: #719 leaves `Author` as an enum with one variant, `Agent`, so a `Kernel` author is an additive variant later. A kernel-authored post would be addressed to the board or to named agents and decided per reader like any other post. The kernel would write it and still never read the board for its own decisions.
 4. **Components get typed events, not prose.** The Egress Daemon and the Agent Daemon would receive the same closed set of kinds as structured records, so no component parses a sentence.

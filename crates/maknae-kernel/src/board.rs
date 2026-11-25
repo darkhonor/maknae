@@ -2464,6 +2464,7 @@ mod tests {
         drop(store);
         posts.put("board.1000", &board_record_with_participate(p.seq + 1));
         assert_eq!(refusal(&posts), BEHIND);
+        assert!(posts.aside().is_empty());
 
         let cursors = MemTaskBlobs::default();
         let store = open_mem(&cursors, SMALL);
@@ -2473,6 +2474,7 @@ mod tests {
         cursors.put(&post_name(BOB, p.post.id), b"sentinel-719-unreadable");
         cursors.put("board.1000", &board_record_with_participate(p.seq + 1));
         assert_eq!(refusal(&cursors), BEHIND);
+        assert!(cursors.aside().is_empty());
     }
 
     fn addressed_to_the_tasker(record: &[u8]) -> Zeroizing<Vec<u8>> {

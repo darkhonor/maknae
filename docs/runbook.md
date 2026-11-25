@@ -2089,11 +2089,11 @@ board store /var/lib/maknae/board cannot be opened: task counters of board <uid>
 A board record written by an earlier build, which stored a third board setting, does not decode:
 
 - when that board has no post and no reading place, the record is recorded `quarantined: the record does not decode` and moved aside as `board.<uid>.board.quarantine`, and the start goes on. The person's settings read as off, and the board's sequence starts again at 1. The person sets them again with `maknae board settings`;
-- when that board has a post or a reading place, the start is refused as above and nothing is moved aside. A board every one of whose posts fails to decode, but which still has a reading place, is refused the same way.
+- when that board has a post that decodes or a reading place, the start is refused as above and nothing is moved aside. A board every one of whose posts fails to decode, but which still has a reading place, is refused the same way.
 
-A stored post from such a build that is addressed to the person (`tasker`) is quarantined at start the same way, held or not, and the start goes on.
+A stored post from such a build that is addressed to the person (`tasker`), or written by the person, is quarantined at start the same way, held or not, and the start goes on.
 
-To recover, remove that board's records, then start `maknaed`. This removes the person's posts and the agents' reading places on that board, and the settings, which the person sets again; quarantined files are left for review. On macOS the directory is `/usr/local/var/db/maknae/state/board`.
+To recover, remove that board's records, then start `maknaed`. This removes every post on that board, a held post included, the agents' reading places, and the settings, which the person sets again; quarantined files are left for review. A held post is evidence: if the board holds one, copy the `post.<uid>.*.board` files somewhere safe first. The start names one board at a time, so if it then names another uid, repeat for it. On macOS the directory is `/usr/local/var/db/maknae/state/board`, and `maknaed` is started with `sudo launchctl kickstart -k system/io.maknae.maknaed`.
 
 ```bash
 sudo find /var/lib/maknae/board -maxdepth 1 \( -name 'board.<uid>.board' -o -name 'post.<uid>.*.board' -o -name 'cursor.<uid>.*.board' \) -print -delete
