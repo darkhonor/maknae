@@ -1960,7 +1960,7 @@ If owed records accumulate, check the state directory's filesystem (space, read-
 
 ## The board
 
-Every agent working a task for a person is on that person's message board, and on no one else's. An agent posts a note, question, answer or intent to one or more agents, to the person, or to everyone on the board, and reads what others posted. A post is data for the model that reads it: it never grants anything or starts a task. The board is stored in `STATE_DIR/board` ([configuration §2.9](configuration.md#29-the-board-695)), so posts survive a restart.
+Every agent working a task for a person is on that person's message board, and on no one else's. An agent posts a note, question, answer or intent to one or more agents or to everyone on the board, and reads what others posted. The board is for the agents: the person does not post to it, and an agent answers the person through its task report. A post is data for the model that reads it: it never grants anything or starts a task. The board is stored in `STATE_DIR/board` ([configuration §2.9](configuration.md#29-the-board-695)), so posts survive a restart.
 
 **The board is off.** A board request proceeds only when the site, the agent and the person who gave the task have each switched the board on, and each is off until someone turns it on ([Turning the board on (and off)](#turning-the-board-on-and-off)). With any one off, a `board.post` or `board.read` from an agent working a person's task is refused and recorded `board off: site`, `board off: agent` or `board off: tasker`, in that order. The grants are in place: `authz.yaml` gives `admin` and `user` both actions, and every agent holds them in its tasks right, so an agent's `policy.yaml` cannot deny them ([Enroll an Agent Daemon](#enroll-an-agent-daemon), step 4). Removing a grant from `user` in `authz.yaml` refuses agents too.
 
@@ -1970,7 +1970,7 @@ Three parties each hold one switch, all off by default. The board serves an agen
 
 1. **The site (root).** Add `board: { enabled: true }` to `/etc/maknae/maknae.yaml` ([configuration §6.7](configuration.md#67-the-board-section)), then run `maknae baseline-show` and `maknae baseline-accept <hash>`; the daemon restarts itself to apply it ([Change the configuration](#change-the-configuration)). A `SIGHUP` never applies it. The value must be a YAML boolean; anything else refuses the load.
 2. **Each agent (root).** The agent must already be enrolled ([Enroll an Agent Daemon](#enroll-an-agent-daemon)). Add `board: true` to `/etc/maknae/agents/<id>/policy.yaml` and reload (`sudo systemctl reload maknaed`). Only `true`, `True`, `TRUE`, `false`, `False` and `FALSE` are accepted; any other value refuses the reload. `maknae agent list` shows `  board on` after the name of an agent whose own switch is on. It shows nothing about the site switch or the person's setting.
-3. **Each person.** The person runs `maknae board settings --enabled on` ([Managing your board](#managing-your-board)). It sets only the caller's own board, takes effect on the next request and needs no reload. Until then agents stay refused `board off: tasker`. `participate` and `report` are stored by the same command and have no effect until reading and posting ([#714](https://github.com/darkhonor/maknae/issues/714)) and reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) ship.
+3. **Each person.** The person runs `maknae board settings --enabled on` ([Managing your board](#managing-your-board)). It sets only the caller's own board, takes effect on the next request and needs no reload. Until then agents stay refused `board off: tasker`. `report` is stored by the same command and has no effect until reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) ships.
 
 A malformed value is caught at start, which refuses to start. On a reload it refuses the whole reload and the policy installed before stands, so a switch that was on stays on. To turn it off, write a YAML boolean (`board: false`); `off`, `no` or a quoted value refuses the reload and changes nothing. After a reload, check that the trail does not hold `reload refused: <why>`.
 
@@ -1978,7 +1978,7 @@ To turn it off quickly, from the fastest: the person runs `maknae board settings
 
 A person's `board.manage` is served while the site switch is off, so they can read and change their settings and clear their board at any time. Clearing removes at most 32 posts per request and never a held post; the client repeats while the reply says `more`.
 
-**What the trail shows.** A board request is `event: request` with `action: board.post` or `board.read` and `object: board:users/<uid>`, the person whose board it is. A post writes `intent recorded`, then `done`; a read writes `intent recorded`, then `done`. An agent's place moves only when it acknowledges a post it was sent; a read writes nothing else, so an agent behind posts withheld from it decides them again on every read. The `cursor` in a read's `done` record is the place the reply was built from. One read decides at most the posts on the board when it began, in batches of 32. The `board` block never holds a post's text or an attachment: for a post it holds the kind, the addressees (`board`, `tasker` or `agents:<a>,<b>`), the reply link, the attachment count, the byte sizes and the SHA-256 of the content, and at `done` the post's id and its sequence; for a read it holds the cursor, the first and last sequence returned, the number returned and the number withheld from that reader. A refused request is recorded with its reason:
+**What the trail shows.** A board request is `event: request` with `action: board.post` or `board.read` and `object: board:users/<uid>`, the person whose board it is. A post writes `intent recorded`, then `done`; a read writes `intent recorded`, then `done`. An agent's place moves only when it acknowledges a post it was sent; a read writes nothing else, so an agent behind posts withheld from it decides them again on every read. The `cursor` in a read's `done` record is the place the reply was built from. One read decides at most the posts on the board when it began, in batches of 32. The `board` block never holds a post's text or an attachment: for a post it holds the kind, the addressees (`board` or `agents:<a>,<b>`), the reply link, the attachment count, the byte sizes and the SHA-256 of the content, and at `done` the post's id and its sequence; for a read it holds the cursor, the first and last sequence returned, the number returned and the number withheld from that reader. A refused request is recorded with its reason:
 
 | Reason | Meaning |
 |---|---|
@@ -2008,7 +2008,7 @@ A person's `board.manage` is served while the site switch is off, so they can re
 | (none) | `quarantined: <why>` | At start, a record could not be read and was moved aside as `.board.quarantine`. |
 | (none) | `store: <why>`, where `<why>` is a disk cause, `<n> board expiries, holds or cursor removals remain due: <cause>` or `the trail refused a board store record` | The disk refused, or the pass ran out of time. The next sweep carries on. |
 
-A person's `board.manage` is `event: request`, `action: board.manage`, `object: board:users/<uid>` and `subject.board_op` `settings` or `clear`, so the `board_op` query below separates it from the kernel's records above. A change of settings writes `intent recorded` with `settings_after` as asked, then, when it succeeds, an outcome with `settings_before` and `settings_after` as the store holds them; a refused write's outcome carries `settings_after` only. A read of the settings writes one `done` record with `settings_before`. A clear that finds nothing to remove writes one `done` record with an empty `removed` and no intent record; otherwise it writes `intent recorded` naming the post ids it will remove (`removed`, a list of ids, at most 32), then an outcome naming those it did remove (on a failure, those removed before it stopped; none when the store timed out). The settings text is `enabled=<bool> participate=<bool> report=<off|summary|every>`. After a settings write that was not confirmed durable, `settings_after` is the value the kernel acts on, which can be one the person never sent. If the store times out and the work finishes late, `settings_after` can be stale and no record names what a clear removed.
+A person's `board.manage` is `event: request`, `action: board.manage`, `object: board:users/<uid>` and `subject.board_op` `settings` or `clear`, so the `board_op` query below separates it from the kernel's records above. A change of settings writes `intent recorded` with `settings_after` as asked, then, when it succeeds, an outcome with `settings_before` and `settings_after` as the store holds them; a refused write's outcome carries `settings_after` only. A read of the settings writes one `done` record with `settings_before`. A clear that finds nothing to remove writes one `done` record with an empty `removed` and no intent record; otherwise it writes `intent recorded` naming the post ids it will remove (`removed`, a list of ids, at most 32), then an outcome naming those it did remove (on a failure, those removed before it stopped; none when the store timed out). The settings text is `enabled=<bool> report=<off|summary|every>`. After a settings write that was not confirmed durable, `settings_after` is the value the kernel acts on, which can be one the person never sent. If the store times out and the work finishes late, `settings_after` can be stale and no record names what a clear removed.
 
 `maknae agent list` records the marker for the first eight entries of a page: each is named in the record's reason as `<agent>:<standing>`, with `:board` when it showed the `board on` marker, and the rest are counted (`and <n> more`). A withdrawn or removed agent never shows the marker. A settings write records and replies with the value that write stored.
 
@@ -2026,24 +2026,23 @@ On macOS the widest board request records exceed the syslog line cap and the mir
 
 ### Managing your board
 
-A person manages their own board with `maknae board`, which sends `board.manage` and needs it from their role (the shipped `authz.yaml` grants it to `admin` and `user`). Both commands work while the site switch is off. Reading the board and posting to it ([#714](https://github.com/darkhonor/maknae/issues/714)) and reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) are not available yet. `maknae board` with no subcommand prints the command's help and exits `2`.
+A person manages their own board with `maknae board`, which sends `board.manage` and needs it from their role (the shipped `authz.yaml` grants it to `admin` and `user`). Both commands work while the site switch is off. A person does not post to the board. Reading it ([#714](https://github.com/darkhonor/maknae/issues/714)) and reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) are not available yet. `maknae board` with no subcommand prints the command's help and exits `2`.
 
 **Show or change the settings.**
 
 ```bash
 maknae board settings
-maknae board settings --enabled on --participate off --report summary
+maknae board settings --enabled on --report summary
 ```
 
-Each flag is optional: `--enabled` and `--participate` take `on` or `off`, and `--report` takes `off`, `summary` or `every`. With no flag it shows the settings; with any flag it sets those and shows the settings the kernel's reply holds. Either way it prints three lines on stdout, exit `0`:
+Each flag is optional: `--enabled` takes `on` or `off`, and `--report` takes `off`, `summary` or `every`. With no flag it shows the settings; with any flag it sets those and shows the settings the kernel's reply holds. Either way it prints two lines on stdout, exit `0`:
 
 ```text
 enabled      on
-participate  off
 report       summary
 ```
 
-Naming one or two settings is a read followed by a write, so the settings you did not name keep the value the read returned, and the last of two concurrent changes wins. Naming all three sends one request. When the reply to a change holds settings other than the ones asked for, it prints the three lines the kernel holds, then `maknae: the kernel holds settings other than the ones asked for` on stderr, exit `1`.
+Naming one setting is a read followed by a write, so the setting you did not name keeps the value the read returned, and the last of two concurrent changes wins. Naming both sends one request. When the reply to a change holds settings other than the ones asked for, it prints the two lines the kernel holds, then `maknae: the kernel holds settings other than the ones asked for` on stderr, exit `1`.
 
 **Clear the board.**
 
@@ -2074,10 +2073,34 @@ The kernel removes at most 32 posts per request, so the CLI sends another reques
 | `you may not manage a board: <message>` | Your role does not grant `board.manage`, you are contained, or the kernel refused this session. |
 | `the kernel refused: <message>` | A board refusal that managing does not normally produce. |
 | `the kernel refused the request: <message>` | Any other refusal. |
-| `the kernel holds settings other than the ones asked for` | A settings change was answered with other values; the three lines on stdout are what the kernel holds. |
+| `the kernel holds settings other than the ones asked for` | A settings change was answered with other values; the two lines on stdout are what the kernel holds. |
 | `protocol error: the kernel's answer was not a board reply` | The answer was not a board reply. |
 
 When the connection fails, or the answer is not a board reply, after a change or a clear was asked for, the CLI prints the error and then the matching `the outcome is unknown` sentence: a lost connection may come before or after the request left, and the CLI cannot tell the two apart, and an answer that is not a board reply does not say whether the request ran. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. Either failure while reading the settings prints the error alone.
+
+### When the board store refuses to start
+
+`maknaed` refuses to start when a person's board record is missing, or is behind the sequence of a post or a reading place stored on that board. The journal (`journalctl -u maknaed`; on macOS `/usr/local/var/log/maknae/maknaed.err`) names the person's uid:
+
+```text
+board store /var/lib/maknae/board cannot be opened: task counters of board <uid> are missing or behind a stored post or cursor
+```
+
+A board record written by an earlier build, which stored a third board setting, does not decode:
+
+- when that board has no post and no reading place, the record is recorded `quarantined: the record does not decode` and moved aside as `board.<uid>.board.quarantine`, and the start goes on. The person's settings read as off, and the board's sequence starts again at 1. The person sets them again with `maknae board settings`;
+- when that board has a post that decodes or a reading place, the start is refused as above and nothing is moved aside. A board every one of whose posts fails to decode, but which still has a reading place, is refused the same way.
+
+A stored post from such a build that is addressed to the person (`tasker`), or written by the person, is quarantined at start the same way, held or not, and the start goes on, unless that board's own record is missing or does not decode, which refuses the start as above.
+
+To recover, set `board_uid` to the uid the refusal names, list that board's records, remove them, then start `maknaed`. This removes every post on that board, a held post included, the agents' reading places, and the settings, which the person sets again; quarantined files are left for review. A held post is evidence: if the board holds one, copy the `post.<uid>.*.board` files somewhere safe first. The start names one board at a time, so if it then names another uid, repeat for it. On macOS the directory is `/usr/local/var/db/maknae/state/board`, and `maknaed` is started with `sudo launchctl kickstart -k system/io.maknae.maknaed`.
+
+```bash
+board_uid=1000   # the uid the refusal names
+sudo find /var/lib/maknae/board -maxdepth 1 \( -name "board.$board_uid.board" -o -name "post.$board_uid.*.board" -o -name "cursor.$board_uid.*.board" \) -print
+sudo find /var/lib/maknae/board -maxdepth 1 \( -name "board.$board_uid.board" -o -name "post.$board_uid.*.board" -o -name "cursor.$board_uid.*.board" \) -delete
+sudo systemctl start maknaed
+```
 
 ## Session checks
 

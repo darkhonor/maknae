@@ -13294,7 +13294,6 @@ mod record_widths {
             use maknae_audit_append::BoardAudit;
             let widest = bv::settings_text(Settings {
                 enabled: false,
-                participate: false,
                 report: Report::Summary,
             });
             let settings = |before: bool, after: bool| {

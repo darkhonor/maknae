@@ -415,9 +415,6 @@ enum BoardSub {
         /// Let the agents on your tasks use your board.
         #[arg(long, value_enum)]
         enabled: Option<OnOff>,
-        /// Let yourself post to your board as well as read it.
-        #[arg(long, value_enum)]
-        participate: Option<OnOff>,
         /// What the board reports to you: nothing, a summary of new posts, or every new post.
         #[arg(long, value_enum)]
         report: Option<ReportArg>,
@@ -460,12 +457,10 @@ fn board_report(value: ReportArg) -> maknae_proto::BoardReport {
 
 fn settings_change(
     enabled: Option<OnOff>,
-    participate: Option<OnOff>,
     report: Option<ReportArg>,
 ) -> maknae_agent::board::SettingsChange {
     maknae_agent::board::SettingsChange {
         enabled: enabled.map(on_off),
-        participate: participate.map(on_off),
         report: report.map(board_report),
     }
 }
@@ -1723,13 +1718,9 @@ pub async fn run_cli() -> ExitCode {
             operand_exit(session_verb(action), &mut std::io::stderr()).await
         }
         Command::Board(args) => match args.sub {
-            BoardSub::Settings {
-                enabled,
-                participate,
-                report,
-            } => wire_exit_code(
+            BoardSub::Settings { enabled, report } => wire_exit_code(
                 execute(Verb::BoardSettings {
-                    change: settings_change(enabled, participate, report),
+                    change: settings_change(enabled, report),
                 })
                 .await,
                 &mut std::io::stderr(),
@@ -1870,11 +1861,7 @@ mod tests {
 
     fn board_change(args: &[&str]) -> maknae_agent::board::SettingsChange {
         match board_sub(args) {
-            BoardSub::Settings {
-                enabled,
-                participate,
-                report,
-            } => settings_change(enabled, participate, report),
+            BoardSub::Settings { enabled, report } => settings_change(enabled, report),
             other => panic!("{other:?}"),
         }
     }
@@ -1895,13 +1882,6 @@ mod tests {
                 board_change(&["maknae", "board", "settings", "--enabled", value]),
                 maknae_agent::board::SettingsChange {
                     enabled: Some(want),
-                    ..Default::default()
-                }
-            );
-            assert_eq!(
-                board_change(&["maknae", "board", "settings", "--participate", value]),
-                maknae_agent::board::SettingsChange {
-                    participate: Some(want),
                     ..Default::default()
                 }
             );
@@ -1926,14 +1906,11 @@ mod tests {
                 "settings",
                 "--enabled",
                 "off",
-                "--participate",
-                "on",
                 "--report",
                 "every"
             ]),
             maknae_agent::board::SettingsChange {
                 enabled: Some(false),
-                participate: Some(true),
                 report: Some(BoardReport::Every),
             }
         );
@@ -1943,7 +1920,6 @@ mod tests {
     fn a_board_settings_value_outside_its_set_is_a_parse_error() {
         for args in [
             ["maknae", "board", "settings", "--enabled", "maybe"],
-            ["maknae", "board", "settings", "--participate", "yes"],
             ["maknae", "board", "settings", "--report", "on"],
         ] {
             assert_eq!(
@@ -1951,6 +1927,16 @@ mod tests {
                 clap::error::ErrorKind::InvalidValue,
                 "{args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn board_settings_has_no_participate_flag() {
+        for value in ["on", "off"] {
+            let e = Cli::try_parse_from(["maknae", "board", "settings", "--participate", value])
+                .unwrap_err();
+            assert_eq!(e.kind(), clap::error::ErrorKind::UnknownArgument, "{e}");
+            assert_eq!(e.exit_code(), 2);
         }
     }
 

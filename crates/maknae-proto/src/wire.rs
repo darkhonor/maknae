@@ -4150,7 +4150,6 @@ mod tests {
                         op: crate::BoardOp::Settings {
                             set: Some(crate::BoardSettings {
                                 enabled: true,
-                                participate: false,
                                 report: crate::BoardReport::Every,
                             }),
                         },
@@ -4592,7 +4591,6 @@ mod tests {
         for payload in [
             Payload::BoardSettings(crate::BoardSettings {
                 enabled: true,
-                participate: true,
                 report: crate::BoardReport::Summary,
             }),
             Payload::BoardSettings(crate::BoardSettings::default()),

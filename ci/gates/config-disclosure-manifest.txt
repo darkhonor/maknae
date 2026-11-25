@@ -200,7 +200,6 @@ always	held_release.next	admin.release (#632): the cursor to resume after: the s
 always	held_release.posts_released	admin.release (#695): how many holds on the subject's board posts this page lifted; a count, never a post's id or content, absent when zero
 always	held_release.posts_held	admin.release (#695): how many holds on board posts are still written for the subject after this page; a count, never a post's id or content, absent when zero
 always	board_settings.enabled	board.manage (#698): whether the caller's own board is on for the tasks the caller gives; the caller's own setting
-always	board_settings.participate	board.manage (#698): whether the caller may post to the caller's own board; the caller's own setting
 always	board_settings.report	board.manage (#698): one fixed token, off, summary or every: what the caller's own board reports to the caller
 always	board_cleared.removed	board.manage (#698): how many posts the caller's own clear removed from the caller's own board; a count, never a post's id or content
 always	board_cleared.more	board.manage (#698): whether posts that are not held remain on the caller's own board after the clear

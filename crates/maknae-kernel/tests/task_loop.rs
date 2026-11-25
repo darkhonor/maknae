@@ -48,6 +48,15 @@ fn another() -> u32 {
         .as_raw()
 }
 
+fn request_body(verb: Verb, task: Option<TaskId>) -> Vec<u8> {
+    maknae_proto::encode_request(&maknae_proto::Request {
+        task,
+        protocol_version: maknae_proto::PROTOCOL_VERSION,
+        verb,
+    })
+    .unwrap()
+}
+
 fn secret(s: &str) -> SecretText {
     SecretText(Zeroizing::new(s.into()))
 }
@@ -281,13 +290,33 @@ impl World {
     }
 
     async fn raw_alone(&self, verb: Verb, records: &Arc<Records>) -> Vec<u8> {
+        let (session, gate) = self.person_session();
+        self.serve(session, gate, verb, None, records, None).await
+    }
+
+    async fn raw_body(&self, body: Vec<u8>, records: &Arc<Records>) -> Vec<u8> {
+        let _shared = STORE.read().await;
+        let (session, gate) = self.person_session();
+        self.serve_as(
+            Arc::clone(&self.pdp),
+            session,
+            gate,
+            body,
+            records,
+            None,
+            self.wiring(),
+        )
+        .await
+    }
+
+    fn person_session(&self) -> (maknae_kernel::SessionRecord, Arc<maknae_kernel::FactsGate>) {
         let session = maknae_kernel::SessionRecord::for_test(self.me, Some(self.user.clone()))
             .with_session_id(628);
         let gate = maknae_kernel::FactsGate::allow_as(
             Some(self.user.clone()),
             Some(PathBuf::from(&*self.root)),
         );
-        self.serve(session, gate, verb, None, records, None).await
+        (session, gate)
     }
 
     /// One request on the agent channel as `agent`, citing `task`.
@@ -361,8 +390,7 @@ impl World {
                 Arc::clone(authorizer),
                 session,
                 gate,
-                verb,
-                task,
+                request_body(verb, task),
                 records,
                 None,
                 Wiring {
@@ -552,24 +580,20 @@ impl World {
         records: &Arc<E>,
         dir: Option<&std::path::Path>,
     ) -> Vec<u8> {
-        self.serve_wired(
-            session,
-            gate,
-            verb,
-            task,
-            records,
-            dir,
-            Wiring {
-                live: Arc::new(maknae_kernel::LiveConfig::with_forges_for_test(
-                    Default::default(),
-                    None,
-                    self.forges.clone(),
-                )),
-                egress: maknae_kernel::unavailable_egress(),
-                conversations: common::conversations(),
-            },
-        )
-        .await
+        self.serve_wired(session, gate, verb, task, records, dir, self.wiring())
+            .await
+    }
+
+    fn wiring(&self) -> Wiring {
+        Wiring {
+            live: Arc::new(maknae_kernel::LiveConfig::with_forges_for_test(
+                Default::default(),
+                None,
+                self.forges.clone(),
+            )),
+            egress: maknae_kernel::unavailable_egress(),
+            conversations: common::conversations(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -587,8 +611,7 @@ impl World {
             Arc::clone(&self.pdp),
             session,
             gate,
-            verb,
-            task,
+            request_body(verb, task),
             records,
             dir,
             wiring,
@@ -602,8 +625,7 @@ impl World {
         authorizer: Arc<P>,
         session: maknae_kernel::SessionRecord,
         gate: Arc<maknae_kernel::FactsGate>,
-        verb: Verb,
-        task: Option<TaskId>,
+        body: Vec<u8>,
         records: &Arc<E>,
         dir: Option<&std::path::Path>,
         wiring: Wiring,
@@ -646,12 +668,6 @@ impl World {
             self.agents.clone(),
         );
         let serving = tokio::spawn(served);
-        let body = maknae_proto::encode_request(&maknae_proto::Request {
-            task,
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            verb,
-        })
-        .unwrap();
         common::write_frame(&mut client, &body).await.unwrap();
         let mut received = Vec::new();
         tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut received))
@@ -5727,8 +5743,7 @@ mod board {
                     Arc::clone(authorizer),
                     session,
                     gate,
-                    verb,
-                    Some(task),
+                    request_body(verb, Some(task)),
                     &emit,
                     None,
                     Wiring {
@@ -6191,8 +6206,7 @@ mod board {
                 pdp,
                 session,
                 gate,
-                read(None),
-                Some(j),
+                request_body(read(None), Some(j)),
                 &records,
                 None,
                 Wiring {
@@ -6901,14 +6915,10 @@ mod board {
             }
         }
 
-        fn set(enabled: bool, participate: bool, report: BoardReport) -> Verb {
+        fn set(enabled: bool, report: BoardReport) -> Verb {
             Verb::BoardManage {
                 op: BoardOp::Settings {
-                    set: Some(BoardSettings {
-                        enabled,
-                        participate,
-                        report,
-                    }),
+                    set: Some(BoardSettings { enabled, report }),
                 },
             }
         }
@@ -6978,7 +6988,7 @@ mod board {
 
         const DONE: (&str, &str, &str) = ("permit", "done", "authorized");
         const INTENT: (&str, &str, &str) = ("permit", "intent recorded", "authorized");
-        const OFF: &str = "enabled=false participate=false report=off";
+        const OFF: &str = "enabled=false report=off";
 
         impl World {
             fn own_board(&self) -> Option<String> {
@@ -7039,14 +7049,13 @@ mod board {
                 )]
             );
 
-            let (answer, records) = w.manage(set(true, true, BoardReport::Every)).await;
+            let (answer, records) = w.manage(set(true, BoardReport::Every)).await;
             let every = BoardSettings {
                 enabled: true,
-                participate: true,
                 report: BoardReport::Every,
             };
             assert_eq!(settings_reply(answer), every);
-            let on = "enabled=true participate=true report=every";
+            let on = "enabled=true report=every";
             assert_eq!(
                 trail(&records),
                 [
@@ -7068,19 +7077,17 @@ mod board {
                 w.settings_of(w.me),
                 Settings {
                     enabled: true,
-                    participate: true,
                     report: maknae_kernel::Report::Every
                 }
             );
             assert_eq!(w.settings_of(OTHER), Settings::default());
 
-            let (answer, records) = w.manage(set(false, true, BoardReport::Summary)).await;
-            let summary = "enabled=false participate=true report=summary";
+            let (answer, records) = w.manage(set(false, BoardReport::Summary)).await;
+            let summary = "enabled=false report=summary";
             assert_eq!(
                 settings_reply(answer),
                 BoardSettings {
                     enabled: false,
-                    participate: true,
                     report: BoardReport::Summary
                 }
             );
@@ -7098,25 +7105,86 @@ mod board {
         }
 
         #[tokio::test]
+        async fn a_settings_request_carrying_participate_is_malformed_and_changes_nothing() {
+            use ciborium::Value;
+            fn put_set(v: &mut Value, set: &Value) -> bool {
+                match v {
+                    Value::Map(entries) => entries.iter_mut().any(|(k, val)| {
+                        if *k == Value::Text("set".into()) {
+                            *val = set.clone();
+                            true
+                        } else {
+                            put_set(val, set)
+                        }
+                    }),
+                    _ => false,
+                }
+            }
+            let text = |s: &str| Value::Text(s.into());
+            let w = manage_world("manage-participate", "user");
+            w.enable(w.me, true);
+            let held = w.settings_of(w.me);
+            let body_setting = |extra: Option<bool>| {
+                let mut request: Value =
+                    ciborium::from_reader(request_body(read_settings(), None).as_slice()).unwrap();
+                let mut set = vec![(text("enabled"), Value::Bool(false))];
+                set.extend(extra.map(|p| (text("participate"), Value::Bool(p))));
+                set.push((text("report"), text("every")));
+                assert!(put_set(&mut request, &Value::Map(set)));
+                let mut body = Vec::new();
+                ciborium::into_writer(&request, &mut body).unwrap();
+                body
+            };
+            for participate in [true, false] {
+                let records = Records::new(0);
+                let raw = w.raw_body(body_setting(Some(participate)), &records).await;
+                assert!(raw.is_empty(), "closed with no reply: {raw:?}");
+                let records = records.snapshot();
+                let refused: Vec<_> = records
+                    .iter()
+                    .filter(|r| r.action == "decode")
+                    .map(|r| (r.outcome.result.as_str(), r.outcome.reason.as_str()))
+                    .collect();
+                assert_eq!(refused, [("deny", "malformed request: decode")]);
+                assert!(
+                    records.iter().all(|r| !r.action.starts_with("board.")),
+                    "{records:?}"
+                );
+                assert_eq!(w.settings_of(w.me), held, "participate={participate}");
+            }
+            let records = Records::new(0);
+            let raw = w.raw_body(body_setting(None), &records).await;
+            assert!(
+                !raw.is_empty(),
+                "the same request without the key is answered"
+            );
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: false,
+                    report: maknae_kernel::Report::Every
+                }
+            );
+        }
+
+        #[tokio::test]
         async fn a_settings_write_reports_its_own_value_when_another_lands_before_its_record() {
             use maknae_kernel::BoardSeam;
             let w = manage_world("manage-settings-own", "user");
             let me = BoardKey(w.me);
             let other = Settings {
                 enabled: false,
-                participate: true,
                 report: maknae_kernel::Report::Summary,
             };
             w.agents.board.after_settings_write(move |store| {
                 BoardSeam::set_settings(store, me, other).unwrap()
             });
-            let (answer, records) = w.manage(set(true, false, BoardReport::Every)).await;
-            let mine = "enabled=true participate=false report=every";
+            let (answer, records) = w.manage(set(true, BoardReport::Every)).await;
+            let mine = "enabled=true report=every";
             assert_eq!(
                 settings_reply(answer),
                 BoardSettings {
                     enabled: true,
-                    participate: false,
                     report: BoardReport::Every
                 }
             );
@@ -7151,19 +7219,18 @@ mod board {
                     me,
                     Settings {
                         enabled: true,
-                        participate: true,
                         report: maknae_kernel::Report::Every,
                     },
                 )
                 .unwrap();
             });
             w.board_blobs.fail(Some(Fail::Unsynced));
-            let (answer, records) = w.manage(set(true, true, BoardReport::Off)).await;
+            let (answer, records) = w.manage(set(true, BoardReport::Off)).await;
             w.board_blobs.fail(None);
             assert_eq!(refused(&answer), Some(BoardDefect::OutcomeUnknown));
             assert_eq!(
                 records[1].board,
-                settings_said(None, Some("enabled=false participate=true report=summary")),
+                settings_said(None, Some("enabled=false report=summary")),
                 "the merge this write left, not the write that landed after it"
             );
         }
@@ -7173,7 +7240,7 @@ mod board {
             let mut w = manage_world("manage-switches-off", "user");
             w.switch(false, &[]);
             let h = w.at_work("hobi");
-            let (answer, _) = w.manage(set(true, true, BoardReport::Off)).await;
+            let (answer, _) = w.manage(set(true, BoardReport::Off)).await;
             assert!(settings_reply(answer).enabled);
             assert!(w.settings_of(w.me).enabled);
             let (answer, records) = w.board("hobi", post(note("sentinel-698-off")), h).await;
@@ -7210,13 +7277,12 @@ mod board {
             );
             assert!(w.posts().is_empty());
 
-            let (answer, _) = w.manage(set(true, false, BoardReport::Off)).await;
+            let (answer, _) = w.manage(set(true, BoardReport::Off)).await;
             assert!(settings_reply(answer).enabled);
             assert_eq!(
                 w.settings_of(w.me),
                 Settings {
                     enabled: true,
-                    participate: false,
                     report: maknae_kernel::Report::Off
                 }
             );
@@ -7234,7 +7300,7 @@ mod board {
             let kept = w.stored("hobi", "sentinel-698-kept", PostLabels::default());
             for (verb, op) in [
                 (read_settings(), "settings"),
-                (set(false, false, BoardReport::Off), "settings"),
+                (set(false, BoardReport::Off), "settings"),
                 (clear(), "clear"),
             ] {
                 let (answer, records) = w.board("jin", verb, j).await;
@@ -7348,7 +7414,7 @@ mod board {
             let permits = Arc::new(PermitsManage(Arc::clone(&w.pdp), None));
             for (verb, op) in [
                 (read_settings(), "settings"),
-                (set(false, true, BoardReport::Every), "settings"),
+                (set(false, BoardReport::Every), "settings"),
                 (clear(), "clear"),
             ] {
                 let (answer, records) = w.board_as(&permits, "hobi", verb, h).await;
@@ -7398,17 +7464,16 @@ mod board {
                     Some(self.user.clone()),
                     Some(PathBuf::from(&*self.root)),
                 );
-                let wiring = Wiring {
-                    live: Arc::new(maknae_kernel::LiveConfig::with_forges_for_test(
-                        Default::default(),
-                        None,
-                        self.forges.clone(),
-                    )),
-                    egress: maknae_kernel::unavailable_egress(),
-                    conversations: common::conversations(),
-                };
-                self.serve_as(authorizer, session, gate, verb, None, records, None, wiring)
-                    .await
+                self.serve_as(
+                    authorizer,
+                    session,
+                    gate,
+                    request_body(verb, None),
+                    records,
+                    None,
+                    self.wiring(),
+                )
+                .await
             }
 
             /// The append at which this world's first `board.manage` record lands.
@@ -7445,13 +7510,12 @@ mod board {
             let w = manage_world("manage-intent-fails-settings", "user");
             let was = Settings {
                 enabled: true,
-                participate: false,
                 report: maknae_kernel::Report::Summary,
             };
             w.agents.board.set_settings(w.key(), was).unwrap();
             let n = w.first_manage_append().await;
             let records = Records::new(n);
-            let raw = w.raw(set(false, true, BoardReport::Every), &records).await;
+            let raw = w.raw(set(false, BoardReport::Every), &records).await;
             no_success(&raw).await;
             let snap = records.snapshot();
             assert_eq!(snap[n - 1].action, "board.manage");
@@ -7529,8 +7593,8 @@ mod board {
             let ((late, late_records), (busy, busy_records)) = twice_while_the_store_stalls(
                 &w,
                 (
-                    set(true, true, BoardReport::Every),
-                    set(false, true, BoardReport::Summary),
+                    set(true, BoardReport::Every),
+                    set(false, BoardReport::Summary),
                 ),
             )
             .await;
@@ -7584,7 +7648,6 @@ mod board {
                 w.settings_of(w.me),
                 Settings {
                     enabled: true,
-                    participate: true,
                     report: maknae_kernel::Report::Every
                 },
                 "the busy write never ran"
@@ -7650,7 +7713,6 @@ mod board {
             let w = manage_world("manage-unhonourable", "user");
             let was = Settings {
                 enabled: true,
-                participate: false,
                 report: maknae_kernel::Report::Summary,
             };
             w.agents.board.set_settings(w.key(), was).unwrap();
@@ -7658,7 +7720,7 @@ mod board {
             let stub = Arc::new(PermitsManage(Arc::clone(&w.pdp), Some("sentinel-698-ob")));
             for (verb, op) in [
                 (read_settings(), "settings"),
-                (set(false, true, BoardReport::Every), "settings"),
+                (set(false, BoardReport::Every), "settings"),
                 (clear(), "clear"),
             ] {
                 let records = Records::new(0);
@@ -7692,14 +7754,13 @@ mod board {
             let w = manage_world("manage-contained", "adversary");
             let was = Settings {
                 enabled: true,
-                participate: false,
                 report: maknae_kernel::Report::Summary,
             };
             w.agents.board.set_settings(w.key(), was).unwrap();
             let kept = w.stored("hobi", "sentinel-698-contained", PostLabels::default());
             for (verb, op) in [
                 (read_settings(), "settings"),
-                (set(false, true, BoardReport::Every), "settings"),
+                (set(false, BoardReport::Every), "settings"),
                 (clear(), "clear"),
             ] {
                 let (answer, records) = w.manage(verb).await;
@@ -7904,10 +7965,10 @@ mod board {
         #[tokio::test]
         async fn a_settings_write_the_disk_refuses_or_does_not_sync_is_never_done() {
             let w = manage_world("manage-settings-disk", "user");
-            w.manage(set(true, true, BoardReport::Every)).await;
-            let on = "enabled=true participate=true report=every";
+            w.manage(set(true, BoardReport::Every)).await;
+            let on = "enabled=true report=every";
             w.board_blobs.fail(Some(Fail::Every));
-            let (answer, records) = w.manage(set(false, false, BoardReport::Off)).await;
+            let (answer, records) = w.manage(set(false, BoardReport::Off)).await;
             w.board_blobs.fail(None);
             assert_eq!(refused(&answer), Some(BoardDefect::TryAgain));
             assert_eq!(records.len(), 2);
@@ -7921,13 +7982,12 @@ mod board {
                 w.settings_of(w.me),
                 Settings {
                     enabled: true,
-                    participate: true,
                     report: maknae_kernel::Report::Every
                 }
             );
 
             w.board_blobs.fail(Some(Fail::Unsynced));
-            let (answer, records) = w.manage(set(false, true, BoardReport::Summary)).await;
+            let (answer, records) = w.manage(set(false, BoardReport::Summary)).await;
             w.board_blobs.fail(None);
             assert_eq!(refused(&answer), Some(BoardDefect::OutcomeUnknown));
             assert!(
@@ -7935,13 +7995,12 @@ mod board {
                 "{records:?}"
             );
             assert_eq!(records[1].outcome.posture, "unavailable");
-            let held = "enabled=false participate=true report=every";
+            let held = "enabled=false report=every";
             assert_eq!(records[1].board, settings_said(None, Some(held)));
             assert_eq!(
                 w.settings_of(w.me),
                 Settings {
                     enabled: false,
-                    participate: true,
                     report: maknae_kernel::Report::Every
                 }
             );
