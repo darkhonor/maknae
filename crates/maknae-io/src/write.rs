@@ -254,6 +254,35 @@ fn move_aside_synced<F: AsFd>(
     })
 }
 
+pub(crate) fn symlink_durable<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    target: &std::ffi::OsStr,
+    at: &Path,
+) -> Result<bool, IoError> {
+    symlink_synced(dirfd, name, target, at, syscall::fsync_fd)
+}
+
+/// `Ok(false)` when `name` already exists; nothing is synced then.
+fn symlink_synced<F: AsFd>(
+    dirfd: &F,
+    name: &str,
+    target: &std::ffi::OsStr,
+    at: &Path,
+    sync_dir: impl FnOnce(&F) -> nix::Result<()>,
+) -> Result<bool, IoError> {
+    match syscall::symlinkat(target, dirfd, name) {
+        Ok(()) => {}
+        Err(nix::errno::Errno::EEXIST) => return Ok(false),
+        Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, at)),
+    }
+    sync_dir(dirfd).map_err(|e| IoError::PublishedNotDurable {
+        path: at.to_path_buf(),
+        kind: crate::checks::kind_of_errno(e),
+    })?;
+    Ok(true)
+}
+
 fn publish_raw<F: AsFd>(
     dirfd: &F,
     final_name: &str,
@@ -476,6 +505,56 @@ mod tests {
         );
         assert_eq!(std::fs::read(d.path().join("g")).unwrap(), b"old");
         assert!(std::fs::symlink_metadata(d.path().join("f")).is_err());
+    }
+
+    #[test]
+    fn a_created_link_is_synced_and_a_failed_sync_is_reported_not_durable() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        let at = d.path().join("l");
+        let target = std::ffi::OsStr::new("/v/l");
+        let mut synced = false;
+        assert!(symlink_synced(&dirfd, "l", target, &at, |_| {
+            synced = true;
+            Ok(())
+        })
+        .unwrap());
+        assert!(synced);
+        assert_eq!(std::fs::read_link(&at).unwrap(), Path::new("/v/l"));
+
+        let at = d.path().join("m");
+        let e = symlink_synced(&dirfd, "m", target, &at, |_| Err(Errno::EIO)).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::PublishedNotDurable {
+                path: at.clone(),
+                kind: crate::IoKind::Other {
+                    raw: Errno::EIO as i32
+                },
+            }
+        );
+        assert!(std::fs::symlink_metadata(&at).is_ok());
+    }
+
+    #[test]
+    fn an_existing_name_or_a_failed_symlink_never_runs_the_directory_sync() {
+        let d = tempfile::tempdir().unwrap();
+        let dirfd = std::fs::File::open(d.path()).unwrap();
+        std::fs::write(d.path().join("f"), b"x").unwrap();
+        let target = std::ffi::OsStr::new("/v/f");
+        let at = d.path().join("f");
+        assert!(!symlink_synced(&dirfd, "f", target, &at, |_| panic!("kept")).unwrap());
+        assert_eq!(std::fs::read(&at).unwrap(), b"x");
+
+        let at = d.path().join("nodir/g");
+        let e = symlink_synced(&dirfd, "nodir/g", target, &at, |_| panic!("failed")).unwrap_err();
+        assert_eq!(
+            e,
+            IoError::Io {
+                path: at,
+                kind: crate::IoKind::NotFound,
+            }
+        );
     }
 
     #[test]

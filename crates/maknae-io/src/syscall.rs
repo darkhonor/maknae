@@ -458,6 +458,14 @@ pub(crate) fn link_at<F: AsFd>(
     nix::unistd::linkat(dirfd, from, dirfd, to, nix::fcntl::AtFlags::empty())
 }
 
+pub(crate) fn symlinkat<F: AsFd>(
+    target: &std::ffi::OsStr,
+    dirfd: &F,
+    name: &str,
+) -> nix::Result<()> {
+    nix::unistd::symlinkat(target, dirfd, name)
+}
+
 pub(crate) fn unlink_at<F: AsFd, P: ?Sized + nix::NixPath>(dirfd: &F, name: &P) -> nix::Result<()> {
     nix::unistd::unlinkat(dirfd, name, nix::unistd::UnlinkatFlags::NoRemoveDir)
 }
