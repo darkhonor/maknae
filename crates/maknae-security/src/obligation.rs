@@ -39,6 +39,50 @@ pub fn merge_obligations(
     Ok(out)
 }
 
+/// The `tool.launch` obligation's id and param keys (#674, spec §5.7): the recipe a front
+/// end launches a permitted tool call from.
+pub mod tool_launch {
+    pub const ID: &str = "tool.launch";
+    pub const ENTRY: &str = "entry";
+    pub const PROGRAM: &str = "program";
+    pub const MODE: &str = "mode";
+    pub const SHAPE: &str = "shape";
+    pub const IMAGE_REF: &str = "image.ref";
+    pub const IMAGE_VERIFY_SIGNATURE: &str = "image.verify.signature";
+    pub const IMAGE_VERIFY_SBOM: &str = "image.verify.sbom";
+    pub const ISOLATION: &str = "isolation";
+    pub const NETWORK_VIA: &str = "network.via";
+    pub const NETWORK_SITES: &str = "network.sites";
+    pub const CREDENTIAL: &str = "credential";
+    pub const WORKSPACE_MODE: &str = "workspace.mode";
+    pub const WORKSPACE_ROOT: &str = "workspace.root";
+    pub const RESOURCES_CPUS: &str = "resources.cpus";
+    pub const RESOURCES_MEMORY: &str = "resources.memory";
+    pub const LIFETIME_MAX: &str = "lifetime.max";
+    pub const TIMEOUT: &str = "timeout";
+    pub const OUTPUT: &str = "output";
+    pub const OUTPUT_TO_MODEL: &str = "output_to_model";
+    pub const VOLUMES_NAME: &str = "volumes.name";
+    pub const VOLUMES_ACCESS: &str = "volumes.access";
+    pub const VOLUMES_SCOPE: &str = "volumes.scope";
+    pub const SHAPE_SHA256: &str = "shape.sha256";
+    pub const GRAMMAR_SHA256: &str = "grammar.sha256";
+    pub const ARGV: &str = "argv";
+    pub const STDIN_SHA256: &str = "stdin.sha256";
+    pub const FILES_PATH: &str = "files.path";
+    pub const FILES_SHA256: &str = "files.sha256";
+    pub const FORGE_BASE: &str = "forge.base";
+    pub const FORGE_HEAD: &str = "forge.head";
+    pub const TASK: &str = "task";
+    pub const SUBJECT_UID: &str = "subject.uid";
+}
+
+/// The `workspace.mask` obligation's id and its one param key.
+pub mod workspace_mask {
+    pub const ID: &str = "workspace.mask";
+    pub const PATTERNS: &str = "patterns";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

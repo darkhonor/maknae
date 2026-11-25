@@ -1,0 +1,165 @@
+# The gh grammar (#674): the argv shapes gh may be called with.
+#
+# Every shape's argv was checked against `gh <subcommand> --help` for the version
+# in `tested`. `gh issue artifact` is a preview command and has no shape.
+# A tool entry names the shapes it serves (`grammar: gh`, `shapes: [...]`) and an
+# operator grants them as Tool(<entry> gh:<shape>), exact or a prefix such as
+# gh:issue.* . To enable it, link it into /etc/maknae/grammars/.
+schema_version: 1
+program: gh
+tested: { version: "2.105.0", date: 2026-11-24 }
+shapes:
+  pr.view:
+    description: "View the pull request this task is about."
+    class: read
+    forge: { base: [read] }
+    argv: [pr, view, "{git.change}", -R, "{git.base}"]
+  pr.diff:
+    description: "Show the diff of the pull request this task is about."
+    class: read
+    forge: { base: [read] }
+    argv: [pr, diff, "{git.change}", -R, "{git.base}"]
+  pr.checks:
+    description: "Show the checks of the pull request this task is about."
+    class: read
+    forge: { base: [read] }
+    argv: [pr, checks, "{git.change}", -R, "{git.base}"]
+  pr.review.comment:
+    description: "Leave a review comment on the pull request this task is about."
+    class: write
+    forge: { base: [review] }
+    argv: [pr, review, "{git.change}", -R, "{git.base}", --comment, --body-file, "-"]
+    slots:
+      body: { at: stdin, description: "The text, in Markdown." }
+  pr.review.request-changes:
+    description: "Request changes on the pull request this task is about."
+    class: write
+    forge: { base: [review] }
+    argv: [pr, review, "{git.change}", -R, "{git.base}", --request-changes, --body-file, "-"]
+    slots:
+      body: { at: stdin, description: "The text, in Markdown." }
+  pr.review.approve:
+    description: "Approve on the pull request this task is about."
+    class: write
+    forge: { base: [review] }
+    argv: [pr, review, "{git.change}", -R, "{git.base}", --approve, --body-file, "-"]
+    slots:
+      body: { at: stdin, description: "The text, in Markdown." }
+  pr.comment:
+    description: "Add a comment to the pull request this task is about."
+    class: write
+    forge: { base: [review] }
+    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      body: { at: stdin, description: "The text, in Markdown." }
+  issue.list:
+    description: "List issues in the repository this task is about."
+    class: read
+    forge: { base: [read] }
+    argv: [issue, list, -R, "{git.base}", "--state={state}"]
+    slots:
+      state: { at: option, enum: [open, closed, all], description: "Which issues to list." }
+  issue.status:
+    description: "Show the issues relevant to the signed-in account in this repository."
+    class: read
+    forge: { base: [read] }
+    argv: [issue, status, -R, "{git.base}"]
+  issue.view:
+    description: "View one issue."
+    class: read
+    forge: { base: [read] }
+    argv: [issue, view, "{number}", -R, "{git.base}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+  issue.create:
+    description: "Create an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, create, -R, "{git.base}", "--title={title}", --body-file, "-"]
+    slots:
+      title: { at: option, pattern: '[^\x00-\x1f\x7f]{1,128}', description: "The title, one line." }
+      body: { at: stdin, description: "The text, in Markdown." }
+  issue.comment:
+    description: "Add a comment to an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, comment, "{number}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      body: { at: stdin, description: "The text, in Markdown." }
+  issue.edit.title:
+    description: "Change an issue title."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, edit, "{number}", -R, "{git.base}", "--title={title}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      title: { at: option, pattern: '[^\x00-\x1f\x7f]{1,128}', description: "The title, one line." }
+  issue.edit.body:
+    description: "Replace an issue body."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, edit, "{number}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      body: { at: stdin, description: "The text, in Markdown." }
+  issue.edit.add-label:
+    description: "Add a label to an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, edit, "{number}", -R, "{git.base}", --add-label, "{label}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      label: { at: token, pattern: '[A-Za-z0-9][A-Za-z0-9 _.:/-]{0,49}', description: "The label name." }
+  issue.edit.remove-label:
+    description: "Remove a label from an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, edit, "{number}", -R, "{git.base}", --remove-label, "{label}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      label: { at: token, pattern: '[A-Za-z0-9][A-Za-z0-9 _.:/-]{0,49}', description: "The label name." }
+  issue.edit.add-assignee:
+    description: "Assign a user to an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, edit, "{number}", -R, "{git.base}", --add-assignee, "{login}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      login: { at: token, pattern: '[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?', description: "The GitHub login." }
+  issue.edit.remove-assignee:
+    description: "Unassign a user from an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, edit, "{number}", -R, "{git.base}", --remove-assignee, "{login}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+      login: { at: token, pattern: '[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?', description: "The GitHub login." }
+  issue.close:
+    description: "Close an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, close, "{number}", -R, "{git.base}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+  issue.reopen:
+    description: "Reopen an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, reopen, "{number}", -R, "{git.base}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+  issue.lock:
+    description: "Lock the conversation of an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, lock, "{number}", -R, "{git.base}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }
+  issue.unlock:
+    description: "Unlock the conversation of an issue."
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, unlock, "{number}", -R, "{git.base}"]
+    slots:
+      number: { at: token, pattern: '[1-9][0-9]{0,9}', description: "The issue number." }

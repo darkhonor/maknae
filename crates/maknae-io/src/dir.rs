@@ -36,7 +36,7 @@ fn kind_of_type(t: nix::dir::Type) -> Kind {
 }
 
 /// Map an `S_IFMT` to `Kind`, for the `d_type == DT_UNKNOWN` fallback.
-fn kind_of_mode(mode: u32) -> Kind {
+pub(crate) fn kind_of_mode(mode: u32) -> Kind {
     let fmt = mode & mode_bits(nix::libc::S_IFMT);
     if fmt == mode_bits(nix::libc::S_IFREG) {
         Kind::File

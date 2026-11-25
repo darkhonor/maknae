@@ -4504,6 +4504,7 @@ impl World {
     }
 
     fn tools(&self, body: &str) {
+        common::write_shipped_gh_grammar(&self.root);
         common::write_0640(&self.root.join(maknae_config::TOOLS_FILE), body);
         self.pdp.baseline().reload_from_file().unwrap();
     }

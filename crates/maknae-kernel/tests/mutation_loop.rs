@@ -1306,9 +1306,9 @@ fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
         },
         MutationScope::Directories { paths: Vec::new() },
     ] {
-        let smallest_grant = maknae_proto::encode_response(&maknae_proto::Response {
-            protocol_version: 0,
-            result: RespResult::Ok(Payload::MutationAttempt(MutationGrant {
+        let smallest_grant = maknae_proto::encode_response(&maknae_proto::Response::new(
+            0,
+            RespResult::Ok(Payload::MutationAttempt(MutationGrant {
                 id: MutationId {
                     session_id: 0,
                     intent_seq: 0,
@@ -1325,8 +1325,8 @@ fn largest_ack_fits_below_every_grant_encoding_lower_bound() {
                     categories: vec![],
                 },
             })),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap();
         assert!(
             largest_ack.len() < smallest_grant.len(),

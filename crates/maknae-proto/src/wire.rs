@@ -1494,11 +1494,43 @@ pub struct Request {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireAttr {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+    Set(Vec<String>),
+    List(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireObligation {
+    pub id: String,
+    pub params: std::collections::BTreeMap<String, WireAttr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Response {
     pub protocol_version: u16,
     pub result: RespResult,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_digest: Option<CatalogDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations: Option<Vec<WireObligation>>,
+}
+
+impl Response {
+    pub fn new(
+        protocol_version: u16,
+        result: RespResult,
+        catalog_digest: Option<CatalogDigest>,
+    ) -> Self {
+        Self {
+            protocol_version,
+            result,
+            catalog_digest,
+            obligations: None,
+        }
+    }
 }
 
 fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>, ProtoCodecError> {
@@ -1727,14 +1759,14 @@ mod tests {
 
     #[test]
     fn egress_unavailable_round_trips() {
-        let resp = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Err(ProtoError {
+        let resp = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Err(ProtoError {
                 code: ProtoErrCode::EgressUnavailable,
                 message: EGRESS_UNAVAILABLE_MESSAGE.into(),
             }),
-            catalog_digest: None,
-        };
+            None,
+        );
         let mut buf = Vec::new();
         ciborium::into_writer(&resp, &mut buf).unwrap();
         let back: Response = ciborium::from_reader(&buf[..]).unwrap();
@@ -1743,14 +1775,14 @@ mod tests {
 
     #[test]
     fn protected_round_trips_with_its_list_and_entry() {
-        let resp = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Err(ProtoError {
+        let resp = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Err(ProtoError {
                 code: ProtoErrCode::Protected,
                 message: protected_message(HOST_SENSITIVE_LIST, "~/.ssh/**"),
             }),
-            catalog_digest: None,
-        };
+            None,
+        );
         let mut buf = Vec::new();
         ciborium::into_writer(&resp, &mut buf).unwrap();
         let back: Response = ciborium::from_reader(&buf[..]).unwrap();
@@ -1773,14 +1805,14 @@ mod tests {
     #[test]
     fn reply_unusable_round_trips_for_every_defect() {
         for d in ReplyDefect::ALL {
-            let resp = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Err(ProtoError {
+            let resp = Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Err(ProtoError {
                     code: ProtoErrCode::ReplyUnusable(d),
                     message: REPLY_UNUSABLE_MESSAGE.into(),
                 }),
-                catalog_digest: None,
-            };
+                None,
+            );
             let mut buf = Vec::new();
             ciborium::into_writer(&resp, &mut buf).unwrap();
             let back: Response = ciborium::from_reader(&buf[..]).unwrap();
@@ -1806,14 +1838,14 @@ mod tests {
             ]
         );
         for d in BoardDefect::ALL {
-            let resp = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Err(ProtoError {
+            let resp = Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Err(ProtoError {
                     code: ProtoErrCode::BoardRefused(d),
                     message: board_refused_message(d).into(),
                 }),
-                catalog_digest: None,
-            };
+                None,
+            );
             let mut buf = Vec::new();
             ciborium::into_writer(&resp, &mut buf).unwrap();
             let back: Response = ciborium::from_reader(&buf[..]).unwrap();
@@ -1822,9 +1854,9 @@ mod tests {
     }
 
     fn status(kernel_graph: Option<(u64, String)>) -> Response {
-        Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Status(StatusView {
+        Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::Status(StatusView {
                 version: "v".into(),
                 protocol_version: PROTOCOL_VERSION,
                 listener: "/run/maknae.sock".into(),
@@ -1838,8 +1870,8 @@ mod tests {
                 identity_sync: vec![],
                 containment: vec![],
             })),
-            catalog_digest: None,
-        }
+            None,
+        )
     }
 
     #[test]
@@ -1924,11 +1956,11 @@ mod tests {
             principal: true,
             ..entry.clone()
         };
-        let r = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::SubjectList(vec![entry, agent, principal])),
-            catalog_digest: None,
-        };
+        let r = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::SubjectList(vec![entry, agent, principal])),
+            None,
+        );
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
 
@@ -2006,17 +2038,17 @@ mod tests {
 
     #[test]
     fn a_baseline_payload_round_trips() {
-        let r = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Baseline(BaselineView {
+        let r = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::Baseline(BaselineView {
                 source: "root-file".into(),
                 hash: "ab".repeat(32),
                 state: "pending".into(),
                 apply: "live".into(),
                 changes: vec!["principal.uid: 1000 -> 1001".into()],
             })),
-            catalog_digest: None,
-        };
+            None,
+        );
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
     }
 
@@ -2085,11 +2117,11 @@ mod tests {
                 completion_tokens: None,
             }),
         };
-        let bytes = encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::PromptReply(r.clone())),
-            catalog_digest: None,
-        })
+        let bytes = encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::PromptReply(r.clone())),
+            None,
+        ))
         .unwrap();
         let RespResult::Ok(Payload::PromptReply(back)) = decode_response(&bytes).unwrap().result
         else {
@@ -2102,11 +2134,11 @@ mod tests {
             tool_calls: vec![],
             usage: None,
         };
-        let bytes = encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::PromptReply(none)),
-            catalog_digest: None,
-        })
+        let bytes = encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::PromptReply(none)),
+            None,
+        ))
         .unwrap();
         assert!(!bytes.windows(5).any(|w| w == b"usage"));
     }
@@ -2234,15 +2266,15 @@ mod tests {
 
     #[test]
     fn stat_returns_size_mtime_and_kind_only() {
-        let reply = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Stat(StatView {
+        let reply = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::Stat(StatView {
                 size: 161,
                 mtime_secs: -2,
                 kind: StatKind::Symlink,
             })),
-            catalog_digest: None,
-        };
+            None,
+        );
         let encoded = encode_response(&reply).unwrap();
         assert_eq!(decode_response(&encoded).unwrap(), reply);
         let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
@@ -2269,15 +2301,15 @@ mod tests {
             StatKind::Symlink,
             StatKind::Other,
         ] {
-            let reply = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::Stat(StatView {
+            let reply = Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Ok(Payload::Stat(StatView {
                     size: 0,
                     mtime_secs: 0,
                     kind,
                 })),
-                catalog_digest: None,
-            };
+                None,
+            );
             assert_eq!(
                 decode_response(&encode_response(&reply).unwrap()).unwrap(),
                 reply
@@ -2359,14 +2391,14 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert!(decode_list_chunk(&trailing).is_err());
-        let grant = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ListGrant(crate::ListGrant {
+        let grant = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ListGrant(crate::ListGrant {
                 entries: vec![entry("b-161", true)],
                 truncated: true,
             })),
-            catalog_digest: None,
-        };
+            None,
+        );
         let encoded = encode_response(&grant).unwrap();
         assert_eq!(decode_response(&encoded).unwrap(), grant);
         let value: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
@@ -2380,11 +2412,11 @@ mod tests {
             .collect();
         keys.sort();
         assert_eq!(keys, ["entries", "truncated"]);
-        let more = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ListContinue),
-            catalog_digest: None,
-        };
+        let more = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ListContinue),
+            None,
+        );
         assert_eq!(
             decode_response(&encode_response(&more).unwrap()).unwrap(),
             more
@@ -2607,16 +2639,16 @@ mod tests {
 
     #[test]
     fn prompt_reply_payload_round_trips_and_redacts() {
-        let resp = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::PromptReply(PromptReply {
+        let resp = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::PromptReply(PromptReply {
                 reasoning: None,
                 tool_calls: vec![],
                 blocks: vec![text("hi there")],
                 usage: None,
             })),
-            catalog_digest: None,
-        };
+            None,
+        );
         let bytes = encode_response(&resp).unwrap();
         assert_eq!(decode_response(&bytes).unwrap(), resp);
         assert!(!format!("{resp:?}").contains("hi there"));
@@ -2771,11 +2803,7 @@ mod tests {
                 categories: vec![],
             },
         });
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(grant),
-            catalog_digest: None,
-        };
+        let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(grant), None);
         assert_eq!(
             decode_response(&encode_response(&response).unwrap()).unwrap(),
             response
@@ -2796,14 +2824,14 @@ mod tests {
     }
     #[test]
     fn response_round_trips() {
-        let r = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Whoami(WhoamiView {
+        let r = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::Whoami(WhoamiView {
                 peer_plane_uri_san: Some("spiffe://d/plane/cli".into()),
                 peer_uid: 501,
             })),
-            catalog_digest: None,
-        };
+            None,
+        );
         let bytes = encode_response(&r).unwrap();
         match decode_response(&bytes).unwrap().result {
             RespResult::Ok(Payload::Whoami(w)) => {
@@ -2833,11 +2861,7 @@ mod tests {
     }
     #[test]
     fn decode_response_rejects_wrong_version() {
-        let r = Response {
-            protocol_version: 999,
-            result: RespResult::Ok(Payload::Pong),
-            catalog_digest: None,
-        };
+        let r = Response::new(999, RespResult::Ok(Payload::Pong), None);
         let bytes = {
             let mut b = Vec::new();
             ciborium::into_writer(&r, &mut b).unwrap();
@@ -2913,14 +2937,14 @@ mod tests {
 
         #[test]
         fn too_large_code_round_trips() {
-            let r = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Err(ProtoError {
+            let r = Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Err(ProtoError {
                     code: ProtoErrCode::TooLarge,
                     message: "resource too large".into(),
                 }),
-                catalog_digest: None,
-            };
+                None,
+            );
             match decode_response(&encode_response(&r).unwrap())
                 .unwrap()
                 .result
@@ -3020,9 +3044,9 @@ mod tests {
         #[test]
         fn encode_response_zeroizing_carries_content_and_does_not_grow() {
             let content = "a".repeat(1000);
-            let r = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::PromptReply(PromptReply {
+            let r = Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Ok(Payload::PromptReply(PromptReply {
                     reasoning: None,
                     blocks: vec![ContentBlock::Text {
                         text: SecretText(zeroize::Zeroizing::new(content.clone())),
@@ -3030,8 +3054,8 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                 })),
-                catalog_digest: None,
-            };
+                None,
+            );
             let cap = 1000 + 1024;
             let buf = encode_response_zeroizing(&r, cap).unwrap();
             // Pre-sizing held: no realloc means capacity is exactly what we asked.
@@ -3680,11 +3704,11 @@ mod tests {
             target_uid: Some(1003),
             revision: Some(12),
         };
-        let r = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Containment(view.clone())),
-            catalog_digest: None,
-        };
+        let r = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::Containment(view.clone())),
+            None,
+        );
         assert_eq!(decode_response(&encode_response(&r).unwrap()).unwrap(), r);
         let mut b = Vec::new();
         ciborium::into_writer(&view, &mut b).unwrap();
@@ -3927,12 +3951,9 @@ mod tests {
                     .collect(),
                 next: Some(cid()),
             });
-            let resp = encode_response(&Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(page),
-                catalog_digest: None,
-            })
-            .unwrap();
+            let resp =
+                encode_response(&Response::new(PROTOCOL_VERSION, RespResult::Ok(page), None))
+                    .unwrap();
             assert!(
                 resp.len() <= crate::frame::CONTROL_RESPONSE_MAX,
                 "{}",
@@ -4254,11 +4275,11 @@ mod tests {
                     categories: vec![],
                 },
             };
-            let bytes = encode_response(&Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::MutationAttempt(grant)),
-                catalog_digest: None,
-            })
+            let bytes = encode_response(&Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Ok(Payload::MutationAttempt(grant)),
+                None,
+            ))
             .unwrap();
             assert!(bytes.len() <= ATTEMPT_RESPONSE_MAX);
         }
@@ -4552,11 +4573,11 @@ mod tests {
         }
         assert!(!posts.is_empty());
         assert!(posts.len() < crate::BOARD_READ_PAGE_POSTS);
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::BoardPage(crate::BoardPage { posts, more: true })),
-            catalog_digest: Some(CatalogDigest([0xff; 32])),
-        };
+        let response = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::BoardPage(crate::BoardPage { posts, more: true })),
+            Some(CatalogDigest([0xff; 32])),
+        );
         let bytes = encode_response(&response).unwrap();
         assert!(
             bytes.len() <= crate::prompt_response_cap(PROMPT_MAX_BYTES_FLOOR),
@@ -4584,11 +4605,7 @@ mod tests {
                 more: false,
             }),
         ] {
-            let response = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(payload),
-                catalog_digest: None,
-            };
+            let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), None);
             let bytes = encode_response(&response).unwrap();
             assert!(bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX);
             assert_eq!(decode_response(&bytes).unwrap(), response);
@@ -4643,11 +4660,11 @@ mod tests {
 
     #[test]
     fn a_max_size_catalog_reply_fits_the_control_frame() {
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ToolCatalog(catalog_view(TOOL_CATALOG_MAX_BYTES))),
-            catalog_digest: Some(CatalogDigest([0xa5; 32])),
-        };
+        let response = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ToolCatalog(catalog_view(TOOL_CATALOG_MAX_BYTES))),
+            Some(CatalogDigest([0xa5; 32])),
+        );
         let bytes = encode_response(&response).unwrap();
         assert!(
             bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX,
@@ -4669,13 +4686,13 @@ mod tests {
         assert_eq!(back, catalog_view(TOOL_CATALOG_MAX_BYTES));
         let over = encode(TOOL_CATALOG_MAX_BYTES + 1);
         assert!(ciborium::from_reader::<ToolCatalogReply, _>(over.as_slice()).is_err());
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ToolCatalog(catalog_view(
+        let response = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ToolCatalog(catalog_view(
                 TOOL_CATALOG_MAX_BYTES + 1,
             ))),
-            catalog_digest: None,
-        };
+            None,
+        );
         let bytes = encode_response(&response).unwrap();
         assert!(decode_response(&bytes).is_err());
     }
@@ -4687,11 +4704,7 @@ mod tests {
             b's', b'i', b'o', b'n', 0x01, 0x66, b'r', b'e', b's', b'u', b'l', b't', 0xa1, 0x62,
             b'O', b'k', 0x64, b'P', b'o', b'n', b'g',
         ];
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::Pong),
-            catalog_digest: None,
-        };
+        let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(Payload::Pong), None);
         assert_eq!(encode_response(&response).unwrap(), pinned.to_vec());
         assert_eq!(decode_response(&pinned).unwrap(), response);
     }
@@ -4734,11 +4747,11 @@ mod tests {
 
     #[test]
     fn a_response_with_a_digest_round_trips() {
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::TaskIdle),
-            catalog_digest: Some(CatalogDigest([0x3c; 32])),
-        };
+        let response = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::TaskIdle),
+            Some(CatalogDigest([0x3c; 32])),
+        );
         let bytes = encode_response(&response).unwrap();
         assert_eq!(decode_response(&bytes).unwrap(), response);
         let value: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
@@ -4749,6 +4762,77 @@ mod tests {
             .find(|(k, _)| k.as_text() == Some("catalog_digest"))
             .map(|(_, v)| v.clone());
         assert_eq!(digest, Some(ciborium::Value::Bytes(vec![0x3c; 32])));
+    }
+
+    fn launch_obligations() -> Vec<WireObligation> {
+        let params = std::collections::BTreeMap::from([
+            (
+                "argv".to_string(),
+                WireAttr::List(vec!["pr".into(), "view".into()]),
+            ),
+            ("forge.base".to_string(), WireAttr::Set(vec!["read".into()])),
+            ("mode".to_string(), WireAttr::Str("shape".into())),
+            ("subject.uid".to_string(), WireAttr::Int(1000)),
+            ("verified".to_string(), WireAttr::Bool(true)),
+        ]);
+        vec![
+            WireObligation {
+                id: "tool.launch".into(),
+                params,
+            },
+            WireObligation {
+                id: "workspace.mask".into(),
+                params: std::collections::BTreeMap::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn response_with_obligations_round_trips() {
+        let response = Response {
+            obligations: Some(launch_obligations()),
+            ..Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Ok(Payload::TaskIdle),
+                Some(CatalogDigest([0x3c; 32])),
+            )
+        };
+        let bytes = encode_response(&response).unwrap();
+        assert_eq!(decode_response(&bytes).unwrap(), response);
+        let bare = Response::new(PROTOCOL_VERSION, RespResult::Ok(Payload::TaskIdle), None);
+        assert_eq!(bare.obligations, None);
+        let bare_bytes = encode_response(&bare).unwrap();
+        assert!(!bare_bytes
+            .windows(b"obligations".len())
+            .any(|w| w == b"obligations"));
+        assert_eq!(decode_response(&bare_bytes).unwrap(), bare);
+    }
+
+    #[test]
+    fn pre_change_response_type_decodes_a_frame_with_obligations() {
+        #[derive(Debug, Deserialize)]
+        struct PreChangeResponse {
+            protocol_version: u16,
+            result: RespResult,
+            #[serde(default)]
+            catalog_digest: Option<CatalogDigest>,
+        }
+        let response = Response {
+            obligations: Some(launch_obligations()),
+            ..Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Ok(Payload::Pong),
+                Some(CatalogDigest([0x11; 32])),
+            )
+        };
+        let bytes = encode_response(&response).unwrap();
+        assert!(bytes
+            .windows(b"obligations".len())
+            .any(|w| w == b"obligations"));
+        let old: PreChangeResponse = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(old.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(old.result, RespResult::Ok(Payload::Pong));
+        assert_eq!(old.catalog_digest, Some(CatalogDigest([0x11; 32])));
     }
 
     #[test]

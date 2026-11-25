@@ -459,6 +459,7 @@ pub struct PolicyPaths {
     pub bindings: PathBuf,
     pub sensitive: PathBuf,
     pub config_dir: PathBuf,
+    pub grammar_vendor: PathBuf,
 }
 
 impl PolicyPaths {
@@ -468,7 +469,13 @@ impl PolicyPaths {
             bindings: dir.join(maknae_config::BINDINGS_FILE),
             sensitive: dir.join(maknae_config::SENSITIVE_FILE),
             config_dir: dir.to_path_buf(),
+            grammar_vendor: PathBuf::from(maknae_config::VENDOR_GRAMMAR_DIR),
         }
+    }
+
+    pub fn with_grammar_vendor(mut self, vendor: impl Into<PathBuf>) -> Self {
+        self.grammar_vendor = vendor.into();
+        self
     }
 
     fn agent_policy(&self, id: &str) -> PathBuf {
@@ -533,6 +540,7 @@ struct Parts {
     bindings: maknae_config::Bindings,
     sensitive: Arc<maknae_config::SensitiveList>,
     tools: Arc<maknae_config::ToolsCatalog>,
+    grammars: Arc<maknae_config::GrammarSet>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -554,6 +562,7 @@ pub struct PolicySource {
     bindings: maknae_config::Bindings,
     sensitive: Arc<maknae_config::SensitiveList>,
     tools: Arc<maknae_config::ToolsCatalog>,
+    grammars: Arc<maknae_config::GrammarSet>,
     lookups: Lookups,
     lookup: NssLookup,
     hosts: HostLookups,
@@ -586,12 +595,16 @@ impl PolicySource {
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
         let sensitive = maknae_config::load_host_sensitive(&paths.sensitive)
             .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let tools = maknae_config::load_host_tools(&paths.config_dir).map_err(tools_load_error)?;
+        let grammars = maknae_config::load_grammars(&paths.config_dir, &paths.grammar_vendor)
+            .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let tools = maknae_config::ToolsCatalog::load(&paths.config_dir, &grammars)
+            .map_err(tools_load_error)?;
         Self::resolved_from(
             policy,
             bindings,
             sensitive,
             tools,
+            grammars,
             agents,
             lookup_uid,
             HostLookups::HOST,
@@ -630,10 +643,18 @@ impl PolicySource {
         let sensitive =
             maknae_config::load_host_sensitive_with_requirement(&paths.sensitive, req.clone())
                 .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
-        let tools = maknae_config::load_tools_with_requirement(&paths.config_dir, req)
-            .map_err(tools_load_error)?;
+        let grammars = maknae_config::load_grammars_with_requirement(
+            &paths.config_dir,
+            &paths.grammar_vendor,
+            maknae_config::GrammarRequirement::from_member(req.clone()),
+        )
+        .map_err(|e| AuthzBasicError::Load(e.to_string()))?;
+        let tools =
+            maknae_config::ToolsCatalog::load_with_requirement(&paths.config_dir, req, &grammars)
+                .map_err(tools_load_error)?;
         Self::resolved_from(
-            policy, bindings, sensitive, tools, agents, lookup_uid, hosts, principal, paths,
+            policy, bindings, sensitive, tools, grammars, agents, lookup_uid, hosts, principal,
+            paths,
         )
     }
 
@@ -643,6 +664,7 @@ impl PolicySource {
         bindings: maknae_config::Bindings,
         sensitive: maknae_config::SensitiveList,
         tools: maknae_config::ToolsCatalog,
+        grammars: maknae_config::GrammarSet,
         agents: maknae_config::AgentsLoad,
         lookup: NssLookup,
         hosts: HostLookups,
@@ -656,6 +678,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::new(sensitive),
             tools: Arc::new(tools),
+            grammars: Arc::new(grammars),
             lookups,
             lookup,
             hosts,
@@ -715,6 +738,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::new(maknae_config::SensitiveList::empty()),
             tools: Arc::new(maknae_config::ToolsCatalog::empty()),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             lookups,
             lookup: lookup_uid,
             hosts,
@@ -744,7 +768,12 @@ impl PolicySource {
             .iter()
             .chain(&self.agents.problems)
             .cloned()
-            .chain(tool_problems(&self.policy, &self.agents, &self.tools))
+            .chain(tool_problems(
+                &self.policy,
+                &self.agents,
+                &self.tools,
+                &self.grammars,
+            ))
             .collect()
     }
 
@@ -754,6 +783,7 @@ impl PolicySource {
             bindings,
             sensitive,
             tools,
+            grammars,
             lookups,
             lookup,
             hosts,
@@ -784,13 +814,14 @@ impl PolicySource {
             .iter()
             .chain(&agents.problems)
             .cloned()
-            .chain(tool_problems(&policy, &agents, &tools))
+            .chain(tool_problems(&policy, &agents, &tools, &grammars))
             .collect();
         Ok(Self {
             policy,
             bindings,
             sensitive,
             tools,
+            grammars,
             lookups,
             lookup,
             hosts,
@@ -821,6 +852,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::clone(&self.sensitive),
             tools: Arc::clone(&self.tools),
+            grammars: Arc::clone(&self.grammars),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -862,6 +894,7 @@ impl PolicySource {
             bindings,
             sensitive: Arc::clone(&self.sensitive),
             tools: Arc::clone(&self.tools),
+            grammars: Arc::clone(&self.grammars),
             lookups,
             lookup: self.lookup,
             hosts: self.hosts,
@@ -901,6 +934,10 @@ impl PolicySource {
 
     pub fn tools(&self) -> &Arc<maknae_config::ToolsCatalog> {
         &self.tools
+    }
+
+    pub fn grammars(&self) -> &maknae_config::GrammarSet {
+        &self.grammars
     }
 
     pub fn principal(&self) -> &maknae_config::Principal {
@@ -1034,8 +1071,9 @@ impl PolicySource {
     }
 
     /// `authz.yaml`'s top-level sections, `"bindings"` from `bindings.yaml` when it has
-    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml` (its
-    /// authored document, disabled entries included), `"agents.<id>"` for each enrolled
+    /// the key, `"sensitive"` from `sensitive.yaml`, `"tools"` from `tools.yaml`, its `tools.d/`
+    /// drop-ins and the grammars its enabled entries name (authored documents, disabled
+    /// entries included), `"agents.<id>"` for each enrolled
     /// agent's `policy.yaml` and `"agents.<id>#tasks-right"` for every enrolled agent,
     /// each canonical JSON through the caller's digest, by key.
     pub fn section_digests(
@@ -1074,19 +1112,46 @@ fn tool_problems(
     policy: &maknae_config::AuthzPolicy,
     agents: &AgentOutcome,
     tools: &maknae_config::ToolsCatalog,
+    grammars: &maknae_config::GrammarSet,
 ) -> Vec<IdentityProblem> {
-    let disabled = tools
-        .disabled()
+    let grammar_files = grammars
+        .disabled
         .iter()
         .map(|d| IdentityProblem::ToolEntryDisabled {
-            entry: d.entry.clone(),
+            entry: format!("{}/{}", maknae_config::GRAMMARS_DIR, d.file),
             reason: d.reason.clone(),
         });
+    let grammar_shapes = grammars.grammars.iter().flat_map(|(program, g)| {
+        g.disabled
+            .iter()
+            .map(move |(shape, reason)| IdentityProblem::ToolEntryDisabled {
+                entry: format!("{}/{program}.yaml#{shape}", maknae_config::GRAMMARS_DIR),
+                reason: reason.clone(),
+            })
+    });
+    let disabled = grammar_files
+        .chain(grammar_shapes)
+        .chain(
+            tools
+                .disabled()
+                .iter()
+                .map(|d| IdentityProblem::ToolEntryDisabled {
+                    entry: d.entry.clone(),
+                    reason: d.reason.clone(),
+                }),
+        );
     let subjects = policy.subjects.iter().filter_map(|(name, s)| {
         Some((
             format!("subjects.{name}.permissions"),
             s.permissions.as_ref()?,
         ))
+    });
+    let roles = policy.action_grants.iter().map(|(role, g)| {
+        (
+            format!("roles.{role}.permissions"),
+            (g.permissions.deny(), g.permissions.deny_sources()),
+            (g.permissions.allow(), g.permissions.allow_sources()),
+        )
     });
     let agent_lists = agents
         .load
@@ -1104,14 +1169,20 @@ fn tool_problems(
         (&policy.deny[..], policy.deny_sources()),
         (&policy.allow[..], policy.allow_sources()),
     ));
+    type Listed<'p> = (&'p [maknae_config::Pattern], &'p [String]);
+    fn own(
+        (section, p): (String, &maknae_config::SubjectPermissions),
+    ) -> (String, Listed<'_>, Listed<'_>) {
+        (
+            section,
+            (&p.deny[..], p.deny_sources()),
+            (&p.allow[..], p.allow_sources()),
+        )
+    }
     let lists = site
-        .chain(subjects.chain(agent_lists).map(|(section, p)| {
-            (
-                section,
-                (&p.deny[..], p.deny_sources()),
-                (&p.allow[..], p.allow_sources()),
-            )
-        }))
+        .chain(subjects.map(own))
+        .chain(roles)
+        .chain(agent_lists.map(own))
         .flat_map(|(section, deny, allow)| {
             [
                 (format!("{section}.deny"), deny.0, deny.1),
@@ -1127,10 +1198,35 @@ fn tool_problems(
                 match pattern {
                     maknae_config::Pattern::Tool(t) => match tools.entry(&t.entry) {
                         None => Some(IdentityProblem::ToolGrantUnknownEntry { source }),
-                        Some(e) if !e.commands.contains_key(&t.program) => {
-                            Some(IdentityProblem::ToolGrantUnknownProgram { source })
-                        }
-                        Some(_) => None,
+                        Some(e) => match e.commands.get(&t.program) {
+                            None => Some(IdentityProblem::ToolGrantUnknownProgram { source }),
+                            Some(command) => match (&t.target, &command.form) {
+                                (
+                                    maknae_config::ToolTarget::Shape(pattern),
+                                    maknae_config::CommandForm::Grammar { shapes, .. },
+                                ) if !shapes.keys().any(|name| pattern.matches(name)) => {
+                                    Some(IdentityProblem::ToolGrantUnknownShape { source })
+                                }
+                                (
+                                    maknae_config::ToolTarget::Shape(_),
+                                    maknae_config::CommandForm::Positional(_)
+                                    | maknae_config::CommandForm::Open,
+                                ) => Some(IdentityProblem::ToolGrantUnknownShape { source }),
+                                (
+                                    maknae_config::ToolTarget::Args(_),
+                                    maknae_config::CommandForm::Grammar { .. },
+                                ) => Some(IdentityProblem::ToolGrantFormMismatch { source }),
+                                (
+                                    maknae_config::ToolTarget::Shape(_),
+                                    maknae_config::CommandForm::Grammar { .. },
+                                )
+                                | (
+                                    maknae_config::ToolTarget::Args(_),
+                                    maknae_config::CommandForm::Positional(_)
+                                    | maknae_config::CommandForm::Open,
+                                ) => None,
+                            },
+                        },
                     },
                     maknae_config::Pattern::Read(_) | maknae_config::Pattern::Write(_) => None,
                 }
@@ -2022,6 +2118,19 @@ impl HermeticAuthorizer {
         *self.hosts.write().unwrap_or_else(PoisonError::into_inner) = hosts;
     }
 
+    /// [`Self::compile_from_file`] with `tool.invoke` in `roles`' action grants, as the
+    /// decision core's tests inject it; it becomes grantable with its Verb in #479.
+    pub fn compile_granting_tool_invoke(
+        &self,
+        roles: &[&str],
+    ) -> Result<Arc<Snapshot>, AuthzBasicError> {
+        let compiled = Arc::try_unwrap(self.compile_from_file()?)
+            .map_err(|_| AuthzBasicError::Load("the compiled snapshot is shared".into()))?;
+        Ok(Arc::new(roles.iter().fold(compiled, |snap, role| {
+            snap.granting_action(role, "tool.invoke")
+        })))
+    }
+
     /// [`Self::compile_from_file`] then install; an `Err` leaves the old snapshot.
     pub fn reload_from_file(&self) -> Result<(), AuthzBasicError> {
         let next = self.compile_from_file()?;
@@ -2747,6 +2856,7 @@ mod tests {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
             tools: Default::default(),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             policy,
             bindings,
             lookups,
@@ -2764,6 +2874,18 @@ mod tests {
 
     fn paths() -> PolicyPaths {
         PolicyPaths::in_dir(Path::new(DIR))
+    }
+
+    #[test]
+    fn grammar_vendor_defaults_per_os_and_is_overridable() {
+        assert_eq!(
+            paths().grammar_vendor,
+            PathBuf::from(maknae_config::VENDOR_GRAMMAR_DIR)
+        );
+        assert_eq!(
+            paths().with_grammar_vendor("/v").grammar_vendor,
+            PathBuf::from("/v")
+        );
     }
 
     fn source_with(authz: &str, bindings: Option<&str>, uids: &[(&str, u32)]) -> PolicySource {
@@ -2850,6 +2972,7 @@ mod tests {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
             tools: Default::default(),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             policy: parse(EMPTY),
             bindings: bound(
                 "schema_version: 1\nbindings:\n  admin: [\"alice\"]\n  user: [\"ghost\"]\n",
@@ -3090,6 +3213,10 @@ mod tests {
         resource.insert(
             maknae_security::RESOURCE_BINDING_KINDS,
             AttrValue::Set(Default::default()),
+        );
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_POSITIONAL.into()),
         );
         maknae_security::Request {
             subject: Subject(subject),
@@ -5026,6 +5153,7 @@ mod tests {
         PolicySource::from_lookups(Parts {
             sensitive: Default::default(),
             tools: Default::default(),
+            grammars: Arc::new(maknae_config::GrammarSet::empty()),
             policy,
             bindings,
             lookups,
@@ -5693,6 +5821,117 @@ mod tests {
     }
 
     #[test]
+    fn grant_naming_a_disabled_shape_is_inert_with_a_warning() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n").unwrap(),
+        );
+        let text = "schema_version: 1\ntools:\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n      sh: { open: true }\n      cargo: { subcommands: [\"build *\"] }\n";
+        let catalog = maknae_config::ToolsCatalog::parse_with(text, &grammars).unwrap();
+        assert!(catalog.disabled().is_empty(), "{:?}", catalog.disabled());
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-shape gh:pr.view)\", \"Tool(sentinel-674-shape gh:pr.*)\", \"Tool(sentinel-674-shape gh:*)\", \"Tool(sentinel-674-shape gh:issue.list)\", \"Tool(sentinel-674-shape gh:issue.*)\", \"Tool(sentinel-674-shape gh:pr)\", \"Tool(sentinel-674-shape sh:x)\", \"Tool(sentinel-674-shape cargo:x)\", \"Tool(sentinel-674-shape glab:x)\", \"Tool(sentinel-674-gone gh:pr.view)\"]\n  deny: [\"Tool(sentinel-674-shape gh:issue.close)\"]\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-shape gh:renamed.*)\", \"Tool(sentinel-674-shape gh:pr.view)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(catalog);
+        let shapes = |problems: &[IdentityProblem]| -> Vec<String> {
+            problems
+                .iter()
+                .filter_map(|p| match p {
+                    IdentityProblem::ToolGrantUnknownShape { source } => Some(source.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let expected = [
+            "permissions.deny Tool(sentinel-674-shape gh:issue.close)",
+            "permissions.allow Tool(sentinel-674-shape gh:issue.list)",
+            "permissions.allow Tool(sentinel-674-shape gh:issue.*)",
+            "permissions.allow Tool(sentinel-674-shape gh:pr)",
+            "permissions.allow Tool(sentinel-674-shape sh:x)",
+            "permissions.allow Tool(sentinel-674-shape cargo:x)",
+            "subjects.ursula.permissions.allow Tool(sentinel-674-shape gh:renamed.*)",
+        ];
+        assert_eq!(shapes(src.identity_problems()), expected);
+        let snap = compiled(&src);
+        assert_eq!(shapes(snap.identity_problems()), expected);
+        let others: Vec<_> = snap
+            .identity_problems()
+            .iter()
+            .filter(|p| !matches!(p, IdentityProblem::ToolGrantUnknownShape { .. }))
+            .collect();
+        assert!(
+            others.iter().all(|p| matches!(
+                p,
+                IdentityProblem::ToolGrantUnknownEntry { .. }
+                    | IdentityProblem::ToolGrantUnknownProgram { .. }
+            )),
+            "{others:?}"
+        );
+        assert_eq!(others.len(), 2, "{others:?}");
+    }
+
+    #[test]
+    fn an_argument_pattern_on_a_grammar_program_is_reported_in_either_list() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+        );
+        let text = "schema_version: 1\ntools:\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n      sh: { open: true }\n      cargo: { subcommands: [\"build *\"] }\n";
+        let catalog = maknae_config::ToolsCatalog::parse_with(text, &grammars).unwrap();
+        let authz = "schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-shape gh pr view)\", \"Tool(sentinel-674-shape sh -c *)\", \"Tool(sentinel-674-shape cargo build *)\"]\n  deny: [\"Tool(sentinel-674-shape gh pr review *)\", \"Tool(sentinel-674-shape gh *)\"]\nroles:\n  user:\n    permissions:\n      deny: [\"Tool(sentinel-674-shape gh pr *)\"]\n";
+        let src = source_with(authz, None, &[]).with_tools(catalog);
+        let expected = [
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "permissions.deny Tool(sentinel-674-shape gh pr review *)".into(),
+            },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "permissions.deny Tool(sentinel-674-shape gh *)".into(),
+            },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "permissions.allow Tool(sentinel-674-shape gh pr view)".into(),
+            },
+            IdentityProblem::ToolGrantFormMismatch {
+                source: "roles.user.permissions.deny Tool(sentinel-674-shape gh pr *)".into(),
+            },
+        ];
+        assert_eq!(src.identity_problems(), expected);
+        assert_eq!(compiled(&src).identity_problems()[..], expected);
+    }
+
+    #[test]
+    fn role_tool_grants_are_scanned_like_every_other_list() {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view]\n").unwrap(),
+        );
+        let text = "schema_version: 1\ntools:\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n";
+        let catalog = maknae_config::ToolsCatalog::parse_with(text, &grammars).unwrap();
+        let authz = "schema_version: 1\nsubjects:\n  ursula:\n    permissions:\n      allow: [\"Tool(sentinel-674-gone-subject x y)\"]\nroles:\n  admin:\n    permissions:\n      deny: [\"Tool(sentinel-674-gone-admin x y)\"]\n  user:\n    permissions:\n      allow: [\"Tool(sentinel-674-shape gh:pr.view)\", \"Tool(sentinel-674-shape gh:renamed)\", \"Tool(sentinel-674-shape glab x)\"]\n      deny: [\"Tool(sentinel-674-gone x y)\"]\n";
+        let src = source_with(authz, None, &[("ursula", 1001)]).with_tools(catalog);
+        let expected = [
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "subjects.ursula.permissions.allow Tool(sentinel-674-gone-subject x y)"
+                    .into(),
+            },
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "roles.admin.permissions.deny Tool(sentinel-674-gone-admin x y)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownEntry {
+                source: "roles.user.permissions.deny Tool(sentinel-674-gone x y)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownShape {
+                source: "roles.user.permissions.allow Tool(sentinel-674-shape gh:renamed)".into(),
+            },
+            IdentityProblem::ToolGrantUnknownProgram {
+                source: "roles.user.permissions.allow Tool(sentinel-674-shape glab x)".into(),
+            },
+        ];
+        assert_eq!(src.identity_problems(), expected);
+        assert_eq!(compiled(&src).identity_problems()[..], expected);
+    }
+
+    #[test]
     fn a_failed_credential_class_is_reported_under_its_qualified_name() {
         let text = "schema_version: 1\ncredential_classes:\n  sentinel-674-class:\n    kind: sentinel-674-nope\n";
         let src = source_with(SHIPPED, None, &[]).with_tools(tools(text));
@@ -5754,6 +5993,7 @@ mod tests {
                 bindings: "/x/bindings.yaml".into(),
                 sensitive: "/x/sensitive.yaml".into(),
                 config_dir: "/x".into(),
+                grammar_vendor: maknae_config::VENDOR_GRAMMAR_DIR.into(),
             }
         );
     }
@@ -6201,6 +6441,31 @@ mod tests {
             assert_eq!(auth.snapshot().agent_uid("hobi"), Some(2001));
         }
 
+        #[test]
+        fn compile_granting_tool_invoke_grants_only_the_named_roles() {
+            let fx = Fixture::new("grant_tool_invoke");
+            write(&fx.policy(), EMPTY);
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            let action = |snap: &Snapshot, role: &str| {
+                snap.loaded()
+                    .action_grants
+                    .evaluate3_action(role, "tool.invoke")
+            };
+            let granted = auth.compile_granting_tool_invoke(&["user"]).unwrap();
+            assert_eq!(
+                action(&granted, "user"),
+                maknae_config::Match3::AllowMatch {
+                    source: "tool.invoke".into()
+                }
+            );
+            for role in ["admin", "guest"] {
+                assert_eq!(action(&granted, role), maknae_config::Match3::NoMatch);
+            }
+            let plain = auth.compile_from_file().unwrap();
+            assert_eq!(action(&plain, "user"), maknae_config::Match3::NoMatch);
+        }
+
         const EMPTY_SENSITIVE: &str = "schema_version: 1\nsensitive: []\n";
 
         fn fixture_req() -> maknae_config::TargetRequired {
@@ -6245,7 +6510,7 @@ mod tests {
             }
 
             fn paths(&self) -> PolicyPaths {
-                PolicyPaths::in_dir(&self.0)
+                PolicyPaths::in_dir(&self.0).with_grammar_vendor(self.0.join("vendor"))
             }
 
             fn bind(&self, role: &str) {
@@ -6275,6 +6540,158 @@ mod tests {
 
         fn write_tools(fx: &Fixture, body: &str) {
             write(&fx.0.join(maknae_config::TOOLS_FILE), body);
+        }
+
+        const GH_GRAMMAR: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2.105.0\", date: 2026-11-24 }\nshapes:\n  pr.view:\n    description: View a pull request.\n    class: read\n    argv: [pr, view]\n";
+        const GH_ENTRY: &str = "schema_version: 1\ntools:\n  sentinel-674-gh:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      gh: { grammar: gh, shapes: [pr.view] }\n";
+
+        fn write_grammar(fx: &Fixture, name: &str, body: &str) {
+            let dir = fx.0.join(maknae_config::GRAMMARS_DIR);
+            if !dir.exists() {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
+            write(&dir.join(name), body);
+        }
+
+        fn write_dropin(fx: &Fixture, name: &str, body: &str) {
+            let dir = fx.0.join(maknae_config::TOOLS_DROPIN_DIR);
+            if !dir.exists() {
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+            }
+            write(&dir.join(name), body);
+        }
+
+        fn loaded(fx: &Fixture) -> PolicySource {
+            PolicySource::load_with_requirement(fx.paths(), principal(), fixture_req()).unwrap()
+        }
+
+        fn tools_digest(fx: &Fixture) -> [u8; 32] {
+            loaded(fx).section_digests(super::stand_in_digest)["tools"]
+        }
+
+        fn policy_fixture(tag: &str) -> Fixture {
+            let fx = Fixture::new(tag);
+            write(&fx.policy(), EMPTY);
+            fx.bind("admin");
+            fx
+        }
+
+        #[test]
+        fn tools_digest_changes_with_a_dropin() {
+            let fx = policy_fixture("digest_dropin");
+            write_tools(&fx, TOOLS_ONE);
+            let alone = tools_digest(&fx);
+            write_dropin(&fx, "a.yaml", "schema_version: 1\n");
+            let empty_dropin = tools_digest(&fx);
+            assert_ne!(alone, empty_dropin);
+            write_dropin(&fx, "a.yaml", "schema_version:    1\n\n");
+            assert_eq!(tools_digest(&fx), empty_dropin);
+            write_dropin(
+                &fx,
+                "a.yaml",
+                &TOOLS_ONE.replace("sentinel-674-one", "sentinel-674-two"),
+            );
+            let with_entry = tools_digest(&fx);
+            assert_ne!(with_entry, empty_dropin);
+            let src = loaded(&fx);
+            assert!(src.tools().entry("sentinel-674-two").is_some());
+            assert!(src.tools().entry("sentinel-674-one").is_some());
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert!(auth.snapshot().tools().entry("sentinel-674-two").is_some());
+        }
+
+        #[test]
+        fn tools_digest_changes_with_an_enabled_grammar() {
+            let fx = policy_fixture("digest_grammar");
+            write_tools(&fx, GH_ENTRY);
+            let without = loaded(&fx);
+            assert!(without.tools().entry("sentinel-674-gh").is_none());
+            write_grammar(&fx, "gh.yaml", GH_GRAMMAR);
+            let src = loaded(&fx);
+            assert!(src.grammars().grammars.contains_key("gh"));
+            assert!(src.tools().entry("sentinel-674-gh").is_some());
+            let first = tools_digest(&fx);
+            assert_ne!(
+                first,
+                without.section_digests(super::stand_in_digest)["tools"]
+            );
+            write_grammar(
+                &fx,
+                "gh.yaml",
+                &GH_GRAMMAR.replace("View a pull request.", "Show a pull request."),
+            );
+            assert_ne!(tools_digest(&fx), first);
+            let auth = HermeticAuthorizer::new(fx.paths(), principal(), fixture_req(), test_digest)
+                .unwrap();
+            assert!(auth.snapshot().tools().entry("sentinel-674-gh").is_some());
+        }
+
+        #[test]
+        fn tools_digest_ignores_a_grammar_no_entry_names() {
+            let fx = policy_fixture("digest_unnamed");
+            write_tools(&fx, TOOLS_ONE);
+            let before = tools_digest(&fx);
+            write_grammar(&fx, "gh.yaml", GH_GRAMMAR);
+            assert!(loaded(&fx).grammars().grammars.contains_key("gh"));
+            assert_eq!(tools_digest(&fx), before);
+            let off = GH_ENTRY.replace(
+                "  sentinel-674-gh:\n",
+                "  sentinel-674-gh:\n    enabled: false\n",
+            );
+            write_tools(&fx, &off);
+            let off_digest = tools_digest(&fx);
+            write_grammar(
+                &fx,
+                "gh.yaml",
+                &GH_GRAMMAR.replace("View a pull request.", "Show a pull request."),
+            );
+            assert_eq!(tools_digest(&fx), off_digest);
+        }
+
+        #[test]
+        fn disabled_grammars_and_shapes_are_identity_problems() {
+            let fx = policy_fixture("grammar_problems");
+            write_grammar(
+                &fx,
+                "gh.yaml",
+                "schema_version: 1\nprogram: sentinel-674-other\n",
+            );
+            write_grammar(
+                &fx,
+                "git.yaml",
+                "schema_version: 1\nprogram: git\ntested: { version: \"1\", date: d }\nshapes:\n  st:\n    description: Status.\n    class: read\n    argv: [status]\n  sentinel-674-bad:\n    description: Bad.\n    class: sentinel-674-nope\n    argv: [x]\n",
+            );
+            write_tools(&fx, GH_ENTRY);
+            let src = loaded(&fx);
+            let problems: Vec<(String, String)> = src
+                .identity_problems()
+                .iter()
+                .map(|p| match p {
+                    IdentityProblem::ToolEntryDisabled { entry, reason } => {
+                        (entry.clone(), reason.clone())
+                    }
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(problems.len(), 3, "{problems:?}");
+            assert_eq!(problems[0].0, "grammars/gh.yaml");
+            assert!(problems[0].1.contains("sentinel-674-other"), "{problems:?}");
+            assert_eq!(problems[1].0, "grammars/git.yaml#sentinel-674-bad");
+            assert!(problems[1].1.contains("sentinel-674-nope"), "{problems:?}");
+            assert_eq!(problems[2].0, "sentinel-674-gh");
+            assert!(
+                problems[2].1.contains("grammar `gh` is disabled"),
+                "{problems:?}"
+            );
+            assert_eq!(
+                src.grammars().disabled[0].file,
+                "gh.yaml",
+                "{:?}",
+                src.grammars()
+            );
         }
 
         #[test]

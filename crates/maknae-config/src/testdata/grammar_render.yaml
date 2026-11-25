@@ -1,0 +1,42 @@
+
+schema_version: 1
+program: gh
+tested: { version: "2.105.0", date: 2026-11-24 }
+shapes:
+  pr.comment:
+    description: Comment.
+    class: write
+    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      body: { at: stdin, description: b }
+  issue.list:
+    description: List.
+    class: read
+    argv: [issue, list, -R, "{git.base}", "--state={state}"]
+    slots:
+      state: { at: option, enum: [open, closed, all], description: s }
+  issue.view:
+    description: View.
+    class: read
+    argv: [issue, view, "{number}"]
+    slots:
+      number: { at: token, pattern: "[1-9][0-9]{0,9}", description: n }
+  issue.edit:
+    description: Edit.
+    class: write
+    argv: [issue, edit, "{number}", "--title={title}"]
+    slots:
+      number: { at: token, enum: ["1", "2"], description: n }
+      title: { at: option, description: t }
+  issue.file:
+    description: File.
+    class: write
+    argv: [issue, create, --body-file, "{body}"]
+    slots:
+      body: { at: file, description: b }
+  issue.word:
+    description: Word.
+    class: read
+    argv: [search, "{word}"]
+    slots:
+      word: { at: token, pattern: ".*", description: w }

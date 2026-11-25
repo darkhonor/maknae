@@ -237,11 +237,7 @@ async fn answer<S: AsyncWrite + Unpin>(
     caps: crate::mutation::AttemptCaps,
     result: RespResult,
 ) -> bool {
-    match maknae_proto::encode_response(&Response {
-        protocol_version: PROTOCOL_VERSION,
-        result,
-        catalog_digest: None,
-    }) {
+    match maknae_proto::encode_response(&Response::new(PROTOCOL_VERSION, result, None)) {
         Ok(bytes) if bytes.len() <= caps.response && tokio::time::Instant::now() < deadline => {
             matches!(
                 tokio::time::timeout_at(
@@ -527,11 +523,11 @@ mod tests {
         let page = lister.page();
         assert!(page.truncated, "the next permitted entry exists");
         assert!(page.entries.len() < LIST_RELEASE_MAX);
-        let encoded = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ListGrant(page.clone())),
-            catalog_digest: None,
-        })
+        let encoded = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ListGrant(page.clone())),
+            None,
+        ))
         .unwrap();
         assert!(encoded.len() <= cap, "{} bytes", encoded.len());
         let last = page.entries.last().unwrap().name.clone();
@@ -596,11 +592,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_answer_is_written_only_before_its_deadline_and_within_its_frame() {
         let caps = crate::mutation::AttemptCaps::default();
-        let exact = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ListContinue),
-            catalog_digest: None,
-        })
+        let exact = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ListContinue),
+            None,
+        ))
         .unwrap()
         .len();
         let later = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -679,14 +675,14 @@ mod tests {
                 dir: true,
             };
             let page = |entries: Vec<ListEntry>| {
-                maknae_proto::encode_response(&Response {
-                    protocol_version: PROTOCOL_VERSION,
-                    result: RespResult::Ok(Payload::ListGrant(ListGrant {
+                maknae_proto::encode_response(&Response::new(
+                    PROTOCOL_VERSION,
+                    RespResult::Ok(Payload::ListGrant(ListGrant {
                         entries,
                         truncated: false,
                     })),
-                    catalog_digest: None,
-                })
+                    None,
+                ))
                 .unwrap()
                 .len()
             };
@@ -706,14 +702,14 @@ mod tests {
                 dir: false,
             })
             .collect();
-        let size = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::ListGrant(ListGrant {
+        let size = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::ListGrant(ListGrant {
                 entries,
                 truncated: true,
             })),
-            catalog_digest: None,
-        })
+            None,
+        ))
         .unwrap()
         .len();
         size - (LIST_RELEASE_MAX + 1) * entry_bytes("e")

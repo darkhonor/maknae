@@ -1680,6 +1680,7 @@ fn catalog_rig(tag: &str, role: &str, tools: &str) -> Rig {
         &paths.bindings,
         &format!("schema_version: 1\nbindings:\n  {role}: [\"{name}\"]\n"),
     );
+    common::write_shipped_gh_grammar(&paths.config_dir);
     common::write_0640(&paths.config_dir.join(maknae_config::TOOLS_FILE), tools);
     rig
 }

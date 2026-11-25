@@ -1,0 +1,19 @@
+
+schema_version: 1
+program: gh
+tested: { version: "2.105.0", date: 2026-11-24 }
+shapes:
+  pr.comment:
+    description: Add a comment to the pull request this task is about.
+    class: write
+    forge: { base: [review] }
+    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      body: { at: stdin, description: "The comment, in Markdown." }
+  issue.list:
+    description: List issues in the repository this task is about.
+    class: read
+    forge: { base: [read] }
+    argv: [issue, list, -R, "{git.base}", "--state={state}"]
+    slots:
+      state: { at: option, enum: [open, closed, all], description: Which issues to list. }

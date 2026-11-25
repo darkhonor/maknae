@@ -83,6 +83,12 @@ pub enum IdentityProblem {
     ToolGrantUnknownProgram {
         source: String,
     },
+    ToolGrantUnknownShape {
+        source: String,
+    },
+    ToolGrantFormMismatch {
+        source: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +154,8 @@ impl IdentityProblem {
             Self::ToolEntryDisabled { .. } => "tool_entry_disabled",
             Self::ToolGrantUnknownEntry { .. } => "tool_grant_unknown_entry",
             Self::ToolGrantUnknownProgram { .. } => "tool_grant_unknown_program",
+            Self::ToolGrantUnknownShape { .. } => "tool_grant_unknown_shape",
+            Self::ToolGrantFormMismatch { .. } => "tool_grant_form_mismatch",
         }
     }
 
@@ -158,7 +166,9 @@ impl IdentityProblem {
             | Self::AgentSkipped { .. }
             | Self::ToolEntryDisabled { .. }
             | Self::ToolGrantUnknownEntry { .. }
-            | Self::ToolGrantUnknownProgram { .. } => None,
+            | Self::ToolGrantUnknownProgram { .. }
+            | Self::ToolGrantUnknownShape { .. }
+            | Self::ToolGrantFormMismatch { .. } => None,
             Self::Contained { uid, .. }
             | Self::Unbound { uid, .. }
             | Self::CarriedForward { uid, .. }
@@ -184,9 +194,10 @@ impl IdentityProblem {
             Self::AgentSkipped { entry, .. } | Self::ToolEntryDisabled { entry, .. } => {
                 vec![entry.clone()]
             }
-            Self::ToolGrantUnknownEntry { source } | Self::ToolGrantUnknownProgram { source } => {
-                vec![source.clone()]
-            }
+            Self::ToolGrantUnknownEntry { source }
+            | Self::ToolGrantUnknownProgram { source }
+            | Self::ToolGrantUnknownShape { source }
+            | Self::ToolGrantFormMismatch { source } => vec![source.clone()],
             Self::PrincipalAdmin { .. } => Vec::new(),
         }
     }
@@ -212,7 +223,9 @@ impl IdentityProblem {
             | Self::AgentSkipped { .. }
             | Self::ToolEntryDisabled { .. }
             | Self::ToolGrantUnknownEntry { .. }
-            | Self::ToolGrantUnknownProgram { .. } => Vec::new(),
+            | Self::ToolGrantUnknownProgram { .. }
+            | Self::ToolGrantUnknownShape { .. }
+            | Self::ToolGrantFormMismatch { .. } => Vec::new(),
         }
     }
 }
@@ -283,7 +296,7 @@ impl std::fmt::Display for IdentityProblem {
             }
             Self::ToolEntryDisabled { entry, reason } => write!(
                 f,
-                "tools.yaml entry '{}' is disabled: {}",
+                "tool policy '{}' is disabled: {}",
                 shown(entry),
                 shown(reason)
             ),
@@ -295,6 +308,16 @@ impl std::fmt::Display for IdentityProblem {
             Self::ToolGrantUnknownProgram { source } => write!(
                 f,
                 "{} names a program its tool entry does not run; it has no effect",
+                shown(source)
+            ),
+            Self::ToolGrantUnknownShape { source } => write!(
+                f,
+                "{} names a shape its tool entry does not enable; it has no effect",
+                shown(source)
+            ),
+            Self::ToolGrantFormMismatch { source } => write!(
+                f,
+                "{} is an argument pattern for a program its tool entry runs by shape; as an allow it grants nothing, as a deny it matches each shape's rendered arguments",
                 shown(source)
             ),
         }
@@ -556,7 +579,9 @@ impl GraphBindings {
                 | IdentityProblem::AgentSkipped { .. }
                 | IdentityProblem::ToolEntryDisabled { .. }
                 | IdentityProblem::ToolGrantUnknownEntry { .. }
-                | IdentityProblem::ToolGrantUnknownProgram { .. } => continue,
+                | IdentityProblem::ToolGrantUnknownProgram { .. }
+                | IdentityProblem::ToolGrantUnknownShape { .. }
+                | IdentityProblem::ToolGrantFormMismatch { .. } => continue,
             });
         }
         if !self.explicit && out.is_empty() {
@@ -1043,7 +1068,7 @@ mod tests {
                 None,
                 vec!["sentinel-674-a,b"],
                 vec![],
-                "tools.yaml entry 'sentinel-674-a\\,b' is disabled: isolation is not a known mode",
+                "tool policy 'sentinel-674-a\\,b' is disabled: isolation is not a known mode",
             ),
             (
                 IdentityProblem::ToolGrantUnknownEntry {
@@ -1064,6 +1089,26 @@ mod tests {
                 vec!["agents/sentinel-674-y"],
                 vec![],
                 "agents/sentinel-674-y names a program its tool entry does not run; it has no effect",
+            ),
+            (
+                IdentityProblem::ToolGrantUnknownShape {
+                    source: "agents/sentinel-674-z".into(),
+                },
+                "tool_grant_unknown_shape",
+                None,
+                vec!["agents/sentinel-674-z"],
+                vec![],
+                "agents/sentinel-674-z names a shape its tool entry does not enable; it has no effect",
+            ),
+            (
+                IdentityProblem::ToolGrantFormMismatch {
+                    source: "agents/sentinel-674-w".into(),
+                },
+                "tool_grant_form_mismatch",
+                None,
+                vec!["agents/sentinel-674-w"],
+                vec![],
+                "agents/sentinel-674-w is an argument pattern for a program its tool entry runs by shape; as an allow it grants nothing, as a deny it matches each shape's rendered arguments",
             ),
         ];
         for (p, kind, uid, names, roles, text) in cases {

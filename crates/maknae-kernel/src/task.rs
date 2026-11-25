@@ -9435,13 +9435,11 @@ mod tests {
         assert!(sealed <= maknae_proto::TASK_BINDINGS_MAX_BYTES, "{sealed}");
         let me = Tasker::Uid(me());
         let accepted = store.status(&id_, &me).unwrap();
-        let body = maknae_proto::encode_response(&maknae_proto::Response {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskAccepted(
-                accepted.clone(),
-            )),
-            catalog_digest: None,
-        })
+        let body = maknae_proto::encode_response(&maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskAccepted(accepted.clone())),
+            None,
+        ))
         .unwrap();
         assert_eq!(
             maknae_proto::decode_response(&body).unwrap().result,
@@ -10635,7 +10633,7 @@ mod tests {
             b"sentinel-168c-sealed-forge-token-".repeat(5)
         }
         const APP: &str = "maknae-github-read";
-        const GRANT: &str = "Tool(github-read gh pr view *)";
+        const GRANT: &str = "Tool(github-read gh:pr.view)";
 
         type Answer = Box<dyn Fn(&ReachRequest) -> (Duration, Option<EgressSocketReply>) + Send>;
 
@@ -10778,6 +10776,7 @@ mod tests {
                 &g.0,
                 include_str!("../../../packaging/common/tools-homelab.yaml"),
             );
+            crate::test_fixtures::write_shipped_gh_grammar(&g.0);
             let site = format!(
                 "schema_version: 1\npermissions:\n  allow: [\"{GRANT}\"]\n  deny: []\nroles:\n  user:\n    allow: [\"session.task\"]\n"
             );
@@ -11555,9 +11554,9 @@ mod tests {
                 assert_eq!(from, seen);
                 assert_eq!(addendum.as_deref(), Some(&*signed), "{seen}");
                 assert_eq!(items.len(), 3 - seen as usize);
-                let response = maknae_proto::Response {
-                    protocol_version: maknae_proto::PROTOCOL_VERSION,
-                    result: maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskFollowUps(
+                let response = maknae_proto::Response::new(
+                    maknae_proto::PROTOCOL_VERSION,
+                    maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskFollowUps(
                         maknae_proto::TaskFollowUps {
                             task: maknae_proto::TaskRef::from_id(&id),
                             from,
@@ -11567,8 +11566,8 @@ mod tests {
                             )),
                         },
                     )),
-                    catalog_digest: Some(maknae_proto::CatalogDigest([0xff; 32])),
-                };
+                    Some(maknae_proto::CatalogDigest([0xff; 32])),
+                );
                 let len = maknae_proto::encode_response(&response).unwrap().len();
                 assert!(len <= maknae_proto::prompt_response_cap(text_max), "{len}");
             }

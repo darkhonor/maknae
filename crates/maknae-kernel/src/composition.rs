@@ -247,6 +247,18 @@ impl<B: Baseline> Composition<B> {
         &self,
         decide: impl FnOnce(&[&dyn Authorizer; 4], &Arc<maknae_config::SensitiveList>) -> R,
     ) -> R {
+        self.on_live_pinned(|ops, host, _| decide(ops, host))
+    }
+
+    /// [`Composition::on_live`], also handing over that snapshot's tools catalog.
+    fn on_live_pinned<R>(
+        &self,
+        decide: impl FnOnce(
+            &[&dyn Authorizer; 4],
+            &Arc<maknae_config::SensitiveList>,
+            &maknae_config::ToolsCatalog,
+        ) -> R,
+    ) -> R {
         let _turn = self.baseline.live_turn().share();
         let snap = self.baseline.snapshot();
         let base = OnSnapshot {
@@ -254,7 +266,11 @@ impl<B: Baseline> Composition<B> {
             snap: &snap,
         };
         let sensitive = SensitiveAuthorizer::new(snap.sensitive());
-        decide(&self.operands_with(&base, &sensitive), snap.sensitive())
+        decide(
+            &self.operands_with(&base, &sensitive),
+            snap.sensitive(),
+            snap.tools(),
+        )
     }
 }
 
@@ -264,6 +280,56 @@ impl<B: Baseline> crate::workspace::DecidesPinned for Composition<B> {
         reqs: &[Request],
     ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
         self.on_live(|ops, host| (compose_decide_cited_all(ops, reqs), Arc::clone(host)))
+    }
+
+    fn with_pinned<R>(&self, f: impl FnOnce(&dyn crate::workspace::PinnedPolicy) -> R) -> R {
+        self.on_live_pinned(|ops, host, tools| f(&PinnedView { ops, host, tools }))
+    }
+}
+
+/// The operands, host list and tools catalog of one live snapshot, captured once.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) struct PinnedView<'a> {
+    ops: &'a [&'a dyn Authorizer; 4],
+    host: &'a Arc<maknae_config::SensitiveList>,
+    tools: &'a maknae_config::ToolsCatalog,
+}
+
+impl crate::workspace::DecidesPinned for PinnedView<'_> {
+    fn decide_all_pinned(
+        &self,
+        reqs: &[Request],
+    ) -> (Vec<Decided>, Arc<maknae_config::SensitiveList>) {
+        (
+            compose_decide_cited_all(self.ops, reqs),
+            Arc::clone(self.host),
+        )
+    }
+
+    fn with_pinned<R>(&self, f: impl FnOnce(&dyn crate::workspace::PinnedPolicy) -> R) -> R {
+        f(self)
+    }
+}
+
+impl crate::workspace::PinnedPolicy for PinnedView<'_> {
+    fn tools(&self) -> &maknae_config::ToolsCatalog {
+        self.tools
+    }
+
+    fn decide(&self, req: &Request) -> Decided {
+        compose_decide_cited(self.ops, req)
+    }
+
+    fn mount(
+        &self,
+        subject: &crate::workspace::SubjectFacts<'_>,
+        root: &str,
+        mode: crate::workspace::MountMode,
+    ) -> crate::workspace::MountDecision {
+        subject.mount(self, root, mode)
     }
 }
 
@@ -989,6 +1055,7 @@ mod tests {
         }
         out.push_str(&tool_invoke_decisions());
         out.push_str(&workspace_mount_decisions());
+        out.push_str(&tool_launch_decisions());
         out.push_str(&board_decisions());
         out
     }
@@ -1177,7 +1244,7 @@ mod tests {
     const TOOL_SITE_POLICY: &str = concat!(
         "schema_version: 1\n",
         "permissions:\n",
-        "  allow: [\"Tool(github-read gh pr view *)\", \"Tool(rust-build cargo build *)\"]\n",
+        "  allow: [\"Tool(github-read gh:pr.view)\", \"Tool(rust-build cargo build *)\"]\n",
         "  deny: [\"Tool(rust-build cargo build --release *)\"]\n",
         "subjects:\n",
         "  operator:\n",
@@ -1210,6 +1277,7 @@ mod tests {
             &g.0,
             include_str!("../../../packaging/common/tools-homelab.yaml"),
         );
+        crate::test_fixtures::write_shipped_gh_grammar(&g.0);
         basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
         for (id, uid, policy) in [("hobi", 2001, Some(TOOL_AGENT_POLICY)), ("jin", 2002, None)] {
             crate::test_fixtures::write_agent(&g.0, id, &format!("{id}-svc"), uid, "user");
@@ -1290,6 +1358,7 @@ mod tests {
                     program: (*program).into(),
                     argv: argv.iter().map(|a| (*a).to_owned()).collect(),
                     bound: Vec::new(),
+                    shape: None,
                 };
                 let r = build_tool_request(
                     stamp,
@@ -1312,6 +1381,353 @@ mod tests {
                     maknae_security::finalize(d.verdict.clone())
                 ));
             }
+        }
+        out
+    }
+
+    fn tool_launch_decisions() -> String {
+        use crate::handler::{Stamp, TaskStamp};
+        use crate::tool_call::{decide_tool_call, CallInput, ToolCallDecision, ToolCallRequest};
+        use crate::workspace::SubjectFacts;
+        use maknae_proto::{Binding, GitBinding};
+        let (_g, c) = crate::test_fixtures::homelab_launch_composition("tool-launch-golden");
+        let git = |change: Option<u64>| {
+            vec![Binding::Git(GitBinding {
+                server: "github.com".into(),
+                base: "octo/repo".into(),
+                head: None,
+                change,
+            })]
+        };
+        let of = crate::test_fixtures::cited_task_of;
+        let hobi_task = of("hobi", 2001, git(Some(42)));
+        let jin_task = of("jin", 2002, git(Some(42)));
+        let changeless = of("hobi", 2001, git(None));
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let jin = maknae_config::AgentId::parse("jin").unwrap();
+        let hobi_stamp = TaskStamp::of(&hobi_task);
+        let jin_stamp = TaskStamp::of(&jin_task);
+        let changeless_stamp = TaskStamp::of(&changeless);
+        struct Who<'a> {
+            label: &'a str,
+            uid: u32,
+            home: &'a str,
+            stamp: Stamp<'a>,
+        }
+        let principal = Who {
+            label: "principal",
+            uid: nix::unistd::geteuid().as_raw(),
+            home: "/home/operator",
+            stamp: Stamp::Client,
+        };
+        let agent_hobi = |task| Who {
+            label: "agent hobi tasked",
+            uid: 2001,
+            home: "/var/lib/maknae-agents/hobi",
+            stamp: Stamp::Agent {
+                agent: &hobi,
+                task: Some(task),
+            },
+        };
+        let agent_jin = Who {
+            label: "agent jin tasked",
+            uid: 2002,
+            home: "/var/lib/maknae-agents/jin",
+            stamp: Stamp::Agent {
+                agent: &jin,
+                task: Some(&jin_stamp),
+            },
+        };
+        let shape = |entry: &str, name: &str, slots: &[(&str, &str)]| ToolCallRequest {
+            entry: entry.into(),
+            program: "gh".into(),
+            binding: None,
+            call: CallInput::Shape {
+                shape: name.into(),
+                slots: slots
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            },
+        };
+        let open = |entry: &str, program: &str, argv: &[&str]| ToolCallRequest {
+            entry: entry.into(),
+            program: program.into(),
+            binding: None,
+            call: CallInput::Open {
+                argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+            },
+        };
+        let shape_to = |entry: &str, program: &str, name: &str| {
+            let mut r = shape(entry, name, &[]);
+            r.program = program.into();
+            r
+        };
+        let hobi_who = agent_hobi(&hobi_stamp);
+        let changeless_who = agent_hobi(&changeless_stamp);
+        const SRV: &str = "/srv/work/x";
+        const HOBI_ROOT: &str = "/var/lib/maknae-agents/hobi/tasks/users/1000";
+        let body = [("body", "LGTM")];
+        let rows: Vec<(
+            &str,
+            &Who,
+            Option<&crate::task::CitedTask>,
+            ToolCallRequest,
+            &str,
+        )> = vec![
+            (
+                "role grant",
+                &principal,
+                None,
+                open("rust-scratch", "cargo", &["test", "--all"]),
+                SRV,
+            ),
+            (
+                "not granted",
+                &principal,
+                None,
+                open("rust-scratch", "cargo", &["doc"]),
+                SRV,
+            ),
+            (
+                "own policy grant",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-post", "pr.comment", &body),
+                HOBI_ROOT,
+            ),
+            (
+                "not granted",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-post", "pr.review.approve", &body),
+                HOBI_ROOT,
+            ),
+            (
+                "role deny over site allow",
+                &principal,
+                None,
+                open("rust-scratch", "cargo", &["build", "--offline"]),
+                SRV,
+            ),
+            (
+                "no role grant for an agent",
+                &agent_jin,
+                Some(&jin_task),
+                shape("github-post", "pr.comment", &body),
+                "/var/lib/maknae-agents/jin/tasks/users/1000",
+            ),
+            (
+                "shape not enabled in the ceiling",
+                &principal,
+                None,
+                shape("github-read", "pr.comment", &body),
+                SRV,
+            ),
+            (
+                "shape not in the grammar",
+                &principal,
+                None,
+                shape("github-issues-write", "issue.transfer", &[]),
+                SRV,
+            ),
+            (
+                "position invariant",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-issues-read", "issue.view", &[("number", "-1")]),
+                HOBI_ROOT,
+            ),
+            (
+                "enum",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-issues-read", "issue.list", &[("state", "merged")]),
+                HOBI_ROOT,
+            ),
+            (
+                "pattern",
+                &hobi_who,
+                Some(&hobi_task),
+                shape("github-issues-read", "issue.view", &[("number", "1e3")]),
+                HOBI_ROOT,
+            ),
+            (
+                "missing bound value",
+                &changeless_who,
+                Some(&changeless),
+                shape("github-post", "pr.comment", &body),
+                HOBI_ROOT,
+            ),
+            (
+                "open call",
+                &principal,
+                None,
+                open("rust-scratch", "cargo", &["build", "--release"]),
+                SRV,
+            ),
+            (
+                "open with a credential",
+                &principal,
+                None,
+                open("open-credential", "cargo", &["build"]),
+                SRV,
+            ),
+            (
+                "shape call to an open command",
+                &principal,
+                None,
+                shape_to("rust-scratch", "cargo", "pr.comment"),
+                SRV,
+            ),
+            (
+                "open call to a grammar command",
+                &principal,
+                None,
+                open("github-post", "gh", &["pr", "comment", "42"]),
+                SRV,
+            ),
+            (
+                "positional command, open call",
+                &principal,
+                None,
+                open("rust-build", "cargo", &["build"]),
+                SRV,
+            ),
+            (
+                "positional command, shape call",
+                &principal,
+                None,
+                shape_to("rust-build", "cargo", "build"),
+                SRV,
+            ),
+            (
+                "option slot with a leading dash",
+                &hobi_who,
+                Some(&hobi_task),
+                shape(
+                    "github-issues-write",
+                    "issue.edit.title",
+                    &[("number", "7"), ("title", "-x")],
+                ),
+                HOBI_ROOT,
+            ),
+            (
+                "open call in the task",
+                &hobi_who,
+                Some(&hobi_task),
+                open("rust-scratch", "cargo", &["build"]),
+                HOBI_ROOT,
+            ),
+            (
+                "mount outside the partition",
+                &hobi_who,
+                Some(&hobi_task),
+                open("rust-scratch", "cargo", &["build"]),
+                "/var/lib/maknae-agents/hobi/tasks/users/1001",
+            ),
+            (
+                "a person citing a task",
+                &principal,
+                Some(&hobi_task),
+                shape("github-post", "pr.comment", &body),
+                SRV,
+            ),
+            (
+                "a stamp whose task is not the cited task",
+                &hobi_who,
+                Some(&jin_task),
+                shape("github-post", "pr.comment", &body),
+                HOBI_ROOT,
+            ),
+        ];
+        let mut out = String::from(
+            "# tool.launch: decide_tool_call through the Composition, with the shipped gh grammar and tools-homelab.yaml, a site policy granting Tool(...) per site, role and agent, and role tool.invoke injected (grantable with #479). The stamp's task is the cited task: a person cites none. A Permit shows the permitting and mount rules, whether audit was honoured, the mask, the launch's digest and its call fields.\n",
+        );
+        let rule_of = |cited: &crate::workspace::Citation| {
+            cited.rule.as_ref().map(|c| {
+                let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                format!("{} in #{section}", c.key)
+            })
+        };
+        for (case, who, cited, req, root) in rows {
+            let task_id = cited.map(|c| c.signed.task.task_id.to_string());
+            let call = match &req.call {
+                CallInput::Shape { shape, slots } => format!("shape {shape} {slots:?}"),
+                CallInput::Open { argv } => format!("open {argv:?}"),
+            };
+            let head = format!(
+                "{} [{case}] {} {} {call} root={root}",
+                who.label, req.entry, req.program
+            );
+            let subject = SubjectFacts {
+                lane: maknae_security::Lane::Local,
+                uid: who.uid,
+                home: Some(std::path::Path::new(who.home)),
+                conversation: None,
+                personal: None,
+                stamp: &who.stamp,
+            };
+            let outcome = match decide_tool_call(&c, &subject, cited, req, root) {
+                ToolCallDecision::Refused { audit, wire, cited } => {
+                    format!(
+                        "Refused {audit:?} wire={wire:?} {:?} {:?}",
+                        cited.role,
+                        rule_of(&cited)
+                    )
+                }
+                ToolCallDecision::Permitted {
+                    obligations,
+                    cited,
+                    mount_cited,
+                    audited,
+                } => {
+                    use maknae_security::tool_launch as key;
+                    let mut shown = vec![
+                        format!("{:?} {:?}", cited.role, rule_of(&cited)),
+                        format!("mount={:?}", mount_cited.as_deref().map(rule_of)),
+                        format!("audited={audited}"),
+                    ];
+                    for ob in &obligations {
+                        let fields: &[&str] = if ob.id == crate::workspace::MASK {
+                            &[crate::workspace::PATTERNS]
+                        } else {
+                            &[
+                                key::MODE,
+                                key::SHAPE,
+                                key::ARGV,
+                                key::STDIN_SHA256,
+                                key::CREDENTIAL,
+                                key::WORKSPACE_MODE,
+                                key::WORKSPACE_ROOT,
+                                key::TASK,
+                                key::FORGE_BASE,
+                                key::FORGE_HEAD,
+                                key::GRAMMAR_SHA256,
+                                key::SHAPE_SHA256,
+                            ]
+                        };
+                        let params: Vec<String> = fields
+                            .iter()
+                            .filter_map(|k| {
+                                let v = ob.params.get(k)?;
+                                Some(match v {
+                                    maknae_security::AttrValue::Str(t)
+                                        if *k == key::TASK
+                                            && Some(t.as_str()) == task_id.as_deref() =>
+                                    {
+                                        format!("{k}=<cited task>")
+                                    }
+                                    _ => format!("{k}={v:?}"),
+                                })
+                            })
+                            .collect();
+                        shown.push(format!("{} {{{}}}", ob.id, params.join(", ")));
+                    }
+                    format!("Permitted {}", shown.join(" "))
+                }
+            };
+            out.push_str(&format!("{head} => {outcome}\n"));
         }
         out
     }
@@ -1571,6 +1987,7 @@ mod tests {
             program: "cargo".into(),
             argv: vec!["build".into()],
             bound: Vec::new(),
+            shape: None,
         };
         let host = maknae_config::SensitiveList::empty();
         let ceiling = ceiling(Ceiling::baseline_for(US));
@@ -1656,6 +2073,7 @@ mod tests {
                     .map(str::to_owned)
                     .to_vec(),
                 bound: Vec::new(),
+                shape: None,
             };
             let r = build_tool_request(
                 &Stamp::Agent {

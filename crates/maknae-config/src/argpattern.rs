@@ -54,7 +54,7 @@ impl Bound {
         self.0.insert(key.to_string(), value.to_string());
     }
 
-    fn get(&self, kind: &str, field: &str) -> Option<&str> {
+    pub(crate) fn get(&self, kind: &str, field: &str) -> Option<&str> {
         self.0.get(&format!("{kind}.{field}")).map(String::as_str)
     }
 }
@@ -145,6 +145,13 @@ impl ArgPattern {
             }
         }
         Ok(Self(tokens))
+    }
+
+    pub fn parse_grant(spec: &str) -> Result<Self, ArgPatternError> {
+        if spec == "*" {
+            return Ok(Self(vec![ArgToken::Rest]));
+        }
+        Self::parse(spec)
     }
 
     pub fn canonical(&self) -> String {

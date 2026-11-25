@@ -5,11 +5,15 @@ use crate::baseline_check::Env;
 use maknae_authz_basic::HermeticAuthorizer;
 use maknae_config::{
     BaselineSections, BasicPolicy, Ceiling, ClassificationPolicy, Document, Principal,
-    ReaderAccount, ReaderLookup,
+    ReaderAccount, ReaderLookup, ToolsCatalog,
 };
-use maknae_security::{Action, AttrValue, Attributes, Context, Request, Resource, Subject};
+use maknae_security::{
+    Action, AttrValue, Attributes, Context, Decided, Request, Resource, Subject,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use crate::workspace::{DecidesPinned, MountDecision, MountMode, PinnedPolicy, SubjectFacts};
 
 const US: &BasicPolicy = &BasicPolicy;
 
@@ -151,6 +155,51 @@ pub(crate) fn write_tools(dir: &Path, body: &str) {
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
 }
 
+/// The vendor grammar directory inside a [`fixture`]'s config dir.
+pub(crate) const VENDOR_DIR: &str = "vendor";
+
+fn policy_subdir(dir: &Path, name: &str, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let sub = dir.join(name);
+    if !sub.exists() {
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    sub
+}
+
+/// `<dir>/grammars/<name>`, a site's own grammar file.
+pub(crate) fn write_grammar(dir: &Path, name: &str, text: &str) {
+    write_0640(
+        &policy_subdir(dir, maknae_config::GRAMMARS_DIR, 0o750).join(name),
+        text,
+    );
+}
+
+/// Enables `<vendor_dir>/<name>` with a link in `<config_dir>/grammars/`.
+pub(crate) fn link_grammar(config_dir: &Path, vendor_dir: &Path, name: &str) {
+    std::os::unix::fs::symlink(
+        vendor_dir.join(name),
+        policy_subdir(config_dir, maknae_config::GRAMMARS_DIR, 0o750).join(name),
+    )
+    .unwrap();
+}
+
+pub(crate) fn write_shipped_gh_grammar(dir: &Path) {
+    write_grammar(
+        dir,
+        "gh.yaml",
+        include_str!("../../../packaging/common/grammars/gh.yaml"),
+    );
+}
+
+pub(crate) fn write_tools_dropin(dir: &Path, name: &str, text: &str) {
+    write_0640(
+        &policy_subdir(dir, maknae_config::TOOLS_DROPIN_DIR, 0o750).join(name),
+        text,
+    );
+}
+
 pub(crate) fn write_empty_sensitive(dir: &Path) {
     write_sensitive(dir, "schema_version: 1\nsensitive: []\n");
 }
@@ -198,7 +247,8 @@ pub(crate) fn fixture(
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let dir = dir.canonicalize().expect("canonicalize the fixture home");
-    let paths = maknae_authz_basic::PolicyPaths::in_dir(&dir);
+    let paths =
+        maknae_authz_basic::PolicyPaths::in_dir(&dir).with_grammar_vendor(dir.join(VENDOR_DIR));
     for (path, body) in [(&paths.authz, Some(policy)), (&paths.bindings, bindings)] {
         let Some(body) = body else { continue };
         std::fs::write(path, body).unwrap();
@@ -458,6 +508,24 @@ pub(crate) fn build_tool_request(
     call: &maknae_config::ToolCall,
     cited: Option<&crate::task::CitedTask>,
 ) -> maknae_security::Request {
+    let mode = match call.shape {
+        Some(_) => maknae_security::TOOL_MODE_SHAPE,
+        None => maknae_security::TOOL_MODE_POSITIONAL,
+    };
+    build_tool_request_in_mode(mode, stamp, peer_uid, home, lane, conversation, call, cited)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_tool_request_in_mode(
+    mode: &str,
+    stamp: &crate::handler::Stamp<'_>,
+    peer_uid: u32,
+    home: Option<&std::path::Path>,
+    lane: maknae_security::Lane,
+    conversation: Option<&crate::conversation::facts::ConversationFacts>,
+    call: &maknae_config::ToolCall,
+    cited: Option<&crate::task::CitedTask>,
+) -> maknae_security::Request {
     use maknae_security::{Action, AttrValue, Attributes, Context, Resource};
     let mut resource = Attributes::new();
     crate::handler::stamp_conversation(&mut resource, conversation);
@@ -477,6 +545,16 @@ pub(crate) fn build_tool_request(
         maknae_security::RESOURCE_BINDING_KINDS,
         AttrValue::Set(Default::default()),
     );
+    resource.insert(
+        maknae_security::RESOURCE_TOOL_MODE,
+        AttrValue::Str(mode.into()),
+    );
+    if let Some(shape) = &call.shape {
+        resource.insert(
+            maknae_security::RESOURCE_TOOL_SHAPE,
+            AttrValue::Str(shape.clone()),
+        );
+    }
     if let Some(cited) = cited {
         crate::handler::stamp_task_bindings(&mut resource, cited);
     }
@@ -490,8 +568,17 @@ pub(crate) fn build_tool_request(
 
 /// hobi's `Working` task, tasked by uid 1000 with `bindings`, as the store resolves it.
 pub(crate) fn cited_task(bindings: Vec<maknae_proto::Binding>) -> crate::task::CitedTask {
+    cited_task_of("hobi", 2001, bindings)
+}
+
+/// `agent`'s `Working` task, tasked by uid 1000 with `bindings`.
+pub(crate) fn cited_task_of(
+    agent: &str,
+    agent_uid: u32,
+    bindings: Vec<maknae_proto::Binding>,
+) -> crate::task::CitedTask {
     use crate::task::TaskObjectForTest;
-    let mut task = maknae_proto::TaskObject::for_test("hobi", 1000);
+    let mut task = maknae_proto::TaskObject::for_test(agent, 1000);
     task.bindings = bindings;
     let signed = maknae_proto::SignedTask {
         task,
@@ -503,9 +590,113 @@ pub(crate) fn cited_task(bindings: Vec<maknae_proto::Binding>) -> crate::task::C
         },
     };
     let store = crate::task::TaskStore::new();
-    let id = store.insert_for_test(signed, 2001).task.task_id;
+    let id = store.insert_for_test(signed, agent_uid).task.task_id;
     store.start_for_test(&id);
     store
-        .working(&id, &maknae_config::AgentId::parse("hobi").unwrap(), 2001)
+        .working(
+            &id,
+            &maknae_config::AgentId::parse(agent).unwrap(),
+            agent_uid,
+        )
         .unwrap()
+}
+
+pub(crate) const LAUNCH_SITE_POLICY: &str = concat!(
+    "schema_version: 1\n",
+    "permissions:\n",
+    "  allow: [\"Read(/srv/**)\", \"Write(/srv/**)\", \"Tool(github-post gh:pr.review.comment)\", \"Tool(github-read gh:pr.*)\", \"Tool(github-issues-read gh:issue.*)\", \"Tool(github-issues-write gh:issue.edit.title)\", \"Tool(rust-scratch cargo build *)\", \"Tool(rust-build cargo build *)\", \"Tool(open-credential cargo *)\"]\n",
+    "  deny: [\"Read(/**/.env)\"]\n",
+    "roles:\n",
+    "  admin:\n",
+    "    allow: [\"session.new\"]\n",
+    "    permissions:\n",
+    "      allow: [\"Tool(github-post gh:pr.comment)\", \"Tool(rust-scratch cargo test *)\"]\n",
+    "      deny: [\"Tool(github-post gh:pr.review.comment)\", \"Tool(rust-scratch cargo build --offline*)\"]\n",
+    "  user:\n",
+    "    allow: [\"session.new\"]\n",
+    "    permissions:\n",
+    "      allow: [\"Tool(github-post gh:pr.comment)\"]\n",
+);
+
+pub(crate) const LAUNCH_HOBI_POLICY: &str = concat!(
+    "schema_version: 1\n",
+    "permissions:\n",
+    "  allow: [\"Read(~/**)\", \"Write(~/**)\", \"Tool(github-post gh:pr.comment)\", \"Tool(github-issues-write gh:issue.edit.title)\", \"Tool(rust-scratch cargo *)\"]\n",
+);
+
+pub(crate) const LAUNCH_JIN_POLICY: &str = concat!(
+    "schema_version: 1\n",
+    "permissions:\n",
+    "  allow: [\"Read(~/**)\", \"Write(~/**)\"]\n",
+);
+
+pub(crate) const OPEN_CREDENTIAL_DROPIN: &str = concat!(
+    "schema_version: 1\n",
+    "tools:\n",
+    "  open-credential:\n",
+    "    executes_workspace: true\n",
+    "    image: { ref: \"ghcr.io/example/maknae-rust-build@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n",
+    "    output_to_model: redacted\n",
+    "    credential: github-read\n",
+    "    commands:\n",
+    "      cargo: { open: true }\n",
+);
+
+/// The shipped `gh` grammar and HomeLab `tools.yaml` under [`LAUNCH_SITE_POLICY`], agents hobi
+/// and jin, and the role `tool.invoke` test-injected for admin and user (grantable with #479).
+pub(crate) fn homelab_launch_composition(
+    tag: &str,
+) -> (
+    DirGuard,
+    crate::composition::Composition<HermeticAuthorizer>,
+) {
+    use maknae_authz_basic::Baseline;
+    let (g, basic) = fixture(tag, LAUNCH_SITE_POLICY, None);
+    write_sensitive(
+        &g.0,
+        include_str!("../../../packaging/common/sensitive.yaml"),
+    );
+    write_tools(
+        &g.0,
+        include_str!("../../../packaging/common/tools-homelab.yaml"),
+    );
+    write_shipped_gh_grammar(&g.0);
+    write_tools_dropin(&g.0, "open-credential.yaml", OPEN_CREDENTIAL_DROPIN);
+    basic.set_hosts(BTS_HOSTS);
+    for (id, uid, policy) in [
+        ("hobi", 2001, LAUNCH_HOBI_POLICY),
+        ("jin", 2002, LAUNCH_JIN_POLICY),
+    ] {
+        write_agent(&g.0, id, &format!("{id}-svc"), uid, "user");
+        write_agent_policy(&g.0, id, policy);
+    }
+    basic.install(
+        basic
+            .compile_granting_tool_invoke(&["admin", "user"])
+            .unwrap(),
+    );
+    (
+        g,
+        crate::composition::Composition::with_us_baseline_ceiling(basic),
+    )
+}
+
+/// A [`DecidesPinned`] with no snapshot of its own to pin: each call decides on its own.
+pub(crate) struct Unpinned<'a, P: DecidesPinned>(pub(crate) &'a P, pub(crate) &'a ToolsCatalog);
+
+impl<P: DecidesPinned> PinnedPolicy for Unpinned<'_, P> {
+    fn tools(&self) -> &ToolsCatalog {
+        self.1
+    }
+
+    fn decide(&self, req: &Request) -> Decided {
+        self.0
+            .decide_all_pinned(std::slice::from_ref(req))
+            .0
+            .swap_remove(0)
+    }
+
+    fn mount(&self, subject: &SubjectFacts<'_>, root: &str, mode: MountMode) -> MountDecision {
+        subject.mount(self.0, root, mode)
+    }
 }

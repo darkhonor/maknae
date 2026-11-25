@@ -1803,14 +1803,14 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                 close_bounded(&mut stream).await;
                 return;
             }
-            let response = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(Payload::ToolCatalog(maknae_proto::ToolCatalogReply {
+            let response = Response::new(
+                PROTOCOL_VERSION,
+                RespResult::Ok(Payload::ToolCatalog(maknae_proto::ToolCatalogReply {
                     digest: catalog.digest,
                     graph: maknae_proto::Bytes::new((*catalog.bytes).clone().into()),
                 })),
-                catalog_digest: None,
-            };
+                None,
+            );
             match encode_response(&response) {
                 Ok(bytes) => {
                     write_frame_bounded(
@@ -2371,11 +2371,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                     unreachable!("outer match routes unprepared operations")
                 }
             };
-            let response = Response {
-                protocol_version: PROTOCOL_VERSION,
-                result: RespResult::Ok(payload),
-                catalog_digest: None,
-            };
+            let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), None);
             // Bound the response write by read_timeout_ms (it doubles as the
             // write bound — both cap how long one peer may hold this permit).
             // UNCHANGED encoder for these payloads (#172 extracted the write
@@ -2789,11 +2785,11 @@ pub async fn handle_with_attempt_caps<S, E, P>(
                         // 5. within-cap: encode into a buffer that never grows
                         //    (no un-zeroized partial copies in freed heap).
                         let cap = crate::egress::reply_capacity(&reply);
-                        let response = Response {
-                            protocol_version: PROTOCOL_VERSION,
-                            result: RespResult::Ok(Payload::PromptReply(reply)),
-                            catalog_digest: None,
-                        };
+                        let response = Response::new(
+                            PROTOCOL_VERSION,
+                            RespResult::Ok(Payload::PromptReply(reply)),
+                            None,
+                        );
                         match encode_response_zeroizing(&response, cap) {
                             Ok(bytes) => {
                                 write_frame_bounded(
@@ -3268,11 +3264,7 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         if !may_respond(self.record_bounded(outcome).await) {
             return false;
         }
-        let response = Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(payload),
-            catalog_digest,
-        };
+        let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), catalog_digest);
         match encode_reply(&response) {
             Ok(bytes) => {
                 write_frame_bounded(
@@ -5607,14 +5599,14 @@ async fn write_error_bounded<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let response = Response {
-        protocol_version: PROTOCOL_VERSION,
-        result: RespResult::Err(ProtoError {
+    let response = Response::new(
+        PROTOCOL_VERSION,
+        RespResult::Err(ProtoError {
             code,
             message: msg.to_string(),
         }),
-        catalog_digest: None,
-    };
+        None,
+    );
     if let Ok(bytes) = encode_response(&response) {
         let _ = tokio::time::timeout(
             Duration::from_millis(cfg.read_timeout_ms),
@@ -6965,7 +6957,7 @@ impl BootCtx<'_> {
     }
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -25637,11 +25629,11 @@ mod reload_tests {
             ]
         );
         assert_eq!(page.next, None);
-        let encoded = maknae_proto::encode_response(&Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(maknae_proto::Payload::HeldTasks(page)),
-            catalog_digest: None,
-        })
+        let encoded = maknae_proto::encode_response(&Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(maknae_proto::Payload::HeldTasks(page)),
+            None,
+        ))
         .unwrap();
         assert!(!encoded
             .windows(HELD_PROMPT.len())
@@ -31240,11 +31232,11 @@ mod reply_encoding_tests {
                 },
             })
             .collect();
-        Response {
-            protocol_version: PROTOCOL_VERSION,
-            result: RespResult::Ok(Payload::BoardPage(BoardPage { posts, more: true })),
-            catalog_digest: None,
-        }
+        Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::BoardPage(BoardPage { posts, more: true })),
+            None,
+        )
     }
 
     #[test]

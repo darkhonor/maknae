@@ -677,11 +677,11 @@ pub(crate) mod fake {
                         Some(Scripted::Garbage) => vec![0xff, 0xff],
                         Some(Scripted::Answer(answer)) => {
                             let (result, catalog_digest) = *answer;
-                            maknae_proto::encode_response(&Response {
-                                protocol_version: maknae_proto::PROTOCOL_VERSION,
+                            maknae_proto::encode_response(&Response::new(
+                                maknae_proto::PROTOCOL_VERSION,
                                 result,
                                 catalog_digest,
-                            })
+                            ))
                             .unwrap()
                         }
                     };

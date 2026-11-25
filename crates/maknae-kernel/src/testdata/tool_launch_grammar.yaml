@@ -1,0 +1,20 @@
+schema_version: 1
+program: gh
+tested: { version: "2.105.0", date: 2026-11-24 }
+shapes:
+  pr.comment:
+    description: Comment.
+    class: write
+    forge: { base: [read, review], head: [push-head] }
+    argv: [pr, comment, "{git.change}", -R, "{git.base}", --body-file, "-"]
+    slots:
+      body: { at: stdin, description: b }
+  issue.create:
+    description: Create.
+    class: write
+    forge: { base: [issue-write] }
+    argv: [issue, create, "--title={title}", --notes, "{notes}", --body-file, "{body}"]
+    slots:
+      title: { at: option, description: t }
+      notes: { at: file, description: n }
+      body: { at: file, description: b }

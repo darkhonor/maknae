@@ -96,6 +96,8 @@ mod tests {
                 output: CatalogOutput::Redacted,
                 binds: vec![],
                 programs: vec![("git".into(), vec!["status".into()])],
+                open: vec![],
+                shapes: vec![],
             }],
             forges: vec![],
         })

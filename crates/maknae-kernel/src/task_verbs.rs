@@ -1017,16 +1017,14 @@ mod tests {
             cursor: TaskCursor::from_seq(u64::MAX),
         };
         let page = |entries: Vec<TaskReportView>| {
-            maknae_proto::encode_response(&maknae_proto::Response {
-                protocol_version: maknae_proto::PROTOCOL_VERSION,
-                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskReports(
-                    TaskReportPage {
-                        entries,
-                        next: Some(TaskCursor::from_seq(u64::MAX)),
-                    },
-                )),
-                catalog_digest: None,
-            })
+            maknae_proto::encode_response(&maknae_proto::Response::new(
+                maknae_proto::PROTOCOL_VERSION,
+                maknae_proto::RespResult::Ok(maknae_proto::Payload::TaskReports(TaskReportPage {
+                    entries,
+                    next: Some(TaskCursor::from_seq(u64::MAX)),
+                })),
+                None,
+            ))
             .unwrap()
             .len()
         };

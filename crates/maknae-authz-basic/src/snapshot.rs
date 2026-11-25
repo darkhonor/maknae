@@ -188,6 +188,18 @@ impl Snapshot {
         &self.loaded.sensitive
     }
 
+    #[cfg(all(unix, feature = "hermetic-test-seam"))]
+    pub(crate) fn granting_action(mut self, role: &str, term: &'static str) -> Self {
+        let (allow, _) = self
+            .loaded
+            .action_grants
+            .0
+            .entry(role.to_string())
+            .or_default();
+        allow.push((term, term.to_string()));
+        self
+    }
+
     /// `uid`'s tool catalog over this snapshot, built on first use and kept for its life.
     /// The cache is not keyed by `forges`: they are restart-only (ADR-0039).
     pub(crate) fn catalog_for(
@@ -510,6 +522,28 @@ pub fn compile(
                     let term_id = c.id_of(TERM, t)?;
                     c.add_edge(id, MATCHES, term_id);
                 }
+                c.add_edge(role_id, edge, id);
+            }
+        }
+        for (effect, entries) in [
+            (Effect::Deny, grants.permissions.deny_sources()),
+            (Effect::Allow, grants.permissions.allow_sources()),
+        ] {
+            let (edge, word) = effect_attrs(effect);
+            for (i, entry) in entries.iter().enumerate() {
+                let mut attrs = Attrs::new();
+                attrs.insert(ATTR_ENTRY.into(), AttrValue::Str(entry.clone()));
+                attrs.insert(ATTR_EFFECT.into(), AttrValue::Str(word.into()));
+                let id = c.rule(
+                    format!("rule:roles.{role}.permissions:{word}:{i}"),
+                    attrs,
+                    &sec,
+                    Cited::RolePath {
+                        role: role_key,
+                        effect,
+                        source: entry.clone(),
+                    },
+                );
                 c.add_edge(role_id, edge, id);
             }
         }
@@ -1045,9 +1079,10 @@ mod tests {
 
     #[test]
     fn shipped_policy_never_permits_tool_invoke() {
-        let catalog = maknae_config::ToolsCatalog::parse(include_str!(
-            "../../../packaging/common/tools-homelab.yaml"
-        ))
+        let catalog = maknae_config::ToolsCatalog::parse_with(
+            include_str!("../../../packaging/common/tools-homelab.yaml"),
+            &maknae_config::shipped_grammars(),
+        )
         .unwrap();
         let s = source_with(SHIPPED, Some(BINDINGS)).with_tools(catalog);
         let snap = snap(&s);
@@ -1163,6 +1198,49 @@ mod tests {
             .graph()
             .lookup(RULE, "rule:permissions:deny:1")
             .is_some());
+    }
+
+    #[test]
+    fn role_tool_grants_are_rule_nodes_in_the_roles_section() {
+        let s = source("schema_version: 1\nroles:\n  user:\n    permissions:\n      allow: [\"Tool(e p a *)\"]\n      deny: [\"Tool(e p a b)\"]\n");
+        let snap = snap(&s);
+        let g = snap.graph();
+        let user = g.lookup(ROLE, "user").unwrap();
+        for (effect, source, key, edge) in [
+            (
+                Effect::Deny,
+                "Tool(e p a b)",
+                "rule:roles.user.permissions:deny:0",
+                DENIES,
+            ),
+            (
+                Effect::Allow,
+                "Tool(e p a *)",
+                "rule:roles.user.permissions:allow:0",
+                PERMITS,
+            ),
+        ] {
+            let c = snap
+                .cite(&Cited::RolePath {
+                    role: "user",
+                    effect,
+                    source: source.into(),
+                })
+                .unwrap();
+            let rule = g.node(NodeId(c.node)).unwrap();
+            assert_eq!(rule.key, key);
+            assert_eq!(str_attr(rule, ATTR_ENTRY), Some(source));
+            assert_eq!(c.section, "/etc/maknae/authz.yaml#roles.user");
+            assert!(g.out_edges(user.id, edge).any(|e| e.to == rule.id));
+        }
+        assert_eq!(
+            snap.cite(&Cited::RolePath {
+                role: "admin",
+                effect: Effect::Allow,
+                source: "Tool(e p a *)".into(),
+            }),
+            None
+        );
     }
 
     #[test]

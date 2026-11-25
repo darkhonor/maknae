@@ -1003,11 +1003,11 @@ mod tests {
              rather than copying the new value"
         );
 
-        let r = maknae_proto::Response {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
-            catalog_digest: None,
-        };
+        let r = maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            None,
+        );
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(
             buf.capacity(),
@@ -1152,11 +1152,11 @@ mod tests {
         assert_eq!(admitted_reply(&reply), Ok(()));
         let cap = reply_capacity(&reply);
         assert!(cap <= maknae_config::PROMPT_MAX_BYTES_FLOOR);
-        let r = maknae_proto::Response {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
-            catalog_digest: None,
-        };
+        let r = maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            None,
+        );
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(buf.capacity(), cap);
         assert!(buf.len() <= cap);
@@ -1955,13 +1955,11 @@ mod tests {
                 usage: None,
             };
             let cap = reply_capacity(&reply);
-            let resp = maknae_proto::Response {
-                protocol_version: maknae_proto::PROTOCOL_VERSION,
-                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
-                    reply.clone(),
-                )),
-                catalog_digest: None,
-            };
+            let resp = maknae_proto::Response::new(
+                maknae_proto::PROTOCOL_VERSION,
+                maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply.clone())),
+                None,
+            );
             let buf = maknae_proto::encode_response_zeroizing(&resp, cap).unwrap();
             assert_eq!(
                 buf.capacity(),
@@ -2145,11 +2143,11 @@ mod tests {
         // USAGE_ENVELOPE 64 + FRAME_ENVELOPE_MARGIN 512.
         assert_eq!(cap, 576);
         let buf = maknae_proto::encode_response_zeroizing(
-            &maknae_proto::Response {
-                protocol_version: maknae_proto::PROTOCOL_VERSION,
-                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
-                catalog_digest: None,
-            },
+            &maknae_proto::Response::new(
+                maknae_proto::PROTOCOL_VERSION,
+                maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+                None,
+            ),
             cap,
         )
         .unwrap();
@@ -2161,9 +2159,9 @@ mod tests {
     fn the_usage_envelope_covers_the_widest_encoded_usage() {
         let encoded = |usage| {
             maknae_proto::encode_response_zeroizing(
-                &maknae_proto::Response {
-                    protocol_version: maknae_proto::PROTOCOL_VERSION,
-                    result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
+                &maknae_proto::Response::new(
+                    maknae_proto::PROTOCOL_VERSION,
+                    maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(
                         maknae_proto::PromptReply {
                             reasoning: None,
                             blocks: vec![],
@@ -2171,8 +2169,8 @@ mod tests {
                             usage,
                         },
                     )),
-                    catalog_digest: None,
-                },
+                    None,
+                ),
                 1 << 16,
             )
             .unwrap()
@@ -2501,11 +2499,11 @@ mod tests {
     }
 
     fn encodes_without_growing(reply: maknae_proto::PromptReply, cap: usize) {
-        let r = maknae_proto::Response {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
-            catalog_digest: None,
-        };
+        let r = maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            None,
+        );
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(buf.capacity(), cap, "encode grew the buffer");
         assert!(buf.len() <= cap, "encoded {} > capacity {cap}", buf.len());
@@ -2655,13 +2653,13 @@ mod tests {
             ..marked.clone()
         };
         let len = |c: &ProposedToolCall| {
-            maknae_proto::encode_response(&maknae_proto::Response {
-                protocol_version: maknae_proto::PROTOCOL_VERSION,
-                result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply_of(
-                    vec![c.clone()],
-                ))),
-                catalog_digest: None,
-            })
+            maknae_proto::encode_response(&maknae_proto::Response::new(
+                maknae_proto::PROTOCOL_VERSION,
+                maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply_of(vec![
+                    c.clone()
+                ]))),
+                None,
+            ))
             .unwrap()
             .len()
         };
@@ -2673,11 +2671,11 @@ mod tests {
         let id = "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES);
         let reply = reply_of((0..64).map(|_| stub_at(&id, u64::MAX)).collect());
         let cap = reply_capacity(&reply);
-        let r = maknae_proto::Response {
-            protocol_version: maknae_proto::PROTOCOL_VERSION,
-            result: maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
-            catalog_digest: None,
-        };
+        let r = maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::PromptReply(reply)),
+            None,
+        );
         let buf = maknae_proto::encode_response_zeroizing(&r, cap).unwrap();
         assert_eq!(buf.capacity(), cap);
     }

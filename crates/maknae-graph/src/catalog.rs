@@ -7,7 +7,7 @@ use crate::record::{
 use crate::schema::{CompiledSet, Schema};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 
 pub const ENTRY: NodeKind = NodeKind(1);
 pub const PROGRAM: NodeKind = NodeKind(2);
@@ -20,6 +20,7 @@ pub const RUNS: EdgeKind = EdgeKind(1);
 pub const GRANTED: EdgeKind = EdgeKind(2);
 pub const BINDS: EdgeKind = EdgeKind(3);
 pub const SERVED_BY: EdgeKind = EdgeKind(4);
+pub const HAS: EdgeKind = EdgeKind(5);
 
 pub const ATTR_DESCRIPTION: &str = "description";
 pub const ATTR_EXECUTES_WORKSPACE: &str = "executes_workspace";
@@ -27,6 +28,9 @@ pub const ATTR_OUTPUT: &str = "output";
 pub const ATTR_TEXT: &str = "text";
 pub const ATTR_HOST: &str = "host";
 pub const ATTR_PROVIDER: &str = "provider";
+pub const ATTR_OPEN: &str = "open";
+pub const ATTR_ACCESS: &str = "access";
+const SLOT_PREFIX: &str = "slot/";
 
 pub const SPACE: GraphSpace = GraphSpace::Shared;
 pub const REVISION: u64 = 0;
@@ -51,12 +55,14 @@ pub static SCHEMA: Schema = Schema {
         (GRANTED, "granted"),
         (BINDS, "binds"),
         (SERVED_BY, "served_by"),
+        (HAS, "has"),
     ],
     triples: &[
         (ENTRY, RUNS, PROGRAM),
         (PROGRAM, GRANTED, PATTERN),
         (ENTRY, BINDS, BINDING_KIND),
         (BINDING_KIND, SERVED_BY, FORGE),
+        (PROGRAM, HAS, SHAPE),
     ],
     compiled_kinds: &[],
     forbidden_targets: &[],
@@ -76,6 +82,139 @@ pub struct CatalogEntry {
     pub output: CatalogOutput,
     pub binds: Vec<String>,
     pub programs: Vec<(String, Vec<String>)>,
+    pub open: Vec<String>,
+    pub shapes: Vec<(String, Vec<CatalogShape>)>,
+}
+
+/// What a model may know of a shape: never its pattern, argv template or grammar digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogShape {
+    pub name: String,
+    pub description: String,
+    pub access: CatalogAccess,
+    pub slots: Vec<CatalogSlot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSlot {
+    pub name: String,
+    pub at: CatalogSlotAt,
+    pub members: Vec<String>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogAccess {
+    Read,
+    Write,
+}
+
+impl CatalogAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        [Self::Read, Self::Write]
+            .into_iter()
+            .find(|a| a.as_str() == s)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogSlotAt {
+    Token,
+    Option,
+    Stdin,
+    File,
+}
+
+impl CatalogSlotAt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Token => "token",
+            Self::Option => "option",
+            Self::Stdin => "stdin",
+            Self::File => "file",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        [Self::Token, Self::Option, Self::Stdin, Self::File]
+            .into_iter()
+            .find(|a| a.as_str() == s)
+    }
+}
+
+impl CatalogShape {
+    fn attrs(&self) -> Attrs {
+        let mut attrs = Attrs::from([
+            (
+                ATTR_DESCRIPTION.into(),
+                AttrValue::Str(self.description.clone()),
+            ),
+            (
+                ATTR_ACCESS.into(),
+                AttrValue::Str(self.access.as_str().into()),
+            ),
+        ]);
+        for slot in &self.slots {
+            let base = format!("{SLOT_PREFIX}{}", slot.name);
+            attrs.insert(
+                format!("{base}/at"),
+                AttrValue::Str(slot.at.as_str().into()),
+            );
+            attrs.insert(
+                format!("{base}/description"),
+                AttrValue::Str(slot.description.clone()),
+            );
+            for (i, member) in slot.members.iter().enumerate() {
+                attrs.insert(
+                    format!("{base}/member/{i:06}"),
+                    AttrValue::Str(member.clone()),
+                );
+            }
+        }
+        attrs
+    }
+
+    fn of(name: &str, attrs: &Attrs) -> Option<Self> {
+        type Partial = (Option<CatalogSlotAt>, Vec<String>, String);
+        let mut slots: BTreeMap<&str, Partial> = BTreeMap::new();
+        for (key, value) in attrs {
+            let Some(rest) = key.strip_prefix(SLOT_PREFIX) else {
+                continue;
+            };
+            let (slot, field) = rest.split_once('/')?;
+            let (at, members, description) = slots.entry(slot).or_default();
+            let text = str_of(Some(value))?;
+            match field {
+                "at" => *at = Some(CatalogSlotAt::parse(text)?),
+                "description" => *description = text.to_owned(),
+                member if member.starts_with("member/") => members.push(text.to_owned()),
+                _ => return None,
+            }
+        }
+        Some(Self {
+            name: name.to_owned(),
+            description: str_of(attrs.get(ATTR_DESCRIPTION))?.to_owned(),
+            access: CatalogAccess::parse(str_of(attrs.get(ATTR_ACCESS))?)?,
+            slots: slots
+                .into_iter()
+                .map(|(slot, (at, members, description))| {
+                    Some(CatalogSlot {
+                        name: slot.to_owned(),
+                        at: at?,
+                        members,
+                        description,
+                    })
+                })
+                .collect::<Option<_>>()?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,13 +337,40 @@ fn records(input: &CatalogInput) -> Result<Records, GraphError> {
             let binding = r.node(BINDING_KIND, &[kind], Attrs::new())?;
             r.edges.insert((entry.clone(), BINDS, binding));
         }
-        for (program, pats) in &e.programs {
-            let prog = r.node(PROGRAM, &[&e.name, program], Attrs::new())?;
+        let names: BTreeSet<&str> = e
+            .programs
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .chain(e.open.iter().map(String::as_str))
+            .chain(e.shapes.iter().map(|(p, _)| p.as_str()))
+            .collect();
+        for program in names {
+            let open = e.open.iter().any(|p| p == program);
+            let attrs = if open {
+                Attrs::from([(ATTR_OPEN.into(), AttrValue::U64(1))])
+            } else {
+                Attrs::new()
+            };
+            let prog = r.node(PROGRAM, &[&e.name, program], attrs)?;
             r.edges.insert((entry.clone(), RUNS, prog.clone()));
-            for text in pats {
+            for text in e
+                .programs
+                .iter()
+                .filter(|(p, _)| p == program)
+                .flat_map(|(_, pats)| pats)
+            {
                 let attrs = Attrs::from([(ATTR_TEXT.into(), AttrValue::Str(text.clone()))]);
                 let pat = r.node(PATTERN, &[&e.name, program, text], attrs)?;
                 r.edges.insert((prog.clone(), GRANTED, pat));
+            }
+            for shape in e
+                .shapes
+                .iter()
+                .filter(|(p, _)| p == program)
+                .flat_map(|(_, shapes)| shapes)
+            {
+                let node = r.node(SHAPE, &[&e.name, program, &shape.name], shape.attrs())?;
+                r.edges.insert((prog.clone(), HAS, node));
             }
         }
     }
@@ -266,14 +432,38 @@ fn input_of(g: &Graph) -> Option<CatalogInput> {
             .collect::<Option<Vec<_>>>()?;
         let prefix = format!("{}/", n.key);
         let mut programs = Vec::new();
+        let mut open = Vec::new();
+        let mut shapes = Vec::new();
         for e in g.out_edges(n.id, RUNS) {
             let prog = g.node(e.to)?;
+            let name = prog.key.strip_prefix(&prefix)?.to_owned();
             let pats = g
                 .out_edges(prog.id, GRANTED)
                 .map(|p| g.node(p.to).and_then(|t| str_of(t.attrs.get(ATTR_TEXT))))
                 .map(|t| t.map(str::to_owned))
                 .collect::<Option<Vec<_>>>()?;
-            programs.push((prog.key.strip_prefix(&prefix)?.to_owned(), pats));
+            let is_open = match prog.attrs.get(ATTR_OPEN) {
+                None => false,
+                Some(AttrValue::U64(1)) => true,
+                Some(AttrValue::U64(_) | AttrValue::Str(_)) => return None,
+            };
+            let program_shapes = g
+                .out_edges(prog.id, HAS)
+                .map(|h| {
+                    let node = g.node(h.to)?;
+                    let shape = node.key.strip_prefix(&format!("{}/", prog.key))?;
+                    CatalogShape::of(shape, &node.attrs)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if !pats.is_empty() || !(is_open || !program_shapes.is_empty()) {
+                programs.push((name.clone(), pats));
+            }
+            if is_open {
+                open.push(name.clone());
+            }
+            if !program_shapes.is_empty() {
+                shapes.push((name, program_shapes));
+            }
         }
         input.entries.push(CatalogEntry {
             name: n.key.clone(),
@@ -282,6 +472,8 @@ fn input_of(g: &Graph) -> Option<CatalogInput> {
             output,
             binds,
             programs,
+            open,
+            shapes,
         });
     }
     for n in g.nodes().iter().filter(|n| n.kind == FORGE) {
@@ -347,6 +539,22 @@ pub fn patterns<'g>(g: &'g Graph, entry: &str, program: &str) -> Vec<&'g str> {
         .collect()
 }
 
+pub fn open_program(g: &Graph, entry: &str, program: &str) -> bool {
+    g.lookup(PROGRAM, &format!("{entry}/{program}"))
+        .is_some_and(|p| p.attrs.get(ATTR_OPEN) == Some(&AttrValue::U64(1)))
+}
+
+pub fn shapes(g: &Graph, entry: &str, program: &str) -> Vec<CatalogShape> {
+    let key = format!("{entry}/{program}");
+    let Some(p) = g.lookup(PROGRAM, &key) else {
+        return Vec::new();
+    };
+    g.out_edges(p.id, HAS)
+        .filter_map(|e| g.node(e.to))
+        .filter_map(|n| CatalogShape::of(n.key.strip_prefix(&format!("{key}/"))?, &n.attrs))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +576,8 @@ mod tests {
                 .iter()
                 .map(|(p, pats)| ((*p).into(), pats.iter().map(|s| (*s).into()).collect()))
                 .collect(),
+            open: Vec::new(),
+            shapes: Vec::new(),
         }
     }
 
@@ -424,7 +634,7 @@ mod tests {
 
     #[test]
     fn schema_tables_are_pinned() {
-        assert_eq!(SCHEMA.version, 1);
+        assert_eq!(SCHEMA.version, 2);
         assert_eq!(
             SCHEMA.node_kinds,
             &[
@@ -443,6 +653,7 @@ mod tests {
                 (EdgeKind(2), "granted"),
                 (EdgeKind(3), "binds"),
                 (EdgeKind(4), "served_by"),
+                (EdgeKind(5), "has"),
             ]
         );
         assert_eq!(
@@ -452,6 +663,7 @@ mod tests {
                 (PROGRAM, GRANTED, PATTERN),
                 (ENTRY, BINDS, BINDING_KIND),
                 (BINDING_KIND, SERVED_BY, FORGE),
+                (PROGRAM, HAS, SHAPE),
             ]
         );
         assert!(SCHEMA.compiled_kinds.is_empty());
@@ -461,10 +673,32 @@ mod tests {
             [1, 2, 3, 4, 5, 6].map(NodeKind)
         );
         assert_eq!(
-            [RUNS, GRANTED, BINDS, SERVED_BY],
-            [1, 2, 3, 4].map(EdgeKind)
+            [RUNS, GRANTED, BINDS, SERVED_BY, HAS],
+            [1, 2, 3, 4, 5].map(EdgeKind)
         );
     }
+
+    const KIND_EXEMPT: [(&str, &str); 2] = [("Pattern", "pattern"), ("Shape", "sha")];
+
+    const FENCE: [&str; 17] = [
+        "credential",
+        "class",
+        "app",
+        "image",
+        "volume",
+        "network",
+        "site",
+        "deny",
+        "resource",
+        "lifetime",
+        "isolation",
+        "pattern",
+        "argv",
+        "digest",
+        "sha",
+        "canonical",
+        "template",
+    ];
 
     #[test]
     fn the_vocabulary_names_no_fence_attribute() {
@@ -487,6 +721,8 @@ mod tests {
             "text",
             "host",
             "provider",
+            "open",
+            "access",
         ];
         assert_eq!(
             [
@@ -495,17 +731,27 @@ mod tests {
                 ATTR_OUTPUT,
                 ATTR_TEXT,
                 ATTR_HOST,
-                ATTR_PROVIDER
+                ATTR_PROVIDER,
+                ATTR_OPEN,
+                ATTR_ACCESS
             ],
             allowed
         );
-        let g = build(&sample()).unwrap();
+        let mut shaped = sample();
+        shaped
+            .entries
+            .extend(with_shapes().entries.into_iter().map(|mut e| {
+                e.name.insert_str(0, "x-");
+                e
+            }));
+        let g = build(&shaped).unwrap();
         let mut seen: Vec<&str> = g
             .nodes()
             .iter()
             .flat_map(|n| n.attrs.keys())
             .chain(g.edges().iter().flat_map(|e| e.attrs.keys()))
             .map(String::as_str)
+            .filter(|k| !k.starts_with(SLOT_PREFIX))
             .collect();
         seen.sort_unstable();
         seen.dedup();
@@ -514,21 +760,15 @@ mod tests {
         assert_eq!(seen, want);
         for name in kinds.iter().chain(&allowed) {
             let lower = name.to_ascii_lowercase();
-            for fence in [
-                "credential",
-                "class",
-                "app",
-                "image",
-                "volume",
-                "network",
-                "site",
-                "deny",
-                "resource",
-                "lifetime",
-                "isolation",
-            ] {
+            for fence in FENCE {
+                if KIND_EXEMPT.contains(&(*name, fence)) {
+                    continue;
+                }
                 assert!(!lower.contains(fence), "{name} names {fence}");
             }
+        }
+        for (kind, fence) in KIND_EXEMPT {
+            assert!(kinds.contains(&kind) && FENCE.contains(&fence));
         }
     }
 
@@ -734,45 +974,157 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shape_is_reserved_and_never_emitted() {
-        assert_eq!(SCHEMA.node_kind_name(SHAPE), Some("Shape"));
-        assert!(!SCHEMA
-            .triples
-            .iter()
-            .any(|&(f, _, t)| f == SHAPE || t == SHAPE));
-        let g = build(&sample()).unwrap();
-        assert!(g.nodes().iter().all(|n| n.kind != SHAPE));
-        let kinds: Vec<NodeKind> = {
-            let mut k: Vec<NodeKind> = g.nodes().iter().map(|n| n.kind).collect();
-            k.dedup();
-            k
-        };
-        assert_eq!(kinds, [ENTRY, PROGRAM, PATTERN, BINDING_KIND, FORGE]);
+    fn gh_shapes() -> Vec<CatalogShape> {
+        vec![
+            CatalogShape {
+                name: "issue.list".into(),
+                description: "List issues.".into(),
+                access: CatalogAccess::Read,
+                slots: vec![
+                    CatalogSlot {
+                        name: "state".into(),
+                        at: CatalogSlotAt::Option,
+                        members: vec!["all".into(), "closed".into(), "open".into()],
+                        description: "Which issues.".into(),
+                    },
+                    CatalogSlot {
+                        name: "title".into(),
+                        at: CatalogSlotAt::Token,
+                        members: Vec::new(),
+                        description: "A title.".into(),
+                    },
+                ],
+            },
+            CatalogShape {
+                name: "pr.view".into(),
+                description: "View a PR.".into(),
+                access: CatalogAccess::Read,
+                slots: Vec::new(),
+            },
+        ]
+    }
 
+    fn with_shapes() -> CatalogInput {
+        let mut gh = entry("gh", &["git"], &[("gh", &["pr view *"])]);
+        gh.shapes = vec![("gh".into(), gh_shapes())];
+        let mut sh = entry("sandbox", &[], &[]);
+        sh.open = vec!["sh".into()];
+        let mut both = entry("tools", &[], &[]);
+        both.shapes = vec![("a".into(), gh_shapes()[1..].to_vec())];
+        both.open = vec!["b".into()];
+        CatalogInput {
+            entries: vec![gh, sh, both],
+            forges: vec![],
+        }
+    }
+
+    #[test]
+    fn shape_nodes_round_trip() {
+        let input = with_shapes();
+        let bytes = encode(&input).unwrap();
+        let g = decode(&bytes).unwrap();
+        assert_eq!(shapes(&g, "gh", "gh"), gh_shapes());
+        assert_eq!(patterns(&g, "gh", "gh"), ["pr view *"]);
+        assert!(shapes(&g, "gh", "nope").is_empty());
+        assert!(shapes(&g, "sandbox", "sh").is_empty());
+        assert!(open_program(&g, "sandbox", "sh"));
+        assert!(!open_program(&g, "gh", "gh"));
+        assert!(open_program(&g, "tools", "b"));
+        assert_eq!(shapes(&g, "tools", "a"), gh_shapes()[1..]);
+        assert_eq!(
+            g.nodes().iter().filter(|n| n.kind == SHAPE).count(),
+            3,
+            "one node per entry, program and shape"
+        );
+        let again = input_of(&g).unwrap();
+        assert_eq!(encode(&again).unwrap(), bytes);
+        let mut permuted = input;
+        permuted.entries.reverse();
+        assert_eq!(encode(&permuted).unwrap(), bytes);
+    }
+
+    #[test]
+    fn shape_attrs_name_no_pattern_argv_or_digest() {
+        let g = build(&with_shapes()).unwrap();
+        for n in g.nodes().iter().filter(|n| n.kind == SHAPE) {
+            for key in n.attrs.keys() {
+                let name = match key.strip_prefix(SLOT_PREFIX) {
+                    None => key.as_str(),
+                    Some(rest) => {
+                        let (_, field) = rest.split_once('/').unwrap();
+                        assert!(
+                            matches!(field, "at" | "description") || field.starts_with("member/"),
+                            "{key}"
+                        );
+                        field.split('/').next().unwrap()
+                    }
+                };
+                assert!(
+                    [ATTR_DESCRIPTION, ATTR_ACCESS, "at", "member"].contains(&name),
+                    "{key}"
+                );
+                for fence in FENCE {
+                    assert!(!name.contains(fence), "{key} names {fence}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_slot_field_hides_the_shape_and_program_kinds_stay_distinct() {
+        let mut bad = with_shapes();
+        let mut g = build(&bad).unwrap();
         let mut b = GraphBuilder::new(GraphSpace::Shared, 0);
         for n in g.nodes() {
-            b = b.node(n.clone());
+            let mut n = n.clone();
+            if n.kind == SHAPE && n.key == "gh/gh/issue.list" {
+                n.attrs
+                    .insert("slot/state/bogus".into(), AttrValue::Str("x".into()));
+            }
+            b = b.node(n);
         }
         for e in g.edges() {
             b = b.edge(e.clone());
         }
-        let with_shape = b.node(NodeRecord {
-            id: NodeId(1_000),
-            space: GraphSpace::Shared,
-            kind: SHAPE,
-            key: "s".into(),
-            label: "Shape".into(),
-            provenance: Provenance {
-                kind: ProvenanceKind::RootFile,
-                transition: 0,
-            },
-            revision: 0,
-            attrs: Attrs::new(),
-        });
-        let bytes =
-            crate::format::encode(&with_shape.build(&SCHEMA, &CompiledSet::default()).unwrap());
-        assert_eq!(decode(&bytes).unwrap_err(), FormatError::NonCanonical);
+        g = b.build(&SCHEMA, &CompiledSet::default()).unwrap();
+        let listed: Vec<String> = shapes(&g, "gh", "gh").into_iter().map(|s| s.name).collect();
+        assert_eq!(listed, ["pr.view"]);
+
+        bad.entries[2].programs =
+            vec![("both".into(), vec!["x *".into()]), ("none".into(), vec![])];
+        bad.entries[2].open = vec!["both".into(), "only-open".into()];
+        bad.entries[2].shapes = vec![
+            ("only-shapes".into(), gh_shapes()[1..].to_vec()),
+            ("a".into(), gh_shapes()[1..].to_vec()),
+        ];
+        let g = build(&bad).unwrap();
+        let back = input_of(&g).unwrap();
+        let tools = back.entries.iter().find(|e| e.name == "tools").unwrap();
+        let mut programs = tools.programs.clone();
+        programs.sort();
+        assert_eq!(
+            programs,
+            [
+                ("both".to_owned(), vec!["x *".to_owned()]),
+                ("none".to_owned(), vec![])
+            ]
+        );
+        let mut open = tools.open.clone();
+        open.sort();
+        assert_eq!(open, ["both", "only-open"]);
+        let mut shaped: Vec<&str> = tools.shapes.iter().map(|(p, _)| p.as_str()).collect();
+        shaped.sort_unstable();
+        assert_eq!(shaped, ["a", "only-shapes"]);
+        assert!(decode(&encode(&bad).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_shape_edge_only_runs_from_a_program() {
+        assert!(SCHEMA.triples.contains(&(PROGRAM, HAS, SHAPE)));
+        assert!(!SCHEMA
+            .triples
+            .iter()
+            .any(|&(f, _, t)| (f == SHAPE || t == SHAPE) && (f, t) != (PROGRAM, SHAPE)));
     }
 
     fn shared_node(id: u64, kind: NodeKind, key: &str, label: &str, attrs: Attrs) -> NodeRecord {
@@ -799,6 +1151,62 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_decodes_only_known_access_and_slot_spellings() {
+        let attrs = |access: &str, slot: &[(&str, &str)]| {
+            let mut a = Attrs::from([
+                (ATTR_DESCRIPTION.into(), AttrValue::Str("d".into())),
+                (ATTR_ACCESS.into(), AttrValue::Str(access.into())),
+            ]);
+            for (field, value) in slot {
+                a.insert(
+                    format!("{SLOT_PREFIX}n/{field}"),
+                    AttrValue::Str((*value).into()),
+                );
+            }
+            a
+        };
+        let full = [
+            ("at", "option"),
+            ("description", "x"),
+            ("member/000000", "m"),
+        ];
+        assert_eq!(
+            CatalogShape::of("s", &attrs("write", &full)),
+            Some(CatalogShape {
+                name: "s".into(),
+                description: "d".into(),
+                access: CatalogAccess::Write,
+                slots: vec![CatalogSlot {
+                    name: "n".into(),
+                    at: CatalogSlotAt::Option,
+                    members: vec!["m".into()],
+                    description: "x".into(),
+                }],
+            })
+        );
+        for a in [CatalogAccess::Read, CatalogAccess::Write] {
+            assert_eq!(CatalogAccess::parse(a.as_str()), Some(a));
+        }
+        for at in [
+            CatalogSlotAt::Token,
+            CatalogSlotAt::Option,
+            CatalogSlotAt::Stdin,
+            CatalogSlotAt::File,
+        ] {
+            assert_eq!(CatalogSlotAt::parse(at.as_str()), Some(at));
+        }
+        assert_eq!(CatalogShape::of("s", &attrs("admin", &[])), None);
+        assert_eq!(
+            CatalogShape::of("s", &attrs("read", &[("at", "argv")])),
+            None
+        );
+        assert_eq!(
+            CatalogShape::of("s", &attrs("read", &[("description", "x")])),
+            None
+        );
+    }
+
+    #[test]
     fn decode_refuses_a_shared_space_graph_built_against_another_schema() {
         static OTHER: Schema = Schema {
             version: SCHEMA_VERSION,
@@ -813,6 +1221,27 @@ mod tests {
             .build(&OTHER, &CompiledSet::default())
             .unwrap();
         let bytes = crate::format::encode(&foreign);
+        static PREVIOUS: Schema = Schema {
+            version: SCHEMA_VERSION - 1,
+            node_kinds: &[(ENTRY, "Entry")],
+            edge_kinds: &[],
+            triples: &[],
+            compiled_kinds: &[],
+            forbidden_targets: &[],
+        };
+        let previous = crate::format::encode(
+            &GraphBuilder::new(GraphSpace::Shared, 0)
+                .node(shared_node(1, ENTRY, "e", "Entry", catalog_attrs()))
+                .build(&PREVIOUS, &CompiledSet::default())
+                .unwrap(),
+        );
+        assert_eq!(
+            decode(&previous).unwrap_err(),
+            FormatError::UnsupportedSchemaVersion {
+                found: SCHEMA_VERSION - 1,
+                expected: SCHEMA_VERSION
+            }
+        );
         assert!(crate::format::decode(
             &bytes,
             GraphSpace::Shared,

@@ -814,6 +814,68 @@ pub fn discharge_plan(
     Ok(())
 }
 
+/// The obligations a tool call forwards to its front end, each at most once.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Forwarded {
+    ToolLaunch,
+    WorkspaceMask,
+}
+
+impl Forwarded {
+    const ALL: [Forwarded; 2] = [Forwarded::ToolLaunch, Forwarded::WorkspaceMask];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Forwarded::ToolLaunch => maknae_security::tool_launch::ID,
+            Forwarded::WorkspaceMask => maknae_security::workspace_mask::ID,
+        }
+    }
+
+    fn of(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == id)
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) struct ToolCallDischarge {
+    pub(crate) forward: Vec<maknae_security::Obligation>,
+    pub(crate) audited: bool,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the tool-invocation verb, #479")
+)]
+pub(crate) fn discharge_for_tool_call(
+    obligations: &[maknae_security::Obligation],
+) -> Result<ToolCallDischarge, UnhonorableObligation> {
+    let mut forward: Vec<(Forwarded, maknae_security::Obligation)> = Vec::new();
+    let mut audited = false;
+    for ob in obligations {
+        match Forwarded::of(&ob.id) {
+            Some(kind) if forward.iter().any(|(seen, _)| *seen == kind) => {
+                return Err(UnhonorableObligation(ob.id.clone()))
+            }
+            Some(kind) => forward.push((kind, ob.clone())),
+            None => {
+                discharge_plan(std::slice::from_ref(ob))?;
+                audited = true;
+            }
+        }
+    }
+    Ok(ToolCallDischarge {
+        forward: forward.into_iter().map(|(_, ob)| ob).collect(),
+        audited,
+    })
+}
+
 /// The lexical canonical-form pre-gate over a client-supplied read path
 /// (parent spec §4.4): absolute; no `.`/`..` components; no empty segments
 /// after the leading `/` (no `//`, no trailing `/`; bare `/` passes vacuously
@@ -1134,6 +1196,7 @@ mod tests {
             program: "sentinel-674-prog".into(),
             argv: vec!["test".into(), "a b".into(), String::new()],
             bound: Vec::new(),
+            shape: None,
         };
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
         let task = TaskStamp {
@@ -1201,8 +1264,36 @@ mod tests {
                 AttrValue::List(vec!["test".into(), "a b".into(), String::new()]),
             );
             resource.insert("binding.kinds", AttrValue::Set(Default::default()));
+            resource.insert("tool.mode", s("positional"));
             assert_eq!(got.resource.0, resource);
         }
+        let shaped = ToolCall {
+            shape: Some("pr.view".into()),
+            ..call.clone()
+        };
+        let got = build_tool_request(
+            &Stamp::Client,
+            2001,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &shaped,
+            None,
+        );
+        assert_eq!(got.resource.0.str("tool.mode"), Some("shape"));
+        assert_eq!(got.resource.0.str("tool.shape"), Some("pr.view"));
+        let open = crate::test_fixtures::build_tool_request_in_mode(
+            maknae_security::TOOL_MODE_OPEN,
+            &Stamp::Client,
+            2001,
+            None,
+            maknae_security::Lane::Local,
+            None,
+            &call,
+            None,
+        );
+        assert_eq!(open.resource.0.str("tool.mode"), Some("open"));
+        assert_eq!(open.resource.0.get("tool.shape"), None);
     }
 
     fn git(
@@ -1273,12 +1364,14 @@ mod tests {
             program: "gh".into(),
             argv: vec!["pr".into()],
             bound: Vec::new(),
+            shape: None,
         };
         let mut want = Attributes::new();
         want.insert("tool.entry", AttrValue::Str("sentinel-168a-entry".into()));
         want.insert("tool.program", AttrValue::Str("gh".into()));
         want.insert("tool.argv", AttrValue::List(vec!["pr".into()]));
         want.insert("binding.kinds", AttrValue::Set(Default::default()));
+        want.insert("tool.mode", AttrValue::Str("positional".into()));
         for cited in [None, Some(&unbound)] {
             let got = build_tool_request(
                 &Stamp::Client,
@@ -2340,6 +2433,97 @@ mod tests {
             discharge_plan(&[ob]),
             Err(UnhonorableObligation("audit".into()))
         );
+    }
+
+    fn ob_with(id: &str, key: &str) -> maknae_security::Obligation {
+        let mut params = maknae_security::Attributes::new();
+        params.insert(key, maknae_security::AttrValue::List(vec!["x".into()]));
+        maknae_security::Obligation {
+            id: id.into(),
+            params,
+        }
+    }
+
+    #[test]
+    fn discharge_plan_refuses_tool_launch() {
+        assert_eq!(
+            discharge_plan(&[audit_ob(), ob_with("tool.launch", "argv")]),
+            Err(UnhonorableObligation("tool.launch".into()))
+        );
+    }
+
+    #[test]
+    fn tool_call_discharge_forwards_launch_and_mask() {
+        let launch = ob_with("tool.launch", "argv");
+        let mask = ob_with("workspace.mask", "patterns");
+        let discharged =
+            discharge_for_tool_call(&[audit_ob(), launch.clone(), mask.clone()]).unwrap();
+        assert_eq!(discharged.forward, [launch.clone(), mask.clone()]);
+        let discharged = discharge_for_tool_call(&[mask.clone(), launch.clone()]).unwrap();
+        assert_eq!(discharged.forward, [mask, launch]);
+        assert_eq!(discharge_for_tool_call(&[audit_ob()]).unwrap().forward, []);
+        assert_eq!(discharge_for_tool_call(&[]).unwrap().forward, []);
+        assert_eq!(
+            Forwarded::ALL.map(Forwarded::as_str),
+            ["tool.launch", "workspace.mask"]
+        );
+    }
+
+    #[test]
+    fn tool_call_discharge_reports_whether_audit_was_honoured() {
+        let launch = ob_with("tool.launch", "argv");
+        assert!(
+            discharge_for_tool_call(&[audit_ob(), launch.clone()])
+                .unwrap()
+                .audited
+        );
+        assert!(
+            discharge_for_tool_call(&[launch.clone(), audit_ob()])
+                .unwrap()
+                .audited
+        );
+        assert!(!discharge_for_tool_call(&[launch]).unwrap().audited);
+        assert!(!discharge_for_tool_call(&[]).unwrap().audited);
+    }
+
+    #[test]
+    fn tool_call_discharge_refuses_a_second_launch_or_mask() {
+        let launch = ob_with("tool.launch", "argv");
+        let other = ob_with("tool.launch", "files.path");
+        let mask = ob_with("workspace.mask", "patterns");
+        let other_mask = ob_with("workspace.mask", "other");
+        for second in [other, launch.clone()] {
+            assert_eq!(
+                discharge_for_tool_call(&[launch.clone(), mask.clone(), second]).map(|d| d.forward),
+                Err(UnhonorableObligation("tool.launch".into()))
+            );
+        }
+        for second in [other_mask, mask.clone()] {
+            assert_eq!(
+                discharge_for_tool_call(&[mask.clone(), launch.clone(), second]).map(|d| d.forward),
+                Err(UnhonorableObligation("workspace.mask".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_discharge_refuses_unknown_ids() {
+        let launch = ob_with("tool.launch", "argv");
+        for refused in [
+            ob_with("exfil", "x"),
+            ob_with("audit", "scope"),
+            ob_with("tool.launch.extra", "argv"),
+        ] {
+            let id = refused.id.clone();
+            assert_eq!(
+                discharge_for_tool_call(&[launch.clone(), refused.clone()]).map(|d| d.forward),
+                Err(UnhonorableObligation(id.clone()))
+            );
+            assert_eq!(
+                discharge_for_tool_call(&[refused, audit_ob()]).map(|d| d.forward),
+                Err(UnhonorableObligation(id))
+            );
+        }
     }
 
     // ---- lexical_pregate (vector table cross-referenced with

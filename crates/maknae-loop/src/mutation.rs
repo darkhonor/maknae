@@ -1639,12 +1639,8 @@ mod tests {
         }
     }
     fn reply(result: proto::RespResult) -> Vec<u8> {
-        proto::encode_response(&proto::Response {
-            protocol_version: proto::PROTOCOL_VERSION,
-            result,
-            catalog_digest: None,
-        })
-        .unwrap()
+        proto::encode_response(&proto::Response::new(proto::PROTOCOL_VERSION, result, None))
+            .unwrap()
     }
     /// Plays the kernel: answers each chunk with `answer`, or stops when it says nothing.
     async fn listed(

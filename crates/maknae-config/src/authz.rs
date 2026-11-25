@@ -75,6 +75,7 @@ pub fn destination_entry_is_acceptable(entry: &str) -> bool {
 pub struct RawActionGrants {
     pub allow: Vec<ActionPattern>,
     pub deny: Vec<ActionPattern>,
+    pub permissions: ToolPermissions,
 }
 
 /// One action entry as written: an exact term (`fs.read`) or a family
@@ -180,6 +181,48 @@ impl SubjectPermissions {
     }
 }
 
+/// `roles.<role>.permissions`: only [`role_permissions`] builds one, and every pattern it
+/// holds is a `Pattern::Tool`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ToolPermissions {
+    allow: Vec<Pattern>,
+    deny: Vec<Pattern>,
+    allow_sources: Vec<String>,
+    deny_sources: Vec<String>,
+}
+
+impl ToolPermissions {
+    fn of(
+        allow: Vec<ToolPattern>,
+        deny: Vec<ToolPattern>,
+        allow_sources: Vec<String>,
+        deny_sources: Vec<String>,
+    ) -> Self {
+        ToolPermissions {
+            allow: allow.into_iter().map(Pattern::Tool).collect(),
+            deny: deny.into_iter().map(Pattern::Tool).collect(),
+            allow_sources,
+            deny_sources,
+        }
+    }
+
+    pub fn allow(&self) -> &[Pattern] {
+        &self.allow
+    }
+
+    pub fn deny(&self) -> &[Pattern] {
+        &self.deny
+    }
+
+    pub fn allow_sources(&self) -> &[String] {
+        &self.allow_sources
+    }
+
+    pub fn deny_sources(&self) -> &[String] {
+        &self.deny_sources
+    }
+}
+
 /// The parsed `permissions:` wrapper (spec §7): an allow list and a deny list
 /// of patterns. Deny beats allow; anything matching neither is denied
 /// (default-deny) — see [`AuthzPolicy::evaluate3`].
@@ -247,6 +290,7 @@ pub struct ToolCall {
     pub program: String,
     pub argv: Vec<String>,
     pub bound: Vec<Bound>,
+    pub shape: Option<String>,
 }
 
 /// A `~` pattern was evaluated with no home, or with one that is not an
@@ -298,9 +342,9 @@ impl AuthzPolicy {
         self.evaluate3_floored(None, req, home, fold)
     }
 
-    /// [`Self::evaluate3`] under a subject's own permission set (#608): `None`
-    /// is exactly `evaluate3`; `Some` consults the site deny, then the
-    /// subject's deny, then the subject's allow, and ignores the site allow.
+    /// [`Self::evaluate3`] under a subject's own permission set (#608): `None` is exactly
+    /// `evaluate3`; `Some` consults the site deny, then the subject's deny, then the
+    /// subject's allow, and ignores the site allow.
     pub fn evaluate3_floored(
         &self,
         subject: Option<&SubjectPermissions>,
@@ -308,8 +352,21 @@ impl AuthzPolicy {
         home: Option<&Path>,
         fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        let (deny, allow) = self.lists(subject);
+        let (deny, allow) = self.lists(subject, None);
         evaluate3_over(&deny, &allow, req, home, fold)
+    }
+
+    /// [`Self::evaluate3_floored`] of a tool call with a role's `Tool(...)` grants: the
+    /// role's deny after the others, its allow after the allow in force.
+    pub fn evaluate_tool_floored(
+        &self,
+        subject: Option<&SubjectPermissions>,
+        role: Option<&ToolPermissions>,
+        call: &ToolCall,
+        fold: Fold,
+    ) -> Result<Match3, HomeUnbound> {
+        let (deny, allow) = self.lists(subject, role);
+        evaluate3_over(&deny, &allow, &Request::Tool(call), None, fold)
     }
 
     /// [`Self::evaluate3_floored`] for an agent: the site deny, then the built-in
@@ -333,28 +390,46 @@ impl AuthzPolicy {
         &'a self,
         right: Option<&'a SubjectPermissions>,
         subject: Option<&'a SubjectPermissions>,
+        role: Option<&'a ToolPermissions>,
     ) -> EffectiveLists<'a> {
         EffectiveLists {
             right: right.map(|r| Stage::of(self.right_lists(r))),
-            floored: Stage::of(self.lists(subject)),
+            floored: Stage::of(self.lists(subject, role)),
         }
+    }
+
+    /// `role`'s `roles.<role>.permissions`, if the role has an entry.
+    pub fn role_permissions(&self, role: &str) -> Option<&ToolPermissions> {
+        self.action_grants.get(role).map(|g| &g.permissions)
     }
 
     fn lists<'a>(
         &'a self,
         subject: Option<&'a SubjectPermissions>,
-    ) -> ([Option<SourcedList<'a>>; 2], SourcedList<'a>) {
+        role: Option<&'a ToolPermissions>,
+    ) -> (DenyLists<'a>, AllowLists<'a>) {
         let site_deny = SourcedList {
             patterns: &self.deny,
             sources: &self.deny_sources,
         };
+        let role_deny = role.map(|r| SourcedList {
+            patterns: &r.deny,
+            sources: &r.deny_sources,
+        });
+        let role_allow = role.map(|r| SourcedList {
+            patterns: &r.allow,
+            sources: &r.allow_sources,
+        });
         match subject {
             None => (
-                [Some(site_deny), None],
-                SourcedList {
-                    patterns: &self.allow,
-                    sources: &self.allow_sources,
-                },
+                [Some(site_deny), None, role_deny],
+                [
+                    Some(SourcedList {
+                        patterns: &self.allow,
+                        sources: &self.allow_sources,
+                    }),
+                    role_allow,
+                ],
             ),
             Some(s) => (
                 [
@@ -363,26 +438,30 @@ impl AuthzPolicy {
                         patterns: &s.deny,
                         sources: &s.deny_sources,
                     }),
+                    role_deny,
                 ],
-                SourcedList {
-                    patterns: &s.allow,
-                    sources: &s.allow_sources,
-                },
+                [
+                    Some(SourcedList {
+                        patterns: &s.allow,
+                        sources: &s.allow_sources,
+                    }),
+                    role_allow,
+                ],
             ),
         }
     }
 
-    fn right_lists<'a>(
-        &'a self,
-        right: &'a SubjectPermissions,
-    ) -> ([Option<SourcedList<'a>>; 2], SourcedList<'a>) {
-        let (deny, _) = self.lists(None);
+    fn right_lists<'a>(&'a self, right: &'a SubjectPermissions) -> (DenyLists<'a>, AllowLists<'a>) {
+        let (deny, _) = self.lists(None, None);
         (
             deny,
-            SourcedList {
-                patterns: &right.allow,
-                sources: &right.allow_sources,
-            },
+            [
+                Some(SourcedList {
+                    patterns: &right.allow,
+                    sources: &right.allow_sources,
+                }),
+                None,
+            ],
         )
     }
 
@@ -471,7 +550,7 @@ impl AuthzPolicy {
         fold: Fold,
         glob_of: fn(&Pattern) -> Option<&PathGlob>,
     ) -> Result<Match3, HomeUnbound> {
-        let (deny, allow) = self.lists(subject);
+        let (deny, allow) = self.lists(subject, None);
         evaluate_subtree_over(&deny, &allow, root, home, fold, glob_of)
     }
 
@@ -486,7 +565,7 @@ impl AuthzPolicy {
         home: Option<&Path>,
         fold: Fold,
     ) -> Result<Match3, HomeUnbound> {
-        let (deny, allow) = self.lists(subject);
+        let (deny, allow) = self.lists(subject, None);
         evaluate_mount_over(&deny, &allow, root, home, fold, side.glob_of())
     }
 
@@ -528,9 +607,9 @@ impl AuthzPolicy {
             None => false,
         };
         let (deny, _) = if by_right {
-            self.lists(None)
+            self.lists(None, None)
         } else {
-            self.lists(subject)
+            self.lists(subject, None)
         };
         let Some(text) = canonical_root(root) else {
             return Ok(Vec::new());
@@ -585,14 +664,14 @@ fn read_glob(p: &Pattern) -> Option<&PathGlob> {
 /// One stage of a decision: its denies, in the order consulted, then its allow list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage<'a> {
-    pub allow: &'a [Pattern],
+    pub allow: Vec<&'a [Pattern]>,
     pub deny: Vec<&'a [Pattern]>,
 }
 
 impl<'a> Stage<'a> {
-    fn of((deny, allow): (DenyLists<'a>, SourcedList<'a>)) -> Self {
+    fn of((deny, allow): (DenyLists<'a>, AllowLists<'a>)) -> Self {
         Stage {
-            allow: allow.patterns,
+            allow: allow.iter().flatten().map(|l| l.patterns).collect(),
             deny: deny.iter().flatten().map(|l| l.patterns).collect(),
         }
     }
@@ -619,7 +698,8 @@ impl SourcedList<'_> {
     }
 }
 
-type DenyLists<'a> = [Option<SourcedList<'a>>; 2];
+type DenyLists<'a> = [Option<SourcedList<'a>>; 3];
+type AllowLists<'a> = [Option<SourcedList<'a>>; 2];
 
 #[derive(Clone, Copy)]
 enum Side {
@@ -629,7 +709,7 @@ enum Side {
 
 fn evaluate3_over(
     deny: &DenyLists<'_>,
-    allow: &SourcedList<'_>,
+    allow: &AllowLists<'_>,
     req: &Request<'_>,
     home: Option<&Path>,
     fold: Fold,
@@ -655,11 +735,13 @@ fn evaluate3_over(
             }
         }
     }
-    for (i, p) in allow.patterns.iter().enumerate() {
-        if p.matches_req(req, home, Side::Allow)? {
-            return Ok(Match3::AllowMatch {
-                source: allow.source(i, "allow"),
-            });
+    for list in allow.iter().flatten() {
+        for (i, p) in list.patterns.iter().enumerate() {
+            if p.matches_req(req, home, Side::Allow)? {
+                return Ok(Match3::AllowMatch {
+                    source: list.source(i, "allow"),
+                });
+            }
         }
     }
     Ok(Match3::NoMatch)
@@ -678,7 +760,7 @@ type DenyHit = fn(&PathGlob, &str, Option<&Path>) -> Result<bool, HomeUnbound>;
 
 fn evaluate_subtree_over(
     deny: &DenyLists<'_>,
-    allow: &SourcedList<'_>,
+    allow: &AllowLists<'_>,
     root: &Path,
     home: Option<&Path>,
     fold: Fold,
@@ -696,7 +778,7 @@ fn evaluate_subtree_over(
 
 fn evaluate_mount_over(
     deny: &DenyLists<'_>,
-    allow: &SourcedList<'_>,
+    allow: &AllowLists<'_>,
     root: &Path,
     home: Option<&Path>,
     fold: Fold,
@@ -714,7 +796,7 @@ fn evaluate_mount_over(
 
 fn decide_tree_over(
     deny: &DenyLists<'_>,
-    allow: &SourcedList<'_>,
+    allow: &AllowLists<'_>,
     root: &Path,
     home: Option<&Path>,
     glob_of: GlobOf,
@@ -741,7 +823,7 @@ fn decide_tree_over(
             }
         }
     }
-    for list in [allow] {
+    for list in allow.iter().flatten() {
         for (i, pattern) in list.patterns.iter().enumerate() {
             if let Some(glob) = glob_of(pattern) {
                 if glob.covers_subtree(text, home)? {
@@ -773,14 +855,14 @@ fn agent_match(
 fn unbound_home(
     home: Option<&Path>,
     deny: &DenyLists<'_>,
-    allow: &SourcedList<'_>,
+    allow: &AllowLists<'_>,
     mut wants: impl FnMut(&Pattern) -> bool,
 ) -> bool {
     home.is_none()
         && deny
             .iter()
+            .chain(allow.iter())
             .flatten()
-            .chain([allow])
             .flat_map(|l| l.patterns)
             .any(&mut wants)
 }
@@ -797,40 +879,119 @@ pub enum Pattern {
     Tool(ToolPattern),
 }
 
-/// `Tool(<entry> <program> <argv pattern>)`: decides `tool.invoke`.
+/// `Tool(<entry> <program> <argv pattern>)` or `Tool(<entry> <program>:<shape>)`:
+/// decides `tool.invoke`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolPattern {
     pub entry: String,
     pub program: String,
-    pub args: ArgPattern,
+    pub target: ToolTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolTarget {
+    Args(ArgPattern),
+    Shape(ShapePattern),
+}
+
+/// A shape name, or the whole-segment prefix before `.*` (`""` for `*`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShapePattern {
+    Exact(String),
+    Prefix(String),
+}
+
+impl ShapePattern {
+    fn parse(text: &str) -> Option<ShapePattern> {
+        if text == "*" {
+            return Some(ShapePattern::Prefix(String::new()));
+        }
+        if let Some(prefix) = text.strip_suffix(".*") {
+            return crate::grammar::shape_name_ok(prefix)
+                .then(|| ShapePattern::Prefix(prefix.to_string()));
+        }
+        crate::grammar::shape_name_ok(text).then(|| ShapePattern::Exact(text.to_string()))
+    }
+
+    pub fn matches(&self, shape: &str) -> bool {
+        match self {
+            ShapePattern::Exact(name) => name == shape,
+            ShapePattern::Prefix(prefix) => {
+                prefix.is_empty()
+                    || shape
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            }
+        }
+    }
+
+    pub fn covers(&self, other: &ShapePattern) -> bool {
+        match (self, other) {
+            (ShapePattern::Exact(a), ShapePattern::Exact(b)) => a == b,
+            (ShapePattern::Exact(_), ShapePattern::Prefix(_)) => false,
+            (ShapePattern::Prefix(_), ShapePattern::Exact(name)) => self.matches(name),
+            (ShapePattern::Prefix(a), ShapePattern::Prefix(b)) => {
+                a.is_empty()
+                    || a == b
+                    || b.strip_prefix(a.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            }
+        }
+    }
+
+    pub fn overlaps(&self, other: &ShapePattern) -> bool {
+        self.covers(other) || other.covers(self)
+    }
 }
 
 impl ToolPattern {
     fn parse(spec: &str, inner: &str) -> Result<ToolPattern, AuthzError> {
         let bad = || AuthzError::BadPattern(spec.to_string());
         let mut parts = inner.splitn(3, ' ');
-        let (Some(entry), Some(program), Some(rest)) = (parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(entry), Some(second), third) = (parts.next(), parts.next(), parts.next()) else {
             return Err(bad());
         };
-        if !crate::tools::tool_entry_name_ok(entry) || !crate::tools::tool_program_name_ok(program)
-        {
+        if !crate::tools::tool_entry_name_ok(entry) {
             return Err(bad());
         }
-        let args = ArgPattern::parse(rest).map_err(|_| bad())?;
+        let (program, target) = match second.split_once(':') {
+            Some((program, shape)) => {
+                if third.is_some() {
+                    return Err(bad());
+                }
+                let shape = ShapePattern::parse(shape).ok_or_else(bad)?;
+                (program, ToolTarget::Shape(shape))
+            }
+            None => {
+                let rest = third.ok_or_else(bad)?;
+                let args = ArgPattern::parse_grant(rest).map_err(|_| bad())?;
+                (second, ToolTarget::Args(args))
+            }
+        };
+        if !crate::tools::tool_program_name_ok(program) {
+            return Err(bad());
+        }
         Ok(ToolPattern {
             entry: entry.to_string(),
             program: program.to_string(),
-            args,
+            target,
         })
     }
 
     fn matches(&self, call: &ToolCall, side: Side) -> bool {
         self.entry == call.entry
             && self.program == call.program
-            && match side {
-                Side::Allow => self.args.matches_any(&call.argv, &call.bound),
-                Side::Deny => self.args.matches_any_for_deny(&call.argv, &call.bound),
+            && match (&self.target, &call.shape) {
+                (ToolTarget::Args(args), None) => match side {
+                    Side::Allow => args.matches_any(&call.argv, &call.bound),
+                    Side::Deny => args.matches_any_for_deny(&call.argv, &call.bound),
+                },
+                (ToolTarget::Args(args), Some(_)) => match side {
+                    Side::Allow => false,
+                    Side::Deny => args.matches_any_for_deny(&call.argv, &call.bound),
+                },
+                (ToolTarget::Shape(pattern), Some(shape)) => pattern.matches(shape),
+                (ToolTarget::Shape(_), None) => false,
             }
     }
 }
@@ -1390,6 +1551,52 @@ fn roles_term_list(v: &Value) -> Result<Vec<ActionPattern>, AuthzError> {
     }
 }
 
+/// `roles.<role>.permissions`: `Tool(...)` entries only.
+fn role_permissions(role: &str, pm: &[(String, Value)]) -> Result<ToolPermissions, AuthzError> {
+    check_known_keys(
+        &format!("authz.roles.{role}.permissions"),
+        pm,
+        &["allow", "deny"],
+    )?;
+    let list = |key: &str| -> Result<(Vec<ToolPattern>, Vec<String>), AuthzError> {
+        let sources: Vec<String> = match get(pm, key) {
+            None => Vec::new(),
+            Some(Value::Seq(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Value::Str(s) => Ok(s.clone()),
+                    _ => Err(AuthzError::Yaml(format!(
+                        "roles.{role}.permissions entries must be strings"
+                    ))),
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => {
+                return Err(AuthzError::Yaml(format!(
+                    "roles.{role}.permissions.{key} must be a sequence"
+                )))
+            }
+        };
+        let patterns = sources
+            .iter()
+            .map(|s| match parse_pattern(s)? {
+                Pattern::Tool(t) => Ok(t),
+                Pattern::Read(_) | Pattern::Write(_) => Err(AuthzError::Yaml(format!(
+                    "roles.{role}.permissions: `{s}` is not a Tool(...) grant"
+                ))),
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((patterns, sources))
+    };
+    let (allow, allow_sources) = list("allow")?;
+    let (deny, deny_sources) = list("deny")?;
+    Ok(ToolPermissions::of(
+        allow,
+        deny,
+        allow_sources,
+        deny_sources,
+    ))
+}
+
 fn subject_list(v: &Value, what: &str) -> Result<Vec<String>, AuthzError> {
     match v {
         Value::Seq(items) => items
@@ -1602,7 +1809,11 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
                         ))
                     }
                 };
-                check_known_keys(&format!("authz.roles.{role}"), rb, &["allow", "deny"])?;
+                check_known_keys(
+                    &format!("authz.roles.{role}"),
+                    rb,
+                    &["allow", "deny", "permissions"],
+                )?;
                 let allow = get(rb, "allow")
                     .map(roles_term_list)
                     .transpose()?
@@ -1619,7 +1830,23 @@ fn parse_policy(body: &str) -> Result<AuthzPolicy, AuthzError> {
                 // without that test, swapping the loader for a last-wins one
                 // would turn a written `deny:` into a silent permit, and
                 // nothing here would notice.
-                out.insert(role.clone(), RawActionGrants { allow, deny });
+                let permissions = match get(rb, "permissions") {
+                    None => ToolPermissions::default(),
+                    Some(Value::Map(pm)) => role_permissions(role, pm)?,
+                    Some(_) => {
+                        return Err(AuthzError::Yaml(format!(
+                            "roles.{role}.permissions must be a map of allow/deny"
+                        )))
+                    }
+                };
+                out.insert(
+                    role.clone(),
+                    RawActionGrants {
+                        allow,
+                        deny,
+                        permissions,
+                    },
+                );
             }
             out
         }
@@ -1882,6 +2109,28 @@ pub fn load_authz(path: &Path) -> Result<AuthzPolicy, AuthzError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_permissions_expose_their_allow_and_deny_patterns() {
+        let tool = |spec: &str| match parse_pattern(spec).unwrap() {
+            Pattern::Tool(t) => t,
+            other => panic!("{other:?}"),
+        };
+        let perms = ToolPermissions::of(
+            vec![tool("Tool(a-tool echo hi *)")],
+            vec![tool("Tool(b-tool echo bye *)")],
+            vec!["Tool(a-tool echo hi *)".to_string()],
+            vec!["Tool(b-tool echo bye *)".to_string()],
+        );
+        assert_eq!(
+            perms.allow(),
+            [Pattern::Tool(tool("Tool(a-tool echo hi *)"))]
+        );
+        assert_eq!(
+            perms.deny(),
+            [Pattern::Tool(tool("Tool(b-tool echo bye *)"))]
+        );
+    }
 
     const DEST_BASE: &str = "schema_version: 1\npermissions:\n  allow: []\n  deny: []\n";
     fn parse_dest(body: &str) -> Result<AuthzPolicy, AuthzError> {
@@ -3262,13 +3511,10 @@ mod tests {
 
     #[test]
     fn roles_unknown_key_under_role_refused() {
-        // `roles.<name>` allows exactly `allow` and `deny` — a `permissions:`
-        // typo here must not be silently accepted as a second, unenforced
-        // grant surface.
-        let body = format!("{PREAMBLE}roles:\n  admin:\n    permissions:\n    allow: []\n");
+        let body = format!("{PREAMBLE}roles:\n  admin:\n    models:\n    allow: []\n");
         let e = parse_authz(&body).unwrap_err();
         assert!(
-            matches!(&e, AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "permissions"),
+            matches!(&e, AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "models"),
             "must name the offending key: {e:?}"
         );
     }
@@ -3987,6 +4233,7 @@ mod tests {
             program: program.into(),
             argv: argv.iter().map(|a| (*a).into()).collect(),
             bound: Vec::new(),
+            shape: None,
         }
     }
 
@@ -3997,7 +4244,10 @@ mod tests {
         };
         assert_eq!(t.entry, "cargo-test");
         assert_eq!(t.program, "cargo");
-        assert_eq!(t.args, ArgPattern::parse("test *").unwrap());
+        assert_eq!(
+            t.target,
+            ToolTarget::Args(ArgPattern::parse("test *").unwrap())
+        );
     }
 
     #[test]
@@ -4012,13 +4262,204 @@ mod tests {
             "Tool(-x cargo test)",
             "Tool(a b/c test)",
             "Tool(a cargo  test)",
-            "Tool(a cargo *)",
         ] {
             assert_eq!(
                 parse_pattern(bad),
                 Err(AuthzError::BadPattern(bad.into())),
                 "{bad}"
             );
+        }
+    }
+
+    fn lone() -> Pattern {
+        parse_pattern("Tool(a cargo *)").unwrap()
+    }
+
+    fn lone_tool() -> ToolPattern {
+        let Pattern::Tool(t) = lone() else {
+            panic!("expected a Tool pattern");
+        };
+        t
+    }
+
+    #[test]
+    fn lone_star_grant_loads_as_allow_and_deny() {
+        let Pattern::Tool(t) = lone() else {
+            panic!("expected a Tool pattern");
+        };
+        assert_eq!(t.entry, "a");
+        assert_eq!(t.program, "cargo");
+        assert!(matches!(t.target, ToolTarget::Args(ref a) if a.canonical() == "*"));
+        let doc = parse_authz(
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(a cargo *)\"]\n  deny: [\"Tool(a cargo *)\"]\n",
+        );
+        assert!(doc.is_ok(), "{doc:?}");
+    }
+
+    #[test]
+    fn lone_star_grant_matches_empty_and_long_argv() {
+        let p = lone_tool();
+        let long: Vec<&str> = std::iter::repeat_n("x", 64).collect();
+        for argv in [&[][..], &["build"], &long] {
+            let call = tool_call("a", "cargo", argv);
+            assert!(p.matches(&call, Side::Allow), "{argv:?}");
+            assert!(p.matches(&call, Side::Deny), "{argv:?}");
+        }
+        assert!(!p.matches(&tool_call("b", "cargo", &["x"]), Side::Allow));
+        assert!(!p.matches(&tool_call("a", "rustc", &["x"]), Side::Allow));
+    }
+
+    #[test]
+    fn lone_star_grant_stays_bounded_by_a_positional_ceiling() {
+        let tools = crate::ToolsCatalog::parse(
+            "schema_version: 1\ntools:\n  a:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo: { subcommands: [\"build *\"] }\n",
+        )
+        .unwrap();
+        let cmd = &tools.entry("a").unwrap().commands["cargo"];
+        let crate::CommandForm::Positional(patterns) = &cmd.form else {
+            panic!("{:?}", cmd.form);
+        };
+        let ok = ["build".to_string(), "x".to_string()];
+        let bad = ["publish".to_string()];
+        let b = crate::Bound::empty();
+        assert!(patterns.iter().any(|p| p.matches(&ok, &b)));
+        assert!(!patterns.iter().any(|p| p.matches(&bad, &b)));
+    }
+
+    fn shape_pattern(text: &str) -> ShapePattern {
+        let Pattern::Tool(t) = parse_pattern(&format!("Tool(a gh:{text})")).unwrap() else {
+            panic!("expected a Tool pattern");
+        };
+        let ToolTarget::Shape(p) = t.target else {
+            panic!("expected a shape target");
+        };
+        p
+    }
+
+    fn shape_call(shape: &str) -> ToolCall {
+        ToolCall {
+            shape: Some(shape.into()),
+            ..tool_call("a", "gh", &["issue", "close"])
+        }
+    }
+
+    #[test]
+    fn shape_form_parses_exact_prefix_and_star() {
+        assert_eq!(
+            shape_pattern("issue.close"),
+            ShapePattern::Exact("issue.close".into())
+        );
+        assert_eq!(shape_pattern("pr"), ShapePattern::Exact("pr".into()));
+        assert_eq!(
+            shape_pattern("issue.*"),
+            ShapePattern::Prefix("issue".into())
+        );
+        assert_eq!(
+            shape_pattern("issue.edit.*"),
+            ShapePattern::Prefix("issue.edit".into())
+        );
+        assert_eq!(shape_pattern("*"), ShapePattern::Prefix(String::new()));
+        let Pattern::Tool(t) = parse_pattern("Tool(a gh:pr.*)").unwrap() else {
+            panic!("expected a Tool pattern");
+        };
+        assert_eq!((t.entry.as_str(), t.program.as_str()), ("a", "gh"));
+    }
+
+    #[test]
+    fn shape_form_rejects_a_third_token_and_bad_names() {
+        for bad in [
+            "Tool(a gh:issue.close extra)",
+            "Tool(a gh:issue.close )",
+            "Tool(a gh:*  *)",
+            "Tool(a gh:)",
+            "Tool(a :issue)",
+            "Tool(a gh:issue*)",
+            "Tool(a gh:issue.**)",
+            "Tool(a gh:.*)",
+            "Tool(a gh:issue..close)",
+            "Tool(a gh:Issue.close)",
+            "Tool(a gh:issue.close.)",
+            "Tool(a gh:issue:close)",
+            "Tool(a gh/x:issue)",
+            "Tool(a gh:*.close)",
+            "Tool(a gh:iss*.close)",
+        ] {
+            assert_eq!(
+                parse_pattern(bad),
+                Err(AuthzError::BadPattern(bad.into())),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_matches_only_at_segment_boundary() {
+        let p = shape_pattern("issue.*");
+        for (shape, want) in [
+            ("issue.edit.title", true),
+            ("issue.close", true),
+            ("issue", false),
+            ("issues", false),
+            ("issues.close", false),
+            ("pr.issue.close", false),
+        ] {
+            assert_eq!(p.matches(shape), want, "{shape}");
+        }
+        let star = shape_pattern("*");
+        assert!(star.matches("issue") && star.matches("pr.view"));
+        let exact = shape_pattern("issue.close");
+        assert!(exact.matches("issue.close"));
+        assert!(!exact.matches("issue.close.x") && !exact.matches("issue"));
+    }
+
+    #[test]
+    fn shape_pattern_never_matches_positional_call_and_args_deny_matches_rendered_argv() {
+        let shape = parse_pattern("Tool(a gh:*)").unwrap();
+        let positional = parse_pattern("Tool(a gh issue *)").unwrap();
+        let unrelated = parse_pattern("Tool(a gh pr *)").unwrap();
+        let pos_call = tool_call("a", "gh", &["issue", "close"]);
+        let shp_call = shape_call("issue.close");
+        for side in [Side::Allow, Side::Deny] {
+            let hit = |p: &Pattern, c: &ToolCall| p.matches_req(&Request::Tool(c), None, side);
+            assert_eq!(hit(&shape, &pos_call), Ok(false));
+            assert_eq!(hit(&shape, &shp_call), Ok(true));
+            assert_eq!(hit(&positional, &pos_call), Ok(true));
+            assert_eq!(hit(&unrelated, &shp_call), Ok(false));
+        }
+        let hit = |side| positional.matches_req(&Request::Tool(&shp_call), None, side);
+        assert_eq!(hit(Side::Allow), Ok(false));
+        assert_eq!(hit(Side::Deny), Ok(true));
+        let wrong = parse_pattern("Tool(b gh:*)").unwrap();
+        let other = parse_pattern("Tool(a glab:*)").unwrap();
+        for p in [wrong, other] {
+            assert_eq!(
+                p.matches_req(&Request::Tool(&shp_call), None, Side::Allow),
+                Ok(false)
+            );
+        }
+    }
+
+    #[test]
+    fn shape_overlaps_and_covers() {
+        for (a, b, covers, overlaps) in [
+            ("*", "issue.*", true, true),
+            ("issue.*", "*", false, true),
+            ("issue.*", "issue.close", true, true),
+            ("issue.close", "issue.*", false, true),
+            ("pr.*", "issue.*", false, false),
+            ("issue.*", "issue.edit.*", true, true),
+            ("issue.edit.*", "issue.*", false, true),
+            ("issue.*", "issues.*", false, false),
+            ("issue.close", "issue.close", true, true),
+            ("issue.close", "issue.edit", false, false),
+            ("issue", "issue.*", false, false),
+            ("issue.*", "issue", false, false),
+            ("*", "*", true, true),
+        ] {
+            let (pa, pb) = (shape_pattern(a), shape_pattern(b));
+            assert_eq!(pa.covers(&pb), covers, "{a} covers {b}");
+            assert_eq!(pa.overlaps(&pb), overlaps, "{a} overlaps {b}");
+            assert_eq!(pb.overlaps(&pa), overlaps, "{b} overlaps {a}");
         }
     }
 
@@ -4076,43 +4517,202 @@ mod tests {
     #[test]
     fn effective_lists_are_the_lists_the_pdp_evaluates() {
         let p = parse_authz(
-            "schema_version: 1\npermissions:\n  allow: [\"Tool(e p a *)\"]\n  deny: [\"Tool(e p a b)\"]\nsubjects:\n  alice:\n    permissions:\n      allow: [\"Tool(e p c *)\"]\n      deny: [\"Tool(e p c d)\"]\n",
+            "schema_version: 1\npermissions:\n  allow: [\"Tool(e p a *)\"]\n  deny: [\"Tool(e p a b)\"]\nsubjects:\n  alice:\n    permissions:\n      allow: [\"Tool(e p c *)\"]\n      deny: [\"Tool(e p c d)\"]\nroles:\n  user:\n    permissions:\n      allow: [\"Tool(e p r *)\"]\n      deny: [\"Tool(e p r s)\"]\n",
         )
         .unwrap();
         let alice = p.subjects["alice"].permissions.as_ref().unwrap();
+        let user = p.role_permissions("user").unwrap();
         let right = crate::tasks_right().unwrap();
-        fn same(stage: &Stage<'_>, (deny, allow): (DenyLists<'_>, SourcedList<'_>)) -> bool {
-            let deny: Vec<&[Pattern]> = deny.iter().flatten().map(|l| l.patterns).collect();
-            std::ptr::eq(stage.allow, allow.patterns)
-                && stage.deny.len() == deny.len()
-                && stage
-                    .deny
-                    .iter()
-                    .zip(&deny)
-                    .all(|(a, b)| std::ptr::eq(*a, *b))
+        fn same(stage: &Stage<'_>, (deny, allow): (DenyLists<'_>, AllowLists<'_>)) -> bool {
+            let slices = |l: &[Option<SourcedList<'_>>]| -> Vec<*const [Pattern]> {
+                l.iter()
+                    .flatten()
+                    .map(|l| std::ptr::from_ref(l.patterns))
+                    .collect()
+            };
+            let ptrs = |l: &[&[Pattern]]| -> Vec<*const [Pattern]> {
+                l.iter().map(|p| std::ptr::from_ref(*p)).collect()
+            };
+            ptrs(&stage.deny) == slices(&deny) && ptrs(&stage.allow) == slices(&allow)
         }
 
-        let site = p.effective_lists(None, None);
+        let site = p.effective_lists(None, None, None);
         assert!(site.right.is_none());
-        assert!(same(&site.floored, p.lists(None)));
-        assert_eq!(site.floored.allow, p.allow.as_slice());
+        assert!(same(&site.floored, p.lists(None, None)));
+        assert_eq!(site.floored.allow, [p.allow.as_slice()]);
         assert_eq!(site.floored.deny, [p.deny.as_slice()]);
 
-        let replacing = p.effective_lists(None, Some(alice));
+        let replacing = p.effective_lists(None, Some(alice), None);
         assert!(replacing.right.is_none());
-        assert!(same(&replacing.floored, p.lists(Some(alice))));
-        assert_eq!(replacing.floored.allow, alice.allow.as_slice());
+        assert!(same(&replacing.floored, p.lists(Some(alice), None)));
+        assert_eq!(replacing.floored.allow, [alice.allow.as_slice()]);
         assert_eq!(
             replacing.floored.deny,
             [p.deny.as_slice(), alice.deny.as_slice()]
         );
 
-        let agent = p.effective_lists(Some(&right), Some(alice));
+        let role = p.effective_lists(None, None, Some(user));
+        assert!(same(&role.floored, p.lists(None, Some(user))));
+        assert_eq!(
+            role.floored.allow,
+            [p.allow.as_slice(), user.allow.as_slice()]
+        );
+        assert_eq!(role.floored.deny, [p.deny.as_slice(), user.deny.as_slice()]);
+        assert!(std::ptr::eq(role.floored.allow[1], user.allow.as_slice()));
+        assert!(std::ptr::eq(role.floored.deny[1], user.deny.as_slice()));
+
+        let both = p.effective_lists(None, Some(alice), Some(user));
+        assert!(same(&both.floored, p.lists(Some(alice), Some(user))));
+        assert_eq!(
+            both.floored.allow,
+            [alice.allow.as_slice(), user.allow.as_slice()]
+        );
+        assert_eq!(
+            both.floored.deny,
+            [
+                p.deny.as_slice(),
+                alice.deny.as_slice(),
+                user.deny.as_slice()
+            ]
+        );
+
+        let unlisted = p.effective_lists(None, None, p.role_permissions("admin"));
+        assert_eq!(unlisted, site);
+
+        let agent = p.effective_lists(Some(&right), Some(alice), None);
         let r = agent.right.as_ref().unwrap();
         assert!(same(r, p.right_lists(&right)));
-        assert_eq!(r.allow, right.allow.as_slice());
+        assert_eq!(r.allow, [right.allow.as_slice()]);
         assert_eq!(r.deny, [p.deny.as_slice()]);
-        assert!(same(&agent.floored, p.lists(Some(alice))));
+        assert!(same(&agent.floored, p.lists(Some(alice), None)));
+    }
+
+    const ROLE_TOOLS: &str = "schema_version: 1\npermissions:\n  allow: [\"Tool(e p a *)\"]\n  deny: []\nroles:\n  user:\n    permissions:\n      allow: [\"Tool(e p r *)\"]\n      deny: [\"Tool(e p a b)\"]\n";
+
+    #[test]
+    fn role_permissions_accept_tool_only() {
+        let p = parse_authz(ROLE_TOOLS).unwrap();
+        let user = p.role_permissions("user").unwrap();
+        assert_eq!(user.allow_sources(), ["Tool(e p r *)"]);
+        assert_eq!(user.deny_sources(), ["Tool(e p a b)"]);
+        assert!(matches!(user.allow[..], [Pattern::Tool(_)]));
+        assert!(matches!(user.deny[..], [Pattern::Tool(_)]));
+        assert_eq!(p.action_grants["user"].allow, []);
+        assert_eq!(p.role_permissions("admin"), None);
+
+        for (list, entry) in [("allow", "Read(~/**)"), ("deny", "Write(~/x/**)")] {
+            let body = format!(
+                "{PREAMBLE}roles:\n  user:\n    permissions:\n      {list}: [\"{entry}\"]\n"
+            );
+            let e = parse_authz(&body).unwrap_err();
+            assert_eq!(
+                e,
+                AuthzError::Yaml(format!(
+                    "roles.user.permissions: `{entry}` is not a Tool(...) grant"
+                ))
+            );
+        }
+        let typo = format!("{PREAMBLE}roles:\n  user:\n    permissions:\n      alow: []\n");
+        assert!(matches!(
+            parse_authz(&typo).unwrap_err(),
+            AuthzError::Config(ConfigError::UnknownKey { key, .. }) if key == "alow"
+        ));
+        for (body, message) in [
+            (
+                "    permissions: [\"Tool(e p a)\"]\n",
+                "roles.user.permissions must be a map of allow/deny",
+            ),
+            (
+                "    permissions:\n      allow: \"Tool(e p a)\"\n",
+                "roles.user.permissions.allow must be a sequence",
+            ),
+            (
+                "    permissions:\n      deny: 7\n",
+                "roles.user.permissions.deny must be a sequence",
+            ),
+            (
+                "    permissions:\n      allow: [7]\n",
+                "roles.user.permissions entries must be strings",
+            ),
+        ] {
+            let e = parse_authz(&format!("{PREAMBLE}roles:\n  user:\n{body}")).unwrap_err();
+            assert_eq!(e, AuthzError::Yaml(message.into()), "{body}");
+        }
+        let bad =
+            format!("{PREAMBLE}roles:\n  user:\n    permissions:\n      allow: [\"Tool(e)\"]\n");
+        assert!(matches!(
+            parse_authz(&bad).unwrap_err(),
+            AuthzError::BadPattern(_)
+        ));
+    }
+
+    #[test]
+    fn a_role_permission_edit_changes_the_roles_section() {
+        let a = parse_authz(ROLE_TOOLS).unwrap();
+        let b = parse_authz(&ROLE_TOOLS.replace("Tool(e p r *)", "Tool(e p r x)")).unwrap();
+        assert_ne!(a.section_canonical("roles"), b.section_canonical("roles"));
+        assert_eq!(
+            a.section_canonical("permissions"),
+            b.section_canonical("permissions")
+        );
+    }
+
+    #[test]
+    fn role_lists_join_the_allow_in_force_and_the_deny() {
+        let p = parse_authz(&format!(
+            "{ROLE_TOOLS}subjects:\n  alice:\n    permissions:\n      allow: [\"Tool(e p c *)\"]\n"
+        ))
+        .unwrap();
+        let alice = p.subjects["alice"].permissions.as_ref();
+        let eval = |subject, role: Option<&str>, argv: &[&str]| {
+            p.evaluate_tool_floored(
+                subject,
+                role.and_then(|r| p.role_permissions(r)),
+                &tool_call("e", "p", argv),
+                Fold::None,
+            )
+            .unwrap()
+        };
+        let allow = |source: &str| Match3::AllowMatch {
+            source: source.into(),
+        };
+        assert_eq!(
+            eval(None, Some("user"), &["r", "1"]),
+            allow("Tool(e p r *)")
+        );
+        assert_eq!(eval(None, None, &["r", "1"]), Match3::NoMatch);
+        assert_eq!(eval(None, Some("admin"), &["r", "1"]), Match3::NoMatch);
+        assert_eq!(
+            eval(None, Some("user"), &["a", "1"]),
+            allow("Tool(e p a *)")
+        );
+        assert_eq!(
+            eval(None, Some("user"), &["a", "b"]),
+            Match3::DenyMatch {
+                source: "Tool(e p a b)".into()
+            }
+        );
+        assert_eq!(eval(None, None, &["a", "b"]), allow("Tool(e p a *)"));
+        assert_eq!(
+            eval(alice, Some("user"), &["r", "1"]),
+            allow("Tool(e p r *)")
+        );
+        assert_eq!(
+            eval(alice, Some("user"), &["c", "1"]),
+            allow("Tool(e p c *)")
+        );
+        assert_eq!(eval(alice, Some("user"), &["a", "1"]), Match3::NoMatch);
+        let right = crate::tasks_right().unwrap();
+        assert_eq!(
+            p.evaluate3_agent(
+                &right,
+                None,
+                &Request::Tool(&tool_call("e", "p", &["r", "1"])),
+                None,
+                Fold::None
+            ),
+            Ok(AgentMatch::Floored(Match3::NoMatch))
+        );
     }
 
     #[test]

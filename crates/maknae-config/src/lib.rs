@@ -50,6 +50,7 @@ mod egress_cfg;
 mod egress_mint;
 mod error;
 mod forges;
+mod grammar;
 mod loader;
 pub mod mirror;
 mod policy;
@@ -106,8 +107,9 @@ pub use bindings_sync::{
 pub use authz::{
     destination_entry_is_acceptable, load_authz, parse_authz, parse_subject_entry, ActionPattern,
     AgentMatch, AuthzError, AuthzPolicy, EffectiveLists, HomeUnbound, Match3, ModelRef, MountSide,
-    PathGlob, Pattern, RawActionGrants, RawDestinations, Request, Stage, SubjectActions,
-    SubjectPermissions, SubjectPolicy, ToolCall, ToolPattern,
+    PathGlob, Pattern, RawActionGrants, RawDestinations, Request, ShapePattern, Stage,
+    SubjectActions, SubjectPermissions, SubjectPolicy, ToolCall, ToolPattern, ToolPermissions,
+    ToolTarget,
 };
 pub use banner::{banner_from_document, load_banner, BANNER_FILE, BANNER_PATH};
 pub use baseline_doc::{document_sections, value_from_canonical_json, BaselineSections};
@@ -142,6 +144,15 @@ pub use forges::{
     forges_from_section, AuthorizedForge, ForgeKind, ForgeProvider, ForgeSet, FORGES_SECTION,
     FORGE_KEYS, MAX_FORGES, MAX_FORGE_NAME_BYTES,
 };
+#[cfg(feature = "hermetic-test-seam")]
+pub use grammar::shipped_grammars;
+pub use grammar::{
+    check_open_argv, load_grammars, shape_name_ok, ArgvToken, CallRefusal, Constraint,
+    DisabledGrammar, ForgeNeed, Grammar, GrammarError, GrammarLoadError, GrammarName, GrammarSet,
+    Rendered, Shape, ShapeClass, Slot, SlotAt, SlotFile, Tested, GRAMMARS_DIR, VENDOR_GRAMMAR_DIR,
+};
+#[cfg(all(unix, feature = "hermetic-test-seam"))]
+pub use grammar::{load_grammars_with_requirement, GrammarRequirement};
 #[cfg(all(unix, feature = "hermetic-test-seam"))]
 pub use maknae_io::TargetRequired;
 pub use maknae_security::{ClassificationPolicy, Level};
@@ -167,14 +178,12 @@ pub use sensitive::{
     SENSITIVE_FILE,
 };
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
-#[cfg(all(unix, feature = "hermetic-test-seam"))]
-pub use tools::load_tools_with_requirement;
 pub use tools::{
-    load_host_tools, ClassLifetime, CredentialClass, CredentialKind, CredentialMinting,
+    ClassLifetime, CommandForm, CredentialClass, CredentialKind, CredentialMinting,
     CredentialNarrowing, CredentialRevokeOn, CredentialSource, Disabled, OutputToModel,
     ToolCommand, ToolEntry, ToolImage, ToolIsolation, ToolNetwork, ToolResources, ToolVerify,
     ToolVolume, ToolVolumeAccess, ToolVolumeScope, ToolWorkspaceAccess, ToolsCatalog, ToolsError,
-    TOOLS_FILE,
+    TOOLS_DROPIN_DIR, TOOLS_FILE,
 };
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,

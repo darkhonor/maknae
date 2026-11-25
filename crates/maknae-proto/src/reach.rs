@@ -21,6 +21,16 @@ impl ForgeOp {
         Self::Merge,
     ];
 
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Review => "review",
+            Self::IssueWrite => "issue-write",
+            Self::PushHead => "push-head",
+            Self::Merge => "merge",
+        }
+    }
+
     const fn bit(self) -> u8 {
         match self {
             Self::Read => 1,
@@ -29,6 +39,16 @@ impl ForgeOp {
             Self::PushHead => 1 << 3,
             Self::Merge => 1 << 4,
         }
+    }
+}
+
+impl std::str::FromStr for ForgeOp {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|op| op.as_str() == s)
+            .ok_or_else(|| format!("`{s}` is not a forge operation"))
     }
 }
 
@@ -281,6 +301,20 @@ impl TryFrom<(u16, Option<u8>)> for ReachSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forge_op_spellings_round_trip() {
+        for op in ForgeOp::ALL {
+            assert_eq!(op.as_str().parse::<ForgeOp>(), Ok(op));
+        }
+        let spelled: Vec<&str> = ForgeOp::ALL.iter().map(|op| op.as_str()).collect();
+        assert_eq!(
+            spelled,
+            ["read", "review", "issue-write", "push-head", "merge"]
+        );
+        assert!("Read".parse::<ForgeOp>().is_err());
+        assert!("".parse::<ForgeOp>().is_err());
+    }
 
     fn every_ops() -> impl Iterator<Item = ForgeOps> {
         (0..1u8 << OPS_BITS).map(|b| ForgeOps::from_bits(b).unwrap())

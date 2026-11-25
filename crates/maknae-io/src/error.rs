@@ -145,6 +145,20 @@ pub enum IoError {
         path: PathBuf,
         kind: IoKind,
     },
+    /// An enabled member is neither a regular file nor a symlink.
+    NotRegularOrLink {
+        path: PathBuf,
+    },
+    /// An enabled member is a symlink whose target text is not the vendor path of
+    /// the same name. `target` is the link's text, verbatim.
+    LinkTargetMismatch {
+        path: PathBuf,
+        target: PathBuf,
+    },
+    /// An enabled member's name is not a single plain path component.
+    NotAMemberName {
+        name: String,
+    },
     /// The kernel could not be asked where a delegated descriptor points: the
     /// `/proc/self/fd` lane is unavailable (a namespace without `/proc`), or the
     /// platform has no lane yet.
@@ -249,6 +263,18 @@ impl std::fmt::Display for IoError {
                 )
             }
             Self::Io { path, kind } => write!(f, "io error {kind:?}: {}", path.display()),
+            Self::NotRegularOrLink { path } => {
+                write!(f, "not a regular file or a symlink: {}", path.display())
+            }
+            Self::LinkTargetMismatch { path, target } => write!(
+                f,
+                "symlink target {} is not the vendor path: {}",
+                target.display(),
+                path.display()
+            ),
+            Self::NotAMemberName { name } => {
+                write!(f, "not a single path component: {name:?}")
+            }
             Self::FdPathUnavailable { kind } => {
                 write!(
                     f,
@@ -303,6 +329,25 @@ mod tests {
         assert_eq!(
             IoError::Symlink { path: p.clone() }.to_string(),
             "symlink refused: /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::NotRegularOrLink { path: p.clone() }.to_string(),
+            "not a regular file or a symlink: /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::LinkTargetMismatch {
+                path: p.clone(),
+                target: PathBuf::from("../x"),
+            }
+            .to_string(),
+            "symlink target ../x is not the vendor path: /etc/maknae/cfg"
+        );
+        assert_eq!(
+            IoError::NotAMemberName {
+                name: "a/b".to_owned()
+            }
+            .to_string(),
+            "not a single path component: \"a/b\""
         );
         assert_eq!(
             IoError::PublishedNotDurable {

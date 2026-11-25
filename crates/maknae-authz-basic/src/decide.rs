@@ -163,6 +163,11 @@ pub(crate) enum Cited {
         agent: String,
         source: String,
     },
+    RolePath {
+        role: &'static str,
+        effect: Effect,
+        source: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1444,8 +1449,9 @@ fn decide_fs(
     let decided = decide_grants(
         lp,
         entry,
+        None,
         |right, set| evaluate_agent(lp, right, set, scope, path, home),
-        |set| evaluate_floored(lp, set, scope, path, home),
+        |set, _| evaluate_floored(lp, set, scope, path, home),
         // Case-5 testimony (#181): role and term ONLY -- never the path (the
         // D9 hazard). "No capability entry" is accurate where "no rule" would
         // be false: a rule for fs.read exists; no ENTRY matched this request.
@@ -1470,24 +1476,68 @@ fn decide_fs(
 
 fn mask_obligation(patterns: Vec<String>) -> Obligation {
     let mut params = Attributes::new();
-    params.insert("patterns", AttrValue::List(patterns));
+    params.insert(
+        maknae_security::workspace_mask::PATTERNS,
+        AttrValue::List(patterns),
+    );
     Obligation {
-        id: "workspace.mask".into(),
+        id: maknae_security::workspace_mask::ID.into(),
         params,
     }
 }
 
-/// Deny-first over the site and the subject's or agent's own lists, citing the entry that
-/// decided; `absent` is the note when no entry matches.
-fn decide_grants(
+/// A person's role and its `roles.<role>.permissions`, which join the floored lists; an
+/// agent, by its entry or by `lp.agents`, inherits none.
+pub(crate) fn role_stage<'a>(
+    lp: &'a LoadedPolicy,
+    uid: u32,
+    entry: Option<&SubjectEntry>,
+    role_key: &'static str,
+) -> Option<(&'static str, &'a maknae_config::ToolPermissions)> {
+    if lp.agents.get(uid).is_some() {
+        return None;
+    }
+    match entry.map(|e| &e.origin) {
+        Some(SubjectOrigin::Agent(_)) => None,
+        Some(SubjectOrigin::Authz) | None => {
+            Some((role_key, lp.policy.role_permissions(role_key)?))
+        }
+    }
+}
+
+/// Which written list a matched entry came from, in the order the lists are consulted.
+enum Origin<'e> {
+    Site,
+    Subject(&'e SubjectEntry),
+    Role(&'static str),
+}
+
+/// The first list, in consult order, that holds `source`; the lists' sources are
+/// index-aligned with their patterns, so one always does.
+fn origin_of<'e, const N: usize>(
+    source: &str,
+    lists: [Option<(&[String], Origin<'e>)>; N],
+) -> Origin<'e> {
+    lists
+        .into_iter()
+        .flatten()
+        .find(|(sources, _)| sources.iter().any(|s| s == source))
+        .map_or(Origin::Site, |(_, origin)| origin)
+}
+
+/// Deny-first over the site, the subject's or agent's own lists and the role's `Tool(...)`
+/// grants, citing the entry that decided; `absent` is the note when no entry matches.
+fn decide_grants<'p>(
     lp: &LoadedPolicy,
     entry: Option<&SubjectEntry>,
+    role_permissions: Option<(&'static str, &'p maknae_config::ToolPermissions)>,
     agent: impl FnOnce(
         &maknae_config::SubjectPermissions,
         Option<&maknae_config::SubjectPermissions>,
     ) -> Result<AgentMatch, maknae_config::HomeUnbound>,
     floored: impl FnOnce(
         Option<&maknae_config::SubjectPermissions>,
+        Option<&'p maknae_config::ToolPermissions>,
     ) -> Result<maknae_config::Match3, maknae_config::HomeUnbound>,
     absent: String,
 ) -> Decision {
@@ -1507,47 +1557,73 @@ fn decide_grants(
             Ok(AgentMatch::Floored(m)) => Ok(m),
             Err(unbound) => Err(unbound),
         },
-        None => floored(set),
+        None => floored(set, role_permissions.map(|(_, p)| p)),
     };
     let Ok(matched) = matched else {
         return (Verdict::Indeterminate, None);
     };
-    match (matched, subject) {
-        (maknae_config::Match3::DenyMatch { source }, Some((e, _)))
-            if !lp.policy.deny_sources().contains(&source) =>
-        {
-            (
-                Verdict::Deny {
-                    reason: format!("denied by {}.permissions entry {source}", e.section()),
-                },
-                Some(e.cited_path(Effect::Deny, source)),
-            )
-        }
-        (maknae_config::Match3::DenyMatch { source }, _) => (
-            Verdict::Deny {
+    match matched {
+        maknae_config::Match3::DenyMatch { source } => {
+            let origin = origin_of(
+                &source,
+                [
+                    Some((lp.policy.deny_sources(), Origin::Site)),
+                    subject.map(|(e, p)| (p.deny_sources(), Origin::Subject(e))),
+                    role_permissions.map(|(r, p)| (p.deny_sources(), Origin::Role(r))),
+                ],
+            );
+            let (reason, cited) = match origin {
                 // Audit-only provenance (spec §4.4): this reason reaches the
                 // audit record; #77's wiring must never copy it onto the wire.
-                reason: format!("denied by policy entry {source}"),
-            },
-            Some(Cited::Path {
-                effect: Effect::Deny,
-                source,
-            }),
-        ),
-        (maknae_config::Match3::AllowMatch { source }, Some((e, _))) => (
-            permit_with_audit(),
-            Some(e.cited_path(Effect::Allow, source)),
-        ),
-        (maknae_config::Match3::AllowMatch { source }, None) => (
-            permit_with_audit(),
-            Some(Cited::Path {
-                effect: Effect::Allow,
-                source,
-            }),
-        ),
-        (maknae_config::Match3::NoMatch, _) => {
-            (Verdict::NotApplicable { note: Some(absent) }, None)
+                Origin::Site => (
+                    format!("denied by policy entry {source}"),
+                    Cited::Path {
+                        effect: Effect::Deny,
+                        source,
+                    },
+                ),
+                Origin::Subject(e) => (
+                    format!("denied by {}.permissions entry {source}", e.section()),
+                    e.cited_path(Effect::Deny, source),
+                ),
+                Origin::Role(role) => (
+                    format!("denied by roles.{role}.permissions entry {source}"),
+                    Cited::RolePath {
+                        role,
+                        effect: Effect::Deny,
+                        source,
+                    },
+                ),
+            };
+            (Verdict::Deny { reason }, Some(cited))
         }
+        maknae_config::Match3::AllowMatch { source } => {
+            let in_force = match subject {
+                Some((e, p)) => (p.allow_sources(), Origin::Subject(e)),
+                None => (lp.policy.allow_sources(), Origin::Site),
+            };
+            let origin = origin_of(
+                &source,
+                [
+                    Some(in_force),
+                    role_permissions.map(|(r, p)| (p.allow_sources(), Origin::Role(r))),
+                ],
+            );
+            let cited = match origin {
+                Origin::Site => Cited::Path {
+                    effect: Effect::Allow,
+                    source,
+                },
+                Origin::Subject(e) => e.cited_path(Effect::Allow, source),
+                Origin::Role(role) => Cited::RolePath {
+                    role,
+                    effect: Effect::Allow,
+                    source,
+                },
+            };
+            (permit_with_audit(), Some(cited))
+        }
+        maknae_config::Match3::NoMatch => (Verdict::NotApplicable { note: Some(absent) }, None),
     }
 }
 
@@ -1560,25 +1636,59 @@ fn tool_ceiling_refusal(lp: &LoadedPolicy, req: &SecRequest, uid: u32) -> Option
     tool_ceiling(lp, req, uid).err()
 }
 
+#[derive(Clone, Copy)]
+enum Mode {
+    Shape,
+    Open,
+    Positional,
+}
+
+impl Mode {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            maknae_security::TOOL_MODE_SHAPE => Some(Mode::Shape),
+            maknae_security::TOOL_MODE_OPEN => Some(Mode::Open),
+            maknae_security::TOOL_MODE_POSITIONAL => Some(Mode::Positional),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Shape => maknae_security::TOOL_MODE_SHAPE,
+            Mode::Open => maknae_security::TOOL_MODE_OPEN,
+            Mode::Positional => maknae_security::TOOL_MODE_POSITIONAL,
+        }
+    }
+}
+
 fn tool_ceiling(
     lp: &LoadedPolicy,
     req: &SecRequest,
     uid: u32,
 ) -> Result<maknae_config::ToolCall, Decision> {
     use maknae_security::{
-        RESOURCE_BINDING_KINDS, RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY, RESOURCE_TOOL_PROGRAM,
-        SUBJECT_TASK,
+        RESOURCE_BINDING_KINDS, RESOURCE_TOOL_ARGV, RESOURCE_TOOL_ENTRY, RESOURCE_TOOL_MODE,
+        RESOURCE_TOOL_PROGRAM, RESOURCE_TOOL_SHAPE, SUBJECT_TASK,
     };
     let undecidable = || Err((Verdict::Indeterminate, None));
     let deny = |reason: &str| Err(refused(reason));
     let attrs = &req.resource.0;
-    let (Some(name), Some(program), Some(argv)) = (
+    let (Some(name), Some(program), Some(argv), Some(mode)) = (
         attrs.str(RESOURCE_TOOL_ENTRY),
         attrs.str(RESOURCE_TOOL_PROGRAM),
         attrs.list(RESOURCE_TOOL_ARGV),
+        attrs.str(RESOURCE_TOOL_MODE).and_then(Mode::parse),
     ) else {
         return undecidable();
     };
+    let stray_shape = match mode {
+        Mode::Shape => false,
+        Mode::Open | Mode::Positional => attrs.get(RESOURCE_TOOL_SHAPE).is_some(),
+    };
+    if stray_shape {
+        return undecidable();
+    }
     let none = std::collections::BTreeSet::new();
     let kinds = match (
         attrs.get(RESOURCE_BINDING_KINDS),
@@ -1627,14 +1737,53 @@ fn tool_ceiling(
     let Some(command) = entry.commands.get(program) else {
         return deny(&format!("tool: program not in entry {name}"));
     };
-    if !command
-        .subcommands
-        .iter()
-        .any(|p| p.matches_any(argv, &bound))
-    {
-        return deny(&format!(
-            "tool: arguments outside entry {name}'s subcommands"
-        ));
+    use maknae_config::CommandForm;
+    let mut shape = None;
+    match (mode, &command.form) {
+        (Mode::Positional, CommandForm::Positional(patterns)) => {
+            if !patterns.iter().any(|p| p.matches_any(argv, &bound)) {
+                return deny(&format!(
+                    "tool: arguments outside entry {name}'s subcommands"
+                ));
+            }
+        }
+        (Mode::Shape, CommandForm::Grammar { shapes, .. }) => {
+            let Some(requested) = attrs.str(RESOURCE_TOOL_SHAPE) else {
+                return undecidable();
+            };
+            let Some(template) = shapes.get(requested) else {
+                return deny(&format!(
+                    "tool: the shape is not enabled for {name}/{program}"
+                ));
+            };
+            let empty = maknae_config::Bound::empty();
+            let selected = match bound.as_slice() {
+                [] => &empty,
+                [one] => one,
+                [_, _, ..] => return deny("tool: a shape call carries more than one binding"),
+            };
+            if !template.matches_argv(argv, selected) {
+                return deny(&format!(
+                    "tool: arguments are not shape {requested}'s template"
+                ));
+            }
+            shape = Some(requested.to_string());
+        }
+        (Mode::Open, CommandForm::Open) => {
+            if maknae_config::check_open_argv(argv).is_err() {
+                return deny(&format!(
+                    "tool: open arguments refused for {name}/{program}"
+                ));
+            }
+        }
+        (Mode::Positional | Mode::Open, CommandForm::Grammar { .. })
+        | (Mode::Shape | Mode::Open, CommandForm::Positional(_))
+        | (Mode::Shape | Mode::Positional, CommandForm::Open) => {
+            return deny(&format!(
+                "tool: {name}/{program} is not a {} command",
+                mode.as_str()
+            ))
+        }
     }
     if let Some(n) = maknae_config::first_denied(&command.deny_args, argv) {
         return deny(&format!("tool: denied argument {n} for {name}/{program}"));
@@ -1658,6 +1807,7 @@ fn tool_ceiling(
         program: program.to_string(),
         argv: argv.to_vec(),
         bound,
+        shape,
     })
 }
 
@@ -1671,15 +1821,21 @@ fn decide_tool(
     if let Err(decision) = granted(lp, role_key, "tool.invoke") {
         return decision;
     }
-    let request = maknae_config::Request::Tool(call);
+    let entry = lp.subjects.get(uid);
     decide_grants(
         lp,
-        lp.subjects.get(uid),
+        entry,
+        role_stage(lp, uid, entry, role_key),
         |right, set| {
-            lp.policy
-                .evaluate3_agent(right, set, &request, None, lp.fold)
+            lp.policy.evaluate3_agent(
+                right,
+                set,
+                &maknae_config::Request::Tool(call),
+                None,
+                lp.fold,
+            )
         },
-        |set| lp.policy.evaluate3_floored(set, &request, None, lp.fold),
+        |set, role| lp.policy.evaluate_tool_floored(set, role, call, lp.fold),
         format!("role {role_key}: no capability entry for tool.invoke"),
     )
 }
@@ -6292,6 +6448,10 @@ mod tests {
             maknae_security::RESOURCE_BINDING_KINDS,
             AttrValue::Set(Default::default()),
         );
+        res.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_POSITIONAL.into()),
+        );
         r
     }
 
@@ -6483,6 +6643,501 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_star_grant_permits_only_what_the_positional_ceiling_admits() {
+        let lp = lp_tool(
+            "permissions:\n  allow: [\"Tool(sentinel-674-build cargo *)\"]\n",
+            &["user"],
+            &[],
+        );
+        for argv in [&["build"][..], &["build", "--release"], &["test", "x"]] {
+            assert_eq!(
+                tool_decided(&lp, &build(TOOL_USER, argv)).verdict,
+                permit_with_audit(),
+                "{argv:?}"
+            );
+        }
+        for argv in [&["run", "x"][..], &["publish"], &["Build"], &[]] {
+            assert_eq!(
+                tool_decided(&lp, &build(TOOL_USER, argv)).verdict,
+                deny("tool: arguments outside entry sentinel-674-build's subcommands"),
+                "{argv:?}"
+            );
+        }
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build", "--config=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-build/cargo"),
+        );
+    }
+
+    const GH_V1: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"1\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view, \"{git.change}\", -R, \"{git.base}\"]\n  issue.view:\n    description: View.\n    class: read\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"[1-9][0-9]{0,9}\", description: n }\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n";
+    const GH_V2: &str = "schema_version: 1\nprogram: gh\ntested: { version: \"2\", date: d }\nshapes:\n  pr.view:\n    description: View.\n    class: read\n    argv: [pr, view, \"{git.change}\", --repo, \"{git.base}\"]\n  issue.view:\n    description: View.\n    class: read\n    argv: [issue, view, \"{number}\"]\n    slots:\n      number: { at: token, pattern: \"[1-9][0-9]{0,9}\", description: n }\n  issue.list:\n    description: List.\n    class: read\n    argv: [issue, list]\n";
+    const FORMS_TOOLS: &str = "schema_version: 1\ntools:\n  sentinel-674-open:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      sh: { open: true, deny_args: [\"--exec*\"] }\n  sentinel-674-shape:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    binds: { git: { resolver: git } }\n    commands:\n      gh: { grammar: gh, shapes: [pr.view, issue.view], deny_args: [\"--web*\"] }\n  sentinel-674-build:\n    executes_workspace: false\n    image: { ref: \"registry.example/x@sha256:0000000000000000000000000000000000000000000000000000000000000000\" }\n    output_to_model: redacted\n    commands:\n      cargo:\n        subcommands: [\"build *\"]\n        deny_args: [\"--config*\"]\n";
+    const FORMS_ALLOW: &str = "permissions:\n  allow: [\"Tool(sentinel-674-open sh -c *)\", \"Tool(sentinel-674-shape gh:*)\", \"Tool(sentinel-674-build cargo build *)\"]\n";
+
+    fn forms_catalog(grammar: &str) -> std::sync::Arc<maknae_config::ToolsCatalog> {
+        let mut grammars = maknae_config::GrammarSet::empty();
+        grammars.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse("gh", grammar).unwrap(),
+        );
+        let tools = maknae_config::ToolsCatalog::parse_with(FORMS_TOOLS, &grammars).unwrap();
+        assert!(tools.disabled().is_empty(), "{:?}", tools.disabled());
+        std::sync::Arc::new(tools)
+    }
+
+    fn lp_forms(allow: &str) -> LoadedPolicy {
+        let mut lp = lp_tool(allow, &["user"], &[]);
+        lp.tools = forms_catalog(GH_V1);
+        lp
+    }
+
+    fn with_mode(mut r: SecRequest, mode: &str) -> SecRequest {
+        r.resource.0.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(mode.into()),
+        );
+        r
+    }
+
+    fn shape_call(shape: &str, argv: &[&str], bindings: &[(&str, Option<u64>)]) -> SecRequest {
+        let mut r = with_mode(
+            tool_req(TOOL_USER, "sentinel-674-shape", "gh", argv),
+            maknae_security::TOOL_MODE_SHAPE,
+        );
+        r.resource.0.insert(
+            maknae_security::RESOURCE_TOOL_SHAPE,
+            AttrValue::Str(shape.into()),
+        );
+        stamp_bound(&mut r, bindings);
+        r
+    }
+
+    fn open_call(argv: &[&str]) -> SecRequest {
+        with_mode(
+            tool_req(TOOL_USER, "sentinel-674-open", "sh", argv),
+            maknae_security::TOOL_MODE_OPEN,
+        )
+    }
+
+    const ONE: [(&str, Option<u64>); 1] = [("o/a", Some(7))];
+
+    fn drop_fact(r: &mut SecRequest, key: &str) {
+        let mut kept = Attributes::new();
+        let bound = maknae_security::GIT_BOUND_FIELDS.map(|f| maknae_security::bound_key("git", f));
+        for k in [
+            maknae_security::RESOURCE_TOOL_ENTRY,
+            maknae_security::RESOURCE_TOOL_PROGRAM,
+            maknae_security::RESOURCE_TOOL_ARGV,
+            maknae_security::RESOURCE_TOOL_MODE,
+            maknae_security::RESOURCE_TOOL_SHAPE,
+            maknae_security::RESOURCE_BINDING_KINDS,
+        ]
+        .into_iter()
+        .chain(bound.iter().map(String::as_str))
+        {
+            if let (true, Some(v)) = (k != key, r.resource.0.get(k)) {
+                kept.insert(k, v.clone());
+            }
+        }
+        r.resource.0 = kept;
+    }
+
+    #[test]
+    fn ceiling_denies_mode_form_mismatch() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let shape_on_open = with_mode(
+            tool_req(TOOL_USER, "sentinel-674-open", "sh", &["-c", "x"]),
+            maknae_security::TOOL_MODE_SHAPE,
+        );
+        let mut open_on_shape = shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE);
+        open_on_shape.resource.0.insert(
+            maknae_security::RESOURCE_TOOL_MODE,
+            AttrValue::Str(maknae_security::TOOL_MODE_OPEN.into()),
+        );
+        drop_fact(&mut open_on_shape, maknae_security::RESOURCE_TOOL_SHAPE);
+        let open_on_positional = with_mode(
+            build(TOOL_USER, &["build"]),
+            maknae_security::TOOL_MODE_OPEN,
+        );
+        let mut positional_on_grammar = with_mode(
+            shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE),
+            maknae_security::TOOL_MODE_POSITIONAL,
+        );
+        drop_fact(
+            &mut positional_on_grammar,
+            maknae_security::RESOURCE_TOOL_SHAPE,
+        );
+        let positional_on_open = tool_req(TOOL_USER, "sentinel-674-open", "sh", &["-c", "x"]);
+        let shape_on_positional = with_mode(
+            build(TOOL_USER, &["build"]),
+            maknae_security::TOOL_MODE_SHAPE,
+        );
+        for (r, entry, program, mode) in [
+            (shape_on_open, "sentinel-674-open", "sh", "shape"),
+            (open_on_shape, "sentinel-674-shape", "gh", "open"),
+            (open_on_positional, "sentinel-674-build", "cargo", "open"),
+            (
+                positional_on_grammar,
+                "sentinel-674-shape",
+                "gh",
+                "positional",
+            ),
+            (positional_on_open, "sentinel-674-open", "sh", "positional"),
+            (shape_on_positional, "sentinel-674-build", "cargo", "shape"),
+        ] {
+            let d = tool_decided(&lp, &r);
+            assert_eq!(
+                (d.verdict, d.cited),
+                (
+                    deny(&format!("tool: {entry}/{program} is not a {mode} command")),
+                    None
+                ),
+                "{entry} {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_denies_shape_not_enabled() {
+        let lp = lp_forms(FORMS_ALLOW);
+        for shape in ["issue.list", "pr.close", "pr"] {
+            assert_eq!(
+                tool_decided(&lp, &shape_call(shape, &["issue", "list"], &ONE)).verdict,
+                deny("tool: the shape is not enabled for sentinel-674-shape/gh"),
+                "{shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_permits_open_call_on_open_command() {
+        let lp = lp_forms(FORMS_ALLOW);
+        for argv in [
+            &["-c", "echo hi; rm -rf x"][..],
+            &["-c"],
+            &["-c", "--", "a\tb"],
+        ] {
+            let d = tool_decided(&lp, &open_call(argv));
+            assert_eq!(
+                (d.verdict, d.cited),
+                (
+                    permit_with_audit(),
+                    site_cite(Effect::Allow, "Tool(sentinel-674-open sh -c *)")
+                ),
+                "{argv:?}"
+            );
+        }
+        let edge: Vec<String> = ["-c".to_string()]
+            .into_iter()
+            .chain((0..62).map(|i| i.to_string()))
+            .chain(["a".repeat(4096)])
+            .collect();
+        let edge: Vec<&str> = edge.iter().map(String::as_str).collect();
+        assert_eq!(
+            tool_decided(&lp, &open_call(&edge)).verdict,
+            permit_with_audit()
+        );
+        let none = lp_forms("permissions:\n  allow: [\"Tool(sentinel-674-open sh -e *)\"]\n");
+        assert_eq!(
+            tool_decided(&none, &open_call(&["-x"])).verdict,
+            no_tool_entry("user")
+        );
+    }
+
+    #[test]
+    fn ceiling_refuses_open_argv_failing_lexical_checks() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let refused = deny("tool: open arguments refused for sentinel-674-open/sh");
+        let long = "a".repeat(4097);
+        let many: Vec<String> = (0..65).map(|i| i.to_string()).collect();
+        for argv in [
+            vec!["-c".to_string(), "a\0b".to_string()],
+            vec!["x\u{7}".to_string()],
+            vec!["line\nbreak".to_string()],
+            vec![long],
+            many,
+        ] {
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            assert_eq!(
+                tool_decided(&lp, &open_call(&refs)).verdict,
+                refused,
+                "{}",
+                argv.len()
+            );
+        }
+    }
+
+    #[test]
+    fn deny_args_apply_to_rendered_argv_in_every_mode() {
+        let lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &open_call(&["-c", "--exec=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-open/sh")
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build", "--config=x"])).verdict,
+            deny("tool: denied argument 1 for sentinel-674-build/cargo")
+        );
+        let mut web = maknae_config::GrammarSet::empty();
+        web.grammars.insert(
+            "gh".into(),
+            maknae_config::Grammar::parse(
+                "gh",
+                &GH_V1.replace(
+                    "argv: [pr, view, \"{git.change}\", -R, \"{git.base}\"]",
+                    "argv: [pr, view, \"{git.change}\", -R, \"{git.base}\", --web]",
+                ),
+            )
+            .unwrap(),
+        );
+        let mut lp = lp_forms(FORMS_ALLOW);
+        lp.tools = std::sync::Arc::new(
+            maknae_config::ToolsCatalog::parse_with(FORMS_TOOLS, &web).unwrap(),
+        );
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("pr.view", &["pr", "view", "7", "-R", "o/a", "--web"], &ONE)
+            )
+            .verdict,
+            deny("tool: denied argument 5 for sentinel-674-shape/gh")
+        );
+    }
+
+    #[test]
+    fn missing_mode_is_indeterminate() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let shape = shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE);
+        assert_eq!(tool_decided(&lp, &shape).verdict, permit_with_audit());
+        for value in [
+            None,
+            Some(AttrValue::Int(1)),
+            Some(AttrValue::Set(["shape".to_string()].into())),
+            Some(AttrValue::Str("Shape".into())),
+            Some(AttrValue::Str(String::new())),
+        ] {
+            for base in [
+                shape.clone(),
+                open_call(&["-c"]),
+                build(TOOL_USER, &["build"]),
+            ] {
+                let mut r = base;
+                match &value {
+                    None => drop_fact(&mut r, maknae_security::RESOURCE_TOOL_MODE),
+                    Some(v) => r
+                        .resource
+                        .0
+                        .insert(maknae_security::RESOURCE_TOOL_MODE, v.clone()),
+                };
+                undecidable(tool_decided(&lp, &r));
+            }
+        }
+        for value in [
+            None,
+            Some(AttrValue::Int(1)),
+            Some(AttrValue::List(vec!["pr.view".into()])),
+        ] {
+            let mut r = shape.clone();
+            match value {
+                None => drop_fact(&mut r, maknae_security::RESOURCE_TOOL_SHAPE),
+                Some(v) => r.resource.0.insert(maknae_security::RESOURCE_TOOL_SHAPE, v),
+            };
+            undecidable(tool_decided(&lp, &r));
+        }
+    }
+
+    #[test]
+    fn grant_matches_shape_call() {
+        let lp = lp_forms("permissions:\n  allow: [\"Tool(sentinel-674-shape gh:pr.*)\", \"Tool(sentinel-674-shape gh issue *)\"]\n  deny: [\"Tool(sentinel-674-shape gh:pr.diff)\"]\n");
+        let d = tool_decided(
+            &lp,
+            &shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &ONE),
+        );
+        assert_eq!(
+            (d.verdict, d.cited),
+            (
+                permit_with_audit(),
+                site_cite(Effect::Allow, "Tool(sentinel-674-shape gh:pr.*)")
+            )
+        );
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("issue.view", &["issue", "view", "3"], &ONE)
+            )
+            .verdict,
+            no_tool_entry("user"),
+            "a positional pattern never grants a shape call"
+        );
+    }
+
+    #[test]
+    fn ceiling_denies_argv_not_from_the_shape_template() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let refused =
+            |shape: &str| deny(&format!("tool: arguments are not shape {shape}'s template"));
+        for (shape, argv) in [
+            ("pr.view", &["pr", "view", "8", "-R", "o/a"][..]),
+            ("pr.view", &["pr", "view", "7", "-R", "o/b"]),
+            ("pr.view", &["pr", "view", "7", "-R", "o/a", "--json"]),
+            ("pr.view", &["pr", "close", "7", "-R", "o/a"]),
+            ("pr.view", &["issue", "view", "3"]),
+            ("issue.view", &["issue", "view", "0"]),
+            ("issue.view", &["issue", "view", "3", "x"]),
+            ("issue.view", &["pr", "view", "7", "-R", "o/a"]),
+        ] {
+            assert_eq!(
+                tool_decided(&lp, &shape_call(shape, argv, &ONE)).verdict,
+                refused(shape),
+                "{shape} {argv:?}"
+            );
+        }
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("issue.view", &["issue", "view", "3"], &ONE)
+            )
+            .verdict,
+            permit_with_audit()
+        );
+        let mut unbound = shape_call("pr.view", &["pr", "view", "7", "-R", "o/a"], &[]);
+        unbound.resource.0.insert(
+            maknae_security::RESOURCE_BINDING_KINDS,
+            AttrValue::Set(Default::default()),
+        );
+        assert_eq!(tool_decided(&lp, &unbound).verdict, refused("pr.view"));
+    }
+
+    #[test]
+    fn a_positional_deny_refuses_a_shape_call_whose_rendered_argv_it_matches() {
+        let argv = ["pr", "view", "7", "-R", "o/a"];
+        let lp = lp_forms(&format!(
+            "{FORMS_ALLOW}  deny: [\"Tool(sentinel-674-shape gh pr view *)\"]\n"
+        ));
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            deny("denied by policy entry Tool(sentinel-674-shape gh pr view *)")
+        );
+        let lp = lp_forms(&format!(
+            "{FORMS_ALLOW}  deny: [\"Tool(sentinel-674-shape gh issue *)\"]\n"
+        ));
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            permit_with_audit()
+        );
+        let lp = lp_forms("permissions:\n  allow: [\"Tool(sentinel-674-shape gh pr view *)\"]\n");
+        assert_ne!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            permit_with_audit()
+        );
+    }
+
+    #[test]
+    fn ceiling_denies_argv_rendered_from_an_older_template() {
+        let argv = ["pr", "view", "7", "-R", "o/a"];
+        let mut lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            permit_with_audit()
+        );
+        lp.tools = forms_catalog(GH_V2);
+        assert_eq!(
+            tool_decided(&lp, &shape_call("pr.view", &argv, &ONE)).verdict,
+            deny("tool: arguments are not shape pr.view's template")
+        );
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("pr.view", &["pr", "view", "7", "--repo", "o/a"], &ONE)
+            )
+            .verdict,
+            permit_with_audit()
+        );
+    }
+
+    fn with_stray_shape(mut r: SecRequest, value: AttrValue) -> SecRequest {
+        r.resource
+            .0
+            .insert(maknae_security::RESOURCE_TOOL_SHAPE, value);
+        r
+    }
+
+    #[test]
+    fn stray_shape_on_open_call_is_indeterminate() {
+        let lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &open_call(&["-c", "x"])).verdict,
+            permit_with_audit()
+        );
+        for value in [AttrValue::Str("pr.view".into()), AttrValue::Int(1)] {
+            undecidable(tool_decided(
+                &lp,
+                &with_stray_shape(open_call(&["-c", "x"]), value),
+            ));
+        }
+        undecidable(tool_decided(
+            &lp,
+            &with_stray_shape(
+                with_mode(
+                    tool_req(TOOL_USER, "sentinel-674-shape", "gh", &["pr"]),
+                    maknae_security::TOOL_MODE_OPEN,
+                ),
+                AttrValue::Str("pr.view".into()),
+            ),
+        ));
+    }
+
+    #[test]
+    fn stray_shape_on_positional_call_is_indeterminate() {
+        let lp = lp_forms(FORMS_ALLOW);
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build"])).verdict,
+            permit_with_audit()
+        );
+        for value in [AttrValue::Str("pr.view".into()), AttrValue::Int(1)] {
+            undecidable(tool_decided(
+                &lp,
+                &with_stray_shape(build(TOOL_USER, &["build"]), value),
+            ));
+        }
+        undecidable(tool_decided(
+            &lp,
+            &with_stray_shape(
+                tool_req(TOOL_USER, "sentinel-674-shape", "gh", &["pr"]),
+                AttrValue::Str("pr.view".into()),
+            ),
+        ));
+    }
+
+    #[test]
+    fn ceiling_denies_a_shape_call_with_two_bindings() {
+        let lp = lp_forms(FORMS_ALLOW);
+        let two = [("o/a", Some(7)), ("o/b", Some(8))];
+        for argv in [
+            &["pr", "view", "7", "-R", "o/a"][..],
+            &["pr", "view", "8", "-R", "o/b"],
+        ] {
+            let d = tool_decided(&lp, &shape_call("pr.view", argv, &two));
+            assert_eq!(
+                (d.verdict, d.cited),
+                (
+                    deny("tool: a shape call carries more than one binding"),
+                    None
+                ),
+                "{argv:?}"
+            );
+        }
+        assert_eq!(
+            tool_decided(
+                &lp,
+                &shape_call("pr.view", &["pr", "view", "8", "-R", "o/b"], &two[1..])
+            )
+            .verdict,
+            permit_with_audit()
+        );
+    }
+
+    #[test]
     fn a_denied_argument_is_refused_by_position() {
         let lp = lp_tool(TOOL_SITE_ALLOW, &["user"], &[]);
         for (argv, n) in [
@@ -6636,6 +7291,7 @@ mod tests {
             maknae_security::RESOURCE_TOOL_ENTRY,
             maknae_security::RESOURCE_TOOL_PROGRAM,
             maknae_security::RESOURCE_TOOL_ARGV,
+            maknae_security::RESOURCE_TOOL_MODE,
         ] {
             kept.insert(k, r.resource.0.get(k).unwrap().clone());
         }
@@ -6948,6 +7604,11 @@ mod tests {
                 maknae_security::RESOURCE_BINDING_KINDS,
                 AttrValue::List(vec![]),
             ),
+            (maknae_security::RESOURCE_TOOL_MODE, AttrValue::Int(0)),
+            (
+                maknae_security::RESOURCE_TOOL_MODE,
+                AttrValue::List(vec!["positional".into()]),
+            ),
         ] {
             let mut r = build(TOOL_USER, &["build"]);
             r.resource.0.insert(key, value.clone());
@@ -6965,6 +7626,7 @@ mod tests {
                 maknae_security::RESOURCE_TOOL_ENTRY,
                 maknae_security::RESOURCE_TOOL_PROGRAM,
                 maknae_security::RESOURCE_TOOL_ARGV,
+                maknae_security::RESOURCE_TOOL_MODE,
                 maknae_security::RESOURCE_BINDING_KINDS,
             ] {
                 if let (true, Some(v)) = (k != key, r.resource.0.get(k)) {
@@ -6978,6 +7640,7 @@ mod tests {
             maknae_security::RESOURCE_TOOL_ENTRY,
             maknae_security::RESOURCE_TOOL_PROGRAM,
             maknae_security::RESOURCE_TOOL_ARGV,
+            maknae_security::RESOURCE_TOOL_MODE,
         ] {
             assert_eq!(without(key), Verdict::Indeterminate, "{key}");
         }
@@ -7060,6 +7723,194 @@ mod tests {
                 source: "Tool(sentinel-674-build cargo build *)".into(),
             })
         );
+    }
+
+    fn role_cite(effect: Effect, source: &str) -> Option<Cited> {
+        Some(Cited::RolePath {
+            role: "user",
+            effect,
+            source: source.into(),
+        })
+    }
+
+    const ROLE_USER_TOOLS: &str = "roles:\n  user:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo test *)\", \"Tool(sentinel-674-vault vault read *)\"]\n      deny: [\"Tool(sentinel-674-build cargo build --release*)\", \"Tool(sentinel-674-build cargo build -v*)\"]\n";
+
+    #[test]
+    fn role_tool_allow_joins_site_list() {
+        let lp = lp_tool(
+            &format!("permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n{ROLE_USER_TOOLS}"),
+            &["admin", "user"],
+            &[],
+        );
+        let user = tool_decided(&lp, &build(TOOL_USER, &["test", "x"]));
+        assert_eq!(
+            (user.verdict, user.cited),
+            (
+                permit_with_audit(),
+                role_cite(Effect::Allow, "Tool(sentinel-674-build cargo test *)")
+            )
+        );
+        let site = tool_decided(&lp, &build(TOOL_USER, &["build", "x"]));
+        assert_eq!(
+            (site.verdict, site.cited),
+            (
+                permit_with_audit(),
+                site_cite(Effect::Allow, "Tool(sentinel-674-build cargo build *)")
+            )
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_ADMIN, &["test", "x"])).verdict,
+            no_tool_entry("admin")
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_ADMIN, &["build", "x"])).cited,
+            site_cite(Effect::Allow, "Tool(sentinel-674-build cargo build *)")
+        );
+    }
+
+    #[test]
+    fn role_tool_allow_joins_subject_list_that_replaces_site() {
+        let lp = lp_tool(
+            &format!("permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\nsubjects:\n  tuser:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo test *)\"]\n{ROLE_USER_TOOLS}"),
+            &["user"],
+            &[],
+        );
+        assert_eq!(
+            tool_decided(&lp, &build(TOOL_USER, &["build", "x"])).verdict,
+            no_tool_entry("user")
+        );
+        let subject = tool_decided(&lp, &build(TOOL_USER, &["test", "x"]));
+        assert_eq!(subject.verdict, permit_with_audit());
+        assert_eq!(
+            subject.cited,
+            Some(Cited::SubjectPath {
+                subject: "tuser".into(),
+                effect: Effect::Allow,
+                source: "Tool(sentinel-674-build cargo test *)".into(),
+            })
+        );
+        let role = tool_decided(
+            &lp,
+            &tool_req(TOOL_USER, "sentinel-674-vault", "vault", &["read", "x"]),
+        );
+        assert_eq!(
+            (role.verdict, role.cited),
+            (
+                permit_with_audit(),
+                role_cite(Effect::Allow, "Tool(sentinel-674-vault vault read *)")
+            )
+        );
+    }
+
+    #[test]
+    fn role_deny_overrides_site_allow() {
+        let site = "permissions:\n  allow: [\"Tool(sentinel-674-build cargo build *)\"]\n  deny: [\"Tool(sentinel-674-build cargo build -v*)\"]\n";
+        let replaced = "subjects:\n  tuser:\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo build *)\"]\n      deny: [\"Tool(sentinel-674-build cargo build --release-x*)\"]\n";
+        for body in [
+            format!("{site}{ROLE_USER_TOOLS}"),
+            format!("{site}{replaced}{ROLE_USER_TOOLS}"),
+        ] {
+            let lp = lp_tool(&body, &["admin", "user"], &[]);
+            let d = tool_decided(&lp, &build(TOOL_USER, &["build", "--release"]));
+            assert_eq!(
+                d.verdict,
+                deny("denied by roles.user.permissions entry Tool(sentinel-674-build cargo build --release*)"),
+                "{body}"
+            );
+            assert_eq!(
+                d.cited,
+                role_cite(
+                    Effect::Deny,
+                    "Tool(sentinel-674-build cargo build --release*)"
+                )
+            );
+            let first = tool_decided(&lp, &build(TOOL_USER, &["build", "-v"]));
+            assert_eq!(
+                (first.verdict, first.cited),
+                (
+                    deny("denied by policy entry Tool(sentinel-674-build cargo build -v*)"),
+                    site_cite(Effect::Deny, "Tool(sentinel-674-build cargo build -v*)")
+                )
+            );
+            assert_eq!(
+                tool_decided(&lp, &build(TOOL_ADMIN, &["build", "--release"])).verdict,
+                permit_with_audit()
+            );
+        }
+        let lp = lp_tool(
+            &format!("{site}{replaced}{ROLE_USER_TOOLS}"),
+            &["user"],
+            &[],
+        );
+        let own = tool_decided(&lp, &build(TOOL_USER, &["build", "--release-x"]));
+        assert_eq!(
+            own.verdict,
+            deny("denied by subjects.tuser.permissions entry Tool(sentinel-674-build cargo build --release-x*)")
+        );
+    }
+
+    #[test]
+    fn a_uid_lp_agents_knows_has_no_role_stage_whatever_its_entry() {
+        let mut lp = lp_tool(ROLE_USER_TOOLS, &["user"], &[]);
+        let user = lp.policy.role_permissions("user").unwrap().clone();
+        assert_eq!(
+            role_stage(&lp, TOOL_USER, None, "user"),
+            Some(("user", &user))
+        );
+        assert_eq!(role_stage(&lp, TOOL_USER, None, "admin"), None);
+        lp.agents.0.insert(TOOL_USER, "hobi".into());
+        assert_eq!(role_stage(&lp, TOOL_USER, None, "user"), None);
+    }
+
+    #[test]
+    fn agent_ignores_role_tool_grants() {
+        let site = AGENT_SITE.replace(
+            "  user:\n    allow: [\"session.prompt\", \"session.new\"]\n",
+            "  user:\n    allow: [\"session.prompt\", \"session.new\"]\n    permissions:\n      allow: [\"Tool(sentinel-674-build cargo build *)\"]\n      deny: [\"Tool(sentinel-674-build cargo test --x*)\"]\n",
+        );
+        assert_ne!(site, AGENT_SITE);
+        for agent_policy in [
+            None,
+            Some("schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo test *)\"]\n"),
+        ] {
+            let mut lp = lp_agent("user", agent_policy);
+            lp.policy = maknae_config::parse_authz(&site).unwrap();
+            lp.action_grants = tool_grants(&["user"], &[]);
+            lp.tools = std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap());
+            let agent = tool_decided(
+                &lp,
+                &on_channel(
+                    build(HOBI_UID, &["build"]),
+                    Some(maknae_security::CHANNEL_AGENT),
+                    Some("hobi"),
+                ),
+            );
+            assert_eq!(agent.verdict, no_tool_entry("user"), "{agent_policy:?}");
+            let human = tool_decided(&lp, &build(HUMAN_UID, &["build"]));
+            assert_eq!(
+                (human.verdict, human.cited),
+                (
+                    permit_with_audit(),
+                    role_cite(Effect::Allow, "Tool(sentinel-674-build cargo build *)")
+                )
+            );
+        }
+        let mut lp = lp_agent(
+            "user",
+            Some("schema_version: 1\npermissions:\n  allow: [\"Tool(sentinel-674-build cargo test *)\"]\n"),
+        );
+        lp.policy = maknae_config::parse_authz(&site).unwrap();
+        lp.action_grants = tool_grants(&["user"], &[]);
+        lp.tools = std::sync::Arc::new(maknae_config::ToolsCatalog::parse(TOOLS_674).unwrap());
+        let own = tool_decided(
+            &lp,
+            &on_channel(
+                build(HOBI_UID, &["test", "--x"]),
+                Some(maknae_security::CHANNEL_AGENT),
+                Some("hobi"),
+            ),
+        );
+        assert_eq!(own.verdict, permit_with_audit());
     }
 
     #[test]

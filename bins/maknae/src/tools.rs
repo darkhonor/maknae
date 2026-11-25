@@ -14,6 +14,14 @@ pub(crate) fn catalog_lines(reply: &ToolCatalogReply) -> Result<Vec<String>, Str
     Ok(lines(&g))
 }
 
+fn members(members: &[String]) -> String {
+    members
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn lines(g: &Graph) -> Vec<String> {
     let mut out = Vec::new();
     for entry in g.nodes().iter().filter(|n| n.kind == ENTRY) {
@@ -29,6 +37,27 @@ fn lines(g: &Graph) -> Vec<String> {
                     terminal_safe(name),
                     terminal_safe(pattern)
                 ));
+            }
+            if catalog::open_program(g, &entry.key, name) {
+                out.push(format!("  {}  (open)", terminal_safe(name)));
+            }
+            for shape in catalog::shapes(g, &entry.key, name) {
+                out.push(format!(
+                    "  {}:{}  {}  {}",
+                    terminal_safe(name),
+                    terminal_safe(&shape.name),
+                    shape.access.as_str(),
+                    terminal_safe(&shape.description)
+                ));
+                for slot in &shape.slots {
+                    out.push(format!(
+                        "    {}  {}  {}  {}",
+                        terminal_safe(&slot.name),
+                        slot.at.as_str(),
+                        terminal_safe(&members(&slot.members)),
+                        terminal_safe(&slot.description)
+                    ));
+                }
             }
         }
     }
@@ -71,6 +100,8 @@ mod tests {
                 output: CatalogOutput::Redacted,
                 binds: vec!["git".into()],
                 programs: vec![("git".into(), vec!["status".into(), "log *".into()])],
+                open: vec![],
+                shapes: vec![],
             }],
             forges: vec![CatalogForge {
                 name: "hub".into(),
@@ -101,6 +132,51 @@ mod tests {
         let mut bad = reply();
         bad.digest = CatalogDigest([0; 32]);
         assert!(catalog_lines(&bad).is_err());
+    }
+
+    #[test]
+    fn it_prints_open_programs_and_shapes_with_their_slots() {
+        use maknae_graph::catalog::{CatalogAccess, CatalogShape, CatalogSlot, CatalogSlotAt};
+        let bytes = catalog::encode(&CatalogInput {
+            entries: vec![CatalogEntry {
+                name: "gh".into(),
+                description: None,
+                executes_workspace: false,
+                output: CatalogOutput::Redacted,
+                binds: vec![],
+                programs: vec![],
+                open: vec!["sh".into()],
+                shapes: vec![(
+                    "gh".into(),
+                    vec![CatalogShape {
+                        name: "issue.list".into(),
+                        description: "List issues.".into(),
+                        access: CatalogAccess::Read,
+                        slots: vec![CatalogSlot {
+                            name: "state".into(),
+                            at: CatalogSlotAt::Option,
+                            members: vec!["all".into(), "a|b,c".into()],
+                            description: "Which.".into(),
+                        }],
+                    }],
+                )],
+            }],
+            forges: vec![],
+        })
+        .unwrap();
+        let reply = ToolCatalogReply {
+            digest: CatalogDigest(maknae_crypto::sha256(&bytes)),
+            graph: maknae_proto::Bytes::new(zeroize::Zeroizing::new(bytes)),
+        };
+        assert_eq!(
+            catalog_lines(&reply).unwrap(),
+            [
+                "gh",
+                "  gh:issue.list  read  List issues.",
+                "    state  option  \"all\",\"a|b,c\"  Which.",
+                "  sh  (open)",
+            ]
+        );
     }
 
     #[test]
