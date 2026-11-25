@@ -137,6 +137,12 @@ fi
 # Re-assert ownership on EVERY install: the loader fail-closes on any world bit,
 # and the daemon runs as _maknae and needs group-read (root:_maknae 0640, spec
 # §4.6 — the rpm gets this from %attr).
+for d in "$ETC/grammars" "$ETC/tools.d"; do
+    if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+        echo "maknae: $d is a symlink or not a directory; refusing to install through it" >&2
+        exit 1
+    fi
+done
 install -d -m 0750 -o 0 -g "$MGID" "$ETC/grammars" "$ETC/tools.d"
 chown "0:$MGID" "$ETC" "$ETC/private" "$ETC/grammars" "$ETC/tools.d" 2>/dev/null || :
 chmod 0750      "$ETC" "$ETC/private" "$ETC/grammars" "$ETC/tools.d" 2>/dev/null || :
