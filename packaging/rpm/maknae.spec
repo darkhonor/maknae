@@ -292,7 +292,9 @@ fi
 %dir %{_datadir}/maknae
 %{_datadir}/maknae/bindings.yaml
 %{_datadir}/maknae/tools-homelab.yaml
+%dir %{_datadir}/maknae/grammars
 %{_datadir}/maknae/grammars/gh.yaml
+%dir %{_datadir}/maknae/tools.d
 %{_datadir}/maknae/tools.d/gh.yaml
 %config(noreplace) %{_sysconfdir}/fapolicyd/trust.d/maknae
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae

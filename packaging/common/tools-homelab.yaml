@@ -13,7 +13,7 @@
 #
 # A host that does not install this file can run `sudo maknae tools enable gh
 # --image <ref>` instead; it writes the same gh entries as drop-ins and refuses
-# while this file defines them.
+# while /etc/maknae/tools.yaml defines them.
 #
 # An entry is only callable once policy grants it. The gh commands are shape
 # calls from the grammar in /usr/share/maknae/grammars/gh.yaml (enable it with
