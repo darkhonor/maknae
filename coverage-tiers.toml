@@ -1075,7 +1075,7 @@ why = "#491: sudo maknae policy sync — bin code, T3 per the tiering constraint
 
 [[t3]]
 path = "bins/maknae/src/tools_admin/mod.rs"
-why = "#674: module root of sudo maknae tools enable|disable|available; it declares the modules and decides nothing. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs."
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file orders those calls, and its unit tests cover the link and one 0640 drop-in per entry, --entry and --shapes, the refusals with nothing written (an existing drop-in, a name tools.yaml or another drop-in defines with the ln -s or disable advice, a local grammar file, a foreign link or a directory, a bad image, an unknown program or template, a held tools.d lock, a bad operand), the rollback of a write failure that keeps a link it did not create and leaves a grammar that is no longer the link, disable keeping the link while tools.yaml or another drop-in uses it and removing the exact link, dangling included, with its last user, the reload, --no-reload and a failed reload, the available states and users, and terminal-safe output of file text"
 
 [[t3]]
 path = "bins/maknae/src/tools_admin/template.rs"

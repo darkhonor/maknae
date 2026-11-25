@@ -1,0 +1,32 @@
+schema_version: 1
+credential_classes:
+  github-post:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: site-github-post
+tools:
+  site-post:
+    enabled: true
+    description: Comment on a pull request.
+    image:
+      ref: ghcr.io/example/tools@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: none
+    credential: github-post
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [pr.comment]
+        timeout: 2m
+        output: 1MiB
