@@ -33,9 +33,14 @@ pub(crate) trait Reload {
     fn reload(&self) -> Result<(), String>;
 }
 
+pub(crate) enum DirError {
+    NotDone(String),
+    DoneNotDurable(String),
+}
+
 pub(crate) trait DropinDir {
-    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, String>;
-    fn remove(&self, name: &str) -> Result<(), String>;
+    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, DirError>;
+    fn remove(&self, name: &str) -> Result<(), DirError>;
 }
 
 pub(crate) struct Enable {
@@ -51,19 +56,32 @@ struct AnchoredDir<'a> {
     owner: FileOwner,
 }
 
+fn dir_error(e: IoError) -> DirError {
+    match &e {
+        IoError::PublishedNotDurable { .. } | IoError::RemovedNotDurable { .. } => {
+            DirError::DoneNotDurable(e.to_string())
+        }
+        other => DirError::NotDone(other.to_string()),
+    }
+}
+
+fn removal(anchor: &Anchor, name: &str) -> Result<(), DirError> {
+    anchor
+        .remove_durable(Path::new(name), None)
+        .map(|_| ())
+        .map_err(dir_error)
+}
+
 impl DropinDir for AnchoredDir<'_> {
-    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, String> {
+    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, DirError> {
         self.anchor
             .publish_owned_new(Path::new(name), None, bytes, Mode(0o640), self.owner)
             .map(|o| o.value)
-            .map_err(|e| e.to_string())
+            .map_err(dir_error)
     }
 
-    fn remove(&self, name: &str) -> Result<(), String> {
-        self.anchor
-            .remove_durable(Path::new(name), None)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    fn remove(&self, name: &str) -> Result<(), DirError> {
+        removal(self.anchor, name)
     }
 }
 
@@ -305,6 +323,17 @@ fn collision_error(hits: &[(&Found, Vec<String>)], link: &Link) -> String {
     terminal_safe(&lines.join("; "))
 }
 
+fn undone(result: Result<(), DirError>, path: &Path) -> Option<String> {
+    match result {
+        Ok(()) => None,
+        Err(DirError::DoneNotDurable(e)) => Some(format!(
+            "removed {}, but the removal is not yet durable: {e}",
+            path.display()
+        )),
+        Err(DirError::NotDone(e)) => Some(format!("cannot remove {}: {e}", path.display())),
+    }
+}
+
 fn rollback(
     d: &Dirs,
     p: &Paths,
@@ -315,12 +344,7 @@ fn rollback(
 ) -> String {
     let mut problems = vec![cause];
     for file in written.iter().rev() {
-        if let Err(e) = dir.remove(file) {
-            problems.push(format!(
-                "cannot remove {}: {e}",
-                p.config.join(TOOLS_DROPIN_DIR).join(file).display()
-            ));
-        }
+        problems.extend(undone(dir.remove(file), &dropin_path(p, file)));
     }
     if link.before == MemberState::Absent {
         match d
@@ -328,9 +352,7 @@ fn rollback(
             .enabled_member_state(&link.name, &p.vendor_grammars)
         {
             Ok(MemberState::VendorLink) => {
-                if let Err(e) = d.grammars.remove_durable(Path::new(&link.name), None) {
-                    problems.push(format!("cannot remove {}: {e}", link.path.display()));
-                }
+                problems.extend(undone(removal(&d.grammars, &link.name), &link.path));
             }
             Ok(
                 MemberState::Absent
@@ -538,7 +560,11 @@ fn enable_with(
                 "{} already exists; enable never replaces a drop-in",
                 path.display()
             )),
-            Err(e) => Some(format!("cannot write {}: {e}", path.display())),
+            Err(DirError::NotDone(e)) => Some(format!("cannot write {}: {e}", path.display())),
+            Err(DirError::DoneNotDurable(e)) => {
+                written.push(file.clone());
+                Some(format!("wrote {}, but not durably: {e}", path.display()))
+            }
         };
         if let Some(cause) = failure {
             return Err(rollback(d, p, &link, dir, &written, cause));
@@ -581,6 +607,24 @@ pub(crate) fn disable(
 ) -> Result<(), String> {
     entry_ok(entry)?;
     let d = Dirs::open(p, o)?;
+    let dir = AnchoredDir {
+        anchor: &d.tools,
+        owner: o.file,
+    };
+    disable_with(p, o, &d, entry, reload, r, out, &dir)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn disable_with(
+    p: &Paths,
+    o: &Owners,
+    d: &Dirs,
+    entry: &str,
+    reload: bool,
+    r: &dyn Reload,
+    out: &mut dyn Write,
+    dir: &dyn DropinDir,
+) -> Result<(), String> {
     let _lock = lock(&d.tools)?;
     let file = format!("{entry}.yaml");
     let path = dropin_path(p, &file);
@@ -591,7 +635,7 @@ pub(crate) fn disable(
         &path,
     )?
     .ok_or_else(|| terminal_safe(&format!("no drop-in {}", path.display())))?;
-    let others: Vec<Found> = configured(p, o, &d)?
+    let others: Vec<Found> = configured(p, o, d)?
         .into_iter()
         .filter(|f| f.stem.as_deref() != Some(entry))
         .collect();
@@ -619,26 +663,45 @@ pub(crate) fn disable(
         }
     }
 
-    d.tools
-        .remove_durable(Path::new(&file), None)
-        .map_err(|e| terminal_safe(&format!("cannot remove {}: {e}", path.display())))?;
+    let mut pending = Vec::new();
+    match dir.remove(&file) {
+        Ok(()) => {}
+        Err(DirError::DoneNotDurable(e)) => pending.push(e),
+        Err(DirError::NotDone(e)) => {
+            return Err(terminal_safe(&format!(
+                "cannot remove {}: {e}",
+                path.display()
+            )))
+        }
+    }
     let mut done = vec![format!("removed {}", path.display())];
     for (name, link) in unlink {
-        d.grammars
-            .remove_durable(Path::new(&name), None)
-            .map_err(|e| {
-                terminal_safe(&format!(
+        match removal(&d.grammars, &name) {
+            Ok(()) => {}
+            Err(DirError::DoneNotDurable(e)) => pending.push(e),
+            Err(DirError::NotDone(e)) => {
+                return Err(terminal_safe(&format!(
                     "{}; cannot remove {}: {e}",
                     done.join("; "),
                     link.display()
-                ))
-            })?;
+                )))
+            }
+        }
         done.push(format!("removed {}", link.display()));
     }
     for line in &done {
         say(out, line)?;
     }
-    finish(&done, reload, r, out)
+    let reloaded = finish(&done, reload, r, out);
+    if pending.is_empty() {
+        return reloaded;
+    }
+    let mut problems: Vec<String> = reloaded.err().into_iter().collect();
+    problems.push(format!(
+        "the removal is not yet durable: {}",
+        pending.join("; ")
+    ));
+    Err(terminal_safe(&problems.join("; ")))
 }
 
 #[cfg(test)]
@@ -990,28 +1053,53 @@ mod tests {
         assert_eq!(r.calls.get(), 0);
     }
 
+    #[derive(Clone, Copy)]
+    enum Fail {
+        Never,
+        NotDone,
+        DoneNotDurable,
+    }
+
     struct Failing<'a> {
         inner: &'a dyn DropinDir,
         calls: Cell<u32>,
+        third_publish: Fail,
+        removes: Fail,
         before_failing: &'a dyn Fn(),
     }
 
-    impl DropinDir for Failing<'_> {
-        fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, String> {
-            self.calls.set(self.calls.get() + 1);
-            if self.calls.get() == 3 {
-                (self.before_failing)();
-                return Err("disk full".to_string());
+    fn fail<T>(how: Fail, done: impl FnOnce() -> Result<T, DirError>) -> Result<T, DirError> {
+        match how {
+            Fail::Never => done(),
+            Fail::NotDone => Err(DirError::NotDone("disk full".to_string())),
+            Fail::DoneNotDurable => {
+                done()?;
+                Err(DirError::DoneNotDurable("sync failed".to_string()))
             }
-            self.inner.publish_new(name, bytes)
-        }
-
-        fn remove(&self, name: &str) -> Result<(), String> {
-            self.inner.remove(name)
         }
     }
 
-    fn enable_failing_third(fx: &Fx, before_failing: &dyn Fn()) -> (String, u32) {
+    impl DropinDir for Failing<'_> {
+        fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, DirError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() != 3 {
+                return self.inner.publish_new(name, bytes);
+            }
+            (self.before_failing)();
+            fail(self.third_publish, || self.inner.publish_new(name, bytes))
+        }
+
+        fn remove(&self, name: &str) -> Result<(), DirError> {
+            fail(self.removes, || self.inner.remove(name))
+        }
+    }
+
+    fn enable_failing(
+        fx: &Fx,
+        third_publish: Fail,
+        removes: Fail,
+        before_failing: &dyn Fn(),
+    ) -> (String, u32) {
         let o = me();
         let p = fx.paths();
         let dirs = Dirs::open(&p, &o).unwrap();
@@ -1022,6 +1110,8 @@ mod tests {
         let failing = Failing {
             inner: &inner,
             calls: Cell::new(0),
+            third_publish,
+            removes,
             before_failing,
         };
         let r = FakeReload::ok();
@@ -1037,6 +1127,158 @@ mod tests {
         ));
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
         (e, r.calls.get())
+    }
+
+    fn enable_failing_third(fx: &Fx, before_failing: &dyn Fn()) -> (String, u32) {
+        enable_failing(fx, Fail::NotDone, Fail::Never, before_failing)
+    }
+
+    fn disable_failing(
+        fx: &Fx,
+        entry: &str,
+        removes: Fail,
+        r: &FakeReload,
+    ) -> (Result<(), String>, String) {
+        let o = me();
+        let p = fx.paths();
+        let dirs = Dirs::open(&p, &o).unwrap();
+        let inner = AnchoredDir {
+            anchor: &dirs.tools,
+            owner: o.file,
+        };
+        let failing = Failing {
+            inner: &inner,
+            calls: Cell::new(0),
+            third_publish: Fail::Never,
+            removes,
+            before_failing: &|| {},
+        };
+        let mut out = Vec::new();
+        let result = disable_with(&p, &o, &dirs, entry, true, r, &mut out, &failing);
+        (result, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn a_publish_that_lands_without_durability_is_rolled_back() {
+        let fx = Fx::new();
+        let (e, reloads) = enable_failing(&fx, Fail::DoneNotDurable, Fail::Never, &|| {});
+        assert!(e.contains("github-issues-read.yaml"), "{e}");
+        assert!(e.contains("not durably"), "{e}");
+        assert!(fx.dropins().is_empty(), "{:?}", fx.dropins());
+        assert_eq!(fx.link(), None);
+        assert_eq!(reloads, 0);
+    }
+
+    #[test]
+    fn a_rollback_removal_without_durability_counts_as_removed() {
+        let fx = Fx::new();
+        let (e, _) = enable_failing(&fx, Fail::NotDone, Fail::DoneNotDurable, &|| {});
+        assert!(e.contains("disk full"), "{e}");
+        assert!(e.contains("removal is not yet durable"), "{e}");
+        assert!(!e.contains("cannot remove"), "{e}");
+        assert!(fx.dropins().is_empty(), "{:?}", fx.dropins());
+        assert_eq!(fx.link(), None);
+    }
+
+    #[test]
+    fn a_rollback_removal_that_fails_is_reported() {
+        let fx = Fx::new();
+        let (e, _) = enable_failing(&fx, Fail::NotDone, Fail::NotDone, &|| {});
+        for name in ["github-read", "github-post"] {
+            let path = fx.tools().join(format!("{name}.yaml"));
+            assert!(
+                e.contains(&format!("cannot remove {}", path.display())),
+                "{e}"
+            );
+        }
+        assert_eq!(fx.dropins(), yamls(&["github-read", "github-post"]));
+        assert_eq!(fx.link(), None);
+    }
+
+    #[test]
+    fn disable_goes_on_when_the_removal_is_not_durable() {
+        let fx = Fx::new();
+        fx.enabled_one("github-post");
+        let r = FakeReload::ok();
+        let (result, out) = disable_failing(&fx, "github-post", Fail::DoneNotDurable, &r);
+        let e = err(result);
+        assert!(
+            e.contains("the removal is not yet durable: sync failed"),
+            "{e}"
+        );
+        assert_eq!(fx.link(), None);
+        assert!(fx.dropins().is_empty());
+        assert_eq!(r.calls.get(), 1);
+        assert!(
+            out.contains(&format!(
+                "removed {}",
+                fx.grammars().join("gh.yaml").display()
+            )),
+            "{out}"
+        );
+
+        fx.enabled_one("github-post");
+        let r = FakeReload::failing();
+        let e = err(disable_failing(&fx, "github-post", Fail::DoneNotDurable, &r).0);
+        assert!(e.contains("maknaed was not reloaded"), "{e}");
+        assert!(e.contains("the removal is not yet durable"), "{e}");
+    }
+
+    #[test]
+    fn disable_stops_when_the_removal_fails() {
+        let fx = Fx::new();
+        fx.enabled_one("github-post");
+        let r = FakeReload::ok();
+        let (result, out) = disable_failing(&fx, "github-post", Fail::NotDone, &r);
+        let e = err(result);
+        assert!(e.contains("cannot remove"), "{e}");
+        assert!(e.contains("disk full"), "{e}");
+        assert_eq!(fx.dropins(), ["github-post.yaml"]);
+        assert_eq!(fx.link(), fx.exact());
+        assert_eq!(r.calls.get(), 0);
+        assert!(out.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn only_the_not_durable_errors_count_as_done() {
+        let path = PathBuf::from("/x");
+        let kind = IoKind::Other { raw: 5 };
+        for e in [
+            IoError::PublishedNotDurable {
+                path: path.clone(),
+                kind: kind.clone(),
+            },
+            IoError::RemovedNotDurable {
+                path: path.clone(),
+                kind: kind.clone(),
+            },
+        ] {
+            assert!(matches!(dir_error(e), DirError::DoneNotDurable(_)));
+        }
+        let not_done = dir_error(IoError::Io {
+            kind: IoKind::NotFound,
+            path,
+        });
+        assert!(matches!(not_done, DirError::NotDone(_)));
+    }
+
+    #[test]
+    fn enable_refuses_a_name_tools_yaml_defines_even_if_the_loader_disables_it() {
+        let fx = Fx::new();
+        write(
+            &fx.config().join("tools.yaml"),
+            "schema_version: 1\ntools:\n  github-read:\n    enabled: true\n",
+            0o640,
+        );
+        let r = FakeReload::ok();
+        let e = err(fx.enable(&req(None, None), &r).0);
+        assert!(
+            e.contains("`github-read`") && e.contains("tools.yaml"),
+            "{e}"
+        );
+        assert_eq!(fx.link(), None);
+        assert!(fx.dropins().is_empty());
+        assert_eq!(r.calls.get(), 0);
     }
 
     #[test]
