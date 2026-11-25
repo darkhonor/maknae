@@ -1,5 +1,5 @@
 # SELinux file contexts for Maknae.
-# Restore: restorecon -Rv /usr/bin/maknaed /usr/bin/maknae-egress /usr/bin/maknae-agentd /etc/maknae /var/log/maknae /var/lib/maknae /var/lib/maknae-agents
+# Restore: restorecon -Rv /usr/bin/maknaed /usr/bin/maknae-egress /usr/bin/maknae-agentd /etc/maknae /usr/share/maknae/grammars /var/log/maknae /var/lib/maknae /var/lib/maknae-agents
 
 /usr/bin/maknaed        --      gen_context(system_u:object_r:maknaed_exec_t,s0)
 /usr/bin/maknae-egress  --      gen_context(system_u:object_r:maknae_egress_exec_t,s0)
@@ -13,6 +13,7 @@
 /etc/maknae/private(/.*)?       gen_context(system_u:object_r:maknae_private_t,s0)
 /etc/maknae/agents(/.*)?        gen_context(system_u:object_r:maknae_agent_etc_t,s0)
 /etc/maknae/tls(/.*)?           gen_context(system_u:object_r:maknae_tls_t,s0)
+/usr/share/maknae/grammars(/.*)?  gen_context(system_u:object_r:maknae_vendor_grammar_t,s0)
 # Root/systemd-only secrets (daemon has NO SELinux access) — more specific rules
 # win over the maknae_private_t wildcard above.
 /etc/maknae/private/.*\.cred    gen_context(system_u:object_r:maknae_secret_t,s0)

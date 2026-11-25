@@ -145,6 +145,31 @@ pub enum EnabledMember {
     Vendor(Zeroizing<Vec<u8>>),
 }
 
+/// What a member name is in an enabled directory, as [`Anchor::enabled_member_state`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberState {
+    Absent,
+    VendorLink,
+    LocalFile,
+    ForeignLink(PathBuf),
+    Other,
+}
+
+fn check_member_name(name: &str) -> Result<(), IoError> {
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(only)), None) if only == name => Ok(()),
+        _ => Err(IoError::NotAMemberName {
+            name: name.to_owned(),
+        }),
+    }
+}
+
+fn is_vendor_link(link: &std::ffi::OsStr, vendor_path: &Path, name: &str) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    link.as_bytes() == vendor_path.join(name).as_os_str().as_bytes()
+}
+
 /// An [`Anchor::try_lock_exclusive`] lock; dropping it releases the lock.
 #[derive(Debug)]
 pub struct AnchorLock {
@@ -630,15 +655,7 @@ impl Anchor {
         vendor_path: &Path,
         target: TargetRequired,
     ) -> Result<EnabledMember, IoError> {
-        let mut parts = Path::new(name).components();
-        match (parts.next(), parts.next()) {
-            (Some(std::path::Component::Normal(only)), None) if only == name => {}
-            _ => {
-                return Err(IoError::NotAMemberName {
-                    name: name.to_owned(),
-                })
-            }
-        }
+        check_member_name(name)?;
         let full = self.path.join(name);
         let st = syscall::fstatat_nofollow(&self.fd, name)
             .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
@@ -647,10 +664,9 @@ impl Anchor {
                 self.read(Path::new(name), None, target)?.value,
             )),
             Kind::Symlink => {
-                use std::os::unix::ffi::OsStrExt;
                 let link = syscall::readlinkat_bounded(&self.fd, name)
                     .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
-                if link.as_bytes() != vendor_path.join(name).as_os_str().as_bytes() {
+                if !is_vendor_link(&link, vendor_path, name) {
                     return Err(IoError::LinkTargetMismatch {
                         path: full,
                         target: PathBuf::from(link),
@@ -667,6 +683,69 @@ impl Anchor {
             }
             Kind::Dir | Kind::Other => Err(IoError::NotRegularOrLink { path: full }),
         }
+    }
+
+    /// What `name` is in this directory, decided from `fstatat` and `readlinkat` with no
+    /// symlink followed; the vendor file is never opened, so a dangling link still counts.
+    pub fn enabled_member_state(
+        &self,
+        name: &str,
+        vendor_path: &Path,
+    ) -> Result<MemberState, IoError> {
+        check_member_name(name)?;
+        let full = self.path.join(name);
+        let st = match syscall::fstatat_nofollow(&self.fd, name) {
+            Ok(st) => st,
+            Err(nix::errno::Errno::ENOENT) => return Ok(MemberState::Absent),
+            Err(e) => return Err(crate::checks::map_errno_no_disambiguation(e, &full)),
+        };
+        match crate::dir::kind_of_mode(syscall::mode_bits(st.st_mode)) {
+            Kind::File => Ok(MemberState::LocalFile),
+            Kind::Symlink => {
+                let link = syscall::readlinkat_bounded(&self.fd, name)
+                    .map_err(|e| crate::checks::map_errno_no_disambiguation(e, &full))?;
+                if is_vendor_link(&link, vendor_path, name) {
+                    Ok(MemberState::VendorLink)
+                } else {
+                    Ok(MemberState::ForeignLink(PathBuf::from(link)))
+                }
+            }
+            Kind::Dir | Kind::Other => Ok(MemberState::Other),
+        }
+    }
+
+    /// Creates the symlink `name` whose target text is exactly `vendor_path/name`, then
+    /// syncs the directory. `Ok(false)` when that exact link is already there; any other
+    /// existing entry is refused (`AlreadyExists`) and left as it is.
+    ///
+    /// An error after the link was created (`PublishedNotDurable`) leaves the link in place,
+    /// and `Ok(false)` does not sync: a caller that rolls back decides from the state it saw
+    /// before this call, not from the return value.
+    pub fn link_member(&self, name: &str, vendor_path: &Path) -> Result<Outcome<bool>, IoError> {
+        check_member_name(name)?;
+        let full = self.path.join(name);
+        let target = vendor_path.join(name);
+        let created = crate::write::symlink_durable(&self.fd, name, target.as_os_str(), &full)?;
+        let value = if created {
+            true
+        } else {
+            match self.enabled_member_state(name, vendor_path)? {
+                MemberState::VendorLink => false,
+                MemberState::Absent
+                | MemberState::LocalFile
+                | MemberState::ForeignLink(_)
+                | MemberState::Other => {
+                    return Err(crate::checks::map_errno_no_disambiguation(
+                        nix::errno::Errno::EEXIST,
+                        &full,
+                    ))
+                }
+            }
+        };
+        Ok(Outcome {
+            value,
+            effective_strategy: Strategy::Portable,
+        })
     }
 
     /// Enumerate a directory relative to the anchor, RAW.
@@ -733,6 +812,7 @@ impl Anchor {
     }
 
     /// `publish_owned` that never replaces: the value is `false`, and the existing file is untouched, when `rel` already exists.
+    /// `PublishedNotDurable` is returned only when this call created `rel`; every other error means it did not.
     pub fn publish_owned_new(
         &self,
         rel: &Path,
@@ -3288,6 +3368,147 @@ mod tests {
             a.remove_settled(Path::new("../x"), None).unwrap_err(),
             IoError::EscapesAnchor { .. }
         ));
+    }
+
+    const VENDOR: &str = "/usr/share/maknae/grammars";
+
+    fn exists_err(a: &Anchor, name: &str) -> IoError {
+        IoError::Io {
+            path: a.path.join(name),
+            kind: crate::IoKind::AlreadyExists,
+        }
+    }
+
+    #[test]
+    fn link_member_creates_the_exact_link() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let out = a.link_member("gh.yaml", Path::new(VENDOR)).unwrap();
+        assert!(out.value);
+        let p = a.path.join("gh.yaml");
+        assert_eq!(
+            std::fs::read_link(&p).unwrap(),
+            Path::new("/usr/share/maknae/grammars/gh.yaml")
+        );
+        assert!(std::fs::symlink_metadata(&p)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn link_member_keeps_an_identical_link() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        assert!(a.link_member("gh.yaml", Path::new(VENDOR)).unwrap().value);
+        assert!(!a.link_member("gh.yaml", Path::new(VENDOR)).unwrap().value);
+    }
+
+    #[test]
+    fn link_member_refuses_a_foreign_link() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let p = a.path.join("gh.yaml");
+        std::os::unix::fs::symlink("/elsewhere/gh.yaml", &p).unwrap();
+        assert_eq!(
+            a.link_member("gh.yaml", Path::new(VENDOR)).unwrap_err(),
+            exists_err(&a, "gh.yaml")
+        );
+        assert_eq!(
+            std::fs::read_link(&p).unwrap(),
+            Path::new("/elsewhere/gh.yaml")
+        );
+    }
+
+    #[test]
+    fn link_member_refuses_a_regular_file_and_a_directory() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        std::fs::write(a.path.join("gh.yaml"), b"local").unwrap();
+        assert_eq!(
+            a.link_member("gh.yaml", Path::new(VENDOR)).unwrap_err(),
+            exists_err(&a, "gh.yaml")
+        );
+        assert_eq!(std::fs::read(a.path.join("gh.yaml")).unwrap(), b"local");
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        assert_eq!(
+            a.link_member("sub", Path::new(VENDOR)).unwrap_err(),
+            exists_err(&a, "sub")
+        );
+        assert!(a.path.join("sub").is_dir());
+    }
+
+    #[test]
+    fn link_member_refuses_a_path_name() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        for name in ["a/gh.yaml", ".."] {
+            assert!(
+                matches!(
+                    a.link_member(name, Path::new(VENDOR)),
+                    Err(IoError::NotAMemberName { .. })
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_state_reports_each_kind() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let v = Path::new(VENDOR);
+        let state = |n: &str| -> crate::MemberState { a.enabled_member_state(n, v).unwrap() };
+        assert_eq!(state("gh.yaml"), MemberState::Absent);
+        std::os::unix::fs::symlink("/usr/share/maknae/grammars/gh.yaml", a.path.join("gh.yaml"))
+            .unwrap();
+        assert_eq!(state("gh.yaml"), MemberState::VendorLink);
+        std::os::unix::fs::symlink("/elsewhere/gh.yaml", a.path.join("x.yaml")).unwrap();
+        assert_eq!(
+            state("x.yaml"),
+            MemberState::ForeignLink(PathBuf::from("/elsewhere/gh.yaml"))
+        );
+        std::os::unix::fs::symlink("gh.yaml", a.path.join("rel.yaml")).unwrap();
+        assert_eq!(
+            state("rel.yaml"),
+            MemberState::ForeignLink(PathBuf::from("gh.yaml"))
+        );
+        std::fs::write(a.path.join("f.yaml"), b"x").unwrap();
+        assert_eq!(state("f.yaml"), MemberState::LocalFile);
+        std::fs::create_dir(a.path.join("sub")).unwrap();
+        assert_eq!(state("sub"), MemberState::Other);
+        assert!(matches!(
+            a.enabled_member_state("a/b", v),
+            Err(IoError::NotAMemberName { .. })
+        ));
+    }
+
+    #[test]
+    fn member_state_reports_a_fifo_as_other() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        nix::unistd::mkfifo(
+            &a.path.join("p"),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            a.enabled_member_state("p", Path::new(VENDOR)).unwrap(),
+            MemberState::Other
+        );
+    }
+
+    #[test]
+    fn remove_takes_the_link_not_its_target() {
+        let d = dir(0o750);
+        let a = anchor_at(d.path(), "cfg");
+        let vendor = d.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+        std::fs::write(vendor.join("gh.yaml"), b"vendor").unwrap();
+        a.link_member("gh.yaml", &vendor).unwrap();
+        assert!(a.remove_durable(Path::new("gh.yaml"), None).unwrap().value);
+        assert!(std::fs::symlink_metadata(a.path.join("gh.yaml")).is_err());
+        assert_eq!(std::fs::read(vendor.join("gh.yaml")).unwrap(), b"vendor");
     }
 
     #[test]

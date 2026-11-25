@@ -36,6 +36,7 @@ mod secret_slot;
 pub mod vault_ops;
 
 use crate::stderr::errln;
+pub(crate) use agent_access::{Host, Platform, Ran, Run};
 use clap::{ArgGroup, Args, Subcommand};
 use maknae_io::program::{command, Program};
 use maknae_msgs::{detect_locale, msg, Locale, MsgId};

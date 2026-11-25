@@ -1,0 +1,125 @@
+# The gh tool entries (#674). `sudo maknae tools enable gh --image <ref>` installs
+# each as its own file in /etc/maknae/tools.d with image.ref set to <ref>; this
+# file is not loaded as it stands. The `app:` names are examples: they must name
+# Apps in the Egress Daemon's config. An entry is callable once policy grants it.
+schema_version: 1
+credential_classes:
+  github-read:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN, git-credential-file]
+    app: maknae-github-read
+  github-post:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-post
+  github-issues-read:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-issues-read
+  github-issues-write:
+    kind: github-app-installation
+    source: minted-per-task
+    narrowing: provider
+    lifetime: { expires: 1h, revoke_on: task-outcome }
+    minting: trust-plane
+    delivery: [env:GH_TOKEN]
+    app: maknae-github-issues-write
+tools:
+  github-read:
+    enabled: true
+    description: Read pull requests and fetch or check out their branches.
+    image:
+      ref: ghcr.io/example/tools@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: true
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: rw
+    credential: github-read
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 1Gi }
+    lifetime: { max: 10m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [pr.view, pr.diff, pr.checks]
+        timeout: 5m
+        output: 4MiB
+      git:
+        subcommands: ["fetch *", "checkout *"]
+        deny_args: ["--upl*", "-c*", "--config*"]
+        timeout: 5m
+        output: 4MiB
+  github-post:
+    enabled: true
+    description: Post review comments on a pull request.
+    image:
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: ro
+    credential: github-post
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [pr.review.comment, pr.review.request-changes, pr.review.approve, pr.comment]
+        timeout: 2m
+        output: 1MiB
+  github-issues-read:
+    enabled: true
+    description: "List and view issues."
+    image:
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: none
+    credential: github-issues-read
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [issue.list, issue.status, issue.view]
+        timeout: 2m
+        output: 1MiB
+  github-issues-write:
+    enabled: true
+    description: "Create, comment on, edit and close issues."
+    image:
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: { via: maknae-proxy, sites: [github.com, api.github.com] }
+    workspace: none
+    credential: github-issues-write
+    output_to_model: redacted
+    resources: { cpus: 1, memory: 512Mi }
+    lifetime: { max: 5m }
+    binds: { git: { resolver: git } }
+    commands:
+      gh:
+        grammar: gh
+        shapes: [issue.create, issue.comment, issue.edit.title, issue.edit.body, issue.edit.add-label, issue.edit.remove-label, issue.edit.add-assignee, issue.edit.remove-assignee, issue.close, issue.reopen, issue.lock, issue.unlock]
+        timeout: 2m
+        output: 1MiB

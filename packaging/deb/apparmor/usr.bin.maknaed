@@ -29,6 +29,8 @@ profile maknaed /usr/bin/maknaed {
   # own DAC or credential posture).
   /etc/maknae/                           r,
   /etc/maknae/**                         r,
+  /usr/share/maknae/grammars/            r,
+  /usr/share/maknae/grammars/**          r,
 
   # systemd-decrypted credential. LoadCredentialEncrypted= makes systemd (root)
   # TPM2-decrypt the sealed SecretID into a per-service ramfs at

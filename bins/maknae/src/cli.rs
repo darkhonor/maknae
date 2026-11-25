@@ -14,14 +14,15 @@
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
 //! `clap` and `maknae-loop` (the wire client and delegation arming, #470); `maknae-agent` and
-//! `maknae-seal` are the agent loop's (`agent.rs`) alone; `yaml-rust2`/`rpassword` are
-//! `enroll/`-only, and `nix`/`zeroize` serve `enroll/` and `login`/`tty`. NO privileged crate
+//! `maknae-seal` are the agent loop's (`agent.rs`) alone; `yaml-rust2` serves `enroll/` and
+//! `tools_admin/` (#674), `rpassword` is `enroll/`-only, and `nix`/`zeroize` serve `enroll/`
+//! and `login`/`tty`. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
 //! and process re-exec (`sudo -u`), never by linking the daemon's privileged crates.
 
 use crate::stderr::errln;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use maknae_config::{
     load_config, transport_from_section, Document, SectionSpec, TransportConfig, TRANSPORT_SECTION,
 };
@@ -133,7 +134,47 @@ fn route(cli: Cli) -> Option<Route> {
 
 #[cfg(test)]
 pub(crate) fn is_tools(cli: &Cli) -> bool {
-    matches!(cli.command, Some(Command::Tools))
+    matches!(
+        cli.command,
+        Some(Command::Tools(ToolsArgs { action: None }))
+    )
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ToolsArgs {
+    #[command(subcommand)]
+    pub(crate) action: Option<ToolsCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ToolsCommand {
+    /// List the packaged tool grammars and whether each is enabled. Requires `sudo`.
+    Available,
+    /// Enable a packaged grammar and write its tools.d entries from the vendor template. Requires `sudo`.
+    Enable {
+        /// Packaged grammar to enable, for example gh.
+        program: String,
+        /// Image to run the tool in, pinned by registry and digest.
+        #[arg(long)]
+        image: String,
+        /// Narrow the entry to these shapes (needs --entry).
+        #[arg(long, value_delimiter = ',')]
+        shapes: Option<Vec<String>>,
+        /// Write only this template entry.
+        #[arg(long)]
+        entry: Option<String>,
+        /// Write the files without reloading maknaed.
+        #[arg(long)]
+        no_reload: bool,
+    },
+    /// Remove a tools.d entry, and its grammar's link when nothing else uses it. Requires `sudo`.
+    Disable {
+        /// The tools.d entry to remove.
+        entry: String,
+        /// Remove the file without reloading maknaed.
+        #[arg(long)]
+        no_reload: bool,
+    },
 }
 
 /// The top-level subcommand surface. `Ping`/`Whoami` route to the existing
@@ -147,7 +188,7 @@ enum Command {
     /// Report the verified peer plane identity (URI-SAN + uid).
     Whoami,
     /// List the tools your role's grants reach, and the forges they bind (a hint, not a grant).
-    Tools,
+    Tools(ToolsArgs),
     /// Read a file under your home: the daemon decides (the policy in
     /// /etc/maknae/authz.yaml), and the CLI reads under your credentials; raw
     /// bytes to stdout. Paths are sent lexically absolute; `..` is refused by
@@ -1590,7 +1631,17 @@ pub async fn run_cli() -> ExitCode {
     match command {
         Command::Ping => wire_exit_code(execute(Verb::Ping).await, &mut std::io::stderr()),
         Command::Whoami => wire_exit_code(execute(Verb::Whoami).await, &mut std::io::stderr()),
-        Command::Tools => wire_exit_code(execute(Verb::ToolCatalog).await, &mut std::io::stderr()),
+        Command::Tools(ToolsArgs { action: None }) => {
+            wire_exit_code(execute(Verb::ToolCatalog).await, &mut std::io::stderr())
+        }
+        Command::Tools(ToolsArgs {
+            action: Some(action),
+        }) => ExitCode::from(crate::tools_admin::run_with(
+            nix::unistd::geteuid().as_raw(),
+            action,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )),
         Command::Status => wire_exit_code(execute(Verb::AdminStatus).await, &mut std::io::stderr()),
         Command::ConfigShow => {
             wire_exit_code(execute(Verb::AdminConfigShow).await, &mut std::io::stderr())
@@ -3514,6 +3565,92 @@ mod tests {
         assert!(matches!(
             cli.command.unwrap(),
             Command::AuditReaders { stopped: true }
+        ));
+    }
+
+    #[test]
+    fn bare_tools_still_lists_the_catalog() {
+        let cli = Cli::try_parse_from(["maknae", "tools"]).expect("parses");
+        assert!(is_tools(&cli));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tools(ToolsArgs { action: None }))
+        ));
+    }
+
+    #[test]
+    fn tools_enable_parses_its_options() {
+        let cli = Cli::try_parse_from([
+            "maknae",
+            "tools",
+            "enable",
+            "gh",
+            "--image",
+            "R",
+            "--shapes",
+            "pr.view,pr.diff",
+            "--entry",
+            "github-read",
+            "--no-reload",
+        ])
+        .expect("parses");
+        let Some(Command::Tools(ToolsArgs {
+            action:
+                Some(ToolsCommand::Enable {
+                    program,
+                    image,
+                    shapes,
+                    entry,
+                    no_reload,
+                }),
+        })) = cli.command
+        else {
+            panic!("not tools enable");
+        };
+        assert_eq!(program, "gh");
+        assert_eq!(image, "R");
+        assert_eq!(shapes, Some(vec!["pr.view".into(), "pr.diff".into()]));
+        assert_eq!(entry.as_deref(), Some("github-read"));
+        assert!(no_reload);
+        assert!(!is_tools(
+            &Cli::try_parse_from(["maknae", "tools", "available"]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn tools_enable_requires_an_image() {
+        let e = Cli::try_parse_from(["maknae", "tools", "enable", "gh"]).unwrap_err();
+        assert!(e.to_string().contains("--image"), "{e}");
+    }
+
+    #[test]
+    fn tools_disable_and_available_parse() {
+        let cli = Cli::try_parse_from(["maknae", "tools", "available"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tools(ToolsArgs {
+                action: Some(ToolsCommand::Available)
+            }))
+        ));
+        let cli = Cli::try_parse_from(["maknae", "tools", "disable", "github-read", "--no-reload"])
+            .expect("parses");
+        let Some(Command::Tools(ToolsArgs {
+            action: Some(ToolsCommand::Disable { entry, no_reload }),
+        })) = cli.command
+        else {
+            panic!("not tools disable");
+        };
+        assert_eq!(entry, "github-read");
+        assert!(no_reload);
+        let cli = Cli::try_parse_from(["maknae", "tools", "disable", "x"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tools(ToolsArgs {
+                action: Some(ToolsCommand::Disable {
+                    no_reload: false,
+                    ..
+                })
+            }))
         ));
     }
 

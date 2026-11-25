@@ -8,7 +8,7 @@ and `%postun` restarts each running one on upgrade, warning of each that does no
 labelled `maknae_agent_homes_root_t`; each home in it is `maknae_agent_home_t`, the only type in which the `maknae_agentd_t` domain may write files), the sysusers.d definition (`_maknae` service account + `maknae`
 operator group), the shipped default YAMLs (`authz.yaml` / `maknae.yaml` / `sensitive.yaml`; `bindings.yaml` ships as
 `/usr/share/maknae/bindings.yaml`, and `%post` copies it to `/etc/maknae` only
-when neither that file nor `/var/lib/maknae/kernel.graph` exists), the inactive HomeLab tools baseline `/usr/share/maknae/tools-homelab.yaml` (`0644`; no scriptlet copies it), the
+when neither that file nor `/var/lib/maknae/kernel.graph` exists), the inactive HomeLab tools baseline `/usr/share/maknae/tools-homelab.yaml` (`0644`; no scriptlet copies it), the vendor grammar `/usr/share/maknae/grammars/gh.yaml` and entry template `/usr/share/maknae/tools.d/gh.yaml` (`0644`; staged as `grammar-gh.yaml` and `tools.d-gh.yaml` because `build-rpm.sh` stages Sources flat by basename; labelled `maknae_vendor_grammar_t` for the grammar), the `%dir`s `/etc/maknae/grammars` and `/etc/maknae/tools.d` (`root:_maknae 0750`), the
 SELinux module (compiled at build time, shipped as `/usr/share/selinux/packages/targeted/maknae.pp.bz2`, and installed and removed at priority 200 by the `selinux-policy` RPM macros), the fapolicyd trust
 fragment, the Vault-port label helper, and the opt-in sync-back units
 (`maknae-policy-sync.path`, `maknae-policy-sync.service`) with

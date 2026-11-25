@@ -34,6 +34,8 @@ Source17:       sensitive.yaml
 Source18:       maknae-agentd
 Source19:       maknae-agent@.service
 Source20:       tools-homelab.yaml
+Source21:       grammar-gh.yaml
+Source22:       tools.d-gh.yaml
 
 ExclusiveArch:  x86_64
 
@@ -116,7 +118,11 @@ install -D -m 0640 %{SOURCE9} %{buildroot}%{_sysconfdir}/maknae/maknae.yaml
 install -D -m 0640 %{SOURCE17} %{buildroot}%{_sysconfdir}/maknae/sensitive.yaml
 install -D -m 0644 %{SOURCE13} %{buildroot}%{_datadir}/maknae/bindings.yaml
 install -D -m 0644 %{SOURCE20} %{buildroot}%{_datadir}/maknae/tools-homelab.yaml
+install -D -m 0644 %{SOURCE21} %{buildroot}%{_datadir}/maknae/grammars/gh.yaml
+install -D -m 0644 %{SOURCE22} %{buildroot}%{_datadir}/maknae/tools.d/gh.yaml
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/private
+install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/grammars
+install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/tools.d
 # #240b: the deputy's credential set dir (files written by `maknae enroll`).
 install -d -m 0750 %{buildroot}%{_sysconfdir}/maknae/egress
 install -d -m 0755 %{buildroot}%{_sysconfdir}/pki/maknae
@@ -155,7 +161,7 @@ if [ ! -e "$B" ] && [ ! -h "$B" ] && [ ! -e %{_localstatedir}/lib/maknae/kernel.
         exit 1
     fi
 fi
-restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_bindir}/maknae-agentd %{_sysconfdir}/maknae %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae %{_localstatedir}/lib/maknae-agents 2>/dev/null || :
+restorecon -Rv %{_bindir}/maknaed %{_bindir}/maknae-egress %{_bindir}/maknae-agentd %{_sysconfdir}/maknae %{_datadir}/maknae/grammars %{_sysconfdir}/pki/maknae %{_localstatedir}/log/maknae %{_localstatedir}/lib/maknae %{_localstatedir}/lib/maknae-agents 2>/dev/null || :
 # #240b (D3): the egress deputy is in neither root nor _maknae, and the config
 # loader refuses any world bit on /etc/maknae, so it reaches the dir by a user
 # ACL granting `rx` — `r` because maknae-io opens the directory
@@ -286,12 +292,18 @@ fi
 %dir %{_datadir}/maknae
 %{_datadir}/maknae/bindings.yaml
 %{_datadir}/maknae/tools-homelab.yaml
+%dir %{_datadir}/maknae/grammars
+%{_datadir}/maknae/grammars/gh.yaml
+%dir %{_datadir}/maknae/tools.d
+%{_datadir}/maknae/tools.d/gh.yaml
 %config(noreplace) %{_sysconfdir}/fapolicyd/trust.d/maknae
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/authz.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/maknae.yaml
 %config(noreplace) %attr(0640,root,_maknae) %{_sysconfdir}/maknae/sensitive.yaml
 %dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/private
+%dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/grammars
+%dir %attr(0750,root,_maknae) %{_sysconfdir}/maknae/tools.d
 %dir %attr(0750,root,_maknae-egress) %{_sysconfdir}/maknae/egress
 %dir %attr(0755,root,root) %{_sysconfdir}/pki/maknae
 %dir %attr(0700,_maknae,_maknae) %{_localstatedir}/log/maknae

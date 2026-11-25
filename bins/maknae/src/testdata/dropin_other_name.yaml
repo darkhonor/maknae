@@ -1,0 +1,16 @@
+schema_version: 1
+tools:
+  other-name:
+    enabled: true
+    description: A drop-in that defines nothing the gh template defines.
+    image:
+      ref: ghcr.io/example/tools@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      verify: { signature: required, sbom: required }
+    isolation: container
+    executes_workspace: false
+    network: none
+    workspace: none
+    credential: none
+    output_to_model: redacted
+    commands:
+      echo: { open: true }

@@ -29,6 +29,10 @@ normative statement; this directory holds the packaging that follows from it.
 >
 > **The sync-back job is opt-in.** `io.maknae.policy-sync` watches `/usr/local/var/db/maknae/state/bindings.mirror.yaml`, runs `maknae policy sync` as root, and after an install sends `maknaed` `SIGHUP`; its output goes to `/Library/Logs/maknae-policy-sync.log`, which is root-owned. `scripts/postinstall` disables it on a fresh install and on an upgrade that adds it; `uninstall.sh` boots it out and removes it. Opt in with `sudo launchctl enable system/io.maknae.policy-sync && sudo launchctl bootstrap system /Library/LaunchDaemons/io.maknae.policy-sync.plist` (see [Sync back](../README.md#sync-back-opt-in)).
 
+## Vendor grammars and entry templates
+
+The payload ships `/usr/local/share/maknae/grammars/gh.yaml` (the vendor grammar `maknae tools enable` links to; `maknaed` reads it through the link) and `/usr/local/share/maknae/tools.d/gh.yaml` (the entry template; never read by `maknaed`), both `root:wheel 0644` in `0755` directories, outside `defaults/` so `postinstall` never copies them. `postinstall` creates `/etc/maknae/grammars` and `/etc/maknae/tools.d` as `root:_maknae 0750` when absent and re-asserts them on every install; they are not in the payload, so an upgrade never empties them. `smoke.sh` checks the payload inventory at release.
+
 ## Plane secrets: the System keychain
 
 `sudo maknae enroll` writes one generic-password item per plane into

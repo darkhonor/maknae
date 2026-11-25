@@ -104,6 +104,8 @@ type maknae_agent_etc_t;
 files_config_file(maknae_agent_etc_t)
 type maknae_tls_t;
 files_config_file(maknae_tls_t)
+type maknae_vendor_grammar_t;
+files_type(maknae_vendor_grammar_t)
 
 ########################################
 # Policy rules
@@ -116,6 +118,9 @@ allow maknaed_t maknaed_exec_t:file { read execute execute_no_trans open getattr
 # read by init_t, NOT here — this grants only the daemon-read artifacts).
 allow maknaed_t maknae_etc_t:dir { open read search getattr };
 allow maknaed_t maknae_etc_t:file { read open getattr };
+allow maknaed_t maknae_etc_t:lnk_file { read getattr };
+allow maknaed_t maknae_vendor_grammar_t:dir { open read search getattr };
+allow maknaed_t maknae_vendor_grammar_t:file { read open getattr };
 allow maknaed_t { maknae_agent_etc_t maknae_tls_t }:dir { open read search getattr };
 allow maknaed_t { maknae_agent_etc_t maknae_tls_t }:file { read open getattr };
 # #240a: both readers of the bounds file, by type.

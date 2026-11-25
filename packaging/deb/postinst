@@ -101,6 +101,14 @@ case "$1" in
         # modes are load-bearing. Set them explicitly, not via umask.
         install -d -m 0750 -o root    -g _maknae /etc/maknae
         install -d -m 0750 -o root    -g _maknae /etc/maknae/private
+        for d in /etc/maknae/grammars /etc/maknae/tools.d; do
+            if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+                echo "maknae: $d is a symlink or not a directory; refusing to install through it" >&2
+                exit 1
+            fi
+        done
+        install -d -m 0750 -o root    -g _maknae /etc/maknae/grammars
+        install -d -m 0750 -o root    -g _maknae /etc/maknae/tools.d
 
         # --- Conffile-ownership convergence (EVERY configure) -------------------
         # dpkg records conffiles as root:root; the daemon runs as `_maknae` and the

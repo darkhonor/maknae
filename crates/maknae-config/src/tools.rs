@@ -11,6 +11,11 @@ use std::sync::Arc;
 pub const TOOLS_FILE: &str = "tools.yaml";
 pub const TOOLS_DROPIN_DIR: &str = "tools.d";
 
+#[cfg(target_os = "macos")]
+pub const VENDOR_TOOLS_DIR: &str = "/usr/local/share/maknae/tools.d";
+#[cfg(not(target_os = "macos"))]
+pub const VENDOR_TOOLS_DIR: &str = "/usr/share/maknae/tools.d";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CredentialKind {
     GithubAppInstallation,
@@ -368,6 +373,26 @@ impl ToolsCatalog {
         }
     }
 
+    pub fn from_texts(
+        main: Option<&str>,
+        dropins: &[(&str, &str)],
+        grammars: &GrammarSet,
+    ) -> Result<Self, ToolsError> {
+        let mut named: Vec<&(&str, &str)> = dropins
+            .iter()
+            .filter(|(name, _)| is_dropin_name(name))
+            .collect();
+        named.sort_by(|a, b| a.0.cmp(b.0));
+        let read = named
+            .into_iter()
+            .map(|(name, text)| DropIn::Read {
+                file: dropin_file(name),
+                text: (*text).to_string(),
+            })
+            .collect();
+        Self::assemble(main, read, Vec::new(), grammars)
+    }
+
     #[cfg(all(unix, feature = "hermetic-test-seam"))]
     pub fn load_with_requirement(
         config_dir: &Path,
@@ -397,7 +422,7 @@ impl ToolsCatalog {
                         docs.push((file, doc));
                     }
                     Err(e) => {
-                        let (classes, tools) = names_of(&text);
+                        let (classes, tools) = defined_names(&text);
                         unparsed.push((file.clone(), classes, tools));
                         dropin_canonical.push((file.clone(), Value::Str(text)));
                         catalog.disabled.push(Disabled {
@@ -533,6 +558,10 @@ impl ToolsCatalog {
         self.classes.get(name)
     }
 
+    pub fn class_names(&self) -> impl Iterator<Item = &str> {
+        self.classes.keys().map(String::as_str)
+    }
+
     pub fn disabled(&self) -> &[Disabled] {
         &self.disabled
     }
@@ -567,12 +596,19 @@ fn in_file(file: &str, reason: String) -> String {
     }
 }
 
+fn is_dropin_name(name: &str) -> bool {
+    !name.starts_with('.') && name.ends_with(".yaml")
+}
+
+fn dropin_file(name: &str) -> String {
+    format!("{TOOLS_DROPIN_DIR}/{name}")
+}
+
 fn defined_in(files: &[&str]) -> String {
     format!("defined in more than one file: {}", files.join(", "))
 }
 
-/// The class and tool names of a drop-in whose YAML loads but whose schema does not.
-fn names_of(text: &str) -> (Vec<String>, Vec<String>) {
+pub fn defined_names(text: &str) -> (Vec<String>, Vec<String>) {
     let Ok(Value::Map(top)) = crate::load_str(text) else {
         return (Vec::new(), Vec::new());
     };
@@ -581,6 +617,33 @@ fn names_of(text: &str) -> (Vec<String>, Vec<String>) {
         Some(_) | None => Vec::new(),
     };
     (keys("credential_classes"), keys("tools"))
+}
+
+pub fn grammar_uses(text: &str) -> BTreeSet<String> {
+    let Ok(Value::Map(top)) = crate::load_str(text) else {
+        return BTreeSet::new();
+    };
+    let Some(Value::Map(tools)) = get(&top, "tools") else {
+        return BTreeSet::new();
+    };
+    tools
+        .iter()
+        .filter_map(|(_, entry)| match entry {
+            Value::Map(fields) => match get(fields, "commands") {
+                Some(Value::Map(commands)) => Some(commands),
+                Some(_) | None => None,
+            },
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|(_, command)| match command {
+            Value::Map(fields) => match get(fields, "grammar") {
+                Some(Value::Str(name)) => Some(name.clone()),
+                Some(_) | None => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 fn parse_top(file: &str, text: &str) -> Result<Doc, ToolsError> {
@@ -702,10 +765,10 @@ fn read_dropins(
     let mut skipped = Vec::new();
     for entry in entries {
         let name = entry.name.to_string_lossy().into_owned();
-        if name.starts_with('.') || !name.ends_with(".yaml") {
+        if !is_dropin_name(&name) {
             continue;
         }
-        let file = format!("{TOOLS_DROPIN_DIR}/{name}");
+        let file = dropin_file(&name);
         if entry.kind != Kind::File {
             let what = if entry.kind == Kind::Symlink {
                 "a symlink"
@@ -816,14 +879,14 @@ fn name_ok(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-pub(crate) fn tool_entry_name_ok(name: &str) -> bool {
+pub fn tool_entry_name_ok(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
-pub(crate) fn tool_program_name_ok(name: &str) -> bool {
+pub fn tool_program_name_ok(name: &str) -> bool {
     !matches!(name, "" | "." | "..")
         && name
             .bytes()
@@ -1976,23 +2039,49 @@ mod tests {
     }
 
     #[test]
-    fn names_of_harvests_class_and_tool_keys_only() {
+    fn defined_names_harvests_class_and_tool_keys_only() {
         assert_eq!(
-            names_of("credential_classes:\n  c1: 1\n  c2: 2\ntools:\n  t1: 1\n  t2: 2\n"),
+            defined_names("credential_classes:\n  c1: 1\n  c2: 2\ntools:\n  t1: 1\n  t2: 2\n"),
             (
                 vec!["c1".to_string(), "c2".to_string()],
                 vec!["t1".to_string(), "t2".to_string()]
             )
         );
         assert_eq!(
-            names_of("tools:\n  t1: 1\n"),
+            defined_names("tools:\n  t1: 1\n"),
             (Vec::new(), vec!["t1".to_string()])
         );
         assert_eq!(
-            names_of("credential_classes: 3\ntools: [a]\n"),
+            defined_names("credential_classes: 3\ntools: [a]\n"),
             (Vec::new(), Vec::new())
         );
-        assert_eq!(names_of("tools: [\n"), (Vec::new(), Vec::new()));
+        assert_eq!(defined_names("tools: [\n"), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn grammar_uses_reads_every_grammar_command() {
+        assert_eq!(grammar_uses(HOMELAB), BTreeSet::from(["gh".to_string()]));
+    }
+
+    #[test]
+    fn grammar_uses_is_empty_for_unloadable_or_shapeless_text() {
+        for text in [
+            "::",
+            "tools: 3",
+            "tools:\n  a:\n    commands: [x]\n",
+            "tools:\n  a:\n    commands:\n      gh: { grammar: 7 }\n",
+        ] {
+            assert!(grammar_uses(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn vendor_tools_dir_sits_beside_the_vendor_grammars() {
+        assert_eq!(
+            Path::new(VENDOR_TOOLS_DIR).parent(),
+            Path::new(crate::VENDOR_GRAMMAR_DIR).parent()
+        );
+        assert!(VENDOR_TOOLS_DIR.ends_with("/maknae/tools.d"));
     }
 
     #[cfg(unix)]
@@ -3095,6 +3184,76 @@ mod tests {
             assert!(c.entry("sentinel-674-loose").is_none());
             assert!(reason(&c, "tools.d/a.yaml").contains("UTF-8"));
             assert!(!reason(&c, "tools.d/c.yaml").is_empty());
+        }
+
+        #[test]
+        fn from_texts_assembles_what_load_reads() {
+            let dup = entry_doc("sentinel-674-dup", ECHO);
+            let class = "schema_version: 1\ncredential_classes:\n  sentinel-674-class:\n    kind: github-machine-user\n";
+            let user = entry_doc(
+                "sentinel-674-user",
+                &format!("    credential: sentinel-674-class\n{ECHO}"),
+            );
+            let gh = entry_doc(
+                "sentinel-674-gh",
+                "    commands:\n      gh: { grammar: gh, shapes: [pr.comment] }\n",
+            );
+            type Case<'a> = (&'a str, Option<&'a str>, Vec<(&'a str, &'a str)>);
+            let cases: [Case; 4] = [
+                ("ft_empty", None, vec![]),
+                (
+                    "ft_mixed",
+                    Some(HOMELAB),
+                    vec![
+                        ("b.yaml", &dup),
+                        ("a.yaml", &dup),
+                        ("c.yaml", class),
+                        ("d.yaml", &user),
+                        ("e.yaml", &gh),
+                        ("notes.txt", &user),
+                        (".hidden.yaml", &user),
+                    ],
+                ),
+                (
+                    "ft_unparsed",
+                    Some(&dup),
+                    vec![
+                        (
+                            "z.yaml",
+                            "schema_version: 2\ntools:\n  sentinel-674-dup: {}\n",
+                        ),
+                        ("y.yaml", "schema_version: 1\ntools: [\n"),
+                    ],
+                ),
+                (
+                    "ft_class",
+                    Some(class),
+                    vec![("a.yaml", class), ("b.yaml", &user)],
+                ),
+            ];
+            for (tag, main, dropins) in cases {
+                let want = loaded(tag, main, &dropins);
+                let got =
+                    ToolsCatalog::from_texts(main, &dropins, &crate::grammar::shipped_grammars())
+                        .unwrap();
+                assert_eq!(got, want, "{tag}");
+            }
+            let got =
+                ToolsCatalog::from_texts(None, &[("e.yaml", &gh)], &GrammarSet::empty()).unwrap();
+            assert!(got.entry("sentinel-674-gh").is_none());
+            assert!(ToolsCatalog::from_texts(
+                Some("schema_version: 2\n"),
+                &[],
+                &GrammarSet::empty()
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn class_names_lists_the_enabled_classes() {
+            let class = "schema_version: 1\ncredential_classes:\n  sentinel-674-class:\n    kind: github-machine-user\n  sentinel-674-b:\n    kind: github-machine-user\n";
+            let c = loaded("class_names", Some(class), &[("a.yaml", "schema_version: 1\ncredential_classes:\n  sentinel-674-b:\n    kind: github-machine-user\n")]);
+            assert_eq!(c.class_names().collect::<Vec<_>>(), ["sentinel-674-class"]);
         }
 
         #[test]

@@ -25,10 +25,10 @@ const MIRROR_POLL: Duration = Duration::from_millis(100);
 const MIRROR_POLLS: u32 = 20;
 
 #[cfg(target_os = "macos")]
-const RELOAD: &str =
+pub(crate) const RELOAD: &str =
     "reload maknaed to adopt it: sudo launchctl kill SIGHUP system/io.maknae.maknaed";
 #[cfg(not(target_os = "macos"))]
-const RELOAD: &str = "reload maknaed to adopt it: sudo systemctl reload maknaed";
+pub(crate) const RELOAD: &str = "reload maknaed to adopt it: sudo systemctl reload maknaed";
 
 const ANSWER_MAX_BYTES: u64 = 64;
 

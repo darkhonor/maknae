@@ -27,10 +27,12 @@ maintainer scripts (`postinst`/`prerm`/`postrm`).
 | `/usr/libexec/maknae/maknae-selinux-ports.sh` | `common/maknae-selinux-ports.sh` | `0750` |
 | `/etc/maknae/authz.yaml`, `/etc/maknae/bindings.yaml`, `/etc/maknae/maknae.yaml`, `/etc/maknae/sensitive.yaml` | `common/` (conffiles) | `root:_maknae 0640` (set in postinst) |
 | `/usr/share/maknae/tools-homelab.yaml` | `common/tools-homelab.yaml` | `root:root 0644`; the inactive HomeLab tools baseline, never read by `maknaed` and copied by no maintainer script |
+| `/usr/share/maknae/grammars/gh.yaml` | `common/grammars/gh.yaml` | `root:root 0644`; the vendor grammar `maknae tools enable` links to; `maknaed` reads it through that link (AppArmor `r` rule) |
+| `/usr/share/maknae/tools.d/gh.yaml` | `common/tools.d/gh.yaml` | `root:root 0644`; the entry template `maknae tools enable` renders; never read by `maknaed` |
 | `/var/log/maknae/audit.jsonl` | created in postinst, not payload | `_maknae:_maknae 0640`, `chattr +a` |
 
 Directories created by `postinst` at their §4.6 modes: `/etc/maknae`
-(`root:_maknae 0750`), `/etc/maknae/private` (`root:_maknae 0750`),
+(`root:_maknae 0750`), `/etc/maknae/private`, `/etc/maknae/grammars` and `/etc/maknae/tools.d` (each `root:_maknae 0750`, never emptied by an upgrade),
 `/var/log/maknae` (`_maknae:_maknae 0700`), and `/var/lib/maknae-agents`
 (`root:root 0755`), the recommended root for agent homes.
 

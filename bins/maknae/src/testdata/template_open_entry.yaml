@@ -1,0 +1,9 @@
+  scratch:
+    image: { verify: { signature: required, sbom: required } }
+    isolation: container
+    executes_workspace: true
+    network: none
+    workspace: rw
+    output_to_model: redacted
+    commands:
+      cargo: { open: true, deny_args: ["+*"] }
