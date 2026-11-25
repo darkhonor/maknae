@@ -492,11 +492,10 @@ fn grammar_set(p: &Paths, o: &Owners, d: &Dirs) -> Result<GrammarSet, String> {
                 .map(|m| match m {
                     EnabledMember::Local(bytes) | EnabledMember::Vendor(bytes) => bytes,
                 }),
-            Err(_) if entry.kind == Kind::File => d
+            Err(_) => d
                 .grammars
                 .read(Path::new(&entry.name), None, member.clone())
                 .map(|o| o.value),
-            Err(e) => Err(e.clone()),
         };
         let Ok(bytes) = read else {
             continue;
@@ -2313,6 +2312,14 @@ mod tests {
             &GRAMMAR.replace("program: gh", "program: loose"),
             0o644,
         );
+        let elsewhere = fx.0.join("ln.yaml");
+        write(
+            &elsewhere,
+            &GRAMMAR.replace("program: gh", "program: ln"),
+            0o640,
+        );
+        std::os::unix::fs::symlink(&elsewhere, fx.grammars().join("ln.yaml")).unwrap();
+        std::fs::create_dir(fx.grammars().join("dd.yaml")).unwrap();
         let (o, p) = (me(), fx.paths());
         let keys = || {
             let set = grammar_set(&p, &o, &Dirs::open(&p, &o).unwrap()).unwrap();
