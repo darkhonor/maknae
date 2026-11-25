@@ -112,7 +112,7 @@ fn publish_new_synced<F: AsFd>(
     owner: FileOwner,
     seams: Seams<impl FnOnce(&F) -> nix::Result<()>, impl Fn(&F, &str) -> nix::Result<()>>,
 ) -> Result<bool, IoError> {
-    let created = publish_raw(
+    let placed = publish_raw(
         dirfd,
         final_name,
         bytes,
@@ -122,14 +122,26 @@ fn publish_new_synced<F: AsFd>(
         seams.unlink_linked,
     )
     .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))?;
-    if !created {
-        settle_existing(dirfd, final_name, at)?;
-    }
-    (seams.sync_dir)(dirfd).map_err(|e| IoError::PublishedNotDurable {
+    let not_durable = |e| IoError::PublishedNotDurable {
         path: at.to_path_buf(),
         kind: crate::checks::kind_of_errno(e),
-    })?;
-    Ok(created)
+    };
+    match placed {
+        Placed::Created => (seams.sync_dir)(dirfd).map(|()| true).map_err(not_durable),
+        Placed::CreatedTempKept(e) => Err(not_durable(e)),
+        Placed::Existing => {
+            settle_existing(dirfd, final_name, at)?;
+            (seams.sync_dir)(dirfd)
+                .map(|()| false)
+                .map_err(|e| crate::checks::map_errno_no_disambiguation(e, at))
+        }
+    }
+}
+
+enum Placed {
+    Created,
+    CreatedTempKept(nix::errno::Errno),
+    Existing,
 }
 
 /// Removes only publish temp names that share the final's inode; any other link is refused.
@@ -291,7 +303,7 @@ fn publish_raw<F: AsFd>(
     owner: Option<FileOwner>,
     replace: bool,
     unlink_linked: impl Fn(&F, &str) -> nix::Result<()>,
-) -> nix::Result<bool> {
+) -> nix::Result<Placed> {
     // CONTRACT LIMIT (external review): the temp adds "." + ".tmp.<pid>.<counter>" to
     // the caller's name, so a final name a filesystem accepts (up to 255 bytes on
     // ext4/xfs) can exceed NAME_MAX in its temp form and be REFUSED — ENAMETOOLONG
@@ -323,13 +335,13 @@ fn publish_raw<F: AsFd>(
             let _ = syscall::unlink_at(dirfd, tmp.as_str());
             return Err(e);
         }
-        return Ok(true);
+        return Ok(Placed::Created);
     }
     let linked = syscall::link_at(dirfd, tmp.as_ref(), final_name.as_ref());
     let unlinked = unlink_linked(dirfd, tmp.as_str());
     match linked {
-        Ok(()) => unlinked.map(|()| true),
-        Err(nix::errno::Errno::EEXIST) => Ok(false),
+        Ok(()) => Ok(unlinked.map_or_else(Placed::CreatedTempKept, |()| Placed::Created)),
+        Err(nix::errno::Errno::EEXIST) => Ok(Placed::Existing),
         Err(e) => Err(e),
     }
 }
@@ -725,14 +737,23 @@ mod tests {
         no_temp_left(d.path());
     }
 
+    fn plain_eio(at: &Path) -> IoError {
+        IoError::Io {
+            path: at.to_path_buf(),
+            kind: crate::IoKind::Other {
+                raw: Errno::EIO as i32,
+            },
+        }
+    }
+
     #[test]
-    fn a_failed_directory_sync_on_an_existing_name_is_published_not_durable() {
+    fn a_failed_directory_sync_on_an_existing_name_is_not_published_not_durable() {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
         std::fs::write(&at, b"old").unwrap();
         let e = publish_new(&dirfd, "f", &at, b"new", own_ids(), |_| Err(Errno::EIO)).unwrap_err();
-        assert_eq!(e, io_eio(&at));
+        assert_eq!(e, plain_eio(&at));
         assert_eq!(std::fs::read(&at).unwrap(), b"old");
     }
 
@@ -747,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_temp_unlink_after_the_link_is_an_error_not_success() {
+    fn a_failed_temp_unlink_after_the_link_is_published_not_durable() {
         let d = tempfile::tempdir().unwrap();
         let dirfd = std::fs::File::open(d.path()).unwrap();
         let at = d.path().join("f");
@@ -766,15 +787,8 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(
-            e,
-            IoError::Io {
-                path: at.clone(),
-                kind: crate::IoKind::Other {
-                    raw: Errno::EIO as i32
-                },
-            }
-        );
+        assert_eq!(e, io_eio(&at));
+        assert_eq!(std::fs::read(&at).unwrap(), b"new");
         assert_eq!(temp_links(d.path()).len(), 1);
     }
 
@@ -819,7 +833,7 @@ mod tests {
         std::fs::write(&at, b"one").unwrap();
         std::fs::hard_link(&at, d.path().join(".f.tmp.4242.7")).unwrap();
         let e = publish_new(&dirfd, "f", &at, b"two", own_ids(), |_| Err(Errno::EIO)).unwrap_err();
-        assert_eq!(e, io_eio(&at));
+        assert_eq!(e, plain_eio(&at));
         assert_eq!(std::fs::metadata(&at).unwrap().nlink(), 1);
     }
 

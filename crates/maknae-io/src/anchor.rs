@@ -812,6 +812,7 @@ impl Anchor {
     }
 
     /// `publish_owned` that never replaces: the value is `false`, and the existing file is untouched, when `rel` already exists.
+    /// `PublishedNotDurable` is returned only when this call created `rel`; every other error means it did not.
     pub fn publish_owned_new(
         &self,
         rel: &Path,
