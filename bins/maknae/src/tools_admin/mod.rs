@@ -467,7 +467,15 @@ fn report(c: Committed, reload: bool, r: &dyn Reload, out: &mut dyn Write) -> Re
 }
 
 fn grammar_set(p: &Paths, o: &Owners, d: &Dirs) -> Result<GrammarSet, String> {
-    let vendor = open(&p.vendor_grammars, o.dir, 0o022)?;
+    let vendor = maknae_io::open_anchor_resolved(
+        &p.vendor_grammars,
+        AnchorRequired {
+            owner: Some(o.file.uid),
+            mode_mask: Some(0o022),
+        },
+        StrategyPref::Auto,
+    );
+    let member = required(o.file.uid, 0o027);
     let mut set = GrammarSet::empty();
     for entry in listing(&d.grammars, &p.config.join(GRAMMARS_DIR))? {
         let name = entry.name.to_string_lossy();
@@ -477,15 +485,22 @@ fn grammar_set(p: &Paths, o: &Owners, d: &Dirs) -> Result<GrammarSet, String> {
         if !tool_program_name_ok(stem) || stem.ends_with(".yaml") {
             continue;
         }
-        let Ok(member) = d.grammars.read_enabled_member(
-            &name,
-            &vendor,
-            &p.vendor_grammars,
-            required(o.file.uid, 0o027),
-        ) else {
+        let read = match &vendor {
+            Ok(vendor) => d
+                .grammars
+                .read_enabled_member(&name, vendor, &p.vendor_grammars, member.clone())
+                .map(|m| match m {
+                    EnabledMember::Local(bytes) | EnabledMember::Vendor(bytes) => bytes,
+                }),
+            Err(_) if entry.kind == Kind::File => d
+                .grammars
+                .read(Path::new(&entry.name), None, member.clone())
+                .map(|o| o.value),
+            Err(e) => Err(e.clone()),
+        };
+        let Ok(bytes) = read else {
             continue;
         };
-        let (EnabledMember::Local(bytes) | EnabledMember::Vendor(bytes)) = member;
         let Some(grammar) = std::str::from_utf8(&bytes)
             .ok()
             .and_then(|text| Grammar::parse(stem, text).ok())
@@ -2253,6 +2268,61 @@ mod tests {
         );
         assert!(e.contains("the tool `github-read`"), "{e}");
         assert_eq!(fx.dropins(), yamls(&["copy", "github-read"]));
+    }
+
+    #[test]
+    fn disable_is_never_blocked_by_the_vendor_directory() {
+        let fx = Fx::new();
+        fx.enabled_one("github-post");
+        std::fs::remove_dir_all(fx.vendor_grammars()).unwrap();
+        let r = FakeReload::ok();
+        let (result, out) = fx.disable("github-post", &r);
+        result.unwrap();
+        assert!(fx.dropins().is_empty());
+        assert_eq!(fx.link(), None);
+        assert!(
+            out.contains(&format!(
+                "removed {}",
+                fx.tools().join("github-post.yaml").display()
+            )),
+            "{out}"
+        );
+        assert_eq!(r.calls.get(), 1);
+
+        let e = err(fx.enable(&req(Some("github-post"), None), &r).0);
+        assert!(
+            e.starts_with(&format!("cannot use {}: ", fx.vendor_grammars().display())),
+            "{e}"
+        );
+        assert!(fx.dropins().is_empty());
+        assert_eq!(fx.link(), None);
+        assert_eq!(r.calls.get(), 1);
+    }
+
+    #[test]
+    fn grammar_set_reads_local_grammars_when_the_vendor_directory_is_unusable() {
+        let fx = Fx::new();
+        fx.link_exactly();
+        write(
+            &fx.grammars().join("kk.yaml"),
+            &GRAMMAR.replace("program: gh", "program: kk"),
+            0o640,
+        );
+        write(
+            &fx.grammars().join("loose.yaml"),
+            &GRAMMAR.replace("program: gh", "program: loose"),
+            0o644,
+        );
+        let (o, p) = (me(), fx.paths());
+        let keys = || {
+            let set = grammar_set(&p, &o, &Dirs::open(&p, &o).unwrap()).unwrap();
+            set.grammars.keys().cloned().collect::<Vec<_>>()
+        };
+        std::fs::set_permissions(fx.vendor_grammars(), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        assert_eq!(keys(), ["kk"]);
+        std::fs::remove_dir_all(fx.vendor_grammars()).unwrap();
+        assert_eq!(keys(), ["kk"]);
     }
 
     #[test]
