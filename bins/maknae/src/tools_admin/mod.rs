@@ -924,7 +924,16 @@ fn disable_with(
         }
     }
 
-    if identity(&file)? != Some(seen) {
+    let same = identity(&file)? == Some(seen)
+        && read_text(
+            &d.tools,
+            Path::new(&file),
+            required(o.file.uid, 0o027),
+            &path,
+        )?
+        .as_deref()
+            == Some(text.as_str());
+    if !same {
         return Err(terminal_safe(&format!(
             "{} changed while disable ran; nothing was removed",
             path.display()
@@ -2193,32 +2202,71 @@ mod tests {
         assert_eq!(fx.link(), None);
     }
 
+    fn rewrite_in_place(path: &Path, body: &str) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
     #[test]
     fn disable_refuses_a_dropin_replaced_while_it_ran() {
+        use std::os::unix::fs::MetadataExt;
         let fx = Fx::new();
-        fx.enabled_one("github-post");
         let dropin = fx.tools().join("github-post.yaml");
-        let swap = || {
+        let ino = || std::fs::metadata(&dropin).unwrap().ino();
+        let replace = || {
             std::fs::remove_file(&dropin).unwrap();
             write(&dropin, OTHER, 0o640);
         };
+        let in_place = || {
+            let before = ino();
+            rewrite_in_place(&dropin, OTHER);
+            assert_eq!(ino(), before);
+        };
+        let swaps: [&dyn Fn(); 2] = [&replace, &in_place];
+        for swap in swaps {
+            let _ = std::fs::remove_file(&dropin);
+            fx.enabled_one("github-post");
+            let r = FakeReload::ok();
+            let plan = Plan {
+                before_recheck: swap,
+                ..plan()
+            };
+            let (result, out) = disable_run(&fx, "github-post", &r, plan);
+            assert_eq!(
+                err(result),
+                format!(
+                    "{} changed while disable ran; nothing was removed",
+                    dropin.display()
+                )
+            );
+            assert_eq!(std::fs::read_to_string(&dropin).unwrap(), OTHER);
+            assert_eq!(fx.link(), fx.exact());
+            assert!(out.is_empty(), "{out}");
+            assert_eq!(r.calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn disable_removes_a_dropin_rewritten_with_the_same_bytes() {
+        let fx = Fx::new();
+        fx.enabled_one("github-post");
+        let dropin = fx.tools().join("github-post.yaml");
+        let text = std::fs::read_to_string(&dropin).unwrap();
+        let same = || rewrite_in_place(&dropin, &text);
         let r = FakeReload::ok();
         let plan = Plan {
-            before_recheck: &swap,
+            before_recheck: &same,
             ..plan()
         };
-        let (result, out) = disable_run(&fx, "github-post", &r, plan);
-        assert_eq!(
-            err(result),
-            format!(
-                "{} changed while disable ran; nothing was removed",
-                dropin.display()
-            )
-        );
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), OTHER);
-        assert_eq!(fx.link(), fx.exact());
-        assert!(out.is_empty(), "{out}");
-        assert_eq!(r.calls.get(), 0);
+        disable_run(&fx, "github-post", &r, plan).0.unwrap();
+        assert!(fx.dropins().is_empty());
+        assert_eq!(fx.link(), None);
+        assert_eq!(r.calls.get(), 1);
     }
 
     #[test]
