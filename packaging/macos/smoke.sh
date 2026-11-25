@@ -397,7 +397,11 @@ phase1() {
                 "./usr/local/share/maknae/defaults/bindings.yaml" \
                 "./usr/local/share/maknae/defaults/maknae.yaml" \
                 "./usr/local/share/maknae/defaults/sensitive.yaml" \
-                "./usr/local/share/maknae/tools-homelab.yaml" | sort > "$x/want"
+                "./usr/local/share/maknae/tools-homelab.yaml" \
+                "./usr/local/share/maknae/grammars" \
+                "./usr/local/share/maknae/grammars/gh.yaml" \
+                "./usr/local/share/maknae/tools.d" \
+                "./usr/local/share/maknae/tools.d/gh.yaml" | sort > "$x/want"
             lsbom -s "$bom" \
               | sed -e 's|^\.$||' -e 's|libaws_lc_fips_.*_crypto\.dylib|FIPSDYLIB|' \
               | grep -v '^$' | sort > "$x/got"

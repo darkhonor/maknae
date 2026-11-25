@@ -188,7 +188,8 @@ done
 # model.)
 D="$STAGE/daemon"
 install -d "$D/usr/local/bin" "$D/Library/LaunchDaemons" \
-           "$D/usr/local/share/maknae/defaults" "$D$FIPS_LIBDIR"
+           "$D/usr/local/share/maknae/defaults" "$D/usr/local/share/maknae/grammars" \
+           "$D/usr/local/share/maknae/tools.d" "$D$FIPS_LIBDIR"
 install -m 0755 "$BIN/maknaed" "$D/usr/local/bin/maknaed"
 install -m 0755 "$BIN/maknae-egress" "$D/usr/local/bin/maknae-egress"
 install -m 0755 "$BIN/maknae-agentd" "$D/usr/local/bin/maknae-agentd"
@@ -204,6 +205,8 @@ install -m 0644 "$REPO/packaging/common/bindings.yaml" "$D/usr/local/share/makna
 install -m 0644 "$REPO/packaging/common/maknae.yaml" "$D/usr/local/share/maknae/defaults/maknae.yaml"
 install -m 0644 "$REPO/packaging/common/sensitive.yaml" "$D/usr/local/share/maknae/defaults/sensitive.yaml"
 install -m 0644 "$REPO/packaging/common/tools-homelab.yaml" "$D/usr/local/share/maknae/tools-homelab.yaml"
+install -m 0644 "$REPO/packaging/common/grammars/gh.yaml" "$D/usr/local/share/maknae/grammars/gh.yaml"
+install -m 0644 "$REPO/packaging/common/tools.d/gh.yaml" "$D/usr/local/share/maknae/tools.d/gh.yaml"
 # The shipped skeleton is LINUX-SHAPED and would be wrong here if left alone:
 # maknae.yaml carries no `transport:` section, and maknae-config's compiled default
 # is /run/maknae/maknaed.sock (crates/maknae-config/src/transport.rs:15, no darwin

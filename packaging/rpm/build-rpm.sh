@@ -66,6 +66,8 @@ install -m 0644 "$COMMON/maknae-policy-sync.service" "$TOP/SOURCES/"
 install -m 0644 "$COMMON/80-maknae.preset"        "$TOP/SOURCES/"
 install -m 0644 "$COMMON/maknae-agent@.service"   "$TOP/SOURCES/"
 install -m 0644 "$COMMON/tools-homelab.yaml"     "$TOP/SOURCES/"
+install -m 0644 "$COMMON/grammars/gh.yaml"        "$TOP/SOURCES/grammar-gh.yaml"
+install -m 0644 "$COMMON/tools.d/gh.yaml"         "$TOP/SOURCES/tools.d-gh.yaml"
 
 # --- Spec %files vs manifest: what the rpm SHIPS is what was declared --------
 # The rpm's equivalent of the deb payload check. rpmbuild builds the payload
