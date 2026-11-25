@@ -101,7 +101,6 @@ impl PostKind {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Addressee {
     Agents(#[serde(deserialize_with = "bounded_agents")] Vec<String>),
-    Tasker,
     Board,
 }
 
@@ -290,7 +289,6 @@ impl std::fmt::Debug for PostDraft {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Author {
     Agent(String),
-    Tasker(u32),
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,6 +888,80 @@ mod tests {
             assert!(!shown.contains(BODY) && !shown.contains(ATT), "{shown}");
             assert!(shown.contains("<17 bytes>"), "{shown}");
         }
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    fn post_to(to: Addressee) -> Post {
+        Post {
+            id: PostId([0xab; 16]),
+            author: Author::Agent("hobi".into()),
+            task: None,
+            at_secs: 1_800_000_000,
+            labels: Labels {},
+            draft: PostDraft {
+                kind: PostKind::Note,
+                to,
+                in_reply_to: None,
+                body: text("b"),
+                attachments: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn a_post_to_the_board_or_to_agents_encodes_as_it_always_has() {
+        let board = post_to(Addressee::Board);
+        let agents = post_to(Addressee::Agents(vec!["hobi".into(), "jin".into()]));
+        assert_eq!(hex(&enc(&board)), "a662696450abababababababababababababababab66617574686f72a1654167656e7464686f6269647461736bf66761745f736563731a6b49d200666c6162656c73a0656472616674a5646b696e64644e6f746562746f65426f6172646b696e5f7265706c795f746ff664626f647961626b6174746163686d656e747380");
+        assert_eq!(hex(&enc(&agents)), "a662696450abababababababababababababababab66617574686f72a1654167656e7464686f6269647461736bf66761745f736563731a6b49d200666c6162656c73a0656472616674a5646b696e64644e6f746562746fa1664167656e74738264686f6269636a696e6b696e5f7265706c795f746ff664626f647961626b6174746163686d656e747380");
+        assert_eq!(dec::<Post>(&enc(&board)), Ok(board));
+        assert_eq!(dec::<Post>(&enc(&agents)), Ok(agents));
+    }
+
+    #[test]
+    fn a_draft_addressed_to_the_tasker_is_refused_at_decode() {
+        use ciborium::Value;
+        let mut v = Value::serialized(&draft()).unwrap();
+        let Value::Map(fields) = &mut v else {
+            panic!("a draft encodes as a map")
+        };
+        for (k, val) in fields.iter_mut() {
+            if k.as_text() == Some("to") {
+                *val = Value::Text("Tasker".into());
+            }
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&v, &mut buf).unwrap();
+        assert_eq!(
+            dec::<PostDraft>(&buf).unwrap_err(),
+            "Semantic(None, \"unknown variant `Tasker`, expected `Agents` or `Board`\")"
+        );
+    }
+
+    #[test]
+    fn a_post_whose_author_is_the_tasker_is_refused_at_decode() {
+        use ciborium::Value;
+        let mut v = Value::serialized(&post_to(Addressee::Board)).unwrap();
+        let Value::Map(fields) = &mut v else {
+            panic!("a post encodes as a map")
+        };
+        for (k, val) in fields.iter_mut() {
+            if k.as_text() == Some("author") {
+                *val = Value::Map(vec![(
+                    Value::Text("Tasker".into()),
+                    Value::Integer(1000.into()),
+                )]);
+            }
+        }
+        let mut buf = Vec::new();
+        ciborium::into_writer(&v, &mut buf).unwrap();
+        assert_eq!(
+            dec::<Post>(&buf).unwrap_err(),
+            "Semantic(None, \"unknown variant `Tasker`, expected `Agent`\")"
+        );
     }
 
     #[test]

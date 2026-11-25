@@ -294,7 +294,6 @@ impl World {
         self.serve(session, gate, verb, None, records, None).await
     }
 
-    /// `body`, sent as is on the client channel.
     async fn raw_body(&self, body: Vec<u8>, records: &Arc<Records>) -> Vec<u8> {
         let _shared = STORE.read().await;
         let (session, gate) = self.person_session();
@@ -7451,15 +7450,6 @@ mod board {
                     Some(self.user.clone()),
                     Some(PathBuf::from(&*self.root)),
                 );
-                let wiring = Wiring {
-                    live: Arc::new(maknae_kernel::LiveConfig::with_forges_for_test(
-                        Default::default(),
-                        None,
-                        self.forges.clone(),
-                    )),
-                    egress: maknae_kernel::unavailable_egress(),
-                    conversations: common::conversations(),
-                };
                 self.serve_as(
                     authorizer,
                     session,
@@ -7467,7 +7457,7 @@ mod board {
                     request_body(verb, None),
                     records,
                     None,
-                    wiring,
+                    self.wiring(),
                 )
                 .await
             }

@@ -229,7 +229,7 @@ pub struct BoardAudit {
     pub seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// `board`, `tasker` or `agents:<a>,<b>`.
+    /// `board` or `agents:<a>,<b>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

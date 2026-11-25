@@ -757,7 +757,6 @@ pub(crate) fn on_board(mut rec: AuditRecord, key: Option<BoardKey>) -> AuditReco
 fn addressed(to: &Addressee) -> String {
     match to {
         Addressee::Board => "board".into(),
-        Addressee::Tasker => "tasker".into(),
         Addressee::Agents(ids) => format!("agents:{}", ids.join(",")),
     }
 }
@@ -1928,7 +1927,7 @@ mod tests {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
         let mut other = d.clone();
         other.kind = PostKind::Question;
-        other.to = Addressee::Tasker;
+        other.to = Addressee::Agents(vec!["hobi".into()]);
         assert_eq!(post_digest(&other).unwrap(), digest, "content only");
         other.body = secret("sentinel-695-other");
         assert_ne!(post_digest(&other).unwrap(), digest);

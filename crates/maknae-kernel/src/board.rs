@@ -2002,8 +2002,7 @@ mod tests {
         assert_eq!(refused.unwrap_err(), BoardRefusal::AuthorAtCap);
         assert_eq!(BoardRefusal::AuthorAtCap.to_string(), "author at cap");
         put(&store, BOB, jin(), "jin");
-        let tasker = Author::Tasker(1000);
-        put(&store, BOB, tasker, "the tasker");
+        put(&store, BOB, Author::Agent("suga".into()), "suga");
         assert_eq!(store.candidates(BOB, 0, 10).len(), 4);
     }
 
@@ -2476,6 +2475,69 @@ mod tests {
         assert_eq!(refusal(&cursors), BEHIND);
     }
 
+    fn addressed_to_the_tasker(record: &[u8]) -> Zeroizing<Vec<u8>> {
+        use ciborium::Value;
+        fn field<'v>(v: &'v mut Value, name: &str) -> &'v mut Value {
+            let Value::Map(fields) = v else {
+                panic!("{name} is under a map")
+            };
+            &mut fields
+                .iter_mut()
+                .find(|(k, _)| k.as_text() == Some(name))
+                .unwrap()
+                .1
+        }
+        let mut v: Value = ciborium::from_reader(record).unwrap();
+        let draft = field(field(field(&mut v, "stored"), "post"), "draft");
+        *field(draft, "to") = Value::Text("Tasker".into());
+        encode(&v).unwrap()
+    }
+
+    #[test]
+    fn a_stored_post_addressed_to_the_tasker_is_quarantined_and_boot_goes_on() {
+        let b = MemTaskBlobs::default();
+        let store = open_mem(&b, SMALL);
+        let kept = put(&store, BOB, hobi(), "kept");
+        let live = put(&store, BOB, jin(), "sentinel-719-to-the-tasker");
+        drop(store);
+        let held = held_post([0x71; 16], live.seq + 1, hobi());
+        plant(&b, BOB, &held);
+        b.put(
+            "board.1000",
+            &encode(&crate::board_store::BoardRecord {
+                board: 1000,
+                next_seq: held.seq + 1,
+                settings: Settings::default(),
+            })
+            .unwrap(),
+        );
+        let mut want = vec![post_name(BOB, live.post.id), post_name(BOB, held.post.id)];
+        want.sort();
+        for name in &want {
+            b.put(name, &addressed_to_the_tasker(&b.load(name).unwrap()));
+        }
+        let store = open_mem(&b, SMALL);
+        let found = store.take_boot_findings();
+        let mut named: Vec<String> = found
+            .iter()
+            .map(|BoardFinding::Quarantined { name, why }| {
+                assert_eq!(why, "the record does not decode", "{name}");
+                name.clone()
+            })
+            .collect();
+        named.sort();
+        assert_eq!(named, want);
+        assert_eq!(ids(&store.candidates(BOB, 0, 10)), vec![kept.post.id]);
+        assert!(store.get(BOB, live.post.id).is_none());
+        for f in &found {
+            store.settle(f).unwrap();
+        }
+        let mut aside = b.aside();
+        aside.sort();
+        assert_eq!(aside, want);
+        assert_eq!(put(&store, BOB, hobi(), "after").seq, held.seq + 1);
+    }
+
     #[test]
     fn a_board_key_is_a_person_never_an_agent() {
         assert_eq!(BoardKey::of(&RootTasker::Person { uid: 1000 }), Some(BOB));
@@ -2816,7 +2878,7 @@ mod tests {
         assert!(store.still_live(BOB, &[a.seq], &free()).is_empty());
         let reply = store.post(
             BOB,
-            (Author::Tasker(1000), None),
+            (Author::Agent("suga".into()), None),
             None,
             PostLabels::default(),
             reply("r", a.post.id),
@@ -3139,7 +3201,7 @@ mod tests {
         }
         let full = store.post(
             BOB,
-            (Author::Tasker(1000), None),
+            (Author::Agent("suga".into()), None),
             None,
             PostLabels::default(),
             draft("x"),
