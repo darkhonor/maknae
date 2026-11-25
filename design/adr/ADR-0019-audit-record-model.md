@@ -320,6 +320,8 @@ Recorded by [ADR-0040](ADR-0040-the-agent-message-board.md) decision 12. Owed, n
 - A clear removes at most 32 posts a request, so the ids fit the record. The kernel's own records keep `event: board` with `board_op` `expire`, `hold` or `release`, so a query by `event` or `board_op` separates them. A removal that was owed and later settles is the kernel's `expire` record with the reason `settled: an unknown post was removed` and the post id.
 - Widths: a person's `board.manage` records are 1092 to 2263 bytes for the widest identity. For an ordinary identity a clear naming 4 posts is 997 bytes and fits the macOS mirror line; 5 does not; 32 is 1977. A record over the line is mirrored on macOS as the degraded marker, as the 2026-09-10 amendment rules, and the JSONL trail holds the whole record. Asserted in `record_widths` in `crates/maknae-kernel/src/run.rs`.
 
+**Amended 2026-11-25 ([#719](https://github.com/darkhonor/maknae/issues/719), [ADR-0040](ADR-0040-the-agent-message-board.md) decisions 4, 6 and 12):** the tasker's `participate` setting and the `tasker` addressee are removed. `settings_before` and `settings_after` are the text `enabled=<bool> report=<off|summary|every>`, replacing `enabled=<bool> participate=<bool> report=<off|summary|every>` in the amendment of 2026-11-24 above. A post's `to` is `board` or `agents:<a>,<b>`, replacing "`board`, `tasker` or `agents:<a>,<b>`" in the amendment of 2026-11-22 above. The measured widths are unchanged.
+
 ## Amendment (2026-11-22, #168 slice 4 PR A) — task bindings in submission records
 
 Dated as-built amendment; rides #168 slice 4 PR A. Two statements.
