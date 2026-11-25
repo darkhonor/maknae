@@ -11,6 +11,11 @@ use std::sync::Arc;
 pub const TOOLS_FILE: &str = "tools.yaml";
 pub const TOOLS_DROPIN_DIR: &str = "tools.d";
 
+#[cfg(target_os = "macos")]
+pub const VENDOR_TOOLS_DIR: &str = "/usr/local/share/maknae/tools.d";
+#[cfg(not(target_os = "macos"))]
+pub const VENDOR_TOOLS_DIR: &str = "/usr/share/maknae/tools.d";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CredentialKind {
     GithubAppInstallation,
@@ -397,7 +402,7 @@ impl ToolsCatalog {
                         docs.push((file, doc));
                     }
                     Err(e) => {
-                        let (classes, tools) = names_of(&text);
+                        let (classes, tools) = defined_names(&text);
                         unparsed.push((file.clone(), classes, tools));
                         dropin_canonical.push((file.clone(), Value::Str(text)));
                         catalog.disabled.push(Disabled {
@@ -572,7 +577,7 @@ fn defined_in(files: &[&str]) -> String {
 }
 
 /// The class and tool names of a drop-in whose YAML loads but whose schema does not.
-fn names_of(text: &str) -> (Vec<String>, Vec<String>) {
+pub fn defined_names(text: &str) -> (Vec<String>, Vec<String>) {
     let Ok(Value::Map(top)) = crate::load_str(text) else {
         return (Vec::new(), Vec::new());
     };
@@ -581,6 +586,33 @@ fn names_of(text: &str) -> (Vec<String>, Vec<String>) {
         Some(_) | None => Vec::new(),
     };
     (keys("credential_classes"), keys("tools"))
+}
+
+pub fn grammar_uses(text: &str) -> BTreeSet<String> {
+    let Ok(Value::Map(top)) = crate::load_str(text) else {
+        return BTreeSet::new();
+    };
+    let Some(Value::Map(tools)) = get(&top, "tools") else {
+        return BTreeSet::new();
+    };
+    tools
+        .iter()
+        .filter_map(|(_, entry)| match entry {
+            Value::Map(fields) => match get(fields, "commands") {
+                Some(Value::Map(commands)) => Some(commands),
+                Some(_) | None => None,
+            },
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|(_, command)| match command {
+            Value::Map(fields) => match get(fields, "grammar") {
+                Some(Value::Str(name)) => Some(name.clone()),
+                Some(_) | None => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 fn parse_top(file: &str, text: &str) -> Result<Doc, ToolsError> {
@@ -816,14 +848,14 @@ fn name_ok(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-pub(crate) fn tool_entry_name_ok(name: &str) -> bool {
+pub fn tool_entry_name_ok(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
-pub(crate) fn tool_program_name_ok(name: &str) -> bool {
+pub fn tool_program_name_ok(name: &str) -> bool {
     !matches!(name, "" | "." | "..")
         && name
             .bytes()
@@ -1976,23 +2008,49 @@ mod tests {
     }
 
     #[test]
-    fn names_of_harvests_class_and_tool_keys_only() {
+    fn defined_names_harvests_class_and_tool_keys_only() {
         assert_eq!(
-            names_of("credential_classes:\n  c1: 1\n  c2: 2\ntools:\n  t1: 1\n  t2: 2\n"),
+            defined_names("credential_classes:\n  c1: 1\n  c2: 2\ntools:\n  t1: 1\n  t2: 2\n"),
             (
                 vec!["c1".to_string(), "c2".to_string()],
                 vec!["t1".to_string(), "t2".to_string()]
             )
         );
         assert_eq!(
-            names_of("tools:\n  t1: 1\n"),
+            defined_names("tools:\n  t1: 1\n"),
             (Vec::new(), vec!["t1".to_string()])
         );
         assert_eq!(
-            names_of("credential_classes: 3\ntools: [a]\n"),
+            defined_names("credential_classes: 3\ntools: [a]\n"),
             (Vec::new(), Vec::new())
         );
-        assert_eq!(names_of("tools: [\n"), (Vec::new(), Vec::new()));
+        assert_eq!(defined_names("tools: [\n"), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn grammar_uses_reads_every_grammar_command() {
+        assert_eq!(grammar_uses(HOMELAB), BTreeSet::from(["gh".to_string()]));
+    }
+
+    #[test]
+    fn grammar_uses_is_empty_for_unloadable_or_shapeless_text() {
+        for text in [
+            "::",
+            "tools: 3",
+            "tools:\n  a:\n    commands: [x]\n",
+            "tools:\n  a:\n    commands:\n      gh: { grammar: 7 }\n",
+        ] {
+            assert!(grammar_uses(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn vendor_tools_dir_sits_beside_the_vendor_grammars() {
+        assert_eq!(
+            Path::new(VENDOR_TOOLS_DIR).parent(),
+            Path::new(crate::VENDOR_GRAMMAR_DIR).parent()
+        );
+        assert!(VENDOR_TOOLS_DIR.ends_with("/maknae/tools.d"));
     }
 
     #[cfg(unix)]

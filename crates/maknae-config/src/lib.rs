@@ -179,11 +179,12 @@ pub use sensitive::{
 };
 pub use state::{MARKER_FILE, MIRROR_FILE, STATE_DIR, STORE_FILE};
 pub use tools::{
-    ClassLifetime, CommandForm, CredentialClass, CredentialKind, CredentialMinting,
-    CredentialNarrowing, CredentialRevokeOn, CredentialSource, Disabled, OutputToModel,
-    ToolCommand, ToolEntry, ToolImage, ToolIsolation, ToolNetwork, ToolResources, ToolVerify,
-    ToolVolume, ToolVolumeAccess, ToolVolumeScope, ToolWorkspaceAccess, ToolsCatalog, ToolsError,
-    TOOLS_DROPIN_DIR, TOOLS_FILE,
+    defined_names, grammar_uses, tool_entry_name_ok, tool_program_name_ok, ClassLifetime,
+    CommandForm, CredentialClass, CredentialKind, CredentialMinting, CredentialNarrowing,
+    CredentialRevokeOn, CredentialSource, Disabled, OutputToModel, ToolCommand, ToolEntry,
+    ToolImage, ToolIsolation, ToolNetwork, ToolResources, ToolVerify, ToolVolume, ToolVolumeAccess,
+    ToolVolumeScope, ToolWorkspaceAccess, ToolsCatalog, ToolsError, TOOLS_DROPIN_DIR, TOOLS_FILE,
+    VENDOR_TOOLS_DIR,
 };
 pub use transport::{
     content_write_bound, transport_from_section, TransportConfig, ADMIN_REPLY_MARGIN_MS,
