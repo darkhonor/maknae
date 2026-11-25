@@ -7198,6 +7198,34 @@ mod board {
         }
 
         #[tokio::test]
+        async fn a_person_turning_their_board_on_through_the_verb_lets_their_agent_post() {
+            let mut w = manage_world("manage-enable-then-post", "user");
+            w.switch(true, &["hobi"]);
+            let h = w.at_work("hobi");
+            let (answer, records) = w.board("hobi", post(note("sentinel-713-before")), h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                one("deny", "board off: tasker", "unavailable")
+            );
+            assert!(w.posts().is_empty());
+
+            let (answer, _) = w.manage(set(true, false, BoardReport::Off)).await;
+            assert!(settings_reply(answer).enabled);
+            assert_eq!(
+                w.settings_of(w.me),
+                Settings {
+                    enabled: true,
+                    participate: false,
+                    report: maknae_kernel::Report::Off
+                }
+            );
+
+            posted(w.board("hobi", post(note("sentinel-713-after")), h).await.0);
+            assert_eq!(w.posts().len(), 1);
+        }
+
+        #[tokio::test]
         async fn an_agent_is_denied_board_manage_even_when_its_actions_list_it() {
             let mut w = manage_world("manage-agent", "user");
             w.switch(true, &["hobi", "suga", "jin"]);

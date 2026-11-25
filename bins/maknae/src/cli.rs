@@ -232,6 +232,8 @@ enum Command {
         #[command(subcommand)]
         action: SessionCommand,
     },
+    /// Your agent message board: its settings, and clearing it.
+    Board(BoardArgs),
     /// The agents you may task (`maknae agent list`), and a session with one
     /// (`maknae agent <NAME>`).
     Agent(AgentArgs),
@@ -358,6 +360,108 @@ enum PolicyCommand {
     },
 }
 
+#[derive(clap::Args, Debug)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+struct BoardArgs {
+    #[command(subcommand)]
+    sub: BoardSub,
+}
+
+#[derive(Subcommand, Debug)]
+enum BoardSub {
+    /// Show or change your board settings.
+    Settings {
+        /// Let the agents on your tasks use your board.
+        #[arg(long, value_enum)]
+        enabled: Option<OnOff>,
+        /// Let yourself post to your board as well as read it.
+        #[arg(long, value_enum)]
+        participate: Option<OnOff>,
+        /// What the board reports to you: nothing, a summary of new posts, or every new post.
+        #[arg(long, value_enum)]
+        report: Option<ReportArg>,
+    },
+    /// Remove every post on your board that is not held.
+    Clear {
+        /// Clear without asking first.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum OnOff {
+    On,
+    Off,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ReportArg {
+    Off,
+    Summary,
+    Every,
+}
+
+fn on_off(value: OnOff) -> bool {
+    match value {
+        OnOff::On => true,
+        OnOff::Off => false,
+    }
+}
+
+fn board_report(value: ReportArg) -> maknae_proto::BoardReport {
+    match value {
+        ReportArg::Off => maknae_proto::BoardReport::Off,
+        ReportArg::Summary => maknae_proto::BoardReport::Summary,
+        ReportArg::Every => maknae_proto::BoardReport::Every,
+    }
+}
+
+fn settings_change(
+    enabled: Option<OnOff>,
+    participate: Option<OnOff>,
+    report: Option<ReportArg>,
+) -> maknae_agent::board::SettingsChange {
+    maknae_agent::board::SettingsChange {
+        enabled: enabled.map(on_off),
+        participate: participate.map(on_off),
+        report: report.map(board_report),
+    }
+}
+
+/// Prints what a board flow said. A board flow's exit is its own `ok`.
+fn print_said(
+    said: &maknae_agent::board::Said,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> bool {
+    for line in &said.out {
+        crate::stderr::line(out, format_args!("{line}"));
+    }
+    for line in &said.err {
+        crate::stderr::line(err, format_args!("maknae: {line}"));
+    }
+    said.ok
+}
+
+/// Asks before a clear is sent; `None` means go on and send it.
+fn clear_gate(
+    yes: bool,
+    terminal: bool,
+    answer: &mut dyn std::io::BufRead,
+    prompt: &mut dyn std::io::Write,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Option<ExitCode> {
+    let confirmed = maknae_agent::board::confirm(yes, terminal, answer, prompt);
+    let said = maknae_agent::board::clear_gate(confirmed).err()?;
+    Some(if print_said(&said, out, err) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
 /// The verbs the wire path can issue (mirrors `maknae_proto::Verb`).
 /// `Clone` (no longer `Copy` — `Read` carries its path), no `clap` derive of
 /// its own — `Command::*` above own the argument surface; this is purely the
@@ -409,6 +513,10 @@ pub(crate) enum Verb {
     SessionClose {
         conversation: maknae_proto::ConversationId,
     },
+    BoardSettings {
+        change: maknae_agent::board::SettingsChange,
+    },
+    BoardClear,
 }
 
 impl Verb {
@@ -433,6 +541,8 @@ impl Verb {
             Verb::HeldRelease { .. } => "held release",
             Verb::SessionList { .. } => "session list",
             Verb::SessionClose { .. } => "session close",
+            Verb::BoardSettings { .. } => "board settings",
+            Verb::BoardClear => "board clear",
         }
     }
 
@@ -574,6 +684,12 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::SessionClose { conversation } => {
                 maknae_proto::Verb::SessionClose { conversation }
             }
+            Verb::BoardSettings { .. } => maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None },
+            },
+            Verb::BoardClear => maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear,
+            },
         }
     }
 }
@@ -715,6 +831,35 @@ async fn round_trip(
             println!("{}", conversation_line(&v));
         }
         return Ok(true);
+    }
+    let board_send = |v| async move {
+        send_verb(
+            v,
+            None,
+            maknae_loop::mutation::WriteCheck::Unchecked,
+            transport,
+            client,
+            trust,
+            &mut |l| errln!("{l}"),
+        )
+        .await
+        .map(maknae_agent::wire::WireOutcome::from)
+    };
+    if let Verb::BoardSettings { change } = &verb {
+        let said = maknae_agent::board::settings(*change, board_send).await;
+        return Ok(print_said(
+            &said,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ));
+    }
+    if let Verb::BoardClear = &verb {
+        let said = maknae_agent::board::clear(board_send).await;
+        return Ok(print_said(
+            &said,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ));
     }
     if let Verb::Read { path, page: None } = &verb {
         let mut stdout = std::io::stdout().lock();
@@ -1526,6 +1671,32 @@ pub async fn run_cli() -> ExitCode {
         Command::Session { action } => {
             operand_exit(session_verb(action), &mut std::io::stderr()).await
         }
+        Command::Board(args) => match args.sub {
+            BoardSub::Settings {
+                enabled,
+                participate,
+                report,
+            } => wire_exit_code(
+                execute(Verb::BoardSettings {
+                    change: settings_change(enabled, participate, report),
+                })
+                .await,
+                &mut std::io::stderr(),
+            ),
+            BoardSub::Clear { yes } => {
+                if let Some(code) = clear_gate(
+                    yes,
+                    crate::tty::stdin_is_terminal(),
+                    &mut std::io::stdin().lock(),
+                    &mut std::io::stderr(),
+                    &mut std::io::stdout(),
+                    &mut std::io::stderr(),
+                ) {
+                    return code;
+                }
+                wire_exit_code(execute(Verb::BoardClear).await, &mut std::io::stderr())
+            }
+        },
         Command::Agent(_) => ExitCode::from(2),
         Command::Login => crate::login::run_login().await,
         Command::Logout => crate::login::run_logout().await,
@@ -1637,6 +1808,245 @@ mod tests {
         assert_eq!(agent_exit(Err("boom".into()), &mut err), ExitCode::from(1));
         assert_eq!(err, b"maknae: boom\n");
         assert_eq!(agent_exit(Ok(2), &mut ClosedStderr), ExitCode::from(2));
+    }
+
+    fn board_sub(args: &[&str]) -> BoardSub {
+        match Cli::try_parse_from(args).expect("parses").command.unwrap() {
+            Command::Board(board) => board.sub,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn board_change(args: &[&str]) -> maknae_agent::board::SettingsChange {
+        match board_sub(args) {
+            BoardSub::Settings {
+                enabled,
+                participate,
+                report,
+            } => settings_change(enabled, participate, report),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_settings_without_flags_changes_nothing() {
+        assert_eq!(
+            board_change(&["maknae", "board", "settings"]),
+            maknae_agent::board::SettingsChange::default()
+        );
+    }
+
+    #[test]
+    fn each_board_settings_flag_maps_to_its_own_field() {
+        use maknae_proto::BoardReport;
+        for (value, want) in [("on", true), ("off", false)] {
+            assert_eq!(
+                board_change(&["maknae", "board", "settings", "--enabled", value]),
+                maknae_agent::board::SettingsChange {
+                    enabled: Some(want),
+                    ..Default::default()
+                }
+            );
+            assert_eq!(
+                board_change(&["maknae", "board", "settings", "--participate", value]),
+                maknae_agent::board::SettingsChange {
+                    participate: Some(want),
+                    ..Default::default()
+                }
+            );
+        }
+        for (value, want) in [
+            ("off", BoardReport::Off),
+            ("summary", BoardReport::Summary),
+            ("every", BoardReport::Every),
+        ] {
+            assert_eq!(
+                board_change(&["maknae", "board", "settings", "--report", value]),
+                maknae_agent::board::SettingsChange {
+                    report: Some(want),
+                    ..Default::default()
+                }
+            );
+        }
+        assert_eq!(
+            board_change(&[
+                "maknae",
+                "board",
+                "settings",
+                "--enabled",
+                "off",
+                "--participate",
+                "on",
+                "--report",
+                "every"
+            ]),
+            maknae_agent::board::SettingsChange {
+                enabled: Some(false),
+                participate: Some(true),
+                report: Some(BoardReport::Every),
+            }
+        );
+    }
+
+    #[test]
+    fn a_board_settings_value_outside_its_set_is_a_parse_error() {
+        for args in [
+            ["maknae", "board", "settings", "--enabled", "maybe"],
+            ["maknae", "board", "settings", "--participate", "yes"],
+            ["maknae", "board", "settings", "--report", "on"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                clap::error::ErrorKind::InvalidValue,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn board_clear_takes_an_optional_yes() {
+        assert!(matches!(
+            board_sub(&["maknae", "board", "clear"]),
+            BoardSub::Clear { yes: false }
+        ));
+        assert!(matches!(
+            board_sub(&["maknae", "board", "clear", "--yes"]),
+            BoardSub::Clear { yes: true }
+        ));
+    }
+
+    #[test]
+    fn bare_board_prints_help_and_exits_two() {
+        let e = Cli::try_parse_from(["maknae", "board"]).unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert_eq!(e.exit_code(), 2);
+    }
+
+    #[test]
+    fn the_board_verbs_are_named_and_sent_as_board_manage() {
+        let change = maknae_agent::board::SettingsChange::default();
+        assert_eq!(Verb::BoardSettings { change }.kind(), "board settings");
+        assert_eq!(Verb::BoardClear.kind(), "board clear");
+        assert_eq!(
+            maknae_proto::Verb::from(Verb::BoardSettings { change }),
+            maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None }
+            }
+        );
+        assert_eq!(
+            maknae_proto::Verb::from(Verb::BoardClear),
+            maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Clear
+            }
+        );
+    }
+
+    fn said(out: &[&str], err: &[&str], ok: bool) -> maknae_agent::board::Said {
+        maknae_agent::board::Said {
+            out: out.iter().map(|l| l.to_string()).collect(),
+            err: err.iter().map(|l| l.to_string()).collect(),
+            ok,
+        }
+    }
+
+    #[test]
+    fn a_board_said_prints_out_to_stdout_and_err_prefixed_to_stderr() {
+        let (mut out, mut err) = (vec![], vec![]);
+        assert!(!print_said(
+            &said(&["cleared 2 posts before stopping"], &["a", "b"], false),
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(out, b"cleared 2 posts before stopping\n");
+        assert_eq!(err, b"maknae: a\nmaknae: b\n");
+        let (mut out, mut err) = (vec![], vec![]);
+        assert!(print_said(
+            &said(&["enabled      on"], &[], true),
+            &mut out,
+            &mut err
+        ));
+        assert_eq!(out, b"enabled      on\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn a_board_said_keeps_its_exit_when_the_streams_are_closed() {
+        assert!(print_said(
+            &said(&["x"], &["y"], true),
+            &mut ClosedStderr,
+            &mut ClosedStderr
+        ));
+        assert!(!print_said(
+            &said(&["x"], &["y"], false),
+            &mut ClosedStderr,
+            &mut ClosedStderr
+        ));
+    }
+
+    struct BrokenInput;
+    impl std::io::Read for BrokenInput {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("input\u{7}gone"))
+        }
+    }
+
+    fn gate(
+        yes: bool,
+        terminal: bool,
+        answer: &mut dyn std::io::BufRead,
+    ) -> (Option<ExitCode>, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let (mut prompt, mut out, mut err) = (vec![], vec![], vec![]);
+        let code = clear_gate(yes, terminal, answer, &mut prompt, &mut out, &mut err);
+        (code, prompt, out, err)
+    }
+
+    #[test]
+    fn a_clear_goes_on_only_after_a_yes() {
+        let (code, prompt, out, err) = gate(false, true, &mut &b"Yes\n"[..]);
+        assert_eq!(code, None);
+        assert_eq!(
+            prompt,
+            b"clear every post on your board that is not held? [y/N] "
+        );
+        assert!(out.is_empty() && err.is_empty());
+        let (code, prompt, ..) = gate(true, false, &mut &b""[..]);
+        assert_eq!(code, None);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn a_declined_clear_says_so_on_stdout_and_exits_zero() {
+        for input in [&b"n\n"[..], &b"\n"[..], &b""[..]] {
+            let (code, _, out, err) = gate(false, true, &mut { input });
+            assert_eq!(code, Some(ExitCode::SUCCESS));
+            assert_eq!(out, b"nothing was cleared\n");
+            assert!(err.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_clear_off_a_terminal_without_yes_is_refused() {
+        let (code, prompt, out, err) = gate(false, false, &mut &b"y\n"[..]);
+        assert_eq!(code, Some(ExitCode::FAILURE));
+        assert!(prompt.is_empty() && out.is_empty());
+        assert_eq!(
+            err,
+            b"maknae: board clear needs --yes when not run on a terminal\n"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_answer_is_refused_with_the_sanitised_error() {
+        let (code, _, out, err) = gate(false, true, &mut std::io::BufReader::new(BrokenInput));
+        assert_eq!(code, Some(ExitCode::FAILURE));
+        assert!(out.is_empty());
+        assert_eq!(
+            err,
+            b"maknae: cannot ask for confirmation: input\\u{0007}gone\n"
+        );
     }
 
     #[test]

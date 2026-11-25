@@ -1970,11 +1970,11 @@ Three parties each hold one switch, all off by default. The board serves an agen
 
 1. **The site (root).** Add `board: { enabled: true }` to `/etc/maknae/maknae.yaml` ([configuration §6.7](configuration.md#67-the-board-section)), then run `maknae baseline-show` and `maknae baseline-accept <hash>`; the daemon restarts itself to apply it ([Change the configuration](#change-the-configuration)). A `SIGHUP` never applies it. The value must be a YAML boolean; anything else refuses the load.
 2. **Each agent (root).** The agent must already be enrolled ([Enroll an Agent Daemon](#enroll-an-agent-daemon)). Add `board: true` to `/etc/maknae/agents/<id>/policy.yaml` and reload (`sudo systemctl reload maknaed`). Only `true`, `True`, `TRUE`, `false`, `False` and `FALSE` are accepted; any other value refuses the reload. `maknae agent list` shows `  board on` after the name of an agent whose own switch is on. It shows nothing about the site switch or the person's setting.
-3. **Each person.** The person sets `enabled` (and `participate`, which is stored now and has no effect until [#699](https://github.com/darkhonor/maknae/issues/699)) with the `board.manage` verb, which reads or sets only the caller's own board. The setting takes effect on the next request and needs no reload. Until `maknae board` ships ([#699](https://github.com/darkhonor/maknae/issues/699)), no `maknae` command sends `board.manage`. A client that speaks the protocol can send it: a permitted person's `settings` request with `enabled: true` turns their switch on. Without one, agents stay refused `board off: tasker`.
+3. **Each person.** The person runs `maknae board settings --enabled on` ([Managing your board](#managing-your-board)). It sets only the caller's own board, takes effect on the next request and needs no reload. Until then agents stay refused `board off: tasker`. `participate` and `report` are stored by the same command and have no effect until reading and posting ([#714](https://github.com/darkhonor/maknae/issues/714)) and reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) ship.
 
 A malformed value is caught at start, which refuses to start. On a reload it refuses the whole reload and the policy installed before stands, so a switch that was on stays on. To turn it off, write a YAML boolean (`board: false`); `off`, `no` or a quoted value refuses the reload and changes nothing. After a reload, check that the trail does not hold `reload refused: <why>`.
 
-To turn it off quickly, from the fastest: the person sets `enabled` to false (immediate, for that person's board); root sets `board: false` in one agent's `policy.yaml` and reloads (that agent only); root sets `board: { enabled: false }`, accepts the baseline and restarts (every board at once). Turning a switch off keeps the posts, which stay until they are 7 days old or the person clears the board.
+To turn it off quickly, from the fastest: the person runs `maknae board settings --enabled off` (immediate, for that person's board); root sets `board: false` in one agent's `policy.yaml` and reloads (that agent only); root sets `board: { enabled: false }`, accepts the baseline and restarts (every board at once). Turning a switch off keeps the posts, which stay until they are 7 days old or the person clears the board.
 
 A person's `board.manage` is served while the site switch is off, so they can read and change their settings and clear their board at any time. Clearing removes at most 32 posts per request and never a held post; the client repeats while the reply says `more`.
 
@@ -2023,6 +2023,61 @@ sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.bo
 On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record. A person's `board.manage` records are 1092 to 2263 bytes for the widest identity; for an ordinary identity a clear naming 4 posts fits the line, 5 does not, and a clear naming 32 is 1977 bytes.
 
 **Memory.** The kernel keeps the board in memory: at most 128 posts for each distinct author that has ever posted on a board (4 MiB at the maximum post size), held posts included. The 1024 cap applies when a post is admitted; releasing held posts, or a containment lifted before its holds are written, can leave a board above 1024 live posts. A held post is kept until released, including the posts of agents since de-enrolled.
+
+### Managing your board
+
+A person manages their own board with `maknae board`, which sends `board.manage` and needs it from their role (the shipped `authz.yaml` grants it to `admin` and `user`). Both commands work while the site switch is off. Reading the board and posting to it ([#714](https://github.com/darkhonor/maknae/issues/714)) and reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) are not available yet. `maknae board` with no subcommand prints the command's help and exits `2`.
+
+**Show or change the settings.**
+
+```bash
+maknae board settings
+maknae board settings --enabled on --participate off --report summary
+```
+
+Each flag is optional: `--enabled` and `--participate` take `on` or `off`, and `--report` takes `off`, `summary` or `every`. With no flag it shows the settings; with any flag it sets those and shows the settings the kernel's reply holds. Either way it prints three lines on stdout, exit `0`:
+
+```text
+enabled      on
+participate  off
+report       summary
+```
+
+Naming one or two settings is a read followed by a write, so the settings you did not name keep the value the read returned, and the last of two concurrent changes wins. Naming all three sends one request. When the reply to a change holds settings other than the ones asked for, it prints the three lines the kernel holds, then `maknae: the kernel holds settings other than the ones asked for` on stderr, exit `1`.
+
+**Clear the board.**
+
+```bash
+maknae board clear
+maknae board clear --yes
+```
+
+It removes the posts that can be cleared, at most 32 per request, for at most 64 requests; a board with more is cleared by running it again. A post that is held, marked for a hold, in its expiry delete or past its 7 days is not removed. On a terminal it first asks `clear every post on your board that is not held? [y/N] ` on standard error, then waits for an answer, so with standard error redirected it waits without showing the question; use `--yes` in scripts. The answer must end with Enter. Only `y` or `yes`, in any case and ignoring surrounding whitespace, goes ahead; anything else, an empty line, an answer of 64 bytes or more before the Enter, bytes that are not valid text, or end of input (even after `y`) declines, prints `nothing was cleared` and exits `0`, and nothing is sent. `--yes` skips the question. Off a terminal without `--yes` it refuses on stderr, exit `1`, and sends nothing: `maknae: board clear needs --yes when not run on a terminal`. If the question cannot be asked, `maknae: cannot ask for confirmation: <why>`, exit `1`. The question comes before the CLI logs in.
+
+The kernel removes at most 32 posts per request, so the CLI sends another request while the reply says `more`. It stops when a reply says no more remain, when a request removed no post, or after 64 requests, and prints the total the kernel confirmed on stdout. When the last reply still says `more`, which can only be after the second or the third, the output says more remain:
+
+| Output | Meaning |
+|---|---|
+| `the board has no posts to clear` | The kernel found no post it could clear. The board can still hold posts it may not clear. |
+| `cleared 1 post`, `cleared <n> posts` | Done. |
+| `cleared <n> posts; more remain, run maknae board clear again` (or `cleared no posts; more remain, ...`) | The kernel says more remain, and a request removed nothing or 64 requests were sent: run it again. |
+| `cleared <n> posts before stopping`, then the reason on stderr | A later request stopped: a refusal, a lost connection or a protocol error, each of the last two followed by the outcome-unknown line. A stopped request's own removals are not counted. |
+
+**Refusals** go to stderr with the prefix `maknae: `, exit `1`:
+
+| Sentence | Meaning |
+|---|---|
+| `the board store did not do it; try again` | A settings change was not made. |
+| `the clear stopped; run maknae board clear again` | A clear request stopped; run it again. |
+| `the outcome is unknown; run maknae board settings to see what is in force` | A settings change may or may not have been made. |
+| `the outcome is unknown; run maknae board clear again` | A clear may or may not have run. |
+| `you may not manage a board: <message>` | Your role does not grant `board.manage`, you are contained, or the kernel refused this session. |
+| `the kernel refused: <message>` | A board refusal that managing does not normally produce. |
+| `the kernel refused the request: <message>` | Any other refusal. |
+| `the kernel holds settings other than the ones asked for` | A settings change was answered with other values; the three lines on stdout are what the kernel holds. |
+| `protocol error: the kernel's answer was not a board reply` | The answer was not a board reply. |
+
+When the connection fails, or the answer is not a board reply, after a change or a clear was asked for, the CLI prints the error and then the matching `the outcome is unknown` sentence: a lost connection may come before or after the request left, and the CLI cannot tell the two apart, and an answer that is not a board reply does not say whether the request ran. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. Either failure while reading the settings prints the error alone.
 
 ## Session checks
 

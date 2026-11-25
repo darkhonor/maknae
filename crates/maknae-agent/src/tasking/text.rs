@@ -3,8 +3,8 @@ use crate::render::display_piece;
 use crate::render::DISPLAY_PIECE_MAX;
 use crate::screen::MenuItem;
 use maknae_proto::{
-    AgentEntry, AgentStanding, Binding, EmptyReason, ForgeOp, ForgeOps, ReachSummary, TaskClose,
-    TaskState,
+    AgentEntry, AgentStanding, Binding, BoardDefect, BoardReport, BoardSettings, EmptyReason,
+    ForgeOp, ForgeOps, ReachSummary, TaskClose, TaskState,
 };
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
@@ -175,6 +175,72 @@ pub fn agent_list_lines(entries: &[AgentEntry], undecided: u32) -> Vec<String> {
     lines
 }
 
+pub fn board_settings_lines(s: &BoardSettings) -> Vec<String> {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    let report = match s.report {
+        BoardReport::Off => "off",
+        BoardReport::Summary => "summary",
+        BoardReport::Every => "every",
+    };
+    vec![
+        format!("enabled      {}", on_off(s.enabled)),
+        format!("participate  {}", on_off(s.participate)),
+        format!("report       {report}"),
+    ]
+}
+
+fn posts(n: u64) -> String {
+    match n {
+        1 => "1 post".into(),
+        n => format!("{n} posts"),
+    }
+}
+
+pub fn board_cleared_line(removed: u64, more: bool) -> String {
+    match (removed, more) {
+        (0, false) => "the board has no posts to clear".into(),
+        (n, false) => format!("cleared {}", posts(n)),
+        (0, true) => "cleared no posts; more remain, run maknae board clear again".into(),
+        (n, true) => format!(
+            "cleared {}; more remain, run maknae board clear again",
+            posts(n)
+        ),
+    }
+}
+
+pub fn board_stopped_line(removed: u64) -> String {
+    format!("cleared {} before stopping", posts(removed))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardCommand {
+    Settings,
+    Clear,
+}
+
+pub fn board_unknown_line(command: BoardCommand) -> &'static str {
+    match command {
+        BoardCommand::Settings => {
+            "the outcome is unknown; run maknae board settings to see what is in force"
+        }
+        BoardCommand::Clear => "the outcome is unknown; run maknae board clear again",
+    }
+}
+
+pub fn board_refused_line(defect: BoardDefect, command: BoardCommand) -> String {
+    match defect {
+        BoardDefect::TryAgain => match command {
+            BoardCommand::Settings => "the board store did not do it; try again".into(),
+            BoardCommand::Clear => "the clear stopped; run maknae board clear again".into(),
+        },
+        BoardDefect::OutcomeUnknown => board_unknown_line(command).into(),
+        BoardDefect::Full | BoardDefect::AuthorAtCap | BoardDefect::NoSuchPost => format!(
+            "the kernel refused: {}",
+            maknae_proto::board_refused_message(defect)
+        ),
+    }
+}
+
 pub fn not_an_agent(name: &str) -> String {
     format!(
         "maknae: {} is not an agent you can task; see maknae agent list",
@@ -320,6 +386,111 @@ pub fn help_lines() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_settings_print_one_padded_line_each() {
+        let lines = |enabled, participate, report| {
+            board_settings_lines(&BoardSettings {
+                enabled,
+                participate,
+                report,
+            })
+        };
+        assert_eq!(
+            lines(false, false, BoardReport::Off),
+            ["enabled      off", "participate  off", "report       off"]
+        );
+        assert_eq!(
+            lines(true, false, BoardReport::Summary),
+            [
+                "enabled      on",
+                "participate  off",
+                "report       summary"
+            ]
+        );
+        assert_eq!(
+            lines(false, true, BoardReport::Every),
+            ["enabled      off", "participate  on", "report       every"]
+        );
+    }
+
+    #[test]
+    fn board_cleared_line_counts_and_says_when_more_remain() {
+        let more = "; more remain, run maknae board clear again";
+        assert_eq!(
+            board_cleared_line(0, false),
+            "the board has no posts to clear"
+        );
+        assert_eq!(board_cleared_line(1, false), "cleared 1 post");
+        assert_eq!(board_cleared_line(2, false), "cleared 2 posts");
+        assert_eq!(
+            board_cleared_line(0, true),
+            format!("cleared no posts{more}")
+        );
+        assert_eq!(board_cleared_line(1, true), format!("cleared 1 post{more}"));
+        assert_eq!(
+            board_cleared_line(69, true),
+            format!("cleared 69 posts{more}")
+        );
+        assert_eq!(
+            board_cleared_line(u64::MAX, false),
+            "cleared 18446744073709551615 posts"
+        );
+    }
+
+    #[test]
+    fn board_stopped_line_counts() {
+        assert_eq!(board_stopped_line(1), "cleared 1 post before stopping");
+        assert_eq!(board_stopped_line(2), "cleared 2 posts before stopping");
+    }
+
+    #[test]
+    fn board_refusals_name_the_defect_and_the_command() {
+        use BoardCommand::{Clear, Settings};
+        use BoardDefect::*;
+        assert_eq!(
+            board_refused_line(TryAgain, Settings),
+            "the board store did not do it; try again"
+        );
+        assert_eq!(
+            board_refused_line(TryAgain, Clear),
+            "the clear stopped; run maknae board clear again"
+        );
+        for command in [Settings, Clear] {
+            assert_eq!(
+                board_refused_line(Full, command),
+                "the kernel refused: board full"
+            );
+            assert_eq!(
+                board_refused_line(AuthorAtCap, command),
+                "the kernel refused: author at cap"
+            );
+            assert_eq!(
+                board_refused_line(NoSuchPost, command),
+                "the kernel refused: no such post"
+            );
+        }
+        assert_eq!(
+            board_refused_line(OutcomeUnknown, Settings),
+            "the outcome is unknown; run maknae board settings to see what is in force"
+        );
+        assert_eq!(
+            board_refused_line(OutcomeUnknown, Clear),
+            "the outcome is unknown; run maknae board clear again"
+        );
+    }
+
+    #[test]
+    fn board_unknown_lines_per_command() {
+        assert_eq!(
+            board_unknown_line(BoardCommand::Settings),
+            "the outcome is unknown; run maknae board settings to see what is in force"
+        );
+        assert_eq!(
+            board_unknown_line(BoardCommand::Clear),
+            "the outcome is unknown; run maknae board clear again"
+        );
+    }
 
     #[test]
     fn each_close_reason_has_its_line() {

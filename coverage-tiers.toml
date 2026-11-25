@@ -431,6 +431,8 @@ files = [
   "crates/maknae-agent/src/budget.rs",
   # #170: session.list's paging and its client-side --cwd filter; a wrong match lists another directory's conversations as this one's.
   "crates/maknae-agent/src/conversations.rs",
+  # #713: the board settings and clear flows. A wrong arm resets a setting the person did not name, reports a change the kernel did not confirm, or loops.
+  "crates/maknae-agent/src/board.rs",
   # #630: the session screen's pure core. A key read as Enter submits a half-typed task; a store that drops an unseen report loses it after the kernel was told it was delivered; a composer that writes report text raw lets it move the cursor over the banner.
   "crates/maknae-agent/src/screen/fixed.rs",
   "crates/maknae-agent/src/screen/keys.rs",
@@ -954,7 +956,7 @@ why = "credential-supervisor I/O driver; the decisions it drives (retry_action/r
 
 [[t3]]
 path = "bins/maknae/src/cli.rs"
-why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto) Amended 2026-11-03 (#470): send_verb, SentOutcome and the frame helpers moved to maknae-loop (send.rs T3, outcome.rs T2); this file keeps argument parsing and the CLI own verbs. Amended 2026-11-08 (#170): maknae session list and close; the paging and the --cwd filter are T1 in maknae-agent::conversations, the id rule is ConversationId::parse in maknae-proto, and session_verb's parsing is tested here."
+why = "clap arg parsing + the CLI's connect/mint/request/response I/O orchestration; no fail-closed decision logic of its own (delegates to maknae-vault/maknae-proto) Amended 2026-11-03 (#470): send_verb, SentOutcome and the frame helpers moved to maknae-loop (send.rs T3, outcome.rs T2); this file keeps argument parsing and the CLI own verbs. Amended 2026-11-08 (#170): maknae session list and close; the paging and the --cwd filter are T1 in maknae-agent::conversations, the id rule is ConversationId::parse in maknae-proto, and session_verb's parsing is tested here. Amended 2026-11-24 (#713): maknae board settings and clear; which settings a change touches, when a result is done, the clear loop and the confirmation are T1 in maknae-agent::board; this file maps the confirmation and the flow's result to output and exit codes, tested here, and that the confirmation runs before any request is checked by running the commands against a daemon."
 
 [[t3]]
 path = "bins/maknae/src/tools.rs"
