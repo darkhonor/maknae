@@ -18,7 +18,7 @@
 //! final operator-context child and reporting — monotonic descent by flow order.
 
 mod agent;
-pub(crate) mod agent_access;
+mod agent_access;
 mod agent_apparmor;
 #[cfg(any(target_os = "macos", test))]
 mod agent_launchd;
@@ -36,6 +36,7 @@ mod secret_slot;
 pub mod vault_ops;
 
 use crate::stderr::errln;
+pub(crate) use agent_access::{Host, Platform, Ran, Run};
 use clap::{ArgGroup, Args, Subcommand};
 use maknae_io::program::{command, Program};
 use maknae_msgs::{detect_locale, msg, Locale, MsgId};

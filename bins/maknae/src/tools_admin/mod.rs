@@ -1,7 +1,7 @@
 mod template;
 
 use crate::cli::{terminal_safe, ToolsCommand};
-use crate::enroll::agent_access::{Host, Platform, Ran, Run};
+use crate::enroll::{Host, Platform, Ran, Run};
 use crate::policy_sync::{kernel_gid, CONFIG_DIR, RELOAD};
 use maknae_config::{
     defined_names, grammar_uses, tool_entry_name_ok, tool_program_name_ok, Grammar, GRAMMARS_DIR,
@@ -15,7 +15,6 @@ use maknae_io::{
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
 const LOCKED: &str = "another maknae tools command is running";
 
@@ -41,8 +40,13 @@ pub(crate) enum DirError {
     DoneNotDurable(String),
 }
 
+pub(crate) enum WriteError {
+    MaybeDone(String),
+    DoneNotDurable(String),
+}
+
 pub(crate) trait DropinDir {
-    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, DirError>;
+    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, WriteError>;
     fn remove(&self, name: &str) -> Result<(), DirError>;
 }
 
@@ -59,12 +63,17 @@ struct AnchoredDir<'a> {
     owner: FileOwner,
 }
 
+fn write_error(e: IoError) -> WriteError {
+    match &e {
+        IoError::PublishedNotDurable { .. } => WriteError::DoneNotDurable(e.to_string()),
+        _ => WriteError::MaybeDone(e.to_string()),
+    }
+}
+
 fn dir_error(e: IoError) -> DirError {
     match &e {
-        IoError::PublishedNotDurable { .. } | IoError::RemovedNotDurable { .. } => {
-            DirError::DoneNotDurable(e.to_string())
-        }
-        other => DirError::NotDone(other.to_string()),
+        IoError::RemovedNotDurable { .. } => DirError::DoneNotDurable(e.to_string()),
+        _ => DirError::NotDone(e.to_string()),
     }
 }
 
@@ -76,11 +85,11 @@ fn removal(anchor: &Anchor, name: &str) -> Result<(), DirError> {
 }
 
 impl DropinDir for AnchoredDir<'_> {
-    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, DirError> {
+    fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, WriteError> {
         self.anchor
             .publish_owned_new(Path::new(name), None, bytes, Mode(0o640), self.owner)
             .map(|o| o.value)
-            .map_err(dir_error)
+            .map_err(write_error)
     }
 
     fn remove(&self, name: &str) -> Result<(), DirError> {
@@ -293,20 +302,35 @@ struct Link {
     before: MemberState,
 }
 
-fn collision_error(hits: &[(&Found, Vec<String>)], link: &Link) -> String {
+fn quoted(names: &[impl AsRef<str>]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{}`", n.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn collision_error(
+    hits: &[(&Found, Vec<String>)],
+    dropins: &[template::Dropin],
+    link: &Link,
+) -> String {
     let mut lines = Vec::new();
     for (found, names) in hits {
-        let names: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
-        lines.push(format!(
-            "{} already defined in {}",
-            names.join(", "),
-            found.file
-        ));
+        let names = quoted(names);
+        lines.push(format!("{names} already defined in {}", found.file));
         lines.push(match &found.stem {
-            Some(stem) => format!(
-                "to replace {}, disable it first: sudo maknae tools disable {stem}",
-                found.file
-            ),
+            Some(stem) => {
+                let (_, tools) = defined_names(&found.text);
+                if tools == [stem.as_str()] && dropins.iter().any(|d| d.entry == *stem) {
+                    format!(
+                        "to replace {}, disable it first: sudo maknae tools disable {stem}",
+                        found.file
+                    )
+                } else {
+                    format!("rename or remove {names} in {}", found.file)
+                }
+            }
             None => match &link.before {
                 MemberState::Absent => format!(
                     "to keep tools.yaml's entries, link the grammar instead: sudo ln -s {} {}",
@@ -321,6 +345,21 @@ fn collision_error(hits: &[(&Found, Vec<String>)], link: &Link) -> String {
                 }
             },
         });
+    }
+    let taken: BTreeSet<&String> = hits.iter().flat_map(|(_, names)| names).collect();
+    let free: Vec<&str> = dropins
+        .iter()
+        .filter(|d| {
+            let (classes, tools) = defined_names(&d.text);
+            !classes.iter().chain(&tools).any(|n| taken.contains(n))
+        })
+        .map(|d| d.entry.as_str())
+        .collect();
+    if !free.is_empty() {
+        lines.push(format!(
+            "the entries that do not collide can be enabled one at a time with --entry: {}",
+            quoted(&free)
+        ));
     }
     lines.push("nothing was written".to_string());
     terminal_safe(&lines.join("; "))
@@ -369,22 +408,34 @@ fn rollback(
     terminal_safe(&problems.join("; "))
 }
 
-fn finish(
-    done: &[String],
-    reload: bool,
-    r: &dyn Reload,
-    out: &mut dyn Write,
-) -> Result<(), String> {
-    if !reload {
-        return say(out, RELOAD);
+struct Committed {
+    done: Vec<String>,
+    lines: Vec<String>,
+    stopped: Option<String>,
+    notes: Vec<String>,
+}
+
+fn report(c: Committed, reload: bool, r: &dyn Reload, out: &mut dyn Write) -> Result<(), String> {
+    let mut printed = c.lines.iter().try_for_each(|line| say(out, line));
+    let state = match c.stopped {
+        Some(cause) => Err(cause),
+        None if reload => r.reload().map(|()| "reloaded maknaed"),
+        None => Ok(RELOAD),
+    };
+    if let (Ok(()), Ok(line)) = (&printed, &state) {
+        printed = say(out, line);
     }
-    r.reload().map_err(|cause| {
-        terminal_safe(&format!(
-            "{}; maknaed was not reloaded: {cause}; {RELOAD}",
-            done.join("; ")
-        ))
-    })?;
-    say(out, "reloaded maknaed")
+    if printed.is_ok() && state.is_ok() && c.notes.is_empty() {
+        return Ok(());
+    }
+    let mut parts = c.done;
+    parts.push(match state {
+        Ok(line) => line.to_string(),
+        Err(cause) => format!("maknaed was not reloaded: {cause}; {RELOAD}"),
+    });
+    parts.extend(printed.err());
+    parts.extend(c.notes);
+    Err(terminal_safe(&parts.join("; ")))
 }
 
 fn dropin_path(p: &Paths, file: &str) -> PathBuf {
@@ -526,7 +577,7 @@ fn enable_with(
     let found = configured(p, o, d)?;
     let hits = collisions(&dropins, &found);
     if !hits.is_empty() {
-        return Err(collision_error(&hits, &link));
+        return Err(collision_error(&hits, &dropins, &link));
     }
     match &link.before {
         MemberState::Absent | MemberState::VendorLink => {}
@@ -535,7 +586,12 @@ fn enable_with(
         }
     }
 
+    let present: BTreeSet<String> = listing(&d.tools, &p.config.join(TOOLS_DROPIN_DIR))?
+        .iter()
+        .map(|e| e.name.to_string_lossy().into_owned())
+        .collect();
     let mut done = Vec::new();
+    let mut lines = Vec::new();
     let created = d
         .grammars
         .link_member(&link.name, &p.vendor_grammars)
@@ -545,11 +601,13 @@ fn enable_with(
         })?
         .value;
     if created {
-        done.push(format!(
+        let linked = format!(
             "linked {} to {}",
             link.path.display(),
             link.vendor.display()
-        ));
+        );
+        lines.push(linked.clone());
+        done.push(linked);
     }
     let mut written = Vec::new();
     for dropin in &dropins {
@@ -557,44 +615,44 @@ fn enable_with(
         let path = dropin_path(p, &file);
         let failure = match dir.publish_new(&file, dropin.text.as_bytes()) {
             Ok(true) => None,
-            Ok(false) => Some(format!(
-                "{} already exists; enable never replaces a drop-in",
-                path.display()
+            Ok(false) => Some((
+                format!(
+                    "{} already exists; enable never replaces a drop-in",
+                    path.display()
+                ),
+                false,
             )),
-            Err(DirError::NotDone(e)) => Some(format!("cannot write {}: {e}", path.display())),
-            Err(DirError::DoneNotDurable(e)) => {
-                written.push(file.clone());
-                Some(format!("wrote {}, but not durably: {e}", path.display()))
+            Err(WriteError::MaybeDone(e)) => {
+                Some((format!("cannot write {}: {e}", path.display()), true))
             }
+            Err(WriteError::DoneNotDurable(e)) => Some((
+                format!("wrote {}, but not durably: {e}", path.display()),
+                true,
+            )),
         };
-        if let Some(cause) = failure {
+        if let Some((cause, landed)) = failure {
+            if landed && !present.contains(&file) {
+                written.push(file);
+            }
             return Err(rollback(d, p, &link, dir, &written, cause));
         }
         written.push(file);
-    }
-
-    if created {
-        say(out, &done[0])?;
-    }
-    for dropin in &dropins {
-        let wrote = format!(
-            "wrote {}",
-            dropin_path(p, &format!("{}.yaml", dropin.entry)).display()
-        );
-        say(out, &wrote)?;
+        let wrote = format!("wrote {}", path.display());
+        lines.push(wrote.clone());
         done.push(wrote);
-        say(out, GRANT_HEADER)?;
-        for grant in &dropin.grants {
-            say(out, &format!("  {grant}"))?;
-        }
-        for (class, app) in &dropin.apps {
-            say(
-                out,
-                &format!("credential class {class} expects the App {app} in the Egress Daemon's configuration"),
-            )?;
-        }
+        lines.push(GRANT_HEADER.to_string());
+        lines.extend(dropin.grants.iter().map(|grant| format!("  {grant}")));
+        lines.extend(dropin.apps.iter().map(|(class, app)| {
+            format!("credential class {class} expects the App {app} in the Egress Daemon's configuration")
+        }));
     }
-    finish(&done, req.reload, r, out)
+    let committed = Committed {
+        done,
+        lines,
+        stopped: None,
+        notes: Vec::new(),
+    };
+    report(committed, req.reload, r, out)
 }
 
 pub(crate) fn disable(
@@ -611,7 +669,11 @@ pub(crate) fn disable(
         anchor: &d.tools,
         owner: o.file,
     };
-    disable_with(p, o, &d, entry, reload, r, out, &dir)
+    let links = AnchoredDir {
+        anchor: &d.grammars,
+        owner: o.file,
+    };
+    disable_with(p, o, &d, entry, reload, r, out, &dir, &links)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -624,6 +686,7 @@ fn disable_with(
     r: &dyn Reload,
     out: &mut dyn Write,
     dir: &dyn DropinDir,
+    links: &dyn DropinDir,
 ) -> Result<(), String> {
     let _lock = lock(&d.tools)?;
     let file = format!("{entry}.yaml");
@@ -675,33 +738,33 @@ fn disable_with(
         }
     }
     let mut done = vec![format!("removed {}", path.display())];
+    let mut stopped = None;
     for (name, link) in unlink {
-        match removal(&d.grammars, &name) {
+        match links.remove(&name) {
             Ok(()) => {}
             Err(DirError::DoneNotDurable(e)) => pending.push(e),
             Err(DirError::NotDone(e)) => {
-                return Err(terminal_safe(&format!(
-                    "{}; cannot remove {}: {e}",
-                    done.join("; "),
-                    link.display()
-                )))
+                stopped = Some(format!("cannot remove {}: {e}", link.display()));
+                break;
             }
         }
         done.push(format!("removed {}", link.display()));
     }
-    for line in &done {
-        say(out, line)?;
-    }
-    let reloaded = finish(&done, reload, r, out);
-    if pending.is_empty() {
-        return reloaded;
-    }
-    let mut problems: Vec<String> = reloaded.err().into_iter().collect();
-    problems.push(format!(
-        "the removal is not yet durable: {}",
-        pending.join("; ")
-    ));
-    Err(terminal_safe(&problems.join("; ")))
+    let notes = if pending.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "the removal is not yet durable: {}",
+            pending.join("; ")
+        )]
+    };
+    let committed = Committed {
+        lines: done.clone(),
+        done,
+        stopped,
+        notes,
+    };
+    report(committed, reload, r, out)
 }
 
 fn preflight(euid: u32, sub: &str) -> Result<(), String> {
@@ -731,10 +794,12 @@ impl Reload for HostReload<'_> {
     fn reload(&self) -> Result<(), String> {
         let (program, args) = reload_call(Platform::HOST);
         let ran: Ran = self.0.run(program, &args)?;
-        if ran.ok {
-            Ok(())
-        } else {
-            Err(ran.stderr.trim_end().to_string())
+        let stderr = ran.stderr.trim();
+        match (ran.ok, ran.code) {
+            (true, _) => Ok(()),
+            (false, _) if !stderr.is_empty() => Err(stderr.to_string()),
+            (false, Some(code)) => Err(format!("the reload exited with status {code}")),
+            (false, None) => Err("the reload was ended by a signal".to_string()),
         }
     }
 }
@@ -819,15 +884,6 @@ pub(crate) fn run_with(
     finish_run(production(euid, cmd, out), err)
 }
 
-pub(crate) fn run(euid: u32, cmd: ToolsCommand) -> ExitCode {
-    ExitCode::from(run_with(
-        euid,
-        cmd,
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -842,6 +898,7 @@ mod tests {
     const HOMELAB: &str = include_str!("../../../../packaging/common/tools-homelab.yaml");
     const SITE: &str = include_str!("../testdata/dropin_site_github_post.yaml");
     const OTHER: &str = include_str!("../testdata/dropin_other_name.yaml");
+    const GITHUB_READ_ONLY: &str = include_str!("../testdata/tools_github_read_only.yaml");
 
     const NAMES: [&str; 4] = [
         "github-issues-read",
@@ -1182,6 +1239,7 @@ mod tests {
         Never,
         NotDone,
         DoneNotDurable,
+        Landed,
     }
 
     struct Failing<'a> {
@@ -1192,9 +1250,9 @@ mod tests {
         before_failing: &'a dyn Fn(),
     }
 
-    fn fail<T>(how: Fail, done: impl FnOnce() -> Result<T, DirError>) -> Result<T, DirError> {
+    fn fail(how: Fail, done: impl FnOnce() -> Result<(), DirError>) -> Result<(), DirError> {
         match how {
-            Fail::Never => done(),
+            Fail::Never | Fail::Landed => done(),
             Fail::NotDone => Err(DirError::NotDone("disk full".to_string())),
             Fail::DoneNotDurable => {
                 done()?;
@@ -1203,14 +1261,32 @@ mod tests {
         }
     }
 
+    fn fail_publish(
+        how: Fail,
+        done: impl FnOnce() -> Result<bool, WriteError>,
+    ) -> Result<bool, WriteError> {
+        match how {
+            Fail::Never => done(),
+            Fail::NotDone => Err(WriteError::MaybeDone("disk full".to_string())),
+            Fail::DoneNotDurable => {
+                done()?;
+                Err(WriteError::DoneNotDurable("sync failed".to_string()))
+            }
+            Fail::Landed => {
+                done()?;
+                Err(WriteError::MaybeDone("unrecognised".to_string()))
+            }
+        }
+    }
+
     impl DropinDir for Failing<'_> {
-        fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, DirError> {
+        fn publish_new(&self, name: &str, bytes: &[u8]) -> Result<bool, WriteError> {
             self.calls.set(self.calls.get() + 1);
             if self.calls.get() != 3 {
                 return self.inner.publish_new(name, bytes);
             }
             (self.before_failing)();
-            fail(self.third_publish, || self.inner.publish_new(name, bytes))
+            fail_publish(self.third_publish, || self.inner.publish_new(name, bytes))
         }
 
         fn remove(&self, name: &str) -> Result<(), DirError> {
@@ -1270,6 +1346,10 @@ mod tests {
             anchor: &dirs.tools,
             owner: o.file,
         };
+        let links = AnchoredDir {
+            anchor: &dirs.grammars,
+            owner: o.file,
+        };
         let failing = Failing {
             inner: &inner,
             calls: Cell::new(0),
@@ -1278,7 +1358,7 @@ mod tests {
             before_failing: &|| {},
         };
         let mut out = Vec::new();
-        let result = disable_with(&p, &o, &dirs, entry, true, r, &mut out, &failing);
+        let result = disable_with(&p, &o, &dirs, entry, true, r, &mut out, &failing, &links);
         (result, String::from_utf8(out).unwrap())
     }
 
@@ -1364,36 +1444,38 @@ mod tests {
     }
 
     #[test]
-    fn only_the_not_durable_errors_count_as_done() {
+    fn io_errors_map_to_what_may_be_on_disk() {
         let path = PathBuf::from("/x");
         let kind = IoKind::Other { raw: 5 };
-        for e in [
-            IoError::PublishedNotDurable {
-                path: path.clone(),
-                kind: kind.clone(),
-            },
-            IoError::RemovedNotDurable {
-                path: path.clone(),
-                kind: kind.clone(),
-            },
-        ] {
-            assert!(matches!(dir_error(e), DirError::DoneNotDurable(_)));
-        }
-        let not_done = dir_error(IoError::Io {
+        let published = || IoError::PublishedNotDurable {
+            path: path.clone(),
+            kind: kind.clone(),
+        };
+        let removed = || IoError::RemovedNotDurable {
+            path: path.clone(),
+            kind: kind.clone(),
+        };
+        let other = || IoError::Io {
             kind: IoKind::NotFound,
-            path,
-        });
-        assert!(matches!(not_done, DirError::NotDone(_)));
+            path: path.clone(),
+        };
+        assert!(matches!(
+            write_error(published()),
+            WriteError::DoneNotDurable(_)
+        ));
+        for e in [removed(), other()] {
+            assert!(matches!(write_error(e), WriteError::MaybeDone(_)));
+        }
+        assert!(matches!(dir_error(removed()), DirError::DoneNotDurable(_)));
+        for e in [published(), other()] {
+            assert!(matches!(dir_error(e), DirError::NotDone(_)));
+        }
     }
 
     #[test]
     fn enable_refuses_a_name_tools_yaml_defines_even_if_the_loader_disables_it() {
         let fx = Fx::new();
-        write(
-            &fx.config().join("tools.yaml"),
-            "schema_version: 1\ntools:\n  github-read:\n    enabled: true\n",
-            0o640,
-        );
+        write(&fx.config().join("tools.yaml"), GITHUB_READ_ONLY, 0o640);
         let r = FakeReload::ok();
         let e = err(fx.enable(&req(None, None), &r).0);
         assert!(
@@ -1542,10 +1624,11 @@ mod tests {
         write(&fx.tools().join("site.yaml"), SITE, 0o640);
         let r = FakeReload::ok();
         let e = err(fx.enable(&req(None, None), &r).0);
-        assert!(e.contains("`github-post`"), "{e}");
-        assert!(e.contains("tools.d/site.yaml"), "{e}");
-        assert!(e.contains("sudo maknae tools disable site"), "{e}");
-        assert!(!e.contains("`github-read`"), "{e}");
+        assert!(
+            e.contains("`github-post` already defined in tools.d/site.yaml; rename or remove `github-post` in tools.d/site.yaml; the entries that do not collide can be enabled one at a time with --entry: `github-read`, `github-issues-read`, `github-issues-write`; nothing was written"),
+            "{e}"
+        );
+        assert!(!e.contains("disable"), "{e}");
         assert!(!e.contains("ln -s"), "{e}");
         assert_eq!(fx.link(), None);
         assert_eq!(fx.dropins(), ["site.yaml"]);
@@ -1555,8 +1638,210 @@ mod tests {
         let tool_only = tool_only.replace("  github-post:\n    kind", "  site-class:\n    kind");
         write(&fx.tools().join("site.yaml"), &tool_only, 0o640);
         let e = err(fx.enable(&req(None, None), &r).0);
-        assert!(e.contains("`github-read`"), "{e}");
-        assert!(!e.contains("`github-post`"), "{e}");
+        assert!(
+            e.contains("rename or remove `github-read` in tools.d/site.yaml"),
+            "{e}"
+        );
+        assert!(!e.contains("`github-post` already"), "{e}");
+        assert!(
+            e.contains("with --entry: `github-post`, `github-issues-read`, `github-issues-write`;"),
+            "{e}"
+        );
+        assert!(!e.contains("disable"), "{e}");
+    }
+
+    #[test]
+    fn a_publish_that_fails_after_landing_is_rolled_back() {
+        let fx = Fx::new();
+        let (e, reloads) = enable_failing(&fx, Fail::Landed, Fail::Never, &|| {});
+        assert!(e.contains("github-issues-read.yaml"), "{e}");
+        assert!(e.contains("unrecognised"), "{e}");
+        assert!(fx.dropins().is_empty(), "{:?}", fx.dropins());
+        assert_eq!(fx.link(), None);
+        assert_eq!(reloads, 0);
+    }
+
+    #[test]
+    fn a_failed_publish_never_rolls_back_a_file_that_was_there() {
+        let fx = Fx::new();
+        write(&fx.tools().join("github-issues-read.yaml"), OTHER, 0o640);
+        let (e, _) = enable_failing(&fx, Fail::Landed, Fail::Never, &|| {});
+        assert!(e.contains("unrecognised"), "{e}");
+        assert_eq!(fx.dropins(), ["github-issues-read.yaml"]);
+        assert_eq!(
+            std::fs::read_to_string(fx.tools().join("github-issues-read.yaml")).unwrap(),
+            OTHER
+        );
+        let (e, _) = enable_failing(&fx, Fail::DoneNotDurable, Fail::Never, &|| {});
+        assert!(e.contains("sync failed"), "{e}");
+        assert_eq!(fx.dropins(), ["github-issues-read.yaml"]);
+    }
+
+    struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn enable_reloads_and_reports_when_stdout_fails() {
+        let fx = Fx::new();
+        let r = FakeReload::ok();
+        let e = err(enable(
+            &fx.paths(),
+            &me(),
+            &req(Some("github-post"), None),
+            &r,
+            &mut Broken,
+        ));
+        let wrote = fx.tools().join("github-post.yaml");
+        assert_eq!(
+            e,
+            format!(
+                "linked {} to {}; wrote {}; reloaded maknaed; cannot write to standard output: {}",
+                fx.grammars().join("gh.yaml").display(),
+                fx.vendor_grammars().join("gh.yaml").display(),
+                wrote.display(),
+                std::io::Error::from(std::io::ErrorKind::BrokenPipe)
+            )
+        );
+        assert_eq!(r.calls.get(), 1);
+        assert_eq!(fx.dropins(), ["github-post.yaml"]);
+        assert_eq!(fx.link(), fx.exact());
+
+        let mut no = req(Some("github-read"), None);
+        no.reload = false;
+        let e = err(enable(&fx.paths(), &me(), &no, &r, &mut Broken));
+        assert!(
+            e.starts_with(&format!(
+                "wrote {}; {RELOAD}; cannot write to standard output",
+                fx.tools().join("github-read.yaml").display()
+            )),
+            "{e}"
+        );
+        assert_eq!(r.calls.get(), 1);
+    }
+
+    #[test]
+    fn disable_reloads_and_reports_when_stdout_fails() {
+        let fx = Fx::new();
+        fx.enabled_one("github-post");
+        let r = FakeReload::ok();
+        let e = err(disable(
+            &fx.paths(),
+            &me(),
+            "github-post",
+            true,
+            &r,
+            &mut Broken,
+        ));
+        assert!(
+            e.starts_with(&format!(
+                "removed {}; removed {}; reloaded maknaed; cannot write to standard output",
+                fx.tools().join("github-post.yaml").display(),
+                fx.grammars().join("gh.yaml").display()
+            )),
+            "{e}"
+        );
+        assert_eq!(r.calls.get(), 1);
+        assert!(fx.dropins().is_empty());
+        assert_eq!(fx.link(), None);
+    }
+
+    #[test]
+    fn disable_reports_a_link_it_cannot_remove() {
+        let fx = Fx::new();
+        fx.enabled_one("github-post");
+        let o = me();
+        let p = fx.paths();
+        let dirs = Dirs::open(&p, &o).unwrap();
+        let tools = AnchoredDir {
+            anchor: &dirs.tools,
+            owner: o.file,
+        };
+        let grammars = AnchoredDir {
+            anchor: &dirs.grammars,
+            owner: o.file,
+        };
+        let failing = |inner, removes| Failing {
+            inner,
+            calls: Cell::new(0),
+            third_publish: Fail::Never,
+            removes,
+            before_failing: &|| {},
+        };
+        let r = FakeReload::ok();
+        let mut out = Vec::new();
+        let e = err(disable_with(
+            &p,
+            &o,
+            &dirs,
+            "github-post",
+            true,
+            &r,
+            &mut out,
+            &failing(&tools, Fail::DoneNotDurable),
+            &failing(&grammars, Fail::NotDone),
+        ));
+        let link = fx.grammars().join("gh.yaml");
+        let dropin = fx.tools().join("github-post.yaml");
+        assert_eq!(
+            e,
+            format!(
+                "removed {}; maknaed was not reloaded: cannot remove {}: disk full; {RELOAD}; the removal is not yet durable: sync failed",
+                dropin.display(),
+                link.display()
+            )
+        );
+        assert_eq!(r.calls.get(), 0);
+        assert!(fx.dropins().is_empty());
+        assert_eq!(fx.link(), fx.exact());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("removed {}\n", dropin.display())
+        );
+    }
+
+    #[test]
+    fn enable_offers_disable_only_for_a_file_enable_could_have_written() {
+        let fx = Fx::new();
+        let r = FakeReload::ok();
+        let one = SITE.replace("site-post:", "Site Tools:");
+        write(&fx.tools().join("Site Tools.yaml"), &one, 0o640);
+        let e = err(fx.enable(&req(None, None), &r).0);
+        assert!(
+            e.contains("rename or remove `github-post` in tools.d/Site Tools.yaml"),
+            "{e}"
+        );
+        assert!(!e.contains("disable"), "{e}");
+        std::fs::remove_file(fx.tools().join("Site Tools.yaml")).unwrap();
+
+        let solo = SITE.replace("site-post:", "solo:");
+        write(&fx.tools().join("solo.yaml"), &solo, 0o640);
+        let e = err(fx.enable(&req(Some("github-post"), None), &r).0);
+        assert!(
+            e.contains("rename or remove `github-post` in tools.d/solo.yaml"),
+            "{e}"
+        );
+        assert!(!e.contains("disable"), "{e}");
+        assert!(!e.contains("--entry"), "{e}");
+        std::fs::remove_file(fx.tools().join("solo.yaml")).unwrap();
+
+        let own = SITE.replace("site-post:", "github-read:");
+        write(&fx.tools().join("github-read.yaml"), &own, 0o640);
+        let e = err(fx.enable(&req(None, None), &r).0);
+        assert!(
+            e.contains("to replace tools.d/github-read.yaml, disable it first: sudo maknae tools disable github-read"),
+            "{e}"
+        );
+        assert_eq!(fx.dropins(), ["github-read.yaml"]);
+        assert_eq!(r.calls.get(), 0);
     }
 
     #[test]
@@ -1971,6 +2256,22 @@ mod tests {
             Err("Unit maknaed.service not loaded.".to_string())
         );
 
+        for stderr in ["", " \n"] {
+            let silent = spawn(Ok(ran(false, stderr)));
+            assert_eq!(
+                HostReload(&silent).reload(),
+                Err("the reload exited with status 1".to_string())
+            );
+        }
+        let signalled = spawn(Ok(Ran {
+            code: None,
+            ..ran(false, "")
+        }));
+        assert_eq!(
+            HostReload(&signalled).reload(),
+            Err("the reload was ended by a signal".to_string())
+        );
+
         let missing = spawn(Err("/usr/bin/systemctl not found".into()));
         assert_eq!(
             HostReload(&missing).reload(),
@@ -2032,10 +2333,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), fx.available());
-    }
-
-    #[test]
-    fn run_exits_one_for_a_non_root_caller() {
-        assert_eq!(run(1000, ToolsCommand::Available), ExitCode::from(1));
     }
 }

@@ -14,8 +14,9 @@
 //! the wire path since ADR-0009 arming landed.)* The `ping`/`whoami` wire path
 //! below uses only `maknae-proto`, `maknae-vault`, `maknae-config`, `maknae-msgs`,
 //! `clap` and `maknae-loop` (the wire client and delegation arming, #470); `maknae-agent` and
-//! `maknae-seal` are the agent loop's (`agent.rs`) alone; `yaml-rust2`/`rpassword` are
-//! `enroll/`-only, and `nix`/`zeroize` serve `enroll/` and `login`/`tty`. NO privileged crate
+//! `maknae-seal` are the agent loop's (`agent.rs`) alone; `yaml-rust2` serves `enroll/` and
+//! `tools_admin/` (#674), `rpassword` is `enroll/`-only, and `nix`/`zeroize` serve `enroll/`
+//! and `login`/`tty`. NO privileged crate
 //! (`maknae-kernel`/`-subject-ctx-mint`/`-audit-append`/`-spif-compile`) — spec §3
 //! P1 — even for `enroll`: it does its own privileged work via `nix` safe wrappers
 //! and process re-exec (`sudo -u`), never by linking the daemon's privileged crates.
@@ -1635,7 +1636,12 @@ pub async fn run_cli() -> ExitCode {
         }
         Command::Tools(ToolsArgs {
             action: Some(action),
-        }) => crate::tools_admin::run(nix::unistd::geteuid().as_raw(), action),
+        }) => ExitCode::from(crate::tools_admin::run_with(
+            nix::unistd::geteuid().as_raw(),
+            action,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )),
         Command::Status => wire_exit_code(execute(Verb::AdminStatus).await, &mut std::io::stderr()),
         Command::ConfigShow => {
             wire_exit_code(execute(Verb::AdminConfigShow).await, &mut std::io::stderr())

@@ -576,7 +576,6 @@ fn defined_in(files: &[&str]) -> String {
     format!("defined in more than one file: {}", files.join(", "))
 }
 
-/// The class and tool names of a drop-in whose YAML loads but whose schema does not.
 pub fn defined_names(text: &str) -> (Vec<String>, Vec<String>) {
     let Ok(Value::Map(top)) = crate::load_str(text) else {
         return (Vec::new(), Vec::new());

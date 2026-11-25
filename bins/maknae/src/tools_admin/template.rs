@@ -173,7 +173,7 @@ pub(crate) fn render(
     match (entry, shapes) {
         (None, Some(_)) => return Err("--shapes needs --entry".to_string()),
         (Some(_), Some([])) => return Err("--shapes names no shape".to_string()),
-        _ => {}
+        (None, None) | (Some(_), None) | (Some(_), Some([_, ..])) => {}
     }
     let docs = YamlLoader::load_from_str(template)
         .map_err(|e| format!("the {program} template is not YAML: {e}"))?;
@@ -245,16 +245,7 @@ mod tests {
     const SHARED: &str = include_str!("../testdata/template_shared_class.yaml");
     const WITH_REF: &str = include_str!("../testdata/template_with_ref.yaml");
 
-    const OPEN_ENTRY: &str = "  scratch:
-    image: { verify: { signature: required, sbom: required } }
-    isolation: container
-    executes_workspace: true
-    network: none
-    workspace: rw
-    output_to_model: redacted
-    commands:
-      cargo: { open: true, deny_args: [\"+*\"] }
-";
+    const OPEN_ENTRY: &str = include_str!("../testdata/template_open_entry.yaml");
 
     fn img() -> String {
         format!("ghcr.io/example/tools@sha256:{}", "a".repeat(64))
@@ -321,7 +312,21 @@ mod tests {
     #[test]
     fn the_template_matches_the_homelab_gh_entries() {
         let home = ToolsCatalog::parse_with(HOMELAB, &set()).unwrap();
-        for d in run(TEMPLATE, None, None).unwrap() {
+        let rendered = run(TEMPLATE, None, None).unwrap();
+        let mut theirs: Vec<&str> = home
+            .entries()
+            .filter(|e| {
+                e.commands.values().any(
+                    |c| matches!(&c.form, CommandForm::Grammar { grammar, .. } if grammar == "gh"),
+                )
+            })
+            .map(|e| e.name.as_str())
+            .collect();
+        theirs.sort_unstable();
+        let mut mine: Vec<&str> = rendered.iter().map(|d| d.entry.as_str()).collect();
+        mine.sort_unstable();
+        assert_eq!(mine, theirs);
+        for d in rendered {
             let (mine, mine_catalog) = parsed(&d.text, &d.entry);
             let mut theirs = home.entry(&d.entry).unwrap().clone();
             theirs.image.as_mut().unwrap().reference = img();
