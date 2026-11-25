@@ -15,6 +15,7 @@ mod reseed;
 mod screen;
 mod stderr;
 mod tools;
+mod tools_admin;
 mod tty;
 
 use crate::stderr::errln;
