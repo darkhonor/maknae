@@ -36,7 +36,7 @@ Each row: the industry's name, Maknae's construct, the artifact that **decided**
 | **Routing** | `authz.yaml`'s `destinations:` — a per-**role** allowlist of `provider:<name>`, deny-by-default | #172 | `authz-composition-drift`; golden tests |
 | **Parallelisation** | one connection per request; `Egress` is `Send + Sync`, so fan-out needs no demuxer and re-runs the peer check per request | #240a D2 | `egress_socket` tests |
 | **Evaluator-optimiser / reflection** | **blind review as a control**, with a *grounded* oracle: gates, mutation, negative controls — never a model grading itself | core principle 6; ADR-0016 | the gate suite itself; `negative-control` proves the gates fail |
-| **Orchestrator-workers / manager** | *delegation transmits intent, never authority* — the child is decided as if the user typed the task, on its own conduit; the return hop is a release decision | **candidate only** — `model-conduit-policy.md` Q11, explicitly not ratified | — |
+| **Orchestrator-workers / manager** | the model's `task_agent` tool: an agent gives a sub-task to another agent whose `policy.yaml` names it in `taskers:`, waits for its report, and keeps control. The task moves, never authority: a task reaches only what both its tasker and its agent can reach, a sub-task's bindings are limited to its parent's, and the partition operand bounds it by the chain's root tasker. A sub-task ends with its parent, and no agent waits on itself | ADR-0033 (`taskers:`; chain rulings 2026-11-16), ADR-0037 decision 7, ADR-0023 decision 6, ADR-0008 (partition operand) | `crates/maknae-kernel/src/task.rs` sub-task tests; `crates/maknae-kernel/tests/task_loop.rs`, `agent_daemon.rs` |
 | **Guardrails** | the PDP, in a **separate process under a separate uid**, outside the runtime it guards | ADR-0005, ADR-0008 | `authz-composition-drift`; P1/P2 witnesses |
 | **Prompt chaining** | deliberately **not modelled**: step and tool-call limits inside the loop are *advisory*, because a bound inside an untrusted loop cannot fail closed | ADR-0023 d7 | — (the kernel-enforced bound is the request deadline) |
 | **Memory / sessions** | **not in Cooky** — no session identity; the reply returns on the prompt's response leg | ADR-0023 d7 | — |
@@ -44,7 +44,7 @@ Each row: the industry's name, Maknae's construct, the artifact that **decided**
 
 ### The handoff gap, stated plainly
 
-OpenAI's decentralised pattern **transfers control of the conversation**: the receiving agent owns it. Under *delegation transmits intent, never authority*, that is not delegation — it is a release decision on every hop, and the return is another. `model-conduit-policy.md` Q11 covers the **manager** shape and does not obviously cover this one.
+OpenAI's decentralised pattern **transfers control of the conversation**: the receiving agent owns it. In Maknae a task moves between agents without authority, so a transfer of control is not something a tasked agent can receive: every hop would be its own decision, and so would the return. The **manager** shape is built (`task_agent`, ADR-0033); this one is not.
 
 OpenAI's own documentation names the sharp edge: **input guardrails apply only to the first agent in a chain, output guardrails only to the last.** Everything between runs unguarded. That is a coherent design when the guardrail lives inside the runtime and the runtime is trusted. Under Maknae's model it is the exact failure the architecture exists to prevent, and Maknae currently has nothing to say about it.
 
