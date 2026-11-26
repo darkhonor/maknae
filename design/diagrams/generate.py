@@ -866,6 +866,8 @@ SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
              "os":       (OK_FILL, OK_LINE, "#04342C"),
              "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK),
              "external": (PLAIN_FILL, MUTED, INK)}
+SEQ_KINDS = ("call", "reply", "self", "ref")
+_STEP_ID = re.compile(r"[a-z][a-z0-9-]*")
 
 
 def sequence(name: str) -> str:
@@ -885,6 +887,23 @@ def sequence(name: str) -> str:
     """
     doc = tomllib.loads((OUT / name).read_text())
     parts, steps = doc["participant"], doc["step"]
+    sid_index = {}
+    for n, s in enumerate(steps, 1):
+        k = s.get("kind")
+        if not (isinstance(k, str) and k in SEQ_KINDS):
+            sys.exit(f"{name}: step {n}: unknown kind {k!r}")
+        if k == "ref":
+            sys.exit(f"{name}: step {n}: ref is not drawn yet")
+        if "id" in s:
+            sid = s["id"]
+            if not (isinstance(sid, str) and _STEP_ID.fullmatch(sid)):
+                sys.exit(f"{name}: step {n}: id {sid!r} must match {_STEP_ID.pattern}")
+            if sid in sid_index:
+                sys.exit(f"{name}: duplicate step id {sid!r}")
+            sid_index[sid] = n - 1
+    pre = doc.get("precondition")
+    if pre is not None and not isinstance(pre, str):
+        sys.exit(f"{name}: precondition must be a str")
     check_evidence(steps, "evidence", name)
     check_tests(steps, "test", name)
     check_status(steps, name)
@@ -929,7 +948,11 @@ def sequence(name: str) -> str:
     notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
     DCOLS = int((W - 2 * (LEFT - 52)) / 5.6)
     dlines = [_wrap_words(f"D{d} (step {st}). {q}", DCOLS) for d, st, q in decisions]
-    H = (body_h + 34 + len(notes) * 27 + 58 + (22 if marked else 0)
+    PRE_LABEL = "Before step 1."
+    pre_x = LEFT - 52 + len(PRE_LABEL) * 5.6 + 8
+    if pre is not None and pre_x + len(pre) * 5.3 > W - 12:
+        sys.exit(f"{name}: precondition does not fit the canvas; shorten it")
+    H = (body_h + 34 + (len(notes) + (pre is not None)) * 27 + 58 + (22 if marked else 0)
          + ((40 + sum(18 + 14 * (len(ls) - 1) for ls in dlines)) if decisions else 0))
 
     p = ['<defs>'
@@ -1032,6 +1055,10 @@ def sequence(name: str) -> str:
         p.append(text(LEFT - 52, y, STATUS_LEGEND, 9.5, fill=MUTED))
         y += 22
     p.append(text(LEFT - 52, y, "Notes", 12, "600"))
+    if pre is not None:
+        y += 27
+        p.append(text(LEFT - 52, y, PRE_LABEL, 9.5, "600", fill=WARN))
+        p.append(text(pre_x, y, pre, 9.5, fill=INK))
     for num, nt in notes:
         y += 27
         p.append(text(LEFT - 52, y, f"{num}.", 9.5, "600", fill=WARN))
