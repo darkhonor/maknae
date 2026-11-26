@@ -139,6 +139,8 @@ files = [
   # exact — a wrong branch hands a subject an object outside its home,
   # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
   "crates/maknae-io/src/delegated.rs",
+  # #751: DeliveredCredential and the launch-credential framing; a lost redaction or a decode that admits a malformed frame leaks or forges a credential.
+  "crates/maknae-io/src/credential.rs",
   "crates/maknae-io/src/normalize.rs",
   "crates/maknae-io/src/page.rs",
   # Raw T1 syscall coverage, with no exceptions.
