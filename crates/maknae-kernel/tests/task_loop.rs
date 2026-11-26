@@ -8692,23 +8692,61 @@ mod board {
             assert_eq!(board_records(&records)[0].object, w.own_mark_board());
         }
 
+        /// Three posts; hobi has read them unacknowledged, jin has acknowledged the first and
+        /// holds the rest unacknowledged.
+        async fn two_readers(w: &World) -> (TaskId, TaskId) {
+            let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+            let posts = w.seen_posts("suga", 3);
+            assert_eq!(
+                bodies(&page_of(w.board("jin", read(None), j).await.0)),
+                ["sentinel-715-1", "sentinel-715-2", "sentinel-715-3"]
+            );
+            page_of(w.board("jin", read(Some(posts[0])), j).await.0);
+            page_of(w.board("hobi", read(None), h).await.0);
+            (h, j)
+        }
+
+        type Reading = Vec<(u64, std::collections::BTreeSet<u64>)>;
+
+        fn reading(w: &World) -> Reading {
+            ["hobi", "jin"]
+                .iter()
+                .map(|a| {
+                    let agent = maknae_config::AgentId::parse(a).unwrap();
+                    (w.cursor(a), w.agents.board.sent_to(w.key(), &agent))
+                })
+                .collect()
+        }
+
+        async fn next_reads(w: &World, (h, j): (TaskId, TaskId)) -> Vec<Vec<String>> {
+            vec![
+                bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+                bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ]
+        }
+
         #[tokio::test]
         async fn seen_leaves_every_agents_read_unchanged() {
             let w = seen_world("seen-agents-unchanged", "user", SEEN_ROLES);
-            let h = w.at_work("hobi");
-            w.seen_posts("suga", 3);
-            let hobi = maknae_config::AgentId::parse("hobi").unwrap();
-            let before = (w.cursor("hobi"), w.agents.board.sent_to(w.key(), &hobi));
+            let tasks = two_readers(&w).await;
+            let before = reading(&w);
+            assert!(
+                before.iter().all(|(_, sent)| !sent.is_empty()),
+                "{before:?}"
+            );
+            assert!(before[1].0 > 0, "jin holds an acknowledged cursor");
             for through in [u64::MAX, 2] {
                 assert!(is_seen(&w.seen_ask(seen(through)).await.0));
-                let now = (w.cursor("hobi"), w.agents.board.sent_to(w.key(), &hobi));
-                assert_eq!(now, before, "{through}");
+                assert_eq!(reading(&w), before, "{through}");
             }
             assert_eq!(w.mark_of(w.me), 3);
-            let page = page_of(w.board("hobi", read(None), h).await.0);
+
+            let twin = seen_world("seen-agents-unchanged-twin", "user", SEEN_ROLES);
+            let twin_tasks = two_readers(&twin).await;
+            assert_eq!(reading(&twin), before);
             assert_eq!(
-                bodies(&page),
-                ["sentinel-715-1", "sentinel-715-2", "sentinel-715-3"]
+                next_reads(&w, tasks).await,
+                next_reads(&twin, twin_tasks).await
             );
         }
     }

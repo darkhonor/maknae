@@ -115,8 +115,12 @@ pub(crate) struct BoardRecord {
     pub board: u32,
     pub next_seq: u64,
     pub settings: Settings,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub seen_through: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

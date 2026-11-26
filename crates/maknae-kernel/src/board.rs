@@ -4445,6 +4445,25 @@ mod tests {
     }
 
     #[test]
+    fn an_unmoved_mark_encodes_the_record_as_before_and_a_moved_one_carries_it() {
+        use crate::board_store::BoardRecord;
+        let rec = |seen_through| BoardRecord {
+            board: 1000,
+            next_seq: 4,
+            settings: Settings {
+                enabled: true,
+                report: Report::Every,
+            },
+            seen_through,
+        };
+        assert_eq!(encode(&rec(0)).unwrap(), seen_record(4, None));
+        assert_eq!(encode(&rec(3)).unwrap(), seen_record(4, Some(3)));
+        let decoded = |b: &[u8]| ciborium::from_reader::<BoardRecord, _>(b).unwrap();
+        assert_eq!(decoded(&seen_record(4, None)), rec(0));
+        assert_eq!(decoded(&seen_record(4, Some(3))), rec(3));
+    }
+
+    #[test]
     fn a_board_record_written_before_the_mark_loads_with_mark_zero() {
         let b = MemTaskBlobs::default();
         let (store, _) = wide(&b);
@@ -4612,6 +4631,10 @@ mod tests {
         assert_eq!(listed_range(5, None), Some((Excluded(5), Unbounded)));
         assert_eq!(listed_range(5, Some(6)), Some((Excluded(5), Excluded(6))));
         assert_eq!(listed_range(0, Some(1)), Some((Excluded(0), Excluded(1))));
+        assert_eq!(
+            listed_range(u64::MAX, None),
+            Some((Excluded(u64::MAX), Unbounded))
+        );
         for (floor, before) in [(5, 5), (5, 4), (0, 0), (u64::MAX, 7)] {
             assert_eq!(listed_range(floor, Some(before)), None, "{floor} {before}");
         }
