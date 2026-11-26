@@ -1,22 +1,25 @@
 use std::io;
 use std::sync::OnceLock;
 
-use rustix::process::{setrlimit, Resource, Rlimit};
+use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
 
 static CORE_DUMPS_DENIED: OnceLock<Result<(), i32>> = OnceLock::new();
 
-/// Makes this process write no core file and, on Linux, non-dumpable, once; a failure is sticky.
+/// Lowers the soft core limit to 0 and, on Linux, makes the process non-dumpable, once; a
+/// failure is sticky. A holder calls it before fetching a credential. Only the soft limit
+/// moves, so no `process:setrlimit` permission is needed under a confined domain.
 pub fn deny_core_dumps() -> io::Result<()> {
     (*CORE_DUMPS_DENIED.get_or_init(|| deny().map_err(|e| e.raw_os_error())))
         .map_err(io::Error::from_raw_os_error)
 }
 
 fn deny() -> rustix::io::Result<()> {
+    let hard = getrlimit(Resource::Core).maximum;
     setrlimit(
         Resource::Core,
         Rlimit {
             current: Some(0),
-            maximum: Some(0),
+            maximum: hard,
         },
     )?;
     #[cfg(target_os = "linux")]
@@ -27,13 +30,14 @@ fn deny() -> rustix::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustix::process::{getrlimit, Resource};
 
     #[test]
-    fn deny_core_dumps_sets_a_zero_core_limit() {
+    fn deny_core_dumps_lowers_only_the_soft_core_limit() {
+        let before = getrlimit(Resource::Core);
         deny_core_dumps().unwrap();
-        let limit = getrlimit(Resource::Core);
-        assert_eq!((limit.current, limit.maximum), (Some(0), Some(0)));
+        let after = getrlimit(Resource::Core);
+        assert_eq!(after.current, Some(0));
+        assert_eq!(after.maximum, before.maximum);
     }
 
     #[cfg(target_os = "linux")]

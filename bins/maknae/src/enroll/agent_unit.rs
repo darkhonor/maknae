@@ -258,6 +258,7 @@ mod tests {
             ("ProtectHome", "read-only"),
             ("ProtectSystem", "strict"),
             ("NoNewPrivileges", "yes"),
+            ("LimitCORE", "0"),
             ("CapabilityBoundingSet", ""),
             ("Restart", "on-failure"),
             ("RestartPreventExitStatus", "2"),

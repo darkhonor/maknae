@@ -517,6 +517,8 @@ floor_production_region = 90
 # What stays here is the I/O around it: calling it on every read, the sticky
 # verdict, and queueing descriptors only after it admits.
 files = [
+  # #751: deny_core_dumps (soft RLIMIT_CORE, non-dumpable) and, with Task 3, the launch-credential send/receive over a Unix socket.
+  "crates/maknae-io/src/credential_io.rs",
   # #240a: the kernel-side egress transport. T2, not T1, and by the repo's own
   # line-drawing rather than by convenience: this file is socket I/O — connect,
   # timeouts, framed read/write — and every other I/O file here is T3

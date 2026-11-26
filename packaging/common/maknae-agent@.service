@@ -19,6 +19,7 @@ UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_prox
 ProtectSystem=strict
 ProtectHome=read-only
 NoNewPrivileges=yes
+LimitCORE=0
 CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateTmp=yes
