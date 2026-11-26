@@ -905,6 +905,12 @@ pub(crate) async fn minted_plane(
 /// printed to stderr — the caller maps this to a non-zero exit), `Err` for any
 /// earlier (config/mint/connect/frame) failure.
 async fn execute(verb: Verb) -> Result<bool, String> {
+    let mut ending = match verb {
+        Verb::BoardWatch { .. } => {
+            Some(crate::screen::run::Ending::register().map_err(|e| e.to_string())?)
+        }
+        _ => None,
+    };
     let (dir, document, transport) = cli_config()?;
 
     let session = crate::login::user_session(&document, &dir)?;
@@ -915,7 +921,7 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     )?;
 
     let (client, trust) = minted_plane(&document, &dir, &session.token).await?;
-    let outcome = round_trip(
+    let trip = round_trip(
         verb,
         request,
         content,
@@ -923,8 +929,15 @@ async fn execute(verb: Verb) -> Result<bool, String> {
         &client,
         &trust,
         session.expires_at,
-    )
-    .await;
+    );
+    let outcome = match ending.as_mut() {
+        Some(ending) => tokio::select! {
+            biased;
+            _ = ending.next() => Ok(true),
+            outcome = trip => outcome,
+        },
+        None => trip.await,
+    };
     if let Err(e) = client.shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
     }
@@ -938,7 +951,7 @@ async fn leaf_ready(
     now: u64,
 ) -> Result<(), String> {
     let login_expired = crate::agent::login_expired(login_expires_at, now);
-    match maknae_agent::plane::leaf_step(leaf.not_after(), now, login_expired) {
+    match maknae_agent::plane::watch_leaf_step(leaf.not_after(), now, login_expired) {
         maknae_agent::plane::LeafStep::Fresh => Ok(()),
         maknae_agent::plane::LeafStep::LoginExpired => Err(crate::agent::LOGIN_EXPIRED.into()),
         maknae_agent::plane::LeafStep::Remint { valid } => match leaf.remint().await {
@@ -1025,24 +1038,25 @@ async fn round_trip(
         ));
     }
     if let Verb::BoardWatch { interval } = &verb {
-        let mut ending = crate::screen::run::Ending::register().map_err(|e| e.to_string())?;
         let send = |v| async move {
             leaf_ready(client, login_expires_at, maknae_io::now_unix()?).await?;
             board_send(v).await
         };
         let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
-        let watching = maknae_agent::board::watch(
+        let said = maknae_agent::board::watch(
             std::time::Duration::from_secs(u64::from(*interval)),
             &mut out,
             &mut err,
             send,
             tokio::time::sleep,
             std::time::Instant::now,
-        );
-        return tokio::select! {
-            said = watching => Ok(print_said(&said, &mut std::io::stdout(), &mut std::io::stderr())),
-            _ = ending.next() => Ok(true),
-        };
+        )
+        .await;
+        return Ok(print_said(
+            &said,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ));
     }
     if let Verb::BoardList {
         want,
@@ -2475,9 +2489,14 @@ mod tests {
     const LOGIN_GONE: u64 = NOW;
 
     #[tokio::test]
-    async fn the_watch_readies_its_leaf_as_a_session_does() {
+    async fn the_watch_readies_its_leaf() {
         let fresh = test_leaf(Some(NOW + 3600), false);
-        assert_eq!(leaf_ready(&fresh, LOGIN_GONE, NOW).await, Ok(()));
+        assert_eq!(leaf_ready(&fresh, LOGIN_VALID, NOW).await, Ok(()));
+        assert_eq!(mints(&fresh), 0);
+        assert_eq!(
+            leaf_ready(&fresh, LOGIN_GONE, NOW).await,
+            Err(crate::agent::LOGIN_EXPIRED.into())
+        );
         assert_eq!(mints(&fresh), 0);
 
         let near = test_leaf(Some(NOW + 10), false);
@@ -2504,6 +2523,41 @@ mod tests {
             Err(crate::agent::LOGIN_EXPIRED.into())
         );
         assert_eq!(mints(&expired), 0);
+    }
+
+    #[tokio::test]
+    async fn an_expired_login_ends_the_watch_though_its_leaf_is_fresh() {
+        let leaf = test_leaf(Some(NOW + 3600), false);
+        let sent = std::cell::Cell::new(0);
+        let said = maknae_agent::board::watch(
+            std::time::Duration::from_secs(30),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |_| {
+                let ready = leaf_ready(&leaf, LOGIN_GONE, NOW);
+                let sent = &sent;
+                async move {
+                    ready.await?;
+                    sent.set(sent.get() + 1);
+                    Ok(maknae_agent::wire::WireOutcome::Payload(
+                        maknae_proto::Payload::BoardSettings(maknae_proto::BoardSettings {
+                            enabled: true,
+                            report: maknae_proto::BoardReport::Off,
+                        }),
+                    ))
+                }
+            },
+            |_| async {},
+            std::time::Instant::now,
+        )
+        .await;
+        let (mut out, mut err) = (vec![], vec![]);
+        assert!(!print_said(&said, &mut out, &mut err));
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!("maknae: {}\n", crate::agent::LOGIN_EXPIRED)
+        );
+        assert_eq!((sent.get(), mints(&leaf)), (0, 0));
     }
 
     #[tokio::test]

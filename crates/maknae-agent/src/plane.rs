@@ -309,9 +309,48 @@ pub fn leaf_step(not_after: Option<u64>, now: u64, login_expired: bool) -> LeafS
     }
 }
 
+/// The watch's step: unlike a session's, an expired login ends it whatever the leaf.
+pub fn watch_leaf_step(not_after: Option<u64>, now: u64, login_expired: bool) -> LeafStep {
+    if login_expired {
+        LeafStep::LoginExpired
+    } else {
+        leaf_step(not_after, now, false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_watch_ends_on_an_expired_login_whatever_its_leaf() {
+        for at in [Some(u64::MAX), Some(1061), Some(1060), Some(900), None] {
+            assert_eq!(
+                watch_leaf_step(at, 1000, true),
+                LeafStep::LoginExpired,
+                "{at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_a_valid_login_a_watch_steps_as_a_session_does() {
+        for at in [
+            Some(u64::MAX),
+            Some(1061),
+            Some(1060),
+            Some(1000),
+            Some(900),
+            None,
+        ] {
+            assert_eq!(
+                watch_leaf_step(at, 1000, false),
+                leaf_step(at, 1000, false),
+                "{at:?}"
+            );
+        }
+        assert_eq!(watch_leaf_step(Some(1061), 1000, false), LeafStep::Fresh);
+    }
 
     #[test]
     fn a_leaf_far_from_its_not_after_is_fresh_whatever_the_login() {
