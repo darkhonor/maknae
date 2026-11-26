@@ -1,21 +1,42 @@
-//! `maknae board settings` and `maknae board clear`: which settings a change
-//! sends, when a clear stops, and what the person is told.
+//! `maknae board`, `maknae board settings` and `maknae board clear`: which pages a
+//! listing asks for, which settings a change sends, when a clear stops, and what the
+//! person is told.
 use crate::tasking::text::{
-    board_cleared_line, board_refused_line, board_settings_lines, board_stopped_line,
-    board_unknown_line, safe, BoardCommand,
+    board_attachment_line, board_cleared_line, board_entry_header, board_list_stopped_line,
+    board_refused_line, board_settings_lines, board_stopped_line, board_unknown_line, one_line,
+    write_board_text, BoardCommand, BOARD_NO_POSTS, BOARD_OLDER,
 };
 use crate::wire::WireOutcome;
 use maknae_proto::{
-    BoardCleared, BoardOp, BoardReport, BoardSettings, Payload, ProtoErrCode, Verb,
+    BoardCleared, BoardEntry, BoardListing, BoardOp, BoardReport, BoardSettings, Payload,
+    ProtoErrCode, Verb,
 };
 use std::future::Future;
 use std::io::{BufRead, Read, Write};
 
 pub const BOARD_CLEAR_REQUESTS_MAX: u32 = 64;
+pub const BOARD_LIST_REQUESTS_MAX: u32 = 64;
+pub const BOARD_LIST_LAST_MAX: u16 = 1024;
 pub const CONFIRM_ANSWER_MAX_BYTES: u64 = 64;
 const CONFIRM_PROMPT: &[u8] = b"clear every post on your board that is not held? [y/N] ";
 const NOT_A_BOARD_REPLY: &str = "protocol error: the kernel's answer was not a board reply";
 const HELD_OTHER: &str = "the kernel holds settings other than the ones asked for";
+const NOT_MOVED_BACK: &str = "protocol error: the kernel's listing did not move back";
+
+/// How much of the board a listing asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListWant {
+    Latest,
+    Last(u16),
+    All,
+}
+
+/// The posts listed, oldest first; `older`: posts older than these remain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub entries: Vec<BoardEntry>,
+    pub older: bool,
+}
 
 /// The settings a person named; `None` leaves that setting as it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,13 +111,21 @@ fn answer(sent: Result<WireOutcome, String>, command: BoardCommand) -> Result<Pa
 fn refused_line(code: ProtoErrCode, message: &str, command: BoardCommand) -> String {
     match code {
         ProtoErrCode::BoardRefused(defect) => board_refused_line(defect, command),
-        ProtoErrCode::Unauthorized => format!("you may not manage a board: {}", one_line(message)),
+        ProtoErrCode::Unauthorized => match command {
+            BoardCommand::List => format!("you may not read your board: {}", one_line(message)),
+            BoardCommand::Settings | BoardCommand::Clear => {
+                format!("you may not manage a board: {}", one_line(message))
+            }
+        },
         _ => format!("the kernel refused the request: {}", one_line(message)),
     }
 }
 
-fn one_line(s: &str) -> String {
-    safe(&s.replace(['\n', '\r'], " "))
+fn listing_reply(sent: Result<WireOutcome, String>) -> Result<BoardListing, Stop> {
+    match answer(sent, BoardCommand::List)? {
+        Payload::BoardListing(listing) => Ok(listing),
+        _ => Err(Stop::Unconfirmed(NOT_A_BOARD_REPLY.into())),
+    }
 }
 
 fn settings_reply(sent: Result<WireOutcome, String>) -> Result<BoardSettings, Stop> {
@@ -155,6 +184,105 @@ where
             ok: false,
         },
     }
+}
+
+/// Walks back from the newest page; the `Said`, when there is one, is why the walk stopped.
+pub async fn list<F, Fut>(want: ListWant, mut send: F) -> (Listed, Option<Said>)
+where
+    F: FnMut(Verb) -> Fut,
+    Fut: Future<Output = Result<WireOutcome, String>>,
+{
+    let mut pages: Vec<Vec<BoardEntry>> = vec![];
+    let mut collected: usize = 0;
+    let mut before = None;
+    let mut older = None;
+    let mut requests: u32 = 0;
+    let stop = loop {
+        requests += 1;
+        let page = match listing_reply(send(Verb::BoardList { before }).await) {
+            Ok(page) => page,
+            Err(stop) => break Some(stop.err(BoardCommand::List, false)),
+        };
+        if let (Some(sent), Some(next)) = (before, page.older) {
+            if next >= sent {
+                break Some(vec![NOT_MOVED_BACK.into()]);
+            }
+        }
+        collected += page.entries.len();
+        pages.push(page.entries);
+        older = page.older;
+        let enough = match want {
+            ListWant::Latest => collected > 0,
+            ListWant::Last(n) => collected >= usize::from(n),
+            ListWant::All => false,
+        };
+        if older.is_none() || enough {
+            break None;
+        }
+        if requests >= BOARD_LIST_REQUESTS_MAX {
+            break Some(vec![board_list_stopped_line(collected as u64)]);
+        }
+        before = older;
+    };
+    let mut entries: Vec<BoardEntry> = pages.into_iter().rev().flatten().collect();
+    let dropped = match want {
+        ListWant::Last(n) => entries.len().saturating_sub(usize::from(n)),
+        ListWant::Latest | ListWant::All => 0,
+    };
+    entries.drain(..dropped);
+    (
+        Listed {
+            entries,
+            older: older.is_some() || dropped > 0,
+        },
+        stop.map(|err| Said {
+            out: vec![],
+            err,
+            ok: false,
+        }),
+    )
+}
+
+/// What follows the posts: `no posts`, the hint that older posts remain, or why the walk stopped.
+pub fn listing_said(want: ListWant, listed: &Listed, stop: Option<Said>) -> Said {
+    let mut said = stop.unwrap_or(Said {
+        out: vec![],
+        err: vec![],
+        ok: true,
+    });
+    if listed.older && want != ListWant::All {
+        said.out.push(BOARD_OLDER.into());
+    } else if listed.entries.is_empty() && said.ok {
+        said.out.push(BOARD_NO_POSTS.into());
+    }
+    said
+}
+
+/// Each post's header, its body line by line, then its attachments; a body and an
+/// attachment's content are written straight from the reply, never copied.
+pub fn print_listing(
+    listed: &Listed,
+    attachments: bool,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    for e in &listed.entries {
+        let reply_seq = e.post.draft.in_reply_to.and_then(|id| {
+            listed
+                .entries
+                .iter()
+                .find(|t| t.post.id == id)
+                .map(|t| t.seq)
+        });
+        writeln!(out, "{}", board_entry_header(e, reply_seq))?;
+        write_board_text(out, "    ", &e.post.draft.body.0)?;
+        for a in &e.post.draft.attachments {
+            writeln!(out, "{}", board_attachment_line(a))?;
+            if attachments {
+                write_board_text(out, "      ", &a.content.0)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The caller has already confirmed.
@@ -255,7 +383,10 @@ pub fn confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maknae_proto::BoardDefect;
+    use maknae_proto::{
+        Addressee, Attachment, Author, BoardDefect, BoardHold, Labels, Media, Post, PostDraft,
+        PostId, PostKind, SecretText, TaskId,
+    };
     use std::collections::VecDeque;
     use BoardReport::{Every, Off, Summary};
 
@@ -857,6 +988,434 @@ mod tests {
                 &[NOT_A_BOARD_REPLY, CLEAR_UNKNOWN],
                 false
             )
+        );
+    }
+
+    const CONTAINED: &str = "subject contained: role=adversary";
+    const NOT_READ: &str = "the board could not be read; try again";
+    const OLDER: &str = "older posts remain; run maknae board --all to see them";
+    const NOT_MOVED: &str = "protocol error: the kernel's listing did not move back";
+
+    fn secret(s: &str) -> SecretText {
+        SecretText(zeroize::Zeroizing::new(s.into()))
+    }
+
+    fn entry(seq: u64) -> BoardEntry {
+        BoardEntry {
+            seq,
+            post: Post {
+                id: PostId([u8::try_from(seq % 256).unwrap(); 16]),
+                author: Author::Agent("hobi".into()),
+                task: None,
+                at_secs: 1_795_654_923,
+                labels: Labels {},
+                draft: PostDraft {
+                    kind: PostKind::Note,
+                    to: Addressee::Board,
+                    in_reply_to: None,
+                    body: secret(&format!("post {seq}")),
+                    attachments: vec![],
+                },
+            },
+            held: vec![],
+        }
+    }
+
+    fn page(seqs: &[u64], older: Option<u64>) -> Result<WireOutcome, String> {
+        Ok(WireOutcome::Payload(Payload::BoardListing(BoardListing {
+            entries: seqs.iter().copied().map(entry).collect(),
+            older,
+        })))
+    }
+
+    fn at(before: Option<u64>) -> Verb {
+        Verb::BoardList { before }
+    }
+
+    fn seqs(listed: &Listed) -> Vec<u64> {
+        listed.entries.iter().map(|e| e.seq).collect()
+    }
+
+    async fn run_list(
+        want: ListWant,
+        replies: Vec<Result<WireOutcome, String>>,
+    ) -> (Listed, Option<Said>, Vec<Verb>) {
+        let mut replies: VecDeque<_> = replies.into();
+        let mut sent = vec![];
+        let (listed, stop) = list(want, |v| {
+            sent.push(v);
+            let r = replies.pop_front().expect("script exhausted");
+            async move { r }
+        })
+        .await;
+        (listed, stop, sent)
+    }
+
+    fn printed(listed: &Listed, attachments: bool) -> String {
+        let mut out = vec![];
+        print_listing(listed, attachments, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn listed(entries: Vec<BoardEntry>) -> Listed {
+        Listed {
+            entries,
+            older: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_sends_one_request_from_the_top() {
+        let (l, stop, sent) = run_list(ListWant::Latest, vec![page(&[1, 2], None)]).await;
+        assert_eq!(sent, vec![at(None)]);
+        assert_eq!((seqs(&l), l.older, stop), (vec![1, 2], false, None));
+        let (l, stop, sent) = run_list(ListWant::Latest, vec![page(&[7, 9], Some(7))]).await;
+        assert_eq!(sent, vec![at(None)]);
+        assert_eq!((seqs(&l), l.older, stop), (vec![7, 9], true, None));
+    }
+
+    #[tokio::test]
+    async fn latest_walks_past_an_empty_page_with_older() {
+        let (l, stop, sent) = run_list(
+            ListWant::Latest,
+            vec![
+                page(&[], Some(40)),
+                page(&[], Some(8)),
+                page(&[5, 6], Some(5)),
+            ],
+        )
+        .await;
+        assert_eq!(sent, vec![at(None), at(Some(40)), at(Some(8))]);
+        assert_eq!((seqs(&l), l.older, stop), (vec![5, 6], true, None));
+        let (l, stop, sent) =
+            run_list(ListWant::Latest, vec![page(&[], Some(40)), page(&[], None)]).await;
+        assert_eq!(sent, vec![at(None), at(Some(40))]);
+        assert_eq!((seqs(&l), l.older, stop), (vec![], false, None));
+    }
+
+    #[tokio::test]
+    async fn last_n_collects_pages_and_keeps_the_newest_n() {
+        let (l, stop, sent) = run_list(
+            ListWant::Last(3),
+            vec![page(&[10, 11], Some(10)), page(&[8, 9], Some(8))],
+        )
+        .await;
+        assert_eq!(sent, vec![at(None), at(Some(10))]);
+        assert_eq!((seqs(&l), l.older, stop), (vec![9, 10, 11], true, None));
+        let (l, stop, sent) = run_list(
+            ListWant::Last(4),
+            vec![page(&[10, 11], Some(10)), page(&[8, 9], None)],
+        )
+        .await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!((seqs(&l), l.older, stop), (vec![8, 9, 10, 11], false, None));
+        let (l, stop, sent) = run_list(
+            ListWant::Last(5),
+            vec![page(&[10, 11], Some(10)), page(&[8, 9], None)],
+        )
+        .await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!((seqs(&l), l.older, stop), (vec![8, 9, 10, 11], false, None));
+        let (l, _, sent) = run_list(ListWant::Last(2), vec![page(&[10, 11], Some(10))]).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!((seqs(&l), l.older), (vec![10, 11], true));
+        let (l, _, _) = run_list(ListWant::Last(1), vec![page(&[10, 11], None)]).await;
+        assert_eq!((seqs(&l), l.older), (vec![11], true));
+    }
+
+    #[tokio::test]
+    async fn all_walks_to_the_start_and_prints_oldest_first() {
+        let (l, stop, sent) = run_list(
+            ListWant::All,
+            vec![
+                page(&[5, 6], Some(5)),
+                page(&[], Some(3)),
+                page(&[1, 2], None),
+            ],
+        )
+        .await;
+        assert_eq!(sent, vec![at(None), at(Some(5)), at(Some(3))]);
+        assert_eq!(
+            (seqs(&l), l.older, stop.clone()),
+            (vec![1, 2, 5, 6], false, None)
+        );
+        let text = printed(&l, false);
+        let headers: Vec<&str> = text.lines().filter(|l| l.starts_with('#')).collect();
+        assert_eq!(headers.len(), 4);
+        for (h, seq) in headers.iter().zip([1, 2, 5, 6]) {
+            assert!(h.starts_with(&format!("#{seq}  ")), "{h}");
+        }
+        assert_eq!(listing_said(ListWant::All, &l, stop), said(&[], &[], true));
+    }
+
+    #[tokio::test]
+    async fn a_walk_stops_after_64_requests_and_says_so() {
+        let pages = (0..64)
+            .map(|i| page(&[1000 - i], Some(1000 - i)))
+            .collect::<Vec<_>>();
+        let (l, stop, sent) = run_list(ListWant::All, pages).await;
+        assert_eq!(sent.len(), 64);
+        assert_eq!(sent[1], at(Some(1000)));
+        assert_eq!(seqs(&l), (937..=1000).collect::<Vec<_>>());
+        assert!(l.older);
+        let stopped = "stopped after 64 requests and 64 posts; older posts remain";
+        assert_eq!(stop, Some(said(&[], &[stopped], false)));
+        assert_eq!(
+            listing_said(ListWant::All, &l, stop),
+            said(&[], &[stopped], false)
+        );
+
+        let mut pages = (0..63)
+            .map(|i| page(&[1000 - i], Some(1000 - i)))
+            .collect::<Vec<_>>();
+        pages.push(page(&[1], None));
+        let (l, stop, sent) = run_list(ListWant::All, pages).await;
+        assert_eq!(
+            (sent.len(), l.entries.len(), l.older, stop),
+            (64, 64, false, None)
+        );
+
+        let empty = (0..64)
+            .map(|i| page(&[], Some(1000 - i)))
+            .collect::<Vec<_>>();
+        let (l, stop, sent) = run_list(ListWant::Latest, empty).await;
+        assert_eq!(sent.len(), 64);
+        assert!(l.entries.is_empty());
+        assert_eq!(
+            stop,
+            Some(said(
+                &[],
+                &["stopped after 64 requests and 0 posts; older posts remain"],
+                false
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_that_does_not_move_back_stops_the_walk() {
+        for stuck in [5, 6] {
+            let (l, stop, sent) = run_list(
+                ListWant::All,
+                vec![page(&[5], Some(5)), page(&[4], Some(stuck))],
+            )
+            .await;
+            assert_eq!(sent, vec![at(None), at(Some(5))]);
+            assert_eq!(seqs(&l), vec![5]);
+            assert!(l.older);
+            assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+        }
+        let (l, stop, _) = run_list(
+            ListWant::All,
+            vec![page(&[5], Some(5)), page(&[4], Some(4)), page(&[], None)],
+        )
+        .await;
+        assert_eq!((seqs(&l), stop), (vec![4, 5], None));
+    }
+
+    #[tokio::test]
+    async fn a_refused_listing_says_so_and_exits_one() {
+        let (l, stop, sent) = run_list(
+            ListWant::Latest,
+            vec![refused(ProtoErrCode::Unauthorized, CONTAINED)],
+        )
+        .await;
+        assert_eq!(sent, vec![at(None)]);
+        assert!(l.entries.is_empty());
+        let want = said(
+            &[],
+            &["you may not read your board: subject contained: role=adversary"],
+            false,
+        );
+        assert_eq!(stop, Some(want.clone()));
+        assert_eq!(listing_said(ListWant::Latest, &l, stop), want);
+        for defect in [BoardDefect::TryAgain, BoardDefect::OutcomeUnknown] {
+            let (_, stop, _) = run_list(
+                ListWant::Latest,
+                vec![refused(ProtoErrCode::BoardRefused(defect), "x")],
+            )
+            .await;
+            assert_eq!(stop, Some(said(&[], &[NOT_READ], false)));
+        }
+        let (l, stop, _) = run_list(
+            ListWant::All,
+            vec![page(&[5, 6], Some(5)), Err("connection\u{1b}reset".into())],
+        )
+        .await;
+        assert_eq!(seqs(&l), vec![5, 6]);
+        assert_eq!(stop, Some(said(&[], &["connection\\u{001b}reset"], false)));
+        for bad in [
+            cleared(1, false),
+            settled(s(true, Every)),
+            write_done(),
+            read_done(),
+        ] {
+            let (_, stop, _) = run_list(ListWant::Latest, vec![bad]).await;
+            assert_eq!(stop, Some(said(&[], &[NOT_A_BOARD_REPLY], false)));
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_and_clear_refusals_still_say_manage() {
+        let (said_, _) = run_settings(
+            SettingsChange::default(),
+            vec![refused(ProtoErrCode::Unauthorized, CONTAINED)],
+        )
+        .await;
+        assert_eq!(
+            said_,
+            said(
+                &[],
+                &["you may not manage a board: subject contained: role=adversary"],
+                false
+            )
+        );
+        let (said_, _) = run_clear(vec![refused(ProtoErrCode::Unauthorized, CONTAINED)]).await;
+        assert_eq!(
+            said_,
+            said(
+                &[],
+                &["you may not manage a board: subject contained: role=adversary"],
+                false
+            )
+        );
+    }
+
+    #[test]
+    fn a_hostile_post_prints_escaped_line_by_line() {
+        let mut e = entry(3);
+        e.post.draft.body = secret("a\u{1b}[2J\rb\nc\td\u{0}\n\u{1b}]0;x\u{7}");
+        e.post.draft.attachments = vec![Attachment {
+            label: "log".into(),
+            media: Media::TextPlain,
+            content: secret("p\u{1b}q\r\nr\ts\u{0}"),
+        }];
+        let text = printed(&listed(vec![e]), true);
+        for b in [0x1b, 0x0d, 0x00, 0x09, 0x07] {
+            assert!(!text.as_bytes().contains(&b), "{b:#x} in {text:?}");
+        }
+        assert_eq!(
+            text.lines().skip(1).collect::<Vec<_>>(),
+            [
+                "    a\\u{001b}[2J\\u{000d}b",
+                "    c\\u{0009}d\\u{0000}",
+                "    \\u{001b}]0;x\\u{0007}",
+                "  attachment log  text/plain  9 bytes",
+                "      p\\u{001b}q\\u{000d}",
+                "      r\\u{0009}s\\u{0000}",
+            ]
+        );
+    }
+
+    #[test]
+    fn attachments_print_contents_only_when_asked() {
+        let mut e = entry(4);
+        e.post.draft.attachments = vec![
+            Attachment {
+                label: "a.diff".into(),
+                media: Media::TextDiff,
+                content: secret("-x\n+y"),
+            },
+            Attachment {
+                label: "b.md".into(),
+                media: Media::TextMarkdown,
+                content: secret("# b"),
+            },
+        ];
+        let l = listed(vec![e]);
+        assert_eq!(
+            printed(&l, false),
+            "#4  2026-11-26T01:02:03.000Z  hobi  to board  note\n    post 4\n  attachment a.diff  text/x-diff  5 bytes\n  attachment b.md  text/markdown  3 bytes\n"
+        );
+        assert_eq!(
+            printed(&l, true),
+            "#4  2026-11-26T01:02:03.000Z  hobi  to board  note\n    post 4\n  attachment a.diff  text/x-diff  5 bytes\n      -x\n      +y\n  attachment b.md  text/markdown  3 bytes\n      # b\n"
+        );
+    }
+
+    #[test]
+    fn a_board_prints_as_the_person_reads_it() {
+        let plain = entry(5);
+        let mut reply = entry(6);
+        reply.post.author = Author::Agent("jin".into());
+        reply.post.task = Some(TaskId([0xab; 16]));
+        reply.post.draft.kind = PostKind::Answer;
+        reply.post.draft.to = Addressee::Agents(vec!["hobi".into()]);
+        reply.post.draft.in_reply_to = Some(plain.post.id);
+        reply.post.draft.body = secret("yes\nsee the diff");
+        reply.post.draft.attachments = vec![Attachment {
+            label: "fix.diff".into(),
+            media: Media::TextDiff,
+            content: secret("-a\n+b"),
+        }];
+        let mut held = entry(7);
+        held.post.author = Author::Agent("suga".into());
+        held.post.draft.kind = PostKind::Question;
+        held.post.draft.in_reply_to = Some(PostId([0x02; 16]));
+        held.held = vec![BoardHold::Author, BoardHold::Person];
+        let mut hostile = entry(8);
+        hostile.post.author = Author::Agent("ev\u{1b}il\nx".into());
+        hostile.post.draft.body = secret("\u{1b}[2Jgone\r\nmaknae: done\u{202e}");
+        let l = listed(vec![plain, reply, held, hostile]);
+        let task = "ab".repeat(16);
+        let target = "02".repeat(16);
+        assert_eq!(
+            printed(&l, true),
+            format!(
+                "#5  2026-11-26T01:02:03.000Z  hobi  to board  note\n    post 5\n\
+                 #6  2026-11-26T01:02:03.000Z  jin  to agents: hobi  answer  task {task}  reply to #5\n    yes\n    see the diff\n  attachment fix.diff  text/x-diff  5 bytes\n      -a\n      +b\n\
+                 #7  2026-11-26T01:02:03.000Z  suga  to board  question  reply to {target}  HELD (author contained)  HELD (you were contained)\n    post 7\n\
+                 #8  2026-11-26T01:02:03.000Z  ev\\u{{001b}}il x  to board  note\n    \\u{{001b}}[2Jgone\\u{{000d}}\n    maknae: done\\u{{202e}}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn an_empty_board_prints_no_posts() {
+        let l = listed(vec![]);
+        assert_eq!(printed(&l, true), "");
+        for want in [ListWant::Latest, ListWant::Last(3), ListWant::All] {
+            assert_eq!(listing_said(want, &l, None), said(&["no posts"], &[], true));
+        }
+    }
+
+    #[test]
+    fn a_reply_without_a_link_prints_no_reply_to() {
+        let target = entry(5);
+        let mut reply = entry(6);
+        reply.post.draft.in_reply_to = None;
+        let text = printed(&listed(vec![target.clone(), reply.clone()]), false);
+        assert!(!text.contains("reply to"), "{text}");
+        reply.post.draft.in_reply_to = Some(target.post.id);
+        let text = printed(&listed(vec![target.clone(), reply.clone()]), false);
+        assert!(text.contains("note  reply to #5\n"), "{text}");
+        let text = printed(&listed(vec![reply]), false);
+        assert!(
+            text.contains(&format!("note  reply to {}\n", "05".repeat(16))),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn older_names_all_when_not_asked_for() {
+        let mut l = listed(vec![entry(5)]);
+        l.older = true;
+        for want in [ListWant::Latest, ListWant::Last(1)] {
+            assert_eq!(listing_said(want, &l, None), said(&[OLDER], &[], true));
+        }
+        assert_eq!(listing_said(ListWant::All, &l, None), said(&[], &[], true));
+        let stop = said(&[], &["x"], false);
+        assert_eq!(
+            listing_said(ListWant::Latest, &l, Some(stop.clone())),
+            said(&[OLDER], &["x"], false)
+        );
+        assert_eq!(
+            listing_said(ListWant::All, &l, Some(stop)),
+            said(&[], &["x"], false)
+        );
+        l.older = false;
+        assert_eq!(
+            listing_said(ListWant::Latest, &l, None),
+            said(&[], &[], true)
         );
     }
 
