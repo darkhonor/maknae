@@ -224,7 +224,7 @@ kind = "call"
 label = "wrapped read of its own stored token per named server; seal the wrapping token to egress"
 status = "decided"
 evidence = "ADR-0037 decision 7 · #168"
-note = "The agent's own token is stored in Vault beforehand (ADR-0038 decision 2)."
+note = "Its own token, stored beforehand at <kv_mount>/data/<agent_prefix>/<id>/forges/<host>, field token."
 
 [[step]]
 id = "forge-auth-answer"
@@ -234,14 +234,14 @@ kind = "call"
 label = "forge_auth answer: the sealed wrapping tokens"
 status = "decided"
 evidence = "ADR-0033 · ADR-0037 decision 7 · #168"
-note = "Refused, forwarding nothing, unless the task is AwaitingReach for this agent."
+note = "Refused, forwarding nothing, unless a notice is outstanding: an AwaitingReach task, or a held add."
 
 [[step]]
 id = "agent-reach-frame"
 from = "kernel"
 to = "egress"
 kind = "call"
-label = "Reach frame: the agent's sealed token, the tasker side sealed to egress"
+label = "Reach frame: the agent's sealed token, the first-observed side sealed to egress"
 status = "decided"
 evidence = "ADR-0037 decision 7 · #168"
 note = "The kernel opens neither. The sealed side binds the task id and its bindings, so it cannot be altered or swapped."
@@ -263,7 +263,7 @@ kind = "call"
 label = "agent side: GET /repos/{base} and the head, as the machine user"
 status = "decided"
 evidence = "ADR-0037 decision 7 · #168"
-note = "404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403, 5xx or the deadline: the task closes NotReached."
+note = "404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403, 5xx or the deadline: the task closes NotReached (a held add is discarded)."
 
 [[step]]
 id = "agent-intersection"
@@ -312,7 +312,7 @@ label = "TaskClaim that finds a queued task"
 status = "live"
 evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::an_agent_claims_in_fifo_order_across_taskers"
-note = "Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1). Claimable only once reach is decided."
+note = "Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1). Ruled 2026-11-26, not built: claimable only once reach is decided."
 
 [[step]]
 id = "hand-out"
@@ -386,7 +386,7 @@ label = "/add: TaskAdd, a follow-up, while Working"
 status = "live"
 evidence = "ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::add_appends_a_follow_up_to_the_running_task_only"
-note = "Refused once the task is Reported. An /add with new bindings repeats steps 5 to 10, and 13 to 22 for a stored-token agent, and is a signed addendum; a stored-token add is held with its follow-up until its reach is decided. The agent gets it on its next heartbeat."
+note = "Refused once Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, as a signed addendum. Ruled 2026-11-26, not built: with a stored-token agent it is held with its follow-up through steps 13 to 21."
 
 [[step]]
 id = "ask"
@@ -561,7 +561,7 @@ last = "agent-side"
 
 [[fragment]]
 operator = "opt"
-guard = "the agent's credential is a stored token"
+guard = "a side's credential is a stored token"
 first = "queue-forge-auth"
 last = "sign-queue"
 status = "decided"

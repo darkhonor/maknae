@@ -48,7 +48,7 @@
 <rect data-frag="2" x="209" y="1048" width="936" height="682" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
 <path d="M 209 1048 h 32 v 9 l -5 5 h -27 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
 <text x="215" y="1058.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">opt</text>
-<text x="249" y="1058.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">«decided» [the agent's credential is a stored token]</text>
+<text x="249" y="1058.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">«decided» [a side's credential is a stored token]</text>
 <rect data-frag="3" x="217" y="1124" width="335" height="152" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
 <path d="M 217 1124 h 38 v 9 l -5 5 h -33 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
 <text x="223" y="1134.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">loop</text>
@@ -162,8 +162,8 @@
 <text x="384.5" y="1387" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0033 · ADR-0037 decision 7 · #168</text>
 <line x1="482" y1="1444" x2="677" y2="1444" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
 <text x="579.5" y="1414" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">18. «decided» Reach frame: the agent's</text>
-<text x="579.5" y="1426" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">sealed token, the tasker side sealed</text>
-<text x="579.5" y="1438" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">to egress</text>
+<text x="579.5" y="1426" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">sealed token, the first-observed</text>
+<text x="579.5" y="1438" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">side sealed to egress</text>
 <text x="579.5" y="1455" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0037 decision 7 · #168</text>
 <line x1="677" y1="1512" x2="872" y2="1512" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
 <text x="774.5" y="1482" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">19. «decided» open the seal, check the</text>
@@ -328,17 +328,17 @@
 <text x="40" y="4135" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">14.</text>
 <text x="60" y="4135" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Control frames only. It never renews the claim lease; the heartbeat still does, so a wedged loop lapses.</text>
 <text x="40" y="4162" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">16.</text>
-<text x="60" y="4162" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The agent's own token is stored in Vault beforehand (ADR-0038 decision 2).</text>
+<text x="60" y="4162" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Its own token, stored beforehand at &lt;kv_mount&gt;/data/&lt;agent_prefix&gt;/&lt;id&gt;/forges/&lt;host&gt;, field token.</text>
 <text x="40" y="4189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">17.</text>
-<text x="60" y="4189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Refused, forwarding nothing, unless the task is AwaitingReach for this agent.</text>
+<text x="60" y="4189" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Refused, forwarding nothing, unless a notice is outstanding: an AwaitingReach task, or a held add.</text>
 <text x="40" y="4216" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">18.</text>
 <text x="60" y="4216" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">The kernel opens neither. The sealed side binds the task id and its bindings, so it cannot be altered or swapped.</text>
 <text x="40" y="4243" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">20.</text>
-<text x="60" y="4243" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403, 5xx or the deadline: the task closes NotReached.</text>
+<text x="60" y="4243" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403, 5xx or the deadline: the task closes NotReached (a held add is discarded).</text>
 <text x="40" y="4270" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">22.</text>
 <text x="60" y="4270" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">A task is never claimable before its reach is decided.</text>
 <text x="40" y="4297" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">25.</text>
-<text x="60" y="4297" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1). Claimable only once reach is decided.</text>
+<text x="60" y="4297" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1). Ruled 2026-11-26, not built: claimable only once reach is decided.</text>
 <text x="40" y="4324" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">27.</text>
 <text x="60" y="4324" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Live for the file tools and sub-tasks. A gh, git or cargo call in a tool container is #479; its mint and launch are the tool-call diagram's steps.</text>
 <text x="40" y="4351" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">28.</text>
@@ -348,7 +348,7 @@
 <text x="40" y="4405" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">30.</text>
 <text x="60" y="4405" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Sent after a step once HEARTBEAT_EVERY has passed; it renews the 15-minute claim lease. A stop or follow-up is seen here.</text>
 <text x="40" y="4432" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">32.</text>
-<text x="60" y="4432" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Refused once the task is Reported. An /add with new bindings repeats steps 5 to 10, and 13 to 22 for a stored-token agent, and is a signed addendum; a stored-token add is held with its follow-up until its reach is decided. The agent gets it on its next heartbeat.</text>
+<text x="60" y="4432" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Refused once Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, as a signed addendum. Ruled 2026-11-26, not built: with a stored-token agent it is held with its follow-up through steps 13 to 21.</text>
 <text x="40" y="4459" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">33.</text>
 <text x="60" y="4459" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">At the agent's discretion; this is not an interactive session. The question's shape is open in #736.</text>
 <text x="40" y="4486" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">36.</text>
@@ -367,5 +367,5 @@
 <text x="60" y="4648" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">No kernel caller sends this until step 46 is built; an ADR-0038 as-built line follows then. The reach driver's metadata-read token is already revoked live (step 9).</text>
 <text x="40" y="4675" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#B3452F">48.</text>
 <text x="60" y="4675" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Nothing is pushed: the open session pulls. On opening a session, it first shows what came while you were away.</text>
-<text x="24" y="4707" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/task-tool-lifecycle.toml@ee71bb8235 · maknae 10c0afc4 · 2026-11-25</text><text x="1143" y="4707" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="4707" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/task-tool-lifecycle.toml@a04fa13a55 · maknae 10c0afc4 · 2026-11-25</text><text x="1143" y="4707" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>
