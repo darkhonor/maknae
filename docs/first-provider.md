@@ -393,7 +393,7 @@ Vault answers with a wrapping token around the write's metadata (its `wrapping_t
 
 #### Your forge token
 
-If you will task an agent on a GitHub forge, store a token for that forge in the same shell, with the same user token. At submission your client reads it and the kernel checks each bound repository against GitHub as you ([runbook: Store your forge login](runbook.md#store-your-forge-login) says why). The path is `<kv_mount>/data/<user_prefix>/<username>/forges/<host>`, field `token`, where `<host>` is the forge's host as `maknae tools` lists it; a `:` in the host is written `_`, so `ghe.example:8443` is stored at `forges/ghe.example_8443`.
+If you will task an agent on a GitHub forge, store a token for that forge in the same shell, with the same user token. At submission your client reads it, and each bound repository is checked against GitHub as you ([runbook: Store your forge login](runbook.md#store-your-forge-login) says why). The path is `<kv_mount>/data/<user_prefix>/<username>/forges/<host>`, field `token`, where `<host>` is the forge's host as `maknae tools` lists it; a `:` in the host is written `_`, so `ghe.example:8443` is stored at `forges/ghe.example_8443`.
 
 zsh (macOS), not yet measured:
 

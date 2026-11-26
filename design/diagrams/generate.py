@@ -1039,6 +1039,11 @@ def sequence(name: str) -> str:
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
         if s["kind"] == "ref":
             r0, r1 = ref_edges(n)
+            need = max(len(f'{n+1}. {lab[0]}') * 5.6, max(len(ln) for ln in lab) * 5.6,
+                       len(s.get("evidence", "")) * 4.6, len(s["target"]) * 4.6,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
+            if need > r1 - r0 - 12:
+                sys.exit(f"{name}: step {n + 1}: ref text does not fit its box; raise pitch or shorten it")
             return (r0 + r1) / 2, "middle", r0, r1
         if s["kind"] == "self":
             # A self-message on a right-hand lifeline can run its evidence off
@@ -1056,7 +1061,8 @@ def sequence(name: str) -> str:
                    len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
                    len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
         lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
-        return lx, "middle", min(lx - half, a, b), max(lx + half, a, b)
+        drawn = max(half, len(f'{n+1}. {lab[0]}') * 5.6 / 2)
+        return lx, "middle", min(lx - drawn, a, b), max(lx + drawn, a, b)
 
     maxdepth, fx = max(depth, default=0), []
     for k, ((i0, i1), f) in enumerate(zip(spans, frags), 1):
@@ -1092,6 +1098,12 @@ def sequence(name: str) -> str:
          f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
          f'stroke-width="1.1"/></marker></defs>']
 
+    for k, f in enumerate(frags):
+        if f["operator"] == "loop":
+            x0, x1, _ = fx[k]
+            p.append(f'<rect data-frag-fill="{k + 1}" x="{x0}" y="{heads[k] + 2}" width="{x1 - x0}" '
+                     f'height="{fbot[k] - heads[k] - 2}" fill="{LOOP_FILL}" fill-opacity="0.6"/>')
+
     # the trust boundaries, behind the lifelines
     bounds = doc.get("boundary", [])
     bxs = []
@@ -1114,12 +1126,6 @@ def sequence(name: str) -> str:
         if bd["left"]:
             p.append(text(bx - 8, HEAD - 40, bd["left"], 10, "600", fill=WARN, anchor="end"))
         p.append(text(bx + 8, HEAD - 40, bd["right"], 10, "600", fill=WARN))
-
-    for k, f in enumerate(frags):
-        if f["operator"] == "loop":
-            x0, x1, _ = fx[k]
-            p.append(f'<rect data-frag-fill="{k + 1}" x="{x0}" y="{heads[k] + 2}" width="{x1 - x0}" '
-                     f'height="{fbot[k] - heads[k] - 2}" fill="{LOOP_FILL}" fill-opacity="0.6"/>')
 
     # lifelines
     for i, pa in enumerate(parts):
@@ -1146,6 +1152,7 @@ def sequence(name: str) -> str:
         y, lab = ys[n], lines[n]
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
         if s["kind"] == "ref":
+            place(n)
             r0, r1 = ref_edges(n)
             top = y - 14 - 12 * (len(lab) - 1)
             bottom = y + 15 + 12 * (bool(s.get("test")) + 1) + 6

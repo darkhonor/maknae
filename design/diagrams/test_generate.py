@@ -263,6 +263,20 @@ class FragmentRendering(unittest.TestCase):
         t = ids(BASE.replace('evidence = "crates/maknae-kernel/src/task.rs"', f'evidence = "{"e" * 75}"', 1))
         exits(self, t + frag() + frag(operator="opt", first="s1", last="s1"), "text runs past the box")
 
+    def test_box_encloses_the_step_number_prefix(self):
+        label = "w" * 60
+        svg = render(ids(BASE.replace('label = "first"', f'label = "{label}"')) + frag(first="s1", last="s1"))
+        x = float(re.search(r'<text x="([-\d.]+)"[^>]*>1\. ' + label + "<", svg).group(1))
+        r = frag_rects(svg)[1]
+        half = len("1. " + label) * 5.6 / 2
+        self.assertLessEqual(r[0], x - half)
+        self.assertGreaterEqual(r[0] + r[2], x + half)
+
+    def test_loop_fill_is_drawn_behind_the_trust_boundary(self):
+        bound = '\n[[boundary]]\nbefore = "b"\nleft = ""\nright = "trusted"\n'
+        svg = render(ids(BASE).replace("[[participant]]", bound + "\n[[participant]]", 1) + frag())
+        self.assertLess(svg.index("data-frag-fill"), svg.index('stroke-dasharray="7 4"'))
+
     def test_loop_is_shaded_and_opt_is_not(self):
         svg = render(ids(BASE) + frag(first="s1", last="s2") + frag(operator="opt", first="s1", last="s1"))
         self.assertEqual(svg.count("data-frag-fill"), 1)
@@ -338,6 +352,10 @@ class RefSteps(unittest.TestCase):
         f, r = frag_rects(svg)[1], ref_rect(svg)
         self.assertLessEqual(f[0], r[0])
         self.assertGreaterEqual(f[0] + f[2], r[0] + r[2])
+
+    def test_ref_text_wider_than_its_box_exits(self):
+        exits(self, with_ref(ids(THREE), ref_step().replace("a tool call", "w" * 120)),
+              "text does not fit its box")
 
     def test_product_names_match_main(self):
         self.assertIn("generated-task-tool-lifecycle.svg", generate.PRODUCT_NAMES)
