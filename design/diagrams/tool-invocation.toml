@@ -205,7 +205,7 @@ label = "token sealed to the agent + for_revocation sealed to egress"
 status = "unreachable"
 evidence = "ADR-0038 decision 4 · crates/maknae-deputy/src/mint/minter.rs"
 test = "crates/maknae-deputy/src/mint/minter.rs::for_revocation_opens_only_with_egress_own_key_as_to_revoke"
-note = "The kernel cannot open either blob. It stores for_revocation with the task, for the revoke when the task ends (#168 PR C; task D4, ruled; generated-task-tool-lifecycle.svg)."
+note = "The kernel cannot open either blob. It stores for_revocation with the task, for the revoke when the task ends (#168 PR C; ruled 2026-11-26; generated-task-tool-lifecycle.svg)."
 
 [[step]]
 from = "kernel"
@@ -293,7 +293,7 @@ kind = "call"
 label = "record the outcome"
 status = "#479"
 evidence = "#479 · ADR-0036 decision 1"
-note = "Task tokens live for the task: re-minted before expiry and revoked when the task ends (task D3 and D4, ruled; generated-task-tool-lifecycle.svg). A Vault child token is revoked per invocation."
+note = "Task tokens live for the task: re-minted before expiry and revoked when the task ends (ruled 2026-11-26; generated-task-tool-lifecycle.svg). A Vault child token is revoked per invocation."
 
 [[step]]
 from = "kernel"
