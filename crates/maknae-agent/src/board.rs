@@ -199,7 +199,7 @@ where
     let mut requests: u32 = 0;
     let stop = loop {
         requests += 1;
-        let page = match listing_reply(send(Verb::BoardList { before }).await) {
+        let page = match listing_reply(send(Verb::BoardList { before, new: false }).await) {
             Ok(page) => page,
             Err(stop) => break Some(stop.err(BoardCommand::List, false)),
         };
@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     fn at(before: Option<u64>) -> Verb {
-        Verb::BoardList { before }
+        Verb::BoardList { before, new: false }
     }
 
     fn seqs(listed: &Listed) -> Vec<u64> {

@@ -697,6 +697,7 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::BoardSettings(_) => "board settings",
         Payload::BoardCleared(_) => "board cleared",
         Payload::BoardListing(_) => "board listing",
+        Payload::BoardSeen => "board seen",
     }
 }
 
@@ -777,7 +778,10 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::BoardClear => maknae_proto::Verb::BoardManage {
                 op: maknae_proto::BoardOp::Clear,
             },
-            Verb::BoardList { .. } => maknae_proto::Verb::BoardList { before: None },
+            Verb::BoardList { .. } => maknae_proto::Verb::BoardList {
+                before: None,
+                new: false,
+            },
         }
     }
 }
@@ -1658,7 +1662,8 @@ pub(crate) fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(),
         | (v, p @ Payload::BoardPage(_))
         | (v, p @ Payload::BoardSettings(_))
         | (v, p @ Payload::BoardCleared(_))
-        | (v, p @ Payload::BoardListing(_)) => Err(format!(
+        | (v, p @ Payload::BoardListing(_))
+        | (v, p @ Payload::BoardSeen) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -2117,7 +2122,10 @@ mod tests {
         assert_eq!(v.kind(), "board");
         assert_eq!(
             maknae_proto::Verb::from(v),
-            maknae_proto::Verb::BoardList { before: None }
+            maknae_proto::Verb::BoardList {
+                before: None,
+                new: false,
+            }
         );
     }
 
@@ -3419,6 +3427,7 @@ mod tests {
                 }),
                 "board listing",
             ),
+            (Payload::BoardSeen, "board seen"),
         ] {
             assert_eq!(
                 print_payload_for_verb(Verb::Ping, payload).unwrap_err(),

@@ -3740,7 +3740,7 @@ async fn serve_board_verb<S, E, P>(
 {
     use crate::board_verbs as bv;
     let action = verb_to_action(verb);
-    if let Verb::BoardList { before } = verb {
+    if let Verb::BoardList { before, new } = verb {
         let asking = Asking {
             authorizer,
             live,
@@ -3748,7 +3748,7 @@ async fn serve_board_verb<S, E, P>(
             lane,
             stamp,
         };
-        serve_board_list(stream, trail, verb, *before, asking, &board).await;
+        serve_board_list(stream, trail, verb, (*before, *new), asking, &board).await;
         return;
     }
     if let Verb::BoardManage { op } = verb {
@@ -4040,7 +4040,7 @@ async fn serve_board_list<S, E, P>(
     stream: &mut S,
     trail: &Trail<'_, E>,
     verb: &Verb,
-    before: Option<u64>,
+    (before, new): (Option<u64>, bool),
     a: Asking<'_, P>,
     board: &BoardCtx<'_>,
 ) where
@@ -4095,7 +4095,7 @@ async fn serve_board_list<S, E, P>(
         request: &request,
     };
     let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
-    let Some(page) = bv::list_page(store, key, view, &deciding, before, budget).await else {
+    let Some(page) = bv::list_page(store, key, view, &deciding, before, new, budget).await else {
         let rec = said("deny", bv::UNDECIDED, "unavailable");
         trail
             .refuse_board(stream, &rec, BoardDefect::TryAgain)
@@ -4228,6 +4228,37 @@ where
                 settings_after: Some(bv::settings_text(now)),
                 ..BoardAudit::default()
             });
+            trail
+                .refuse_board(stream, &outcome, bv::defect_of(&r))
+                .await;
+        }
+        BoardOp::Seen { through } => {
+            let intent = permitted("intent recorded", bv::cursor_audit(store.seen_through(key)));
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let s = Arc::clone(store);
+            let done = bv::offload(trail.uid, deadline, move || {
+                Ok(s.write_seen_through(key, through))
+            })
+            .await;
+            let (now, r) = match done {
+                Ok(crate::board::Moved { now, refused: None }) => {
+                    let mut outcome = trail.outcome(&intent, "done", "authorized");
+                    outcome.board = Some(bv::cursor_audit(now));
+                    trail
+                        .deliver(stream, &outcome, Payload::BoardSeen, m.role, m.rule, action)
+                        .await;
+                    return;
+                }
+                Ok(crate::board::Moved {
+                    now,
+                    refused: Some(r),
+                }) => (now, r),
+                Err(r) => (store.seen_through(key), r),
+            };
+            let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+            outcome.board = Some(bv::cursor_audit(now));
             trail
                 .refuse_board(stream, &outcome, bv::defect_of(&r))
                 .await;
@@ -13627,6 +13658,7 @@ mod record_widths {
     fn list_verb() -> Verb {
         Verb::BoardList {
             before: Some(u64::MAX),
+            new: false,
         }
     }
 
@@ -13733,6 +13765,104 @@ mod record_widths {
             (c.rec.object.as_deref(), c.rec.rule.is_none()),
             (None, true)
         );
+    }
+
+    fn seen_cases() -> Vec<Case> {
+        use crate::board::BoardRefusal as R;
+        use crate::board_verbs as bv;
+        let (person, agent) = (Who::new(true), Who::new(false));
+        let seen = Verb::BoardManage {
+            op: maknae_proto::BoardOp::Seen { through: u64::MAX },
+        };
+        let at = || Some(bv::cursor_audit(u64::MAX));
+        let mut all = vec![
+            person.manage_case(&seen, ("permit", "intent recorded", "authorized"), at(), ""),
+            person.manage_case(&seen, ("permit", "done", "authorized"), at(), ""),
+        ];
+        for r in [
+            R::Store("not done: the board store was busy".into()),
+            R::Unavailable(format!(
+                "{}the board store did not answer in time",
+                crate::task::OUTCOME_UNKNOWN
+            )),
+        ] {
+            let reason = r.to_string();
+            all.push(person.manage_case(&seen, ("permit", &reason, bv::posture(&r)), at(), ""));
+        }
+        for who in [Who::contained(), Who::guest(), Who::unbound()] {
+            let (reason, _, _) = refused(&who, &seen);
+            all.push(who.manage_case(&seen, ("deny", &reason, "unauthorized"), None, ""));
+        }
+        let never = format!(
+            "agent {}: board.manage is never permitted to an agent",
+            widest_agent_id()
+        );
+        all.push(agent.manage_case(&seen, ("deny", &never, "unauthorized"), None, ""));
+        all
+    }
+
+    #[test]
+    fn a_persons_seen_records_mirror_as_measured() {
+        let cases = seen_cases();
+        let in_full: [(&str, usize, Option<&str>); 3] = [
+            (
+                "board.manage seen: deny subject contained: role=adversary",
+                986,
+                Some("adversary"),
+            ),
+            (
+                "board.manage seen: deny role guest: no rule for board.manage",
+                977,
+                Some("guest"),
+            ),
+            (
+                "board.manage seen: deny subject resolves to no role",
+                951,
+                None,
+            ),
+        ];
+        let labels: Vec<&str> = in_full.iter().map(|(l, _, _)| *l).collect();
+        assert_each_case_mirrors_as_measured(&cases, &labels);
+        let shape = |label: &str| {
+            let c = cases.iter().find(|c| c.label == label).expect("a case");
+            (
+                macos_mirror(&c.rec).full_len,
+                c.rec.subject.role.as_deref(),
+                c.rec.rule.is_some(),
+            )
+        };
+        for (label, width, role) in in_full {
+            assert_eq!(shape(label), (width, role, false), "{label}");
+        }
+        let permitted: Vec<_> = [
+            "board.manage seen: permit intent recorded",
+            "board.manage seen: permit done",
+            "board.manage seen: permit store: not done: the board store was busy",
+        ]
+        .iter()
+        .map(|l| shape(l))
+        .collect();
+        assert_eq!(
+            permitted,
+            [
+                (1118, Some("admin"), true),
+                (1107, Some("admin"), true),
+                (1146, Some("admin"), true),
+            ]
+        );
+        let unknown = format!(
+            "board.manage seen: permit {}the board store did not answer in time",
+            crate::task::OUTCOME_UNKNOWN
+        );
+        assert_eq!(shape(&unknown), (1159, Some("admin"), true));
+        let agent = format!(
+            "board.manage seen: deny agent {}: board.manage is never permitted to an agent",
+            widest_agent_id()
+        );
+        assert_eq!(widest_label(&cases), agent);
+        assert_eq!(shape(&agent), (1206, Some("user"), false));
+        let c = cases.iter().find(|c| c.label == agent).expect("the agent");
+        assert_eq!(c.rec.object, None);
     }
 
     #[test]

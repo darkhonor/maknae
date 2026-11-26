@@ -808,18 +808,19 @@ pub(crate) fn list_audit(p: &Paged) -> BoardAudit {
     }
 }
 
-/// One page of `key`'s board below `before`, its window and reply targets decided in one
-/// batch. `None` when the batch did not confirm the request's own decision, or the newest
-/// released post alone is over `budget`.
+/// One page of `key`'s board below `before`, and with `new` above the person's seen mark, its
+/// window and reply targets decided in one batch. `None` when the batch did not confirm the
+/// request's own decision, or the newest released post alone is over `budget`.
 pub(crate) async fn list_page<P: Authorizer + Send + Sync + 'static>(
     store: &BoardStore,
     key: BoardKey,
     view: &dyn EnrollmentView,
     d: &Deciding<'_, P>,
     before: Option<u64>,
+    new: bool,
     budget: usize,
 ) -> Option<Paged> {
-    let w = store.listing(key, before, BOARD_READ_PAGE_POSTS, view);
+    let w = store.listing(key, before, BOARD_READ_PAGE_POSTS, view, new);
     let asked: Vec<_> = w
         .posts
         .iter()

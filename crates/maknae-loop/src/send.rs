@@ -795,7 +795,10 @@ mod tests {
                 },
             },
             maknae_proto::Verb::BoardRead { seen_through: None },
-            maknae_proto::Verb::BoardList { before: None },
+            maknae_proto::Verb::BoardList {
+                before: None,
+                new: false,
+            },
         ] {
             assert_eq!(reply_caps(&verb, &transport).prompt, ceiling, "{verb:?}");
         }

@@ -468,12 +468,14 @@ pub struct BoardSettings {
     pub report: BoardReport,
 }
 
-/// A `board.manage` operation on the caller's own board; `set: None` reads the settings.
+/// A `board.manage` operation on the caller's own board; `set: None` reads the settings, and
+/// `Seen` moves the caller's seen mark forward to `through`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum BoardOp {
     Settings { set: Option<BoardSettings> },
     Clear,
+    Seen { through: u64 },
 }
 
 /// What one `board.manage` clear removed, and whether posts that are not held remain.
@@ -638,6 +640,37 @@ mod tests {
         extra.push((text("ids"), Value::Array(vec![])));
         let refused = dec::<BoardCleared>(&enc(&Value::Map(extra))).unwrap_err();
         assert!(refused.contains("unknown field `ids`"), "{refused}");
+    }
+
+    #[test]
+    fn a_seen_op_round_trips_and_is_kebab_cased() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let spelled = |through: u64| {
+            Value::Map(vec![(
+                text("seen"),
+                Value::Map(vec![(text("through"), Value::Integer(through.into()))]),
+            )])
+        };
+        for through in [0, 7, u64::MAX] {
+            let op = BoardOp::Seen { through };
+            assert_eq!(
+                ciborium::from_reader::<Value, _>(enc(&op).as_slice()).unwrap(),
+                spelled(through)
+            );
+            assert_eq!(dec::<BoardOp>(&enc(&op)), Ok(op));
+        }
+        let extra = Value::Map(vec![(
+            text("seen"),
+            Value::Map(vec![
+                (text("through"), Value::Integer(7.into())),
+                (text("board"), Value::Integer(31_337.into())),
+            ]),
+        )]);
+        let refused = dec::<BoardOp>(&enc(&extra)).unwrap_err();
+        assert!(refused.contains("unknown field `board`"), "{refused}");
+        let missing = Value::Map(vec![(text("seen"), Value::Map(vec![]))]);
+        assert!(dec::<BoardOp>(&enc(&missing)).is_err());
     }
 
     #[test]

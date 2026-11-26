@@ -199,6 +199,9 @@ pub fn board_op(verb: &Verb) -> Option<&'static str> {
         Verb::BoardManage {
             op: maknae_proto::BoardOp::Clear,
         } => Some("clear"),
+        Verb::BoardManage {
+            op: maknae_proto::BoardOp::Seen { .. },
+        } => Some("seen"),
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
@@ -1098,7 +1101,7 @@ mod tests {
             .iter()
             .filter(|v| matches!(v, Verb::BoardManage { .. }))
             .collect();
-        assert_eq!(manage.len(), 3);
+        assert_eq!(manage.len(), 4);
         for verb in &manage {
             for task in [Some(&person), Some(&agent_rooted), None] {
                 assert_eq!(board(verb, task), None, "{verb:?}");
@@ -1158,7 +1161,10 @@ mod tests {
             root: "users/1000".into(),
             start: 0,
         };
-        let listing = Verb::BoardList { before: Some(9) };
+        let listing = Verb::BoardList {
+            before: Some(9),
+            new: true,
+        };
         let request = |uid: u32, stamp: &Stamp<'_>| {
             build_authz_request(
                 &listing,
@@ -1232,7 +1238,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(ops, ["settings", "settings", "clear"]);
+        assert_eq!(ops, ["settings", "settings", "clear", "seen"]);
         assert_eq!(maknae_security::CONTEXT_BOARD_OP, "board_op");
     }
 
@@ -2807,7 +2813,13 @@ mod tests {
             Verb::BoardManage {
                 op: maknae_proto::BoardOp::Clear,
             },
-            Verb::BoardList { before: None },
+            Verb::BoardManage {
+                op: maknae_proto::BoardOp::Seen { through: 7 },
+            },
+            Verb::BoardList {
+                before: None,
+                new: false,
+            },
         ]
     }
 
@@ -2977,7 +2989,7 @@ mod tests {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
         assert_eq!(terms.len(), 63);
-        assert_eq!(all_verbs().len(), 77);
+        assert_eq!(all_verbs().len(), 78);
     }
 
     /// Two terms sharing an action string would be decided as one another —
@@ -3015,7 +3027,7 @@ mod tests {
         );
         assert_eq!(
             names(&manage),
-            ["BoardManage", "BoardManage", "BoardManage"],
+            ["BoardManage", "BoardManage", "BoardManage", "BoardManage"],
             "only the board.manage operations share board.manage"
         );
         assert_eq!(

@@ -804,9 +804,12 @@ pub enum Verb {
     BoardManage {
         op: crate::BoardOp,
     },
-    /// The newest page of the caller's own board below `before`; `None` from the top.
+    /// The newest page of the caller's own board below `before`; `None` from the top. With
+    /// `new`, only posts above the caller's seen mark.
     BoardList {
         before: Option<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        new: bool,
     },
 }
 
@@ -881,6 +884,8 @@ pub enum Payload {
     BoardCleared(crate::BoardCleared),
     /// A page of the caller's own board, each post released only on its own `board.read` Permit.
     BoardListing(crate::BoardListing),
+    /// The caller's own seen mark was set.
+    BoardSeen,
 }
 
 pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
@@ -4216,8 +4221,33 @@ mod tests {
                     },
                     FrameClass::Control,
                 ),
-                (Verb::BoardList { before: None }, FrameClass::Prompt),
-                (Verb::BoardList { before: Some(7) }, FrameClass::Prompt),
+                (
+                    Verb::BoardManage {
+                        op: crate::BoardOp::Seen { through: 7 },
+                    },
+                    FrameClass::Control,
+                ),
+                (
+                    Verb::BoardList {
+                        before: None,
+                        new: false,
+                    },
+                    FrameClass::Prompt,
+                ),
+                (
+                    Verb::BoardList {
+                        before: Some(7),
+                        new: false,
+                    },
+                    FrameClass::Prompt,
+                ),
+                (
+                    Verb::BoardList {
+                        before: None,
+                        new: true,
+                    },
+                    FrameClass::Prompt,
+                ),
             ]
         }
 
@@ -4231,7 +4261,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 68);
+            assert_eq!(all.len(), 70);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
@@ -4721,11 +4751,46 @@ mod tests {
                 removed: 0,
                 more: false,
             }),
+            Payload::BoardSeen,
         ] {
             let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), None);
             let bytes = encode_response(&response).unwrap();
             assert!(bytes.len() <= crate::frame::CONTROL_RESPONSE_MAX);
             assert_eq!(decode_response(&bytes).unwrap(), response);
+        }
+    }
+
+    #[test]
+    fn a_board_list_without_new_encodes_as_before() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let body = |fields: Vec<(Value, Value)>| {
+            let mut out = Vec::new();
+            ciborium::into_writer(
+                &Value::Map(vec![(text("BoardList"), Value::Map(fields))]),
+                &mut out,
+            )
+            .unwrap();
+            out
+        };
+        let encoded = |verb: &Verb| {
+            let mut out = Vec::new();
+            ciborium::into_writer(verb, &mut out).unwrap();
+            out
+        };
+        let decoded = |b: &[u8]| ciborium::from_reader::<Verb, _>(b).unwrap();
+        for (before, value) in [(None, Value::Null), (Some(7), Value::Integer(7.into()))] {
+            let old = body(vec![(text("before"), value.clone())]);
+            let verb = Verb::BoardList { before, new: false };
+            assert_eq!(encoded(&verb), old);
+            assert_eq!(decoded(&old), verb);
+            let marked = body(vec![
+                (text("before"), value),
+                (text("new"), Value::Bool(true)),
+            ]);
+            let verb = Verb::BoardList { before, new: true };
+            assert_eq!(encoded(&verb), marked);
+            assert_eq!(decoded(&marked), verb);
         }
     }
 

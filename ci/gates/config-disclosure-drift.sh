@@ -445,6 +445,7 @@ PAYLOAD_DISPOSITIONS=(
   "BoardSettings|struct:BoardSettings"   # #698: the caller's own board settings, on its board.manage Permit
   "BoardCleared|struct:BoardCleared"   # #698: what the caller's own clear removed, on its board.manage Permit
   "BoardListing|bytes"   # #714: the caller's own board's posts, each released only on its own board.read Permit, with their sequences and holds
+  "BoardSeen|unit"   # #715: the caller's own seen mark was set; carries nothing
 )
 payload_variants="$(awk '
   /^pub enum Payload \{/ { inenum=1; next }

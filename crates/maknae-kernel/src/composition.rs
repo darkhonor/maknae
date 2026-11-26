@@ -1089,7 +1089,7 @@ mod tests {
         }
     }
 
-    fn manage_verbs() -> [maknae_proto::Verb; 3] {
+    fn manage_verbs() -> [maknae_proto::Verb; 4] {
         use maknae_proto::{BoardOp, BoardReport, BoardSettings, Verb};
         [
             Verb::BoardManage {
@@ -1104,6 +1104,9 @@ mod tests {
                 },
             },
             Verb::BoardManage { op: BoardOp::Clear },
+            Verb::BoardManage {
+                op: BoardOp::Seen { through: 7 },
+            },
         ]
     }
 
@@ -1249,7 +1252,10 @@ mod tests {
                 "user" => &users,
                 _ => &shipped,
             };
-            let verb = maknae_proto::Verb::BoardList { before: None };
+            let verb = maknae_proto::Verb::BoardList {
+                before: None,
+                new: false,
+            };
             let r = build_authz_request(
                 &verb,
                 *uid,
