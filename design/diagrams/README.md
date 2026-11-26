@@ -87,7 +87,8 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-workspace-packages.svg` | UML package | *How do the crates fit together, and what does each pull in?* | contributor, security assessor | generated |
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
 | `generated-credential-path.svg` | UML sequence (≈ DoDAF SV-10c) | *What can each hop see of a user's model key on one turn, and what enforces it?* | security assessor, accreditor | generated |
-| `generated-tool-invocation.svg` | UML sequence (≈ DoDAF SV-10c) | *Who decides one tool call, who runs it, where does its credential come from, what does its network reach, and what does the model see?* The same steps for `maknae` and `maknae-agentd`; each step marked `«live»`, `«unreachable»`, `«decided»` or `«#N»` | security assessor, contributor | generated |
+| `generated-tool-credentials.svg` | UML sequence (≈ DoDAF SV-10c) | *Who mints, stores or ever holds a tool's credential, by custody, and what crosses to the model?* Minted by egress or the front end, stored in the subject's own Vault tree, or brokered; each hop marked with what it sees | security assessor, accreditor | generated |
+| `generated-tool-invocation.svg` | UML sequence (≈ DoDAF SV-10c) | *Who decides one tool call, who launches it, what does its network reach, and what does the model see?* Any tool, the same steps for `maknae` and `maknae-agentd`; its credential is `generated-tool-credentials.svg`. Each step marked `«live»`, `«unreachable»` or `«#N»` | security assessor, contributor | generated |
 | `generated-task-tool-lifecycle.svg` | UML sequence (≈ DoDAF SV-10c) | *How does an agent's task start, run and end: bindings and reach, the pull hand-off, the agentic loop and its optional exchanges, the outcome and the revoke?* Each step marked as above | security assessor, contributor | generated |
 | `generated-isolation-matrix.svg` | access-control matrix (Lampson 1974) | *Which subject can read, carry or unwrap which user's credential, and by what control?* | security assessor, accreditor | generated |
 | `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
@@ -200,16 +201,16 @@ is understood and accepted: `check_evidence` and byte-stable regeneration fire f
 whoever regenerates, so a stale diagram can be committed and no gate will object.
 Regenerate with the command above and commit the result; that is the whole contract.
 
-### Twelve products are curated, not derived
+### Thirteen products are curated, not derived
 
 `standards-profile.toml`, `read-path.toml`, `credential-path.toml`, `isolation-matrix.toml`, `decision-cycle.toml`, `data-model.toml`,
-`system-interfaces.toml`, `operational-concept.toml`, `service-architecture.toml`, `agentic-patterns.toml`, `tool-invocation.toml` and `task-tool-lifecycle.toml` are hand-maintained inputs.
+`system-interfaces.toml`, `operational-concept.toml`, `service-architecture.toml`, `agentic-patterns.toml`, `tool-credentials.toml`, `tool-invocation.toml` and `task-tool-lifecycle.toml` are hand-maintained inputs.
 A conformance claim, a call sequence, an access-control matrix, a precedence ladder, a normalization judgement,
 an interface register, a statement of intent and a deployment inventory are none of them readable out of a
-manifest, so all twelve are kept as reviewable data files in which **every row names
+manifest, so all thirteen are kept as reviewable data files in which **every row names
 something a reader can check**.
 
-None of the twelve is part of the provenance stamp, deliberately. The stamp names the last
+None of the thirteen is part of the provenance stamp, deliberately. The stamp names the last
 commit to touch an *enforcing* input (`ci/gates/lib.sh`, the manifests); a curated file
 travels in the same commit as the SVG it produces, so including it would make the stamp
 chase itself and break `regenerate → diff` — the failure [#202](https://github.com/darkhonor/maknae/pull/202)
@@ -240,8 +241,8 @@ no production caller), `decided` (in an ADR, not built) or `#N` (planned in that
 `check_status` fails generation when one step is marked and another is not, and when a
 mark lacks its citation: `live` and `unreachable` cite a source path under `crates/` or
 `bins/`, or a test, `decided` an ADR, `#N` that issue. It checks that the citation exists,
-not that the mark is true; that is the reviewer's job. `tool-invocation.toml` and `task-tool-lifecycle.toml` use it, so
-the two pictures show what the code does today beside what the ADRs and issues still owe.
+not that the mark is true; that is the reviewer's job. `tool-credentials.toml`, `tool-invocation.toml` and `task-tool-lifecycle.toml` use it, so
+the three pictures show what the code does today beside what the ADRs and issues still owe.
 
 A step may also carry `decide`, a list of open decisions in context: a question, or a
 place where an ADR no longer matches the code, each with a recommendation. They are

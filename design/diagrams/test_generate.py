@@ -384,6 +384,10 @@ class RefSteps(unittest.TestCase):
     def test_product_names_match_main(self):
         self.assertIn("generated-task-tool-lifecycle.svg", generate.PRODUCT_NAMES)
 
+    def test_tool_credentials_is_a_product(self):
+        self.assertIn("generated-tool-credentials.svg", generate.PRODUCT_NAMES)
+        self.assertTrue(generate.sequence("tool-credentials.toml").startswith("<svg"))
+
 
 if __name__ == "__main__":
     unittest.main()
