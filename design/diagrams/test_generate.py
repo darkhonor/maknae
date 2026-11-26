@@ -250,5 +250,78 @@ class FragmentRendering(unittest.TestCase):
         self.assertEqual(svg.count("data-frag-fill"), 1)
 
 
+THREE = BASE.replace("[[step]]", '''[[participant]]
+id = "c"
+label = "C"
+stereo = "«c»"
+kind = "external"
+
+[[step]]''', 1)
+
+
+def ref_step(frm="b", to="c", **extra) -> str:
+    rows = ['id = "r"', 'label = "a tool call"', 'kind = "ref"', f'from = "{frm}"', f'to = "{to}"',
+            'target = "generated-tool-invocation.svg"', 'evidence = "crates/maknae-kernel/src/task.rs"']
+    rows += [f"{k} = {v}" for k, v in extra.items()]
+    return "\n".join(rows) + "\n"
+
+
+def with_ref(toml_text: str, step: str) -> str:
+    """Put the ref step first, ahead of the file's own steps."""
+    head, _, rest = toml_text.partition("[[step]]\n")
+    return head + "[[step]]\n" + step + "\n[[step]]\n" + rest
+
+
+def ref_rect(svg: str) -> tuple:
+    m = re.search(r'<rect data-ref="\d+" x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" '
+                  r'height="([-\d.]+)"', svg)
+    return tuple(float(v) for v in m.groups())
+
+
+class RefSteps(unittest.TestCase):
+    def test_ref_needs_target(self):
+        exits(self, with_ref(ids(THREE), ref_step().replace('target = "generated-tool-invocation.svg"\n', "")),
+              "ref step has no target")
+
+    def test_ref_unknown_target_exits(self):
+        exits(self, with_ref(ids(THREE), ref_step().replace("generated-tool-invocation.svg", "nope.svg")),
+              "ref target 'nope.svg' is not a generated product")
+
+    def test_ref_target_not_a_string_exits(self):
+        exits(self, with_ref(ids(THREE), ref_step().replace('"generated-tool-invocation.svg"', "5")),
+              "target must be a str")
+
+    def test_ref_takes_no_decide(self):
+        exits(self, with_ref(ids(THREE), ref_step(decide='["x"]')), "a ref step takes no decide")
+
+    def test_ref_from_or_to_unknown_exits(self):
+        exits(self, with_ref(ids(THREE), ref_step(frm="zz")), "ref spans unknown participant 'zz'")
+
+    def test_ref_draws_tag_label_and_target(self):
+        svg = render(with_ref(ids(THREE), ref_step()))
+        self.assertIn(">ref<", svg)
+        self.assertIn("a tool call", svg)
+        self.assertIn(">generated-tool-invocation.svg<", svg)
+        self.assertEqual(svg.count("marker-end"), 2)
+
+    def test_ref_from_right_of_to_draws_left_to_right(self):
+        svg = render(with_ref(ids(THREE), ref_step(frm="b", to="a")))
+        self.assertLess(ref_rect(svg)[0], 92)
+
+    def test_fragment_may_start_on_a_ref_step(self):
+        svg = render(with_ref(ids(THREE), ref_step()) + frag(first="r", last="s1"))
+        f, r = frag_rects(svg)[1], ref_rect(svg)
+        self.assertLessEqual(f[0], r[0])
+        self.assertGreaterEqual(f[0] + f[2], r[0] + r[2])
+        self.assertLessEqual(f[1] + 14, r[1])
+
+    def test_fragment_cannot_enclose_a_ref_on_lifeline_zero_exits(self):
+        exits(self, with_ref(ids(THREE), ref_step(frm="a")) + frag(first="r", last="s1"),
+              "cannot enclose ref step")
+
+    def test_product_names_match_main(self):
+        self.assertIn("generated-task-tool-lifecycle.svg", generate.PRODUCT_NAMES)
+
+
 if __name__ == "__main__":
     unittest.main()

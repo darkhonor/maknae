@@ -869,6 +869,24 @@ SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
 SEQ_KINDS = ("call", "reply", "self", "ref")
 _STEP_ID = re.compile(r"[a-z][a-z0-9-]*")
 FRAG_HEAD, FRAG_PAD, FRAG_INSET = 32, 10, 8
+REF_MARGIN = 60
+PRODUCT_NAMES = (
+    "generated-tcb-components.svg",
+    "generated-crate-binary-matrix.svg",
+    "generated-standards-profile.svg",
+    "generated-workspace-packages.svg",
+    "generated-read-path.svg",
+    "generated-credential-path.svg",
+    "generated-tool-invocation.svg",
+    "generated-task-tool-lifecycle.svg",
+    "generated-isolation-matrix.svg",
+    "generated-decision-cycle.svg",
+    "generated-data-model.svg",
+    "generated-system-interfaces.svg",
+    "generated-operational-concept.svg",
+    "generated-service-architecture.svg",
+    "generated-agentic-patterns.svg",
+)
 FRAG_KEYS = ("operator", "guard", "first", "last")
 LOOP_FILL = "#FAEFD2"
 
@@ -896,7 +914,19 @@ def sequence(name: str) -> str:
         if not (isinstance(k, str) and k in SEQ_KINDS):
             sys.exit(f"{name}: step {n}: unknown kind {k!r}")
         if k == "ref":
-            sys.exit(f"{name}: step {n}: ref is not drawn yet")
+            if "target" not in s:
+                sys.exit(f"{name}: step {n}: ref step has no target")
+            for key in ("target", "from", "to"):
+                if not isinstance(s.get(key), str):
+                    sys.exit(f"{name}: step {n}: {key} must be a str")
+            if s["target"] not in PRODUCT_NAMES:
+                sys.exit(f"{name}: step {n}: ref target {s['target']!r} is not a generated product")
+            for key in ("from", "to"):
+                if s[key] not in {pa["id"] for pa in parts}:
+                    sys.exit(f"{name}: step {n}: ref spans unknown participant {s[key]!r}")
+            for key in ("sees", "decide"):
+                if key in s:
+                    sys.exit(f"{name}: step {n}: a ref step takes no {key}")
         if "id" in s:
             sid = s["id"]
             if not (isinstance(sid, str) and _STEP_ID.fullmatch(sid)):
@@ -992,20 +1022,29 @@ def sequence(name: str) -> str:
         lines.append(lab)
         up = len(lab) - 1
         ys.append(cur + 12 * up)
-        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide")))
+        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide"))
+                           + (s["kind"] == "ref"))
         for k in sorted((k for k, sp in enumerate(spans) if sp[1] == i), key=lambda k: -depth[k]):
             cur += FRAG_PAD
             fbot[k] = cur
     body_h = cur - 34 + 26
+    def ref_edges(i):
+        a, b = sorted((xs[idx[steps[i]["from"]]], xs[idx[steps[i]["to"]]]))
+        return (a - REF_MARGIN, b + REF_MARGIN) if steps[i]["kind"] == "ref" else (a, b)
+
     maxdepth, fx = max(depth, default=0), []
     for k, ((i0, i1), f) in enumerate(zip(spans, frags), 1):
-        lx = [xs[idx[steps[i][e]]] for i in range(i0, i1 + 1) for e in ("from", "to")]
+        lx = [e for i in range(i0, i1 + 1) for e in ref_edges(i)]
         X0 = max(LEFT - 52, min(lx) - 70 - FRAG_INSET * maxdepth)
         X1 = min(W - 12, max(lx) + 70 + FRAG_INSET * maxdepth)
         x0, x1 = X0 + FRAG_INSET * depth[k - 1], X1 - FRAG_INSET * depth[k - 1]
         drawn = f"«{f['status']}» [{f['guard']}]" if "status" in f else f"[{f['guard']}]"
         if (len(f["operator"]) * 6 + 14) + len(drawn) * 5.4 + 16 > x1 - x0:
             sys.exit(f"{name}: fragment {k}: guard does not fit its box; shorten it")
+        for i in range(i0, i1 + 1):
+            if steps[i]["kind"] == "ref" and not (x0 <= ref_edges(i)[0] and ref_edges(i)[1] <= x1):
+                sys.exit(f"{name}: fragment {k} cannot enclose ref step {i + 1}; start the ref on "
+                         f"a lifeline other than the first, or nest less deeply")
         fx.append((x0, x1, drawn))
     notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
     DCOLS = int((W - 2 * (LEFT - 52)) / 5.6)
@@ -1079,6 +1118,28 @@ def sequence(name: str) -> str:
     for n, s in enumerate(steps):
         y, lab = ys[n], lines[n]
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
+        if s["kind"] == "ref":
+            r0, r1 = ref_edges(n)
+            top = y - 14 - 12 * (len(lab) - 1)
+            bottom = y + 15 + 12 * (bool(s.get("test")) + 1) + 6
+            p.append(f'<rect data-ref="{n + 1}" x="{r0}" y="{top}" width="{r1 - r0}" '
+                     f'height="{bottom - top}" fill="#FFFFFF" stroke="{INK}" stroke-width="0.9"/>')
+            p.append(f'<path d="M {r0} {top} h 32 v 9 l -5 5 h -27 z" fill="#FFFFFF" '
+                     f'stroke="{INK}" stroke-width="0.9"/>')
+            p.append(text(r0 + 6, top + 10.5, "ref", 9, "600"))
+            cx = (r0 + r1) / 2
+            for k, ln in enumerate(lab):
+                p.append(text(cx, y - 2 - 12 * (len(lab) - 1 - k), f'{n+1}. {ln}' if k == 0 else ln,
+                              10, "600", anchor="middle"))
+            last = y + 15
+            if s.get("evidence"):
+                p.append(text(cx, last, s["evidence"], 7.5, fill=MUTED, anchor="middle", mono=True))
+            if s.get("test"):
+                last += 12
+                p.append(text(cx, last, f'test: {s["test"]}', 7.5, fill=MUTED, anchor="middle",
+                              mono=True))
+            p.append(text(cx, last + 12, s["target"], 7.5, fill=TRUST_INK, anchor="middle", mono=True))
+            continue
         rep = s["kind"] == "reply"
         stroke, dash = (MUTED, ' stroke-dasharray="5 3"') if rep else (INK, "")
         mark = "rep" if rep else "call"
@@ -2236,6 +2297,8 @@ def main(argv: list) -> None:
         ("generated-agentic-patterns.svg", lambda: d11_patterns(prov)),
     ]
     names = [n for n, _ in products]
+    if names != list(PRODUCT_NAMES):
+        sys.exit("PRODUCT_NAMES does not match main()'s products")
 
     want = set(argv) if argv else set(names)
     unknown = sorted(want - set(names))
