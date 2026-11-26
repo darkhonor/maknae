@@ -13,7 +13,7 @@ wrap_cols = 36
 precondition = "GitHub forge token in Vault at <kv_mount>/data/<user_prefix>/<you>/forges/<host>, field token: vault write -wrap-ttl=60s, or maknae forge login <host>. docs/first-provider.md U2."
 
 [[boundary]]
-before = "kernel"
+before = "helper"
 left = "untrusted · tasker uid · agent uid"
 right = "TRUST BOUNDARY — trust plane"
 shade = true
@@ -35,6 +35,12 @@ id = "agentd"
 label = "maknae-agentd"
 stereo = "«untrusted» the agent's uid"
 kind = "untrusted"
+
+[[participant]]
+id = "helper"
+label = "launch helper"
+stereo = "«trusted» launch PEP · SELinux · #481"
+kind = "trusted"
 
 [[participant]]
 id = "kernel"
@@ -313,7 +319,7 @@ target = "generated-tool-invocation.svg"
 status = "live"
 evidence = "crates/maknae-agent/src/route.rs"
 test = "crates/maknae-kernel/tests/agent_loop.rs::a_denied_read_reaches_the_model_as_unavailable_and_is_a_deny_in_the_trail"
-note = "Live for the file tools and sub-tasks. A gh, git or cargo call in a tool container is #479; its mint and launch are the tool-call diagram's steps."
+note = "Live for the file tools and sub-tasks. A tool call in a container is #479: its decision is generated-tool-invocation.svg, its credential and launch generated-tool-credentials.svg."
 
 [[step]]
 id = "store-blob"
@@ -323,7 +329,7 @@ kind = "self"
 label = "store each minted set's for_revocation blob with the task"
 status = "#168"
 evidence = "#168 · ADR-0038 decision 4"
-note = "Produced by the mint in the tool-call diagram (steps 11 to 13). The task store has no field for it yet. A rotation of egress's seal key strands every outstanding blob (ADR-0038 residual 2)."
+note = "Produced by the mint in generated-tool-credentials.svg (steps 10 to 13). The task store has no field for it yet. A rotation of egress's seal key strands every outstanding blob (ADR-0038 residual 2)."
 
 [[step]]
 id = "re-mint"
@@ -472,16 +478,17 @@ label = "on the heartbeat reply: the task was stopped"
 status = "live"
 evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::a_heartbeat_after_stop_tells_the_agent_it_was_stopped"
+note = "Ruled 2026-11-27, not built (#746): the stop arrives on the notice poll within 5 s, not at the next heartbeat."
 
 [[step]]
 id = "halt"
 from = "agentd"
-to = "agentd"
-kind = "self"
-label = "stop watch and cancel token halt the task's tool containers within N seconds"
+to = "helper"
+kind = "call"
+label = "the cancel token asks the launch helper to stop the task: it kills the task's cgroup within N seconds"
 status = "#481"
 evidence = "#481"
-note = "Ruled 2026-11-26: conditions 1 to 5 end by construction; 6, a compromised agent, is cut off by the revoke (step 44)."
+note = "Ruled 2026-11-26 and 2026-11-27: conditions 1 to 5 end by construction, and if agentd dies the helper stops what it launched; 6, a compromised agent, is cut off by the revoke (step 44)."
 
 [[step]]
 id = "report"
