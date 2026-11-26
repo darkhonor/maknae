@@ -773,6 +773,12 @@ impl Book {
         self.refresh(now);
     }
 
+    pub fn unseen(&mut self, unseen: maknae_proto::BoardUnseen, conv: &mut Conversation) {
+        if let Some(line) = text::board_unseen_line(unseen) {
+            self.say(conv, &line);
+        }
+    }
+
     fn steer_failed(&mut self, op: Unknown, e: &Failure, conv: &mut Conversation) {
         self.not_taken += 1;
         if e.unknown() {
@@ -1425,6 +1431,28 @@ mod tests {
         run.enter("/stop");
         run.nothing_queued();
         assert_eq!(run.last_text(), "there is no open task to stop");
+    }
+
+    #[test]
+    fn an_unseen_count_is_said_after_the_commands_own_lines() {
+        let mut run = Run::new(Standing::Enrolled);
+        run.submit("one", 1, 1);
+        run.enter("/stop 1");
+        assert!(matches!(run.op(), Op::Stop { .. }));
+        run.answer(Ok(Answer::View(view(1, 1, TaskState::Closed))));
+        run.book
+            .unseen(maknae_proto::BoardUnseen::Exact(2), &mut run.conv);
+        let texts = run.texts();
+        assert_eq!(
+            texts[texts.len() - 2..],
+            [
+                "stopped #1".to_owned(),
+                "board: 2 unseen posts; run maknae board --new".to_owned()
+            ]
+        );
+        run.book
+            .unseen(maknae_proto::BoardUnseen::Exact(0), &mut run.conv);
+        assert_eq!(run.texts(), texts);
     }
 
     #[test]

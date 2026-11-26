@@ -293,11 +293,12 @@ pub(crate) async fn send_via<S: Wire>(
         .map_err(|f| f.why)
 }
 
-/// What one verb came back as, with the catalog stamp the reply carried.
+/// What one verb came back as, with the stamps the reply carried.
 #[derive(Debug)]
 pub(crate) struct Sent {
     pub(crate) outcome: SentOutcome,
     pub(crate) catalog_digest: Option<maknae_proto::CatalogDigest>,
+    pub(crate) board_unseen: Option<maknae_proto::BoardUnseen>,
 }
 
 /// [`send_via`], with the failure saying whether it came after the request was written.
@@ -315,7 +316,7 @@ pub(crate) async fn send_located<S: Wire>(
         .map(|sent| sent.outcome)
 }
 
-/// [`send_located`], keeping the catalog stamp of the reply.
+/// [`send_located`], keeping the stamps of the reply.
 pub(crate) async fn send_stamped<S: Wire>(
     connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
     task: Option<maknae_proto::TaskId>,
@@ -331,6 +332,7 @@ pub(crate) async fn send_stamped<S: Wire>(
         Err(failed) => settle_located(mutating, Err(failed)).map(|outcome| Sent {
             outcome,
             catalog_digest: None,
+            board_unseen: None,
         }),
     }
 }
@@ -405,6 +407,7 @@ async fn exchange<S: Wire>(
     let unstamped = |outcome| Sent {
         outcome,
         catalog_digest: None,
+        board_unseen: None,
     };
     let unsent = Failed::Unsent;
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
@@ -469,12 +472,13 @@ async fn exchange<S: Wire>(
     .map_err(before)?;
     let response = decode_response(&resp_body).map_err(|e| Failed::Malformed(e.to_string()))?;
 
-    let catalog_digest = response.catalog_digest;
+    let (catalog_digest, board_unseen) = (response.catalog_digest, response.board_unseen);
     let (prepared, grant) = match first_answer(mutating, prepared, response.result, armed)? {
         FirstAnswer::Done(outcome) => {
             return Ok(Sent {
                 outcome,
                 catalog_digest,
+                board_unseen,
             })
         }
         FirstAnswer::Grant(prepared, grant) => (prepared, grant),

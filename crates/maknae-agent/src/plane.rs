@@ -270,6 +270,9 @@ pub trait Plane {
     fn take_diagnostics(&mut self) -> Vec<String> {
         vec![]
     }
+    fn take_board_unseen(&mut self) -> Option<maknae_proto::BoardUnseen> {
+        None
+    }
     /// Only the Agent Daemon's plane, inside a task, gives a task to another agent.
     fn task_agent(
         &mut self,

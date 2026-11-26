@@ -50,7 +50,7 @@ impl<D: Dial> TaskClient<D> {
                     CatalogFetchError::NoReply(f.why)
                 }
             })?;
-        match WireOutcome::from(sent) {
+        match WireOutcome::from(sent.outcome) {
             WireOutcome::Payload(Payload::ToolCatalog(reply)) => Ok(reply),
             WireOutcome::Refused { code, message, .. } => {
                 Err(CatalogFetchError::Refused(format!("{code:?}: {message}")))

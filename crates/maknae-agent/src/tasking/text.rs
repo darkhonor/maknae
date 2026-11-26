@@ -4,8 +4,8 @@ use crate::render::DISPLAY_PIECE_MAX;
 use crate::screen::MenuItem;
 use maknae_proto::{
     Addressee, AgentEntry, AgentStanding, Attachment, Author, Binding, BoardDefect, BoardEntry,
-    BoardHold, BoardReport, BoardSettings, EmptyReason, ForgeOp, ForgeOps, Media, PostKind,
-    ReachSummary, TaskClose, TaskState,
+    BoardHold, BoardReport, BoardSettings, BoardUnseen, EmptyReason, ForgeOp, ForgeOps, Media,
+    PostKind, ReachSummary, TaskClose, TaskState,
 };
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
@@ -323,6 +323,16 @@ fn kind_rank(kind: PostKind) -> usize {
     }
 }
 
+pub fn board_unseen_line(u: BoardUnseen) -> Option<String> {
+    let posts = match u {
+        BoardUnseen::Exact(0) => return None,
+        BoardUnseen::Exact(1) => "1 unseen post".to_owned(),
+        BoardUnseen::Exact(n) => format!("{n} unseen posts"),
+        BoardUnseen::Over => format!("{}+ unseen posts", maknae_proto::BOARD_UNSEEN_MAX),
+    };
+    Some(format!("board: {posts}; run maknae board --new"))
+}
+
 /// Counts by author and by kind; every author id through [`one_line`], and no body is read.
 pub fn board_summary_line(entries: &[BoardEntry]) -> String {
     let mut authors = std::collections::BTreeMap::<&str, u64>::new();
@@ -532,6 +542,31 @@ pub fn help_lines() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_unseen_line_says_exact_singular_plural_and_over() {
+        assert_eq!(board_unseen_line(BoardUnseen::Exact(0)), None);
+        assert_eq!(
+            board_unseen_line(BoardUnseen::Exact(1)).as_deref(),
+            Some("board: 1 unseen post; run maknae board --new")
+        );
+        assert_eq!(
+            board_unseen_line(BoardUnseen::Exact(2)).as_deref(),
+            Some("board: 2 unseen posts; run maknae board --new")
+        );
+        assert_eq!(
+            board_unseen_line(BoardUnseen::Exact(3)).as_deref(),
+            Some("board: 3 unseen posts; run maknae board --new")
+        );
+        assert_eq!(
+            board_unseen_line(BoardUnseen::Exact(32)).as_deref(),
+            Some("board: 32 unseen posts; run maknae board --new")
+        );
+        assert_eq!(
+            board_unseen_line(BoardUnseen::Over).as_deref(),
+            Some("board: 32+ unseen posts; run maknae board --new")
+        );
+    }
 
     #[test]
     fn board_settings_print_enabled_and_report_only() {

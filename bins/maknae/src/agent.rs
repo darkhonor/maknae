@@ -730,6 +730,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
     )
     .await;
     print_diagnostics(&mut plane);
+    let unseen = plane.take_board_unseen();
     if let Err(e) = plane.into_client().shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
     }
@@ -741,6 +742,7 @@ pub async fn run(label: Option<String>, prompt: String) -> Result<u8, String> {
         Ended::Ran(outcome) => finish(
             Ok(outcome),
             &budget,
+            unseen,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         ),
@@ -757,11 +759,16 @@ fn print_diagnostics<P: Plane>(plane: &mut P) {
 pub fn finish(
     outcome: std::io::Result<Outcome>,
     budget: &Budget,
+    unseen: Option<maknae_proto::BoardUnseen>,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Result<u8, String> {
     let outcome = outcome.map_err(|e| e.to_string())?;
-    print_end(&outcome, budget, out, err).map_err(|e| e.to_string())
+    let code = print_end(&outcome, budget, out, err).map_err(|e| e.to_string())?;
+    if let Some(line) = unseen.and_then(maknae_agent::tasking::text::board_unseen_line) {
+        crate::stderr::line(err, format_args!("{line}"));
+    }
+    Ok(code)
 }
 
 #[cfg(test)]
@@ -1491,6 +1498,7 @@ mod tests {
             prompts: usize,
             writes: usize,
             closes: Vec<String>,
+            unseen: Option<maknae_proto::BoardUnseen>,
         }
         const KERNEL_ID: &str = "0123456789abcdef0123456789abcdef";
         impl Plane for Fake {
@@ -1562,6 +1570,9 @@ mod tests {
             fn take_diagnostics(&mut self) -> Vec<String> {
                 std::mem::take(&mut self.queued)
             }
+            fn take_board_unseen(&mut self) -> Option<maknae_proto::BoardUnseen> {
+                self.unseen.take()
+            }
         }
         fn fake(replies: Vec<PromptReply>) -> Fake {
             Fake {
@@ -1571,6 +1582,7 @@ mod tests {
                 prompts: 0,
                 writes: 0,
                 closes: vec![],
+                unseen: None,
             }
         }
         fn budget() -> Budget {
@@ -1777,15 +1789,51 @@ mod tests {
                 Some(Some(StopReason::StepBudget))
             );
             let mut out = vec![];
-            assert_eq!(finish(outcome, &b, &mut out, &mut Broken), Ok(2));
+            assert_eq!(finish(outcome, &b, None, &mut out, &mut Broken), Ok(2));
             assert!(out.is_empty());
 
             let mut p = fake(vec![reply(Some("ok"), &[])]);
             let mut session = Session::new("c", "q", budget(), unmetered(), None);
             let outcome = drive_to(&mut session, &mut p, &mut Broken).await;
             let mut out = vec![];
-            assert_eq!(finish(outcome, &budget(), &mut out, &mut Broken), Ok(0));
+            assert_eq!(
+                finish(outcome, &budget(), None, &mut out, &mut Broken),
+                Ok(0)
+            );
             assert_eq!(out, b"ok\n");
+        }
+
+        #[tokio::test]
+        async fn a_one_shot_prints_the_count_on_stderr_after_the_answer() {
+            let mut p = fake(vec![reply(Some("the answer"), &[])]);
+            p.unseen = Some(maknae_proto::BoardUnseen::Over);
+            let mut session = Session::new("c", "q", budget(), unmetered(), None);
+            let (mut out, mut err) = (vec![], vec![]);
+            let outcome = drive_to(&mut session, &mut p, &mut err).await;
+            let unseen = p.take_board_unseen();
+            assert_eq!(
+                finish(outcome, &budget(), unseen, &mut out, &mut err),
+                Ok(0)
+            );
+            assert_eq!(out, b"the answer\n");
+            let err = String::from_utf8(err).unwrap();
+            assert!(
+                err.ends_with("board: 32+ unseen posts; run maknae board --new\n"),
+                "{err:?}"
+            );
+            assert_eq!(err.matches("unseen").count(), 1, "{err:?}");
+
+            let mut p = fake(vec![reply(Some("the answer"), &[])]);
+            let mut session = Session::new("c", "q", budget(), unmetered(), None);
+            let (mut out, mut err) = (vec![], vec![]);
+            let outcome = drive_to(&mut session, &mut p, &mut err).await;
+            let unseen = p.take_board_unseen();
+            assert_eq!(
+                finish(outcome, &budget(), unseen, &mut out, &mut err),
+                Ok(0)
+            );
+            assert_eq!(out, b"the answer\n");
+            assert!(err.is_empty(), "{:?}", String::from_utf8_lossy(&err));
         }
 
         #[tokio::test]
