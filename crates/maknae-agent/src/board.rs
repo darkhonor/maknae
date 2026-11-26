@@ -1,6 +1,5 @@
-//! `maknae board`, `maknae board settings` and `maknae board clear`: which pages a
-//! listing asks for, which settings a change sends, when a clear stops, and what the
-//! person is told.
+//! `maknae board` and its subcommands: what each sends, when it stops, and what the person
+//! is told.
 use crate::tasking::text::{
     board_attachment_line, board_cleared_line, board_entry_header, board_list_stopped_line,
     board_refused_line, board_settings_lines, board_stopped_line, board_summary_line,
@@ -388,16 +387,28 @@ fn show(summary: bool, listed: &Listed, out: &mut dyn Write) -> std::io::Result<
     out.flush()
 }
 
-/// Whether a poll reads the settings: at the start, and again once
-/// `BOARD_WATCH_SETTINGS_EVERY_SECS` have passed since the last read that answered.
-fn settings_due(read_at: Option<Instant>, now: Instant) -> bool {
-    read_at.is_none_or(|at| {
-        now.saturating_duration_since(at) >= Duration::from_secs(BOARD_WATCH_SETTINGS_EVERY_SECS)
+/// Whether the poll due `at` seconds into the watch reads the settings: when none has
+/// answered yet, or when the next poll would fall more than
+/// `BOARD_WATCH_SETTINGS_EVERY_SECS` after the last read that answered.
+fn settings_due(read_at: Option<u64>, at: u64, interval: u64) -> bool {
+    read_at.is_none_or(|read| {
+        at.saturating_sub(read).saturating_add(interval) > BOARD_WATCH_SETTINGS_EVERY_SECS
     })
 }
 
-/// The last `report` read, as whether it is `summary`, and when it was read.
-type Reading = Option<(Instant, bool)>;
+/// When the poll starting `elapsed` into the watch was due, in seconds: the last whole
+/// interval.
+fn due_at(elapsed: Duration, interval: u64) -> u64 {
+    elapsed.as_secs() / interval * interval
+}
+
+/// How long to sleep from `elapsed` until the next poll is due.
+fn until_next(elapsed: Duration, interval: u64) -> Duration {
+    Duration::from_secs(due_at(elapsed, interval).saturating_add(interval)).saturating_sub(elapsed)
+}
+
+/// The last `report` read, as whether it is `summary`, and when its poll was due.
+type Reading = Option<(u64, bool)>;
 
 /// One poll; `Some` ends the watch with what the person is told.
 async fn poll<F, Fut>(
@@ -405,14 +416,14 @@ async fn poll<F, Fut>(
     err: &mut dyn Write,
     send: &mut F,
     reading: &mut Reading,
-    now: Instant,
+    (at, interval): (u64, u64),
 ) -> Option<Said>
 where
     F: FnMut(Verb) -> Fut,
     Fut: Future<Output = Result<WireOutcome, String>>,
 {
     let summary = match *reading {
-        Some((read_at, summary)) if !settings_due(Some(read_at), now) => summary,
+        Some((read_at, summary)) if !settings_due(Some(read_at), at, interval) => summary,
         _ => match settings_reply(send(manage(BoardOp::Settings { set: None })).await) {
             Ok(held) => {
                 let summary = match held.report {
@@ -420,7 +431,7 @@ where
                     BoardReport::Summary => true,
                     BoardReport::Every => false,
                 };
-                *reading = Some((now, summary));
+                *reading = Some((at, summary));
                 summary
             }
             Err(Stop::Busy(_)) => return None,
@@ -450,8 +461,9 @@ where
     }
 }
 
-/// Polls every `interval` for posts above the mark, reports them by the person's `report`,
-/// then marks through them; ends only with what the person is told. `clock` is monotonic.
+/// Polls every `interval` (whole seconds, at least one) on a fixed schedule from its start, for
+/// posts above the mark; reports them by the person's `report`, then marks through them; ends
+/// only with what the person is told. `clock` is monotonic.
 pub async fn watch<F, Fut, Z, ZFut, C>(
     interval: Duration,
     out: &mut dyn Write,
@@ -467,12 +479,19 @@ where
     ZFut: Future<Output = ()>,
     C: FnMut() -> Instant,
 {
+    let interval = interval.as_secs().max(1);
+    let start = clock();
     let mut reading = None;
     loop {
-        if let Some(said) = poll(out, err, &mut send, &mut reading, clock()).await {
+        let at = due_at(clock().saturating_duration_since(start), interval);
+        if let Some(said) = poll(out, err, &mut send, &mut reading, (at, interval)).await {
             return said;
         }
-        sleep(interval).await;
+        sleep(until_next(
+            clock().saturating_duration_since(start),
+            interval,
+        ))
+        .await;
     }
 }
 
@@ -1652,6 +1671,16 @@ mod tests {
         out: &mut dyn Write,
         replies: Vec<Result<WireOutcome, String>>,
     ) -> Watched {
+        watch_timed(interval, Duration::ZERO, out, replies).await
+    }
+
+    /// Each request moves the clock by `work`.
+    async fn watch_timed(
+        interval: Duration,
+        work: Duration,
+        out: &mut dyn Write,
+        replies: Vec<Result<WireOutcome, String>>,
+    ) -> Watched {
         let mut replies: VecDeque<_> = replies.into();
         let mut sent = vec![];
         let mut err = vec![];
@@ -1663,6 +1692,7 @@ mod tests {
             &mut err,
             |v| {
                 sent.push(v);
+                now.set(now.get() + work);
                 let r = replies.pop_front().expect("script exhausted");
                 async move { r }
             },
@@ -2081,14 +2111,105 @@ mod tests {
 
     #[test]
     fn a_settings_read_is_due_at_the_start_and_once_a_minute() {
-        let t = Instant::now();
-        assert!(settings_due(None, t));
-        assert!(!settings_due(Some(t), t));
-        assert!(!settings_due(Some(t), t + Duration::from_secs(59)));
-        assert!(settings_due(Some(t), t + MINUTE));
-        assert!(settings_due(Some(t), t + Duration::from_secs(61)));
-        assert!(settings_due(Some(t), t + Duration::from_secs(300)));
-        assert!(!settings_due(Some(t + MINUTE), t));
+        assert!(settings_due(None, 0, 5));
+        assert!(settings_due(None, 300, 300));
+        assert!(!settings_due(Some(0), 0, 5));
+        assert!(!settings_due(Some(0), 55, 5));
+        assert!(settings_due(Some(0), 56, 5));
+        assert!(settings_due(Some(0), 60, 5));
+        assert!(!settings_due(Some(0), 30, 30));
+        assert!(settings_due(Some(0), 31, 30));
+        assert!(settings_due(Some(0), 45, 45));
+        assert!(!settings_due(Some(0), 15, 45));
+        assert!(settings_due(Some(0), 0, 61));
+        assert!(!settings_due(Some(120), 0, 5));
+        assert!(settings_due(Some(0), u64::MAX, u64::MAX));
+    }
+
+    /// The seconds at which a watch polling every `interval` reads the settings, up to `until`.
+    fn reads(interval: u64, until: u64) -> Vec<u64> {
+        let mut read_at = None;
+        let mut reads = vec![];
+        for at in (0..=until).step_by(usize::try_from(interval).unwrap()) {
+            if settings_due(read_at, at, interval) {
+                read_at = Some(at);
+                reads.push(at);
+            }
+        }
+        reads
+    }
+
+    #[test]
+    fn no_poll_acts_on_a_setting_read_more_than_a_minute_ago() {
+        assert_eq!(reads(5, 300), [0, 60, 120, 180, 240, 300]);
+        assert_eq!(reads(30, 300), [0, 60, 120, 180, 240, 300]);
+        assert_eq!(reads(45, 300), [0, 45, 90, 135, 180, 225, 270]);
+        assert_eq!(reads(59, 300), [0, 59, 118, 177, 236, 295]);
+        assert_eq!(reads(60, 300), [0, 60, 120, 180, 240, 300]);
+        assert_eq!(reads(61, 300), [0, 61, 122, 183, 244]);
+        assert_eq!(reads(300, 900), [0, 300, 600, 900]);
+        for interval in [1, 5, 7, 29, 30, 31, 45, 59, 60, 61, 300, 3600] {
+            let reads = reads(interval, 7200);
+            for at in (0..=7200).step_by(usize::try_from(interval).unwrap()) {
+                let read = reads.iter().rev().find(|r| **r <= at).unwrap();
+                assert!(
+                    at - read <= 60,
+                    "{interval}: poll at {at} uses the read at {read}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_poll_is_due_on_the_last_whole_interval_and_sleeps_to_the_next() {
+        let s = Duration::from_secs;
+        assert_eq!(due_at(s(0), 30), 0);
+        assert_eq!(due_at(s(30), 30), 30);
+        assert_eq!(due_at(Duration::from_millis(30_900), 30), 30);
+        assert_eq!(due_at(s(75), 30), 60);
+        assert_eq!(until_next(s(0), 30), s(30));
+        assert_eq!(until_next(s(2), 30), s(28));
+        assert_eq!(
+            until_next(Duration::from_millis(30_250), 30),
+            Duration::from_millis(29_750)
+        );
+        assert_eq!(until_next(s(75), 30), s(15));
+        assert_eq!(until_next(s(60), 30), s(30));
+    }
+
+    #[tokio::test]
+    async fn the_watch_keeps_its_schedule_when_requests_take_time() {
+        let mut out = vec![];
+        let w = watch_timed(
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            &mut out,
+            vec![
+                every(),
+                page(&[], None),
+                page(&[], None),
+                settled(s(true, Off)),
+            ],
+        )
+        .await;
+        assert_eq!(w.slept, [Duration::from_secs(28), Duration::from_secs(29)]);
+        assert_eq!(settings_reads(&w.sent), 2);
+        assert_eq!(w.said, said(&[], &[WATCH_OFF], false));
+    }
+
+    #[tokio::test]
+    async fn off_set_just_after_a_read_stops_the_next_poll_within_a_minute() {
+        for secs in [45, 59] {
+            let (w, out) = run_watch_every(
+                Duration::from_secs(secs),
+                vec![every(), page(&[], None), settled(s(true, Off))],
+            )
+            .await;
+            assert_eq!(out, "", "{secs}");
+            assert!(sends_no_seen(&w.sent), "{secs}");
+            assert_eq!(w.sent, [read(), new_at(None), read()], "{secs}");
+            assert_eq!(w.said, said(&[], &[WATCH_OFF], false), "{secs}");
+        }
     }
 
     #[tokio::test]

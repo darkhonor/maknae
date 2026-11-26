@@ -273,7 +273,8 @@ enum Command {
         #[command(subcommand)]
         action: SessionCommand,
     },
-    /// Your agent message board: list its posts, show or change its settings, or clear it.
+    /// Your agent message board: list its posts, mark them seen, watch for new ones, show or
+    /// change its settings, or clear it.
     Board(BoardArgs),
     /// The agents you may task (`maknae agent list`), and a session with one
     /// (`maknae agent <NAME>`).
@@ -409,6 +410,7 @@ struct BoardArgs {
     /// List the newest n posts.
     #[arg(
         long,
+        value_name = "N",
         conflicts_with_all = ["all", "new"],
         value_parser = clap::value_parser!(u16)
             .range(1..=i64::from(maknae_agent::board::BOARD_LIST_LAST_MAX))
@@ -421,7 +423,7 @@ struct BoardArgs {
     #[arg(long, conflicts_with_all = ["all", "last"])]
     new: bool,
     /// Start the listing below post n.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     before: Option<u64>,
     /// Print each attachment's content.
     #[arg(long)]
@@ -449,9 +451,10 @@ enum BoardSub {
     Seen,
     /// Report new posts as they arrive, by your report setting, and mark them seen.
     Watch {
-        /// Seconds between polls.
+        /// Seconds between checks.
         #[arg(
             long,
+            value_name = "SECONDS",
             default_value_t = maknae_agent::board::BOARD_WATCH_INTERVAL_DEFAULT,
             value_parser = clap::value_parser!(u16)
                 .range(1..=i64::from(maknae_agent::board::BOARD_WATCH_INTERVAL_MAX))

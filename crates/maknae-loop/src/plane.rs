@@ -408,7 +408,12 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
                 &mut |l| diagnostics.push(l),
             )
             .await;
-        self.board_unseen = sent.as_ref().ok().and_then(|sent| sent.board_unseen);
+        self.board_unseen = match &sent {
+            Ok(sent) if matches!(sent.outcome, crate::outcome::SentOutcome::Payload(_)) => {
+                sent.board_unseen
+            }
+            _ => None,
+        };
         open_outcome(sent.map(|sent| WireOutcome::from(sent.outcome)))
     }
     async fn close(
@@ -813,6 +818,23 @@ mod tests {
             plane.take_board_unseen(),
             Some(maknae_proto::BoardUnseen::Over)
         );
+        assert_eq!(plane.take_board_unseen(), None);
+    }
+
+    #[tokio::test]
+    async fn a_count_on_a_refused_open_is_never_kept() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut response =
+            maknae_proto::Response::new(maknae_proto::PROTOCOL_VERSION, fake::refused(), None);
+        response.board_unseen = Some(maknae_proto::BoardUnseen::Exact(7));
+        let mut plane = LoopPlane::with_dial(
+            fake::FakeKernel::scripted(vec![fake::Scripted::Response(Box::new(response))]),
+            TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        assert!(plane.open(dir.path(), &[]).await.is_err());
         assert_eq!(plane.take_board_unseen(), None);
     }
 

@@ -800,7 +800,7 @@ pub enum Verb {
     BoardRead {
         seen_through: Option<crate::PostId>,
     },
-    /// Read or set the caller's own board settings, or clear the caller's own board.
+    /// An operation on the caller's own board.
     BoardManage {
         op: crate::BoardOp,
     },
