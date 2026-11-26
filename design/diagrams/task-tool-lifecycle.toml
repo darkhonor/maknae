@@ -1,14 +1,15 @@
-# An agent's task around its tool calls: bindings and reach at submission, the claim, the tool calls, the outcome and the revoke.
+# An agent's task: bindings and reach at submission, the pull hand-off, the agentic loop with its optional exchanges, the outcome and the revoke.
 
-title = "An agent's task around its tool calls: bindings, reach, the claim, the credential's life, the outcome"
+title = "An agent's task: bindings and reach, the pull hand-off, the agentic loop, the outcome and the revoke"
 subtitle = [
-  "A task is how an agent's tool calls start and end. Each call in it is the tool call a person makes (generated-tool-invocation.svg); the task adds bindings, reach, credential.",
-  "Each step is marked with its build state. Submission, reach, claim and report are live; no tool call enforces the sealed reach and no task token is minted until #168 PR C and #479.",
+  "maknaed never dials an agent: maknae-agentd polls until a task is queued for it, then works it in the agentic loop. Each tool call is the one a person makes (generated-tool-invocation.svg).",
+  "Inside the loop, the tasker may add to the task, the agent may ask (#736), a tool call may wait for the tasker's approval (#174), and the tasker may stop it; halting its containers is #481. Each step shows its build state.",
 ]
-svg_title = "Maknae task and tool-call lifecycle"
-svg_desc = "UML sequence diagram of an agent task's life around its tool calls, each step marked live, unreachable, decided or planned: forge login, binding recognition, the sealed tasker token, intake, the reach observation in the Egress Daemon, addenda, the claim, the work, the credential's storage, re-mint and revoke, the report and the stop."
-pitch = 185
+svg_title = "Maknae agent task lifecycle"
+svg_desc = "UML sequence diagram of an agent task, each step marked live, unreachable, decided or planned: binding recognition, the sealed tasker token, intake and the reach observation in the Egress Daemon, the queue, the agent's claim poll, the hand-out, the agentic loop with the tool-call sequence, the credential's storage and re-mint, the heartbeat and the optional add, ask, approval and stop exchanges, then the report, the revoke and the collect."
+pitch = 195
 wrap_cols = 36
+precondition = "GitHub forge token in Vault at <kv_mount>/data/<user_prefix>/<you>/forges/<host>, field token: vault write -wrap-ttl=60s, or maknae forge login <host>. docs/first-provider.md U2"
 
 [[boundary]]
 before = "kernel"
@@ -61,16 +62,7 @@ kind = "external"
 # --- the sequence ---------------------------------------------------------
 
 [[step]]
-from = "tasker"
-to = "vault"
-kind = "call"
-label = "maknae forge login: store the tasker's forge token, once"
-status = "live"
-evidence = "ADR-0037 decision 7 · bins/maknae/src/forge.rs"
-test = "bins/maknae/src/forge.rs::login_writes_wrapped_under_the_users_forge_path"
-note = "A wrapped write to the tasker's own Vault subtree, with the tasker's own Vault login. The client reads no gh store."
-
-[[step]]
+id = "bind"
 from = "tasker"
 to = "tasker"
 kind = "self"
@@ -81,6 +73,7 @@ test = "crates/maknae-agent/src/hints.rs::each_link_form_binds_what_it_names"
 note = "Only hosts of git forges in the subject's catalog bind. A task carries at most 8 bindings; a binding never changes after sealing."
 
 [[step]]
+id = "wrapped-read"
 from = "tasker"
 to = "vault"
 kind = "call"
@@ -90,6 +83,7 @@ evidence = "ADR-0037 decision 7 · bins/maknae/src/agent.rs"
 test = "bins/maknae/src/agent.rs::an_expired_login_reads_no_forge_token"
 
 [[step]]
+id = "submit"
 from = "tasker"
 to = "kernel"
 kind = "call"
@@ -99,6 +93,7 @@ evidence = "ADR-0033 · crates/maknae-loop/src/tasker.rs"
 test = "crates/maknae-loop/src/tasker.rs::submit_sends_the_bindings_it_is_given"
 
 [[step]]
+id = "intake"
 from = "kernel"
 to = "kernel"
 kind = "self"
@@ -109,6 +104,7 @@ test = "crates/maknae-kernel/src/task.rs::a_remote_tasker_with_a_binding_is_refu
 note = "A binding's server must be a current git forge host; a sub-task's binding must equal one of its parent's."
 
 [[step]]
+id = "reach-frame"
 from = "kernel"
 to = "egress"
 kind = "call"
@@ -119,6 +115,7 @@ test = "crates/maknae-kernel/src/reach.rs::a_parent_must_hold_each_binding_and_i
 note = "The kernel carries the tasker's token sealed and never opens it. Sub-tasks take the tasker side from the parent's reach."
 
 [[step]]
+id = "unwrap"
 from = "egress"
 to = "vault"
 kind = "call"
@@ -128,6 +125,7 @@ evidence = "ADR-0028 · ADR-0037 decision 7 · bins/maknae-egress/src/opener.rs"
 test = "crates/maknae-deputy/src/reach/open.rs::the_tasker_token_opens_only_under_its_own_path_and_server"
 
 [[step]]
+id = "tasker-side"
 from = "egress"
 to = "github"
 kind = "call"
@@ -138,6 +136,7 @@ test = "crates/maknae-deputy/src/reach/drive.rs::a_tasker_frame_is_observed_with
 note = "Every answer but 200 refuses the task, a 404 included. The tasker's token is used for this read only and never stored."
 
 [[step]]
+id = "transit-sign"
 from = "egress"
 to = "vault"
 kind = "call"
@@ -146,6 +145,7 @@ status = "live"
 evidence = "ADR-0038 decision 3 · bins/maknae-egress/src/minting.rs"
 
 [[step]]
+id = "agent-side"
 from = "egress"
 to = "github"
 kind = "call"
@@ -156,6 +156,7 @@ test = "crates/maknae-deputy/src/reach/drive.rs::a_token_held_past_the_deadline_
 note = "GET /repos is never called with an installation token: its permissions block reads all false (measured 2026-11-19)."
 
 [[step]]
+id = "observations"
 from = "egress"
 to = "kernel"
 kind = "reply"
@@ -164,19 +165,21 @@ status = "live"
 evidence = "ADR-0037 decision 7 · crates/maknae-kernel/src/reach.rs"
 
 [[step]]
+id = "queue"
 from = "kernel"
 to = "kernel"
 kind = "self"
 label = "seal reach (tasker ∩ agent), sign the task, record it, queue it"
-decide = [
-  "ADR-0037's Owed list still says bindings, reach, recognizers and the intersection are not built; #168 PRs A and B built them, and #674 built binds: and bound-value patterns. Still owed: session.new bindings (#479), the label claim registry, the mapping from a role level to an installation-token permission set, the re-mint check and enforcing reach. Recommendation: add a dated as-built status line to ADR-0037.",
-]
 status = "live"
 evidence = "ADR-0033 · ADR-0037 decision 7 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::a_person_submits_and_sees_the_task_queued"
-note = "github-machine-user is AtHandOut today, so its reach is empty until #168 PR C observes it at hand-out. GitLab has no reach check: its tools stay refused in tasks."
+note = "Queued in the task store; nothing is sent to the agent. github-machine-user's reach is empty until #168 PR C observes it at hand-out. GitLab tools stay refused in tasks."
+decide = [
+  "ADR-0037's Owed list still says bindings, reach, recognizers and the intersection are not built; #168 PRs A and B built them, and #674 built binds: and bound-value patterns. Still owed: session.new bindings (#479), the label claim registry, the mapping from a role level to an installation-token permission set, the re-mint check and enforcing reach. Recommendation: add a dated as-built status line to ADR-0037.",
+]
 
 [[step]]
+id = "echo"
 from = "kernel"
 to = "tasker"
 kind = "reply"
@@ -185,28 +188,40 @@ status = "live"
 evidence = "ADR-0037 decision 7 · crates/maknae-kernel/src/task.rs"
 
 [[step]]
-from = "tasker"
-to = "kernel"
-kind = "call"
-label = "TaskAdd: a signed addendum of bindings, reach observed afresh"
-status = "live"
-evidence = "ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs"
-test = "crates/maknae-kernel/tests/task_loop.rs::an_addendum_is_sealed_signed_and_handed_to_the_agent_that_verifies_it"
-
-[[step]]
+id = "poll"
 from = "agentd"
 to = "kernel"
 kind = "call"
-label = "TaskClaim"
-decide = [
-  "How is a github-machine-user credential observed at hand-out (#168 PR C)? The Egress Daemon holds no KV grant (ADR-0038 decision 5), and the agent reads its own stored token (ADR-0038 decision 2). Recommendation: a second leg after hand-out, since TaskClaim names no task and doubles as the heartbeat. Once the claim reply names the task and its bindings, maknae-agentd wrap-reads its stored token for the bound servers only and sends the sealed wrapping token in a follow-up frame that completes the hand-out, so the heartbeat stays free of credentials (D3). Egress calls GET /repos with it and maps the answer to reach operations as the tasker side is (ADR-0037 decision 7), and the kernel keeps the result as a hand-out reach record beside the signed task, which recording it does not re-sign; sub-task reach and the task view read that record too. If the leg fails or its frame never arrives, the agent side is empty and the task acts on nothing (fail closed), with no new close. This assumes a fine-grained token, whose permissions block was measured 2026-10-22; a classic token is unmeasured.",
-]
+label = "TaskClaim, every 5 s (POLL_EVERY)"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-agent/src/task_driver.rs"
+test = "crates/maknae-agent/src/task_driver.rs::idle_polls_every_five_seconds_and_does_nothing_else_on_idle_or_refused"
+
+[[step]]
+id = "idle"
+from = "kernel"
+to = "agentd"
+kind = "reply"
+label = "TaskIdle: nothing queued for this agent"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
+
+[[step]]
+id = "claim"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "TaskClaim that finds a queued task"
 status = "live"
 evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::an_agent_claims_in_fifo_order_across_taskers"
 note = "Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1)."
+decide = [
+  "How is a github-machine-user credential observed at hand-out (#168 PR C)? The Egress Daemon holds no KV grant (ADR-0038 decision 5), and the agent reads its own stored token (ADR-0038 decision 2). Recommendation: a second leg after hand-out, since TaskClaim names no task and doubles as the heartbeat. Once the claim reply names the task and its bindings, maknae-agentd wrap-reads its stored token for the bound servers only and sends the sealed wrapping token in a follow-up frame that completes the hand-out, so the heartbeat stays free of credentials (task D3, ruled 2026-11-26). Egress calls GET /repos with it and maps the answer to reach operations as the tasker side is (ADR-0037 decision 7), and the kernel keeps the result as a hand-out reach record beside the signed task, which recording it does not re-sign; sub-task reach and the task view read that record too. If the leg fails or its frame never arrives, the agent side is empty and the task acts on nothing (fail closed), with no new close. This assumes a fine-grained token, whose permissions block was measured 2026-10-22; a classic token is unmeasured.",
+]
 
 [[step]]
+id = "hand-out"
 from = "kernel"
 to = "agentd"
 kind = "reply"
@@ -216,16 +231,19 @@ evidence = "ADR-0039 decision 4 · crates/maknae-kernel/src/run.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::an_agent_fetches_the_catalog_its_claim_stamped"
 
 [[step]]
+id = "work"
 from = "agentd"
-to = "kernel"
-kind = "call"
-label = "work the task: model turns and tool calls, each citing the task"
+to = "github"
+kind = "ref"
+label = "model turns and tool calls, each citing the task"
+target = "generated-tool-invocation.svg"
 status = "live"
-evidence = "design/diagrams/tool-invocation.toml · crates/maknae-agent/src/route.rs"
+evidence = "crates/maknae-agent/src/route.rs"
 test = "crates/maknae-kernel/tests/agent_loop.rs::a_denied_read_reaches_the_model_as_unavailable_and_is_a_deny_in_the_trail"
-note = "Live today for the file tools and sub-tasks. A gh, git or cargo call is the tool-call sequence (generated-tool-invocation.svg), #479."
+note = "Live for the file tools and sub-tasks. A gh, git or cargo call in a tool container is #479; its mint and launch are the tool-call diagram's steps."
 
 [[step]]
+id = "store-blob"
 from = "kernel"
 to = "kernel"
 kind = "self"
@@ -235,60 +253,124 @@ evidence = "#168 · ADR-0038 decision 4"
 note = "Produced by the mint in the tool-call diagram (steps 11 to 13). The task store has no field for it yet. A rotation of egress's seal key strands every outstanding blob (ADR-0038 residual 2)."
 
 [[step]]
+id = "re-mint"
 from = "kernel"
 to = "egress"
 kind = "call"
 label = "re-mint before expiry, re-checking the agent side of reach"
-decide = [
-  "When to re-mint? ADR-0038's Consequences and #168's close-out item 2 say only before expiry, and ADR-0037 decision 7 only that each re-mint re-checks the agent side; #168's slice 3 banner says once the remaining life is shorter than a call's timeout. The other candidate is a fixed margin checked on the TaskClaim heartbeat. Recommendation: the call's timeout plus the time to launch, checked at each launch, so a token outlives the call's deadline and the heartbeat carries no credential; the replaced token is revoked at once, since the agent loop runs one tool call at a time, and its blob replaced in the store.",
-]
 status = "#168"
 evidence = "#168 · ADR-0037 decision 7"
+note = "Task D3 ruled 2026-11-26: at each launch, when the remaining life is under the call's timeout plus launch time; the old token is revoked at once."
 
 [[step]]
+id = "heartbeat"
 from = "agentd"
 to = "kernel"
 kind = "call"
-label = "TaskReport: the outcome"
+label = "heartbeat: TaskClaim with seen_follow_ups, every 5 min"
 status = "live"
-evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
-test = "crates/maknae-kernel/tests/task_loop.rs::a_report_needs_the_agents_own_working_task_cited"
+evidence = "ADR-0033 · crates/maknae-agent/src/task_driver.rs"
+test = "crates/maknae-agent/src/task_driver.rs::the_heartbeat_is_sent_when_five_minutes_of_wall_time_have_passed_checked_after_every_step"
+note = "Sent after a step once HEARTBEAT_EVERY has passed; it renews the 15-minute claim lease. A stop or follow-up is seen here."
 
 [[step]]
+id = "beat-reply"
 from = "kernel"
-to = "egress"
-kind = "call"
-label = "Revoke frame per stored for_revocation blob, at the task's close"
-status = "#168"
-decide = [
-  "Which ends revoke? ADR-0038 revokes at the task's outcome. A working task ends Reported or closes Stopped, AgentGone, AgentLost (a crashed or wedged maknae-agentd) or ParentEnded, and containment moves it to Held without closing it; Dropped and Withdrawn come before hand-out, so a lazy mint has given them no token. Recommendation: every close and every move to Held replays the task's stored blobs, so each contained or abandoned task's tokens are revoked, best effort: a failed revoke, or a blob sealed before a rotation of egress's seal key, leaves its token live until it expires (ADR-0038 residual 2). A released held task mints again at its next launch.",
-]
-evidence = "#168 · ADR-0038 decision 4"
-note = "A failed revocation is recorded as an outcome (ADR-0036 decision 13). Each mint and revoke gets an intent and outcome pair on the trail (ADR-0038 decision 10)."
+to = "agentd"
+kind = "reply"
+label = "the follow-ups not yet seen, or the task's state"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs"
+test = "crates/maknae-agent/src/task_driver.rs::a_heartbeat_reads_only_the_follow_ups_not_yet_seen"
 
 [[step]]
-from = "egress"
-to = "github"
-kind = "call"
-label = "DELETE /installation/token, for a Revoke frame"
-decide = [
-  "ADR-0038's Owed list still names the reach check, which #168 PR B built, and the kernel's call at task claim, which the 2026-11-25 ruling moved to first launch (tool-call diagram D5); egress's mint and revoke are built, and no kernel caller sends them. Recommendation: add a dated as-built status line to ADR-0038 recording both.",
-]
-status = "unreachable"
-evidence = "ADR-0038 decision 4 · bins/maknae-egress/src/serve.rs"
-test = "bins/maknae-egress/src/serve.rs::a_revoke_frame_opens_its_blob_and_deletes_that_token"
-note = "The reach driver's own metadata-read token is already revoked live, in the agent-side step above."
-
-[[step]]
+id = "add"
 from = "tasker"
 to = "kernel"
 kind = "call"
-label = "TaskCollect: the report"
+label = "/add: TaskAdd, a follow-up, while Working"
 status = "live"
-evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
-test = "crates/maknae-kernel/tests/task_loop.rs::collect_returns_each_report_until_acknowledged_and_never_after"
+evidence = "ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::add_appends_a_follow_up_to_the_running_task_only"
+note = "Refused once the task is Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, and is a signed addendum. The agent gets it on its next heartbeat."
 
 [[step]]
+id = "ask"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "a question: a report kind that keeps the task Working"
+status = "#736"
+evidence = "#736"
+note = "At the agent's discretion; this is not an interactive session. The question's shape is open in #736."
+
+[[step]]
+id = "read-ask"
+from = "tasker"
+to = "kernel"
+kind = "call"
+label = "read the agent's question"
+status = "#736"
+evidence = "#736"
+
+[[step]]
+id = "answer"
+from = "tasker"
+to = "kernel"
+kind = "call"
+label = "answer with /add, delivered on the heartbeat"
+status = "#736"
+evidence = "#736"
+
+[[step]]
+id = "needs-approval"
+from = "kernel"
+to = "agentd"
+kind = "reply"
+label = "a tool call answered: approval required"
+status = "#174"
+evidence = "#174"
+note = "The tasker may narrow what the site allows, never widen it. Matching and expiry of an approval are open in #174."
+
+[[step]]
+id = "request"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "request_permission for that call"
+status = "#174"
+evidence = "#174"
+
+[[step]]
+id = "decide"
+from = "tasker"
+to = "kernel"
+kind = "call"
+label = "approve or deny, sent straight to maknaed"
+status = "#174"
+evidence = "#174"
+note = "The decision never passes through the agent; the kernel still checks it against the site's authorization."
+
+[[step]]
+id = "approval"
+from = "kernel"
+to = "agentd"
+kind = "reply"
+label = "on the heartbeat reply: approval recorded, or denied"
+status = "#174"
+evidence = "#174"
+
+[[step]]
+id = "retry"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "retry the call; the decision uses up the approval"
+status = "#174"
+evidence = "#174"
+
+[[step]]
+id = "stop"
 from = "tasker"
 to = "kernel"
 kind = "call"
@@ -296,7 +378,102 @@ label = "TaskStop: close the working task as Stopped"
 status = "live"
 evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::a_heartbeat_after_stop_tells_the_agent_it_was_stopped"
-note = "Cooperative: the agent learns of the stop at its next heartbeat and ends its loop. A stop that holds without the agent, its tool containers included, is #481."
-decide = [
-  "Who halts a stopped task's in-flight tool containers when maknae-agentd does not cooperate? The kernel launches no containers, and #481's banner rests such a stop on the tier beneath (ADR-0035 decision 2). Options: (a) a narrowly scoped polkit rule that lets the agent's launch helper (tool-call D8) put each task's containers in a transient system unit that maknaed may stop, which needs a grant to the agent's uid and to _maknae; (b) reopen ADR-0036 decision 1's rejected trusted launcher; (c) keep the container stop cooperative and cut off what the task holds instead: revoke its minted tokens at the stop (D4), and revoke its invocation identities, so the proxy refuses new CONNECTs and closes live tunnels (#566 requirement 7). A machine-user token is the agent's own and stays live, held behind that network cut. A compromised maknae-agentd can already run commands as the agent's uid (ADR-0036 Consequences), so ending its containers adds nothing against it; against a wedged one, (c) leaves its containers' workspace writes and resources until they exit, and lifetime.max, a launch-shape field the front end carries out, bounds only a cooperating agent. Recommendation: (c) for Rabbithole; (a) and (b) each give a uid new authority over units. Choosing (c) rereads #420's 'the stop holds whether or not the agent cooperates' and rewords #481's 'halts its loop and its containers' as cutting off the task's minted credentials and network. macOS has no equivalent under launchd: a supported-platform gap.",
-]
+note = "Cooperative today: the agent sees the stop at its next heartbeat, after its in-flight step."
+
+[[step]]
+id = "stopped"
+from = "kernel"
+to = "agentd"
+kind = "reply"
+label = "on the heartbeat reply: the task was stopped"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::a_heartbeat_after_stop_tells_the_agent_it_was_stopped"
+
+[[step]]
+id = "halt"
+from = "agentd"
+to = "agentd"
+kind = "self"
+label = "stop watch and cancel token halt the task's tool containers within N seconds"
+status = "#481"
+evidence = "#481"
+note = "Task D6 ruled 2026-11-26: conditions 1 to 5 end by construction; 6, a compromised agent, is cut off by the revoke (step 35)."
+
+[[step]]
+id = "report"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "TaskReport: the outcome"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::a_report_needs_the_agents_own_working_task_cited"
+[[step]]
+id = "revoke"
+from = "kernel"
+to = "egress"
+kind = "call"
+label = "Revoke frame per stored for_revocation blob, at every close and move to Held"
+status = "#168"
+evidence = "#168 · ADR-0038 decision 4"
+note = "Task D4 and D5 ruled 2026-11-26: every close and move to Held, best effort; the kernel caller is wired with #168 PR C. Each gets a trail intent and outcome (ADR-0038 decision 10)."
+
+[[step]]
+id = "delete"
+from = "egress"
+to = "github"
+kind = "call"
+label = "DELETE /installation/token, for a Revoke frame"
+status = "unreachable"
+evidence = "ADR-0038 decision 4 · bins/maknae-egress/src/serve.rs"
+test = "bins/maknae-egress/src/serve.rs::a_revoke_frame_opens_its_blob_and_deletes_that_token"
+note = "No kernel caller sends this until step 35 is built; an ADR-0038 as-built line follows then. The reach driver's metadata-read token is already revoked live (step 9)."
+[[step]]
+id = "collect"
+from = "tasker"
+to = "kernel"
+kind = "call"
+label = "TaskCollect: the report"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::collect_returns_each_report_until_acknowledged_and_never_after"
+[[fragment]]
+operator = "loop"
+guard = "until a task is queued for this agent"
+first = "poll"
+last = "idle"
+
+[[fragment]]
+operator = "loop"
+guard = "until TaskReport, or the task ends"
+first = "work"
+last = "halt"
+
+[[fragment]]
+operator = "opt"
+guard = "the tasker adds"
+first = "add"
+last = "add"
+
+[[fragment]]
+operator = "opt"
+guard = "the agent asks"
+first = "ask"
+last = "answer"
+status = "#736"
+evidence = "#736"
+
+[[fragment]]
+operator = "opt"
+guard = "the tasker's settings say “ask me first”"
+first = "needs-approval"
+last = "retry"
+status = "#174"
+evidence = "#174"
+
+[[fragment]]
+operator = "opt"
+guard = "the tasker stops"
+first = "stop"
+last = "halt"

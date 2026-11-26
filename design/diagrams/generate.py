@@ -423,7 +423,19 @@ def order_rows(rows: dict, deps: dict, sweeps: int = 12) -> dict:
 
 # --- SVG primitives -------------------------------------------------------
 
+_XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def load_toml(name: str) -> dict:
+    try:
+        return tomllib.loads((OUT / name).read_text())
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"{name}: is not valid TOML: {e}")
+
+
 def esc(s: str) -> str:
+    if _XML_BAD.search(s):
+        sys.exit(f"text holds a character XML cannot carry: {s!r}")
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -648,7 +660,7 @@ def stdv1(prov: str) -> str:
     and a profile that blurs them is a wish list. The `evidence` column is the
     part most StdV-1s lack — every row names a file, gate or ADR a reader can open.
     """
-    rows = tomllib.load((OUT / "standards-profile.toml").open("rb"))["standard"]
+    rows = load_toml("standards-profile.toml")["standard"]
     check_evidence(rows, "evidence", "standards-profile.toml")
     rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]), r["name"].lower()))
 
@@ -866,6 +878,29 @@ SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
              "os":       (OK_FILL, OK_LINE, "#04342C"),
              "trusted":  (TRUST_FILL, TRUST_LINE, TRUST_INK),
              "external": (PLAIN_FILL, MUTED, INK)}
+SEQ_KINDS = ("call", "reply", "self", "ref")
+_STEP_ID = re.compile(r"[a-z][a-z0-9-]*")
+FRAG_HEAD, FRAG_PAD, FRAG_GAP, FRAG_INSET = 32, 10, 16, 8
+REF_MARGIN = 60
+PRODUCT_NAMES = (
+    "generated-tcb-components.svg",
+    "generated-crate-binary-matrix.svg",
+    "generated-standards-profile.svg",
+    "generated-workspace-packages.svg",
+    "generated-read-path.svg",
+    "generated-credential-path.svg",
+    "generated-tool-invocation.svg",
+    "generated-task-tool-lifecycle.svg",
+    "generated-isolation-matrix.svg",
+    "generated-decision-cycle.svg",
+    "generated-data-model.svg",
+    "generated-system-interfaces.svg",
+    "generated-operational-concept.svg",
+    "generated-service-architecture.svg",
+    "generated-agentic-patterns.svg",
+)
+FRAG_KEYS = ("operator", "guard", "first", "last")
+LOOP_FILL = "#FAEFD2"
 
 
 def sequence(name: str) -> str:
@@ -883,12 +918,86 @@ def sequence(name: str) -> str:
     Geometry fails closed: overlapping boxes, a boundary on an unknown or first
     participant, an unknown kind and a fourth subtitle line all exit.
     """
-    doc = tomllib.loads((OUT / name).read_text())
+    doc = load_toml(name)
     parts, steps = doc["participant"], doc["step"]
+    sid_index = {}
+    for n, s in enumerate(steps, 1):
+        k = s.get("kind")
+        if not (isinstance(k, str) and k in SEQ_KINDS):
+            sys.exit(f"{name}: step {n}: unknown kind {k!r}")
+        if k == "ref":
+            if "target" not in s:
+                sys.exit(f"{name}: step {n}: ref step has no target")
+            for key in ("target", "from", "to"):
+                if not isinstance(s.get(key), str):
+                    sys.exit(f"{name}: step {n}: {key} must be a str")
+            if s["target"] not in PRODUCT_NAMES:
+                sys.exit(f"{name}: step {n}: ref target {s['target']!r} is not a generated product")
+            for key in ("sees", "decide"):
+                if key in s:
+                    sys.exit(f"{name}: step {n}: a ref step takes no {key}")
+        for key in ("label", "from", "to"):
+            if not isinstance(s.get(key), str):
+                sys.exit(f"{name}: step {n}: {key} must be a str")
+        for key in ("from", "to"):
+            if s[key] not in {pa["id"] for pa in parts}:
+                sys.exit(f"{name}: step {n}: spans unknown participant {s[key]!r}")
+        if "id" in s:
+            sid = s["id"]
+            if not (isinstance(sid, str) and _STEP_ID.fullmatch(sid)):
+                sys.exit(f"{name}: step {n}: id {sid!r} must match {_STEP_ID.pattern}")
+            if sid in sid_index:
+                sys.exit(f"{name}: duplicate step id {sid!r}")
+            sid_index[sid] = n - 1
+    pre = doc.get("precondition")
+    if pre is not None and not isinstance(pre, str):
+        sys.exit(f"{name}: precondition must be a str")
     check_evidence(steps, "evidence", name)
     check_tests(steps, "test", name)
     check_status(steps, name)
     marked = any("status" in s for s in steps)
+    frags = doc.get("fragment", [])
+    if not (isinstance(frags, list) and all(isinstance(f, dict) for f in frags)):
+        sys.exit(f"{name}: fragment must be an array of tables")
+    if not marked and any("status" in f for f in frags):
+        sys.exit(f"{name}: a fragment status needs the steps marked")
+    spans = []
+    for k, f in enumerate(frags, 1):
+        for key in f:
+            if key not in FRAG_KEYS + ("status", "evidence"):
+                sys.exit(f"{name}: fragment {k}: unknown key {key!r}")
+        for key in FRAG_KEYS:
+            if not isinstance(f.get(key), str):
+                sys.exit(f"{name}: fragment {k}: {key} is missing or not a string")
+        for key in ("status", "evidence"):
+            if key in f and not isinstance(f[key], str):
+                sys.exit(f"{name}: fragment {k}: {key} must be a str")
+        if f["operator"] not in ("loop", "opt"):
+            sys.exit(f"{name}: fragment {k}: operator {f['operator']!r} is not loop or opt")
+        if not f["guard"].strip():
+            sys.exit(f"{name}: fragment {k}: guard must be a non-empty string")
+        for end in ("first", "last"):
+            if f[end] not in sid_index:
+                sys.exit(f"{name}: fragment {k}: {end} {f[end]!r} names no step")
+        i0, i1 = sid_index[f["first"]], sid_index[f["last"]]
+        if i0 > i1:
+            sys.exit(f"{name}: fragment {k}: first {f['first']!r} comes after last {f['last']!r}")
+        spans.append((i0, i1))
+        row = {"label": f"[{f['guard']}]"} | {key: f[key] for key in ("status", "evidence") if key in f}
+        if "evidence" in f:
+            check_evidence([row], "evidence", name)
+        if "status" in f:
+            check_status([row], name)
+    for j, (a0, a1) in enumerate(spans):
+        for k in range(j + 1, len(spans)):
+            b0, b1 = spans[k]
+            if (a0, a1) == (b0, b1):
+                sys.exit(f"{name}: fragments {j + 1} and {k + 1} cover the same steps; "
+                         f"merge them or nest one inside a wider range")
+            if a1 < b0 or b1 < a0 or (a0 <= b0 and b1 <= a1) or (b0 <= a0 and a1 <= b1):
+                continue
+            sys.exit(f"{name}: fragments {j + 1} and {k + 1} overlap without nesting")
+    depth = [sum(o != sp and o[0] <= sp[0] and sp[1] <= o[1] for o in spans) for sp in spans]
     decisions, dtag = [], {}
     for n, s in enumerate(steps):
         qs = s.get("decide", [])
@@ -918,18 +1027,85 @@ def sequence(name: str) -> str:
 
     lines, ys, cur = [], [], HEAD + 34
     shown = [f'«{s["status"]}» {s["label"]}' if marked else s["label"] for s in steps]
-    for s, label in zip(steps, shown):
+    heads, fbot = {}, {}
+    for i, (s, label) in enumerate(zip(steps, shown)):
+        for k in sorted((k for k, sp in enumerate(spans) if sp[0] == i), key=lambda k: depth[k]):
+            heads[k] = cur
+            cur += FRAG_HEAD
         lab = (_wrap_words(label, wrap)
                if wrap and s["kind"] != "self" and len(label) > wrap else [label])
         lines.append(lab)
         up = len(lab) - 1
         ys.append(cur + 12 * up)
-        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide")))
+        cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide"))
+                           + (s["kind"] == "ref"))
+        closing = sorted((k for k, sp in enumerate(spans) if sp[1] == i), key=lambda k: -depth[k])
+        for k in closing:
+            cur += FRAG_PAD
+            fbot[k] = cur
+        cur += FRAG_GAP if closing else 0
     body_h = cur - 34 + 26
+    def ref_edges(i):
+        a, b = sorted((xs[idx[steps[i]["from"]]], xs[idx[steps[i]["to"]]]))
+        return (a - REF_MARGIN, b + REF_MARGIN) if steps[i]["kind"] == "ref" else (a, b)
+
+    def tag_w(n):
+        return len("open decision " + ", ".join(dtag[n])) * 4.8 if n in dtag else 0
+
+    def place(n):
+        s, lab = steps[n], lines[n]
+        a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
+        if s["kind"] == "ref":
+            r0, r1 = ref_edges(n)
+            need = max(len(f'{n+1}. {lab[0]}') * 5.6, max(len(ln) for ln in lab) * 5.6,
+                       len(s.get("evidence", "")) * 4.6, len(s["target"]) * 4.6,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
+            if need > r1 - r0 - 12:
+                sys.exit(f"{name}: step {n + 1}: ref text does not fit its box; raise pitch or shorten it")
+            return (r0 + r1) / 2, "middle", r0, r1
+        if s["kind"] == "self":
+            # A self-message on a right-hand lifeline can run its evidence off
+            # the canvas -- fully-qualified paths are long. Flip it to the left
+            # of the lifeline when it will not fit to the right.
+            need = max(len(f'{n+1}. {shown[n]}') * 5.6,
+                       len(s.get("evidence", "")) * 4.6,
+                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
+            wide = max(need, tag_w(n))
+            if a + 40 + need > W - 24:
+                return a - 40, "end", a - 40 - wide, a
+            return a + 40, "start", a, a + 40 + wide
+        half = max(max(len(ln) for ln in lab) * 5.6,
+                   len(s.get("evidence", "")) * 4.6,
+                   len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                   len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
+        lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
+        drawn = max(half, len(f'{n+1}. {lab[0]}') * 5.6 / 2, tag_w(n) / 2)
+        return lx, "middle", min(lx - drawn, a, b), max(lx + drawn, a, b)
+
+    maxdepth, fx = max(depth, default=0), []
+    for k, ((i0, i1), f) in enumerate(zip(spans, frags), 1):
+        lx = [e for i in range(i0, i1 + 1) for e in ref_edges(i)]
+        tx = [place(i)[2:] for i in range(i0, i1 + 1)]
+        X0 = max(8, min(min(lx) - 70, min(t[0] for t in tx) - 6) - FRAG_INSET * maxdepth)
+        X1 = min(W - 8, max(max(lx) + 70, max(t[1] for t in tx) + 6) + FRAG_INSET * maxdepth)
+        x0, x1 = X0 + FRAG_INSET * depth[k - 1], X1 - FRAG_INSET * depth[k - 1]
+        for i, (t0, t1) in zip(range(i0, i1 + 1), tx):
+            if t0 < x0 or t1 > x1:
+                sys.exit(f"{name}: fragment {k}: step {i + 1}'s text runs past the box; "
+                         f"raise pitch or shorten it")
+        drawn = f"«{f['status']}» [{f['guard']}]" if "status" in f else f"[{f['guard']}]"
+        if (len(f["operator"]) * 6 + 14) + len(drawn) * 5.4 + 16 > x1 - x0:
+            sys.exit(f"{name}: fragment {k}: guard does not fit its box; shorten it")
+        fx.append((x0, x1, drawn))
     notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
     DCOLS = int((W - 2 * (LEFT - 52)) / 5.6)
     dlines = [_wrap_words(f"D{d} (step {st}). {q}", DCOLS) for d, st, q in decisions]
-    H = (body_h + 34 + len(notes) * 27 + 58 + (22 if marked else 0)
+    PRE_LABEL = "Before step 1."
+    pre_x = LEFT - 52 + len(PRE_LABEL) * 5.6 + 8
+    if pre is not None and pre_x + len(pre) * 5.3 > W - 12:
+        sys.exit(f"{name}: precondition does not fit the canvas; shorten it")
+    H = (body_h + 34 + (len(notes) + (pre is not None)) * 27 + 58 + (22 if marked else 0)
          + ((40 + sum(18 + 14 * (len(ls) - 1) for ls in dlines)) if decisions else 0))
 
     p = ['<defs>'
@@ -940,6 +1116,12 @@ def sequence(name: str) -> str:
          f'markerHeight="8" orient="auto-start-reverse">'
          f'<path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="{MUTED}" '
          f'stroke-width="1.1"/></marker></defs>']
+
+    for k, f in enumerate(frags):
+        if f["operator"] == "loop":
+            x0, x1, _ = fx[k]
+            p.append(f'<rect data-frag-fill="{k + 1}" x="{x0}" y="{heads[k] + 2}" width="{x1 - x0}" '
+                     f'height="{fbot[k] - heads[k] - 2}" fill="{LOOP_FILL}" fill-opacity="0.6"/>')
 
     # the trust boundaries, behind the lifelines
     bounds = doc.get("boundary", [])
@@ -974,36 +1156,53 @@ def sequence(name: str) -> str:
         p.append(f'<line x1="{x}" y1="{HEAD+6}" x2="{x}" y2="{body_h}" stroke="{MUTED}" '
                  f'stroke-width="0.7" stroke-dasharray="3 4"/>')
 
+    for k, f in enumerate(frags):
+        (x0, x1, drawn), top, op = fx[k], heads[k] + 2, f["operator"]
+        tw = len(op) * 6 + 14
+        p.append(f'<rect data-frag="{k + 1}" x="{x0}" y="{top}" width="{x1 - x0}" '
+                 f'height="{fbot[k] - top}" fill="none" stroke="{INK}" stroke-width="0.9"/>')
+        p.append(f'<path d="M {x0} {top} h {tw} v 9 l -5 5 h {5 - tw} z" fill="#FFFFFF" '
+                 f'stroke="{INK}" stroke-width="0.9"/>')
+        p.append(text(x0 + 6, top + 10.5, op, 9, "600"))
+        p.append(text(x0 + tw + 8, top + 10.5, drawn, 9, halo="#FFFFFF"))
+
     # messages
     for n, s in enumerate(steps):
         y, lab = ys[n], lines[n]
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
+        if s["kind"] == "ref":
+            place(n)
+            r0, r1 = ref_edges(n)
+            top = y - 14 - 12 * (len(lab) - 1)
+            bottom = y + 15 + 12 * (bool(s.get("test")) + 1) + 6
+            p.append(f'<rect data-ref="{n + 1}" x="{r0}" y="{top}" width="{r1 - r0}" '
+                     f'height="{bottom - top}" fill="#FFFFFF" stroke="{INK}" stroke-width="0.9"/>')
+            p.append(f'<path d="M {r0} {top} h 32 v 9 l -5 5 h -27 z" fill="#FFFFFF" '
+                     f'stroke="{INK}" stroke-width="0.9"/>')
+            p.append(text(r0 + 6, top + 10.5, "ref", 9, "600"))
+            cx = (r0 + r1) / 2
+            for k, ln in enumerate(lab):
+                p.append(text(cx, y - 2 - 12 * (len(lab) - 1 - k), f'{n+1}. {ln}' if k == 0 else ln,
+                              10, "600", anchor="middle"))
+            last = y + 15
+            if s.get("evidence"):
+                p.append(text(cx, last, s["evidence"], 7.5, fill=MUTED, anchor="middle", mono=True))
+            if s.get("test"):
+                last += 12
+                p.append(text(cx, last, f'test: {s["test"]}', 7.5, fill=MUTED, anchor="middle",
+                              mono=True))
+            p.append(text(cx, last + 12, s["target"], 7.5, fill=TRUST_INK, anchor="middle", mono=True))
+            continue
         rep = s["kind"] == "reply"
         stroke, dash = (MUTED, ' stroke-dasharray="5 3"') if rep else (INK, "")
         mark = "rep" if rep else "call"
         if s["kind"] == "self":
             p.append(f'<path d="M {a} {y-6} h 30 v 20 h -30" fill="none" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
-            # A self-message on a right-hand lifeline can run its evidence off
-            # the canvas -- fully-qualified paths are long. Flip it to the left
-            # of the lifeline when it will not fit to the right.
-            need = max(len(f'{n+1}. {shown[n]}') * 5.6,
-                       len(s.get("evidence", "")) * 4.6,
-                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
-                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
-            if a + 40 + need > W - 24:
-                lx, anc = a - 40, "end"
-            else:
-                lx, anc = a + 40, "start"
         else:
             p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
-            half = max(max(len(ln) for ln in lab) * 5.6,
-                       len(s.get("evidence", "")) * 4.6,
-                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
-                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
-            lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
-            anc = "middle"
+        lx, anc, _, _ = place(n)
         for k, ln in enumerate(lab):
             up = len(lab) - 1 - k
             p.append(text(lx, y - 2 - 12 * up, f'{n+1}. {ln}' if k == 0 else ln, 10,
@@ -1032,6 +1231,10 @@ def sequence(name: str) -> str:
         p.append(text(LEFT - 52, y, STATUS_LEGEND, 9.5, fill=MUTED))
         y += 22
     p.append(text(LEFT - 52, y, "Notes", 12, "600"))
+    if pre is not None:
+        y += 27
+        p.append(text(LEFT - 52, y, PRE_LABEL, 9.5, "600", fill=WARN))
+        p.append(text(pre_x, y, pre, 9.5, fill=INK))
     for num, nt in notes:
         y += 27
         p.append(text(LEFT - 52, y, f"{num}.", 9.5, "600", fill=WARN))
@@ -1065,7 +1268,7 @@ def matrix(name: str) -> str:
     Fails closed on a pair with no cell or two cells: a blank cell reads as
     "no access", which is exactly the claim a gap must never make silently.
     """
-    doc = tomllib.loads((OUT / name).read_text())
+    doc = load_toml(name)
     subs, objs, rights, cells = doc["subject"], doc["object"], doc["right"], doc["cell"]
     for kind, rows in (("subject", subs), ("object", objs), ("right", rights)):
         ids = [r["id"] for r in rows]
@@ -1181,7 +1384,7 @@ def d6_decision(prov: str) -> str:
     RECONCILED (an ordered ladder, ADR-0008). UML 2.5.1 activity semantics for
     the ladder -- a decision node per rung, first match wins.
     """
-    doc = tomllib.loads((OUT / "decision-cycle.toml").read_text())
+    doc = load_toml("decision-cycle.toml")
     ops, rungs = doc["operand"], doc["rung"]
     check_evidence(ops, "evidence", "decision-cycle.toml")
     check_evidence(rungs, "evidence", "decision-cycle.toml")
@@ -1298,7 +1501,7 @@ def d7_datamodel(prov: str) -> str:
     them as separate entities is a normalization judgement, not a transcription
     -- which is why every entity cites the type it was drawn from.
     """
-    doc = tomllib.loads((OUT / "data-model.toml").read_text())
+    doc = load_toml("data-model.toml")
     secs, ents, rels = doc["section"], doc["entity"], doc["rel"]
     check_evidence(ents, "evidence", "data-model.toml")
     by_id = {e["id"]: e for e in ents}
@@ -1400,7 +1603,7 @@ def d8_interfaces(prov: str) -> str:
     sends an assessor to test surfaces that are not there, and lets the ones
     that ARE there pass without notice.
     """
-    doc = tomllib.loads((OUT / "system-interfaces.toml").read_text())
+    doc = load_toml("system-interfaces.toml")
     nodes, ifaces, negs = doc["node"], doc["iface"], doc["negative"]
     check_evidence(ifaces, "evidence", "system-interfaces.toml")
     check_evidence(negs, "evidence", "system-interfaces.toml")
@@ -1544,7 +1747,7 @@ def d9_opconcept(prov: str) -> str:
     An OV-1 that omits that reads as a description of a working system, and
     this catalog's whole discipline is saying which is which.
     """
-    d = tomllib.loads((OUT / "operational-concept.toml").read_text())
+    d = load_toml("operational-concept.toml")
     steps, envs = d["step"], d["env"]
     check_evidence([d["delta"], d["spectrum"], d["delivery"]], "evidence",
                    "operational-concept.toml")
@@ -1729,7 +1932,7 @@ def service_architecture(prov: str) -> str:
     a communication path. Every element carries a status and its line style is
     that status, so nothing unbuilt is drawn as built.
     """
-    d = tomllib.loads((OUT / "service-architecture.toml").read_text())
+    d = load_toml("service-architecture.toml")
     sc, planes, arts, flows = d["scope"], d["plane"], d["artifact"], d["flow"]
     check_evidence([sc, d["built"]], "evidence", "service-architecture.toml")
 
@@ -1959,7 +2162,7 @@ def d11_patterns(prov: str) -> str:
     The crossing count is a cost model: each is a PDP evaluation, an audit
     append and a socket round trip.
     """
-    doc = tomllib.loads((OUT / "agentic-patterns.toml").read_text())
+    doc = load_toml("agentic-patterns.toml")
     pats = doc["pattern"]
     check_evidence(pats, "evidence", "agentic-patterns.toml")
 
@@ -2131,6 +2334,8 @@ def main(argv: list) -> None:
         ("generated-agentic-patterns.svg", lambda: d11_patterns(prov)),
     ]
     names = [n for n, _ in products]
+    if names != list(PRODUCT_NAMES):
+        sys.exit("PRODUCT_NAMES does not match main()'s products")
 
     want = set(argv) if argv else set(names)
     unknown = sorted(want - set(names))

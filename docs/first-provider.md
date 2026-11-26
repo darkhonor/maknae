@@ -349,9 +349,9 @@ maknae: logged in to Vault as <name>; the token is held in <custody> and is vali
 
 The token lasts as long as the userpass user's `token_ttl` (8 hours, with a 24-hour `token_max_ttl`, in `deploy/vault-pki/main.tf`), and Maknae never renews it: log in again when it expires. `maknae logout` revokes it at Vault and erases it.
 
-### U2. Store your key in Vault
+### U2. Store your credentials in Vault
 
-You store your own key, with your own Vault login. In the shell you will use, point the `vault` CLI at the same Vault and CA your Maknae configuration uses; without these it talks to `https://127.0.0.1:8200` and trusts the system store:
+You store two secrets here: your provider's API key and, if you will task an agent on a GitHub forge, your forge token. You store your own key, with your own Vault login. In the shell you will use, point the `vault` CLI at the same Vault and CA your Maknae configuration uses; without these it talks to `https://127.0.0.1:8200` and trusts the system store:
 
 ```bash
 export VAULT_ADDR=https://<vault-host>:8200        # vault.addr from ~/.maknae/maknae.yaml
@@ -389,6 +389,30 @@ The field name, `api_key` here, and the subpath are what your `providers.yaml` n
 Vault answers with a wrapping token around the write's metadata (its `wrapping_token_creation_path` is your key's path). It holds nothing secret; ignore it.
 
 **Never paste a wrapping token from a read.** A wrapped *read* of your key returns a wrapping token that wraps the key itself: anyone who unwraps it within its TTL has your key. An unwrapped read of your own key is refused with a plain `403 permission denied` (measured): that is the policy's `min_wrapping_ttl` working, not a broken grant. Another user's key is refused the same way, wrapped or not (measured).
+
+
+#### Your forge token
+
+If you will task an agent on a GitHub forge, store a token for that forge in the same shell, with the same user token. At submission your client reads it, and each bound repository is checked against GitHub as you ([runbook: Store your forge login](runbook.md#store-your-forge-login) says why). The path is `<kv_mount>/data/<user_prefix>/<username>/forges/<host>`, field `token`, where `<host>` is the forge's host as `maknae tools` lists it; a `:` in the host is written `_`, so `ghe.example:8443` is stored at `forges/ghe.example_8443`.
+
+zsh (macOS), not yet measured:
+
+```zsh
+read -rs "VT?Maknae user token: " && echo && read -rs "TOK?Forge token: " && echo && printf '{"data":{"token":"%s"}}' "$TOK" | VAULT_TOKEN="$VT" vault write -wrap-ttl=60s <kv_mount>/data/<user_prefix>/<username>/forges/<host> - ; unset VT TOK
+```
+
+bash (Linux), not yet measured:
+
+```bash
+read -rsp "Maknae user token: " VT && echo && read -rsp "Forge token: " TOK && echo && printf '{"data":{"token":"%s"}}' "$TOK" | VAULT_TOKEN="$VT" vault write -wrap-ttl=60s <kv_mount>/data/<user_prefix>/<username>/forges/<host> - ; unset VT TOK
+```
+
+The `read -s`, `printf`, `vault write … -`, `-wrap-ttl=60s` and `unset` points above apply here too.
+
+- **A token, not your password.** Use a fine-grained personal access token whose repository access covers every repository you will task an agent on, with **Metadata** and **Pull requests: Read-only**, and nothing else ([runbook: Which token](runbook.md#store-your-forge-login)).
+- **Only GitHub forges are read today.** A GitLab forge has no reach check, so it takes no forge token yet.
+- **Or use the CLI.** After `maknae login`, `maknae forge login <host>` does the same write from a hidden prompt, and refuses a host this site does not configure or a token with a stray byte before storing it.
+- **Skip this** if you will not task an agent on a GitHub forge.
 
 ### U3. Choose your provider
 
