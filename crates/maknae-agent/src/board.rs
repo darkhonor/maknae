@@ -203,10 +203,12 @@ where
             Ok(page) => page,
             Err(stop) => break Some(stop.err(BoardCommand::List, false)),
         };
-        if let (Some(sent), Some(next)) = (before, page.older) {
-            if next >= sent {
-                break Some(vec![NOT_MOVED_BACK.into()]);
-            }
+        let ascending = page.entries.windows(2).all(|w| w[0].seq < w[1].seq);
+        let below = before.is_none_or(|sent| {
+            page.entries.iter().all(|e| e.seq < sent) && page.older.is_none_or(|n| n < sent)
+        });
+        if !(ascending && below) {
+            break Some(vec![NOT_MOVED_BACK.into()]);
         }
         collected += page.entries.len();
         pages.push(page.entries);
@@ -243,16 +245,20 @@ where
     )
 }
 
-/// What follows the posts: `no posts`, the hint that older posts remain, or why the walk stopped.
+/// What follows the posts: why the walk stopped; otherwise `no posts` or the hint that older
+/// posts remain.
 pub fn listing_said(want: ListWant, listed: &Listed, stop: Option<Said>) -> Said {
     let mut said = stop.unwrap_or(Said {
         out: vec![],
         err: vec![],
         ok: true,
     });
+    if !said.ok {
+        return said;
+    }
     if listed.older && want != ListWant::All {
         said.out.push(BOARD_OLDER.into());
-    } else if listed.entries.is_empty() && said.ok {
+    } else if listed.entries.is_empty() {
         said.out.push(BOARD_NO_POSTS.into());
     }
     said
@@ -1212,6 +1218,102 @@ mod tests {
         assert_eq!((seqs(&l), stop), (vec![4, 5], None));
     }
 
+    fn strictly_ascending(l: &Listed) -> bool {
+        l.entries.windows(2).all(|w| w[0].seq < w[1].seq)
+    }
+
+    #[tokio::test]
+    async fn a_page_that_repeats_a_printed_post_stops_the_walk() {
+        let (l, stop, sent) = run_list(
+            ListWant::All,
+            vec![page(&[5, 6], Some(5)), page(&[4, 5], Some(4))],
+        )
+        .await;
+        assert_eq!(sent, vec![at(None), at(Some(5))]);
+        assert_eq!(seqs(&l), vec![5, 6]);
+        assert!(strictly_ascending(&l));
+        assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+    }
+
+    #[tokio::test]
+    async fn a_page_with_an_entry_at_or_above_before_stops_the_walk() {
+        for bad in [&[5][..], &[9], &[2, 7]] {
+            let (l, stop, _) = run_list(
+                ListWant::All,
+                vec![page(&[5, 6], Some(5)), page(bad, Some(1))],
+            )
+            .await;
+            assert_eq!(seqs(&l), vec![5, 6], "{bad:?}");
+            assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)), "{bad:?}");
+        }
+        let (l, stop, _) = run_list(
+            ListWant::All,
+            vec![page(&[5, 6], Some(5)), page(&[4], None)],
+        )
+        .await;
+        assert_eq!((seqs(&l), stop), (vec![4, 5, 6], None));
+    }
+
+    #[tokio::test]
+    async fn a_page_out_of_order_stops_the_walk() {
+        let (l, stop, _) = run_list(ListWant::All, vec![page(&[6, 5], None)]).await;
+        assert!(l.entries.is_empty());
+        assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+        let (l, stop, _) = run_list(ListWant::All, vec![page(&[5, 5], None)]).await;
+        assert!(l.entries.is_empty());
+        assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+        let (l, stop, _) = run_list(
+            ListWant::All,
+            vec![page(&[5, 6], Some(5)), page(&[3, 2], Some(1))],
+        )
+        .await;
+        assert_eq!(
+            (seqs(&l), stop),
+            (vec![5, 6], Some(said(&[], &[NOT_MOVED], false)))
+        );
+        let (l, stop, _) = run_list(ListWant::All, vec![page(&[900, 1000], None)]).await;
+        assert_eq!((seqs(&l), stop), (vec![900, 1000], None));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_walk_gives_no_all_hint() {
+        let empty = (0..64)
+            .map(|i| page(&[], Some(1000 - i)))
+            .collect::<Vec<_>>();
+        let (l, stop, _) = run_list(ListWant::Latest, empty).await;
+        assert!(l.older);
+        assert_eq!(
+            listing_said(ListWant::Latest, &l, stop),
+            said(
+                &[],
+                &["stopped after 64 requests and 0 posts; older posts remain"],
+                false
+            )
+        );
+        let (l, stop, _) = run_list(
+            ListWant::Last(5),
+            vec![
+                page(&[5, 6], Some(5)),
+                refused(ProtoErrCode::Unauthorized, CONTAINED),
+            ],
+        )
+        .await;
+        assert!(l.older);
+        assert_eq!(
+            listing_said(ListWant::Last(5), &l, stop),
+            said(
+                &[],
+                &["you may not read your board: subject contained: role=adversary"],
+                false
+            )
+        );
+        let (l, stop, _) = run_list(ListWant::Latest, vec![page(&[7], Some(7))]).await;
+        assert_eq!(
+            listing_said(ListWant::Latest, &l, stop),
+            said(&[OLDER], &[], true)
+        );
+    }
+
     #[tokio::test]
     async fn a_refused_listing_says_so_and_exits_one() {
         let (l, stop, sent) = run_list(
@@ -1406,7 +1508,7 @@ mod tests {
         let stop = said(&[], &["x"], false);
         assert_eq!(
             listing_said(ListWant::Latest, &l, Some(stop.clone())),
-            said(&[OLDER], &["x"], false)
+            said(&[], &["x"], false)
         );
         assert_eq!(
             listing_said(ListWant::All, &l, Some(stop)),

@@ -259,11 +259,11 @@ pub fn board_entry_header(e: &BoardEntry, reply_seq: Option<u64>) -> String {
         (Some(id), None) => line.push_str(&format!("  reply to {}", one_line(&id.to_string()))),
         (None, _) => {}
     }
-    if e.held.contains(&BoardHold::Author) {
-        line.push_str("  HELD (author contained)");
-    }
-    if e.held.contains(&BoardHold::Person) {
-        line.push_str("  HELD (you were contained)");
+    for hold in &e.held {
+        line.push_str(match hold {
+            BoardHold::Author => "  HELD (author contained)",
+            BoardHold::Person => "  HELD (you were contained)",
+        });
     }
     line
 }
