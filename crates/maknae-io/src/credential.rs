@@ -81,14 +81,28 @@ const TAG_GIT: u8 = 2;
 const TAG_CARGO: u8 = 3;
 const TAG_NETRC: u8 = 4;
 const TAG_FILE: u8 = 5;
-const HIJACK_ENV: [&str; 7] = [
+const HIJACK_ENV: [&str; 21] = [
     "PATH",
+    "HOME",
+    "TMPDIR",
     "BASH_ENV",
     "ENV",
     "IFS",
     "SHELLOPTS",
     "PS4",
     "PROMPT_COMMAND",
+    "GCONV_PATH",
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "JAVA_TOOL_OPTIONS",
+    "GIT_SSH_COMMAND",
+    "GIT_EXEC_PATH",
+    "GIT_CONFIG_GLOBAL",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +140,10 @@ impl CredentialSlot {
         {
             return Err(SlotError::InvalidName);
         }
-        if name.starts_with("LD_") || name.starts_with("DYLD_") || HIJACK_ENV.contains(&name) {
+        let prefixed = ["LD_", "DYLD_", "MALLOC_", "GIT_CONFIG_"]
+            .iter()
+            .any(|p| name.starts_with(p));
+        if prefixed || HIJACK_ENV.contains(&name) {
             return Err(SlotError::Refused);
         }
         Ok(Self::EnvVar(EnvVarName(name.to_owned())))
@@ -382,7 +399,7 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rustix::process::{getrlimit, Resource};
     use zeroize::Zeroizing;
@@ -443,7 +460,7 @@ mod tests {
 
     #[test]
     fn env_var_names_are_validated_and_hijack_names_refused() {
-        for ok in ["GH_TOKEN", "_X", "A1"] {
+        for ok in ["GH_TOKEN", "_X", "A1", &"A".repeat(64)] {
             assert!(CredentialSlot::env_var(ok).is_ok(), "{ok}");
         }
         for bad in ["", "gh_token", "1A", "A-B", &"A".repeat(65)] {
@@ -457,6 +474,12 @@ mod tests {
             "LD_PRELOAD",
             "LD_LIBRARY_PATH",
             "DYLD_INSERT_LIBRARIES",
+            "MALLOC_CONF",
+            "GIT_CONFIG_COUNT",
+            "HOME",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "GIT_SSH_COMMAND",
             "PATH",
             "BASH_ENV",
             "ENV",
@@ -474,7 +497,7 @@ mod tests {
 
     #[test]
     fn file_names_are_validated() {
-        for ok in ["token.txt", "a", "x-y_z.1"] {
+        for ok in ["token.txt", "a", "x-y_z.1", &"a".repeat(64)] {
             assert!(CredentialSlot::file(ok).is_ok(), "{ok}");
         }
         for bad in ["", ".", "..", "a/b", "../x", "a b", &"a".repeat(65)] {
@@ -629,5 +652,42 @@ mod tests {
                 let _ = LaunchCredentials::decode(&b);
             }
         }
+    }
+
+    pub(crate) fn largest() -> LaunchCredentials {
+        let mut lc = LaunchCredentials::new([1; 16]);
+        for i in 0..MAX_CREDENTIALS {
+            let name = format!("T{i:02}{}", "A".repeat(MAX_NAME - 3));
+            DeliveredCredential::new(Zeroizing::new(vec![b'v'; MAX_VALUE]))
+                .unwrap()
+                .deliver_to(&mut lc, CredentialSlot::env_var(&name).unwrap())
+                .unwrap();
+        }
+        lc
+    }
+
+    #[test]
+    fn the_largest_bundle_encodes_to_exactly_the_frame_bound_and_decodes() {
+        let bytes = largest().encode();
+        assert_eq!(bytes.len(), MAX_FRAME);
+        let back = LaunchCredentials::decode(&bytes).unwrap();
+        assert_eq!(back.slots().count(), MAX_CREDENTIALS);
+    }
+
+    #[test]
+    fn every_nameless_slot_round_trips() {
+        let mut lc = LaunchCredentials::new([2; 16]);
+        for slot in [
+            CredentialSlot::GitCredentialHelper,
+            CredentialSlot::CargoCredentialProvider,
+            CredentialSlot::Netrc,
+        ] {
+            cred().deliver_to(&mut lc, slot).unwrap();
+        }
+        let back = LaunchCredentials::decode(&lc.encode()).unwrap();
+        assert_eq!(
+            back.slots().collect::<Vec<_>>(),
+            lc.slots().collect::<Vec<_>>()
+        );
     }
 }

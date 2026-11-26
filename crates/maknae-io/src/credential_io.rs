@@ -201,4 +201,13 @@ mod tests {
         drop(b);
         assert!(one().send(&a).is_err());
     }
+
+    #[test]
+    fn the_largest_frame_travels() {
+        let (a, b) = pair();
+        let sender = std::thread::spawn(move || crate::credential::tests::largest().send(&a));
+        let got = LaunchCredentials::receive(&b).unwrap();
+        sender.join().unwrap().unwrap();
+        assert_eq!(got.slots().count(), crate::credential::MAX_CREDENTIALS);
+    }
 }
