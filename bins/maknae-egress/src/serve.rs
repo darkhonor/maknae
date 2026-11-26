@@ -1262,7 +1262,7 @@ mod tests {
                 Ok(EgressFrameReply::Reply(maknae_proto::PromptReply {
                     reasoning: None,
                     blocks: vec![ContentBlock::Text {
-                        text: SecretText(zeroize::Zeroizing::new("a".repeat(900_000))),
+                        text: SecretText::from(zeroize::Zeroizing::new("a".repeat(900_000))),
                     }],
                     tool_calls: vec![],
                     usage: None,

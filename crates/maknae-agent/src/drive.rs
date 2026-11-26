@@ -49,17 +49,17 @@ fn text_of(blocks: &[ContentBlock]) -> SecretText {
     let len = blocks
         .iter()
         .map(|b| match b {
-            ContentBlock::Text { text } => text.0.len(),
+            ContentBlock::Text { text } => text.expose().len(),
             _ => 0,
         })
         .sum();
     let mut s = Zeroizing::new(String::with_capacity(len));
     for b in blocks {
         if let ContentBlock::Text { text } = b {
-            s.push_str(&text.0);
+            s.push_str(text.expose());
         }
     }
-    SecretText(s)
+    SecretText::from(s)
 }
 
 pub fn step(reply: &PromptReply, steps_remaining: u32, budget: &Budget) -> Next {
@@ -460,7 +460,7 @@ pub async fn drive_session<P: Plane>(
                         }
                         Ok(ToolRequest::TaskAgent { agent, prompt, .. }) => {
                             let got = plane
-                                .task_agent(transcript.conversation(), &agent, SecretText(prompt))
+                                .task_agent(transcript.conversation(), &agent, SecretText::from(prompt))
                                 .await;
                             for d in plane.take_diagnostics() {
                                 emit(LoopEvent::Diagnostic(d));
@@ -492,7 +492,7 @@ mod tests {
     use zeroize::Zeroizing;
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
-            text: SecretText(Zeroizing::new(s.into())),
+            text: SecretText::from(Zeroizing::new(s.into())),
         }
     }
     #[test]
@@ -526,15 +526,15 @@ mod tests {
     #[test]
     fn the_answer_is_sized_once_and_never_grows() {
         let a = text_of(&[text("12345"), text("678901")]);
-        assert_eq!(a.0.as_str(), "12345678901");
-        assert_eq!(a.0.capacity(), 11);
+        assert_eq!(a.expose(), "12345678901");
+        assert_eq!(a.into_inner().capacity(), 11);
     }
 
     fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
         ProposedToolCall {
             name: name.into(),
             call_id: id.into(),
-            arguments: SecretText(Zeroizing::new(args.into())),
+            arguments: SecretText::from(Zeroizing::new(args.into())),
             refused: None,
         }
     }
@@ -551,7 +551,7 @@ mod tests {
     fn tool_text(t: &Turn) -> String {
         match t {
             Turn::Tool { content, .. } => match &content[0] {
-                ContentBlock::Text { text } => text.0.to_string(),
+                ContentBlock::Text { text } => text.expose().to_string(),
                 _ => panic!(),
             },
             _ => panic!("not a tool turn: {t:?}"),
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn a_text_only_reply_is_the_answer() {
         assert!(
-            matches!(step(&PromptReply { reasoning: None,  blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s.0.as_str() == "done")
+            matches!(step(&PromptReply { reasoning: None,  blocks: vec![text("done")], tool_calls: vec![], usage: None, }, 3, &budget()), Next::Answer(s) if s.expose() == "done")
         );
     }
     #[test]
@@ -1010,7 +1010,7 @@ mod tests {
         ]);
         let mut t = Transcript::new("conv", "edit a.txt");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("all done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("all done"));
         assert!(out.stopped.is_none());
         assert_eq!(out.steps_used, 3);
         assert_eq!(p.reads, vec!["/w/a.txt"]);
@@ -1048,7 +1048,7 @@ mod tests {
         ]);
         let mut t = Transcript::new("conv", "read both");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("both read"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("both read"));
         assert_eq!(p.reads, vec!["/w/a", "/w/b"], "executed in call order");
         assert_eq!(t.turns().len(), 5, "user, asst, tool c1, tool c2, asst");
         assert_eq!(
@@ -1085,7 +1085,7 @@ mod tests {
         let mut t = Transcript::new("conv", "q");
         let out = drive_unmetered(&mut p, &mut t, &budget()).await;
         assert_eq!(
-            out.answer.as_ref().map(|a| a.0.as_str()),
+            out.answer.as_ref().map(|a| a.expose()),
             Some("I could not read that")
         );
         assert!(tool_text(&t.turns()[2]).starts_with("unavailable — do not retry"));
@@ -1709,7 +1709,7 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("done"));
         assert_eq!(p.writes.len(), 1);
         assert_eq!(p.reads, vec!["/w/b"]);
         assert_eq!(
@@ -1859,7 +1859,7 @@ mod tests {
             tool_calls: vec![],
             usage: None,
         };
-        assert!(matches!(step(&r, 3, &budget()), Next::Answer(s) if s.0.as_str() == "ok"));
+        assert!(matches!(step(&r, 3, &budget()), Next::Answer(s) if s.expose() == "ok"));
     }
     #[tokio::test]
     async fn a_zero_step_budget_stops_before_any_model_call() {
@@ -1962,7 +1962,7 @@ mod tests {
         })
         .await;
         assert_eq!(
-            (out.answer.as_ref().map(|a| a.0.as_str()), p.prompts),
+            (out.answer.as_ref().map(|a| a.expose()), p.prompts),
             (Some("done"), 1)
         );
 
@@ -1988,7 +1988,7 @@ mod tests {
             notices.push(*n)
         })
         .await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("done"));
         assert_eq!(
             notices,
             vec![Notice {
@@ -2026,7 +2026,7 @@ mod tests {
             blocks: vec![],
             tool_calls: vec![call(id, "read_file", "{}")],
             usage: None,
-            reasoning: Some(maknae_proto::SecretText(Zeroizing::new(r.into()))),
+            reasoning: Some(maknae_proto::SecretText::from(Zeroizing::new(r.into()))),
         };
         let mut t = Transcript::new("conv", "q");
         t.push_assistant(&reasoned("c1", "first"));
@@ -2041,7 +2041,7 @@ mod tests {
             .iter()
             .filter_map(|t| match t {
                 Turn::Assistant { reasoning, .. } => {
-                    Some(reasoning.as_ref().map(|r| r.0.to_string()))
+                    Some(reasoning.as_ref().map(|r| r.expose().to_string()))
                 }
                 _ => None,
             })
@@ -2609,7 +2609,7 @@ mod tests {
     fn user_text(t: &Turn) -> String {
         match t {
             Turn::User { content } => match &content[0] {
-                ContentBlock::Text { text } => text.0.to_string(),
+                ContentBlock::Text { text } => text.expose().to_string(),
                 _ => panic!(),
             },
             _ => panic!("not a user turn: {t:?}"),
@@ -2630,7 +2630,7 @@ mod tests {
             stop_at: None,
         };
         let out = drive_hooked(&mut p, &mut t, &mut hook).await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("done"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("done"));
         assert_eq!(
             hook.after.iter().map(Vec::len).collect::<Vec<_>>(),
             vec![4, 6]
@@ -2686,7 +2686,7 @@ mod tests {
         assert_eq!(
             out,
             Outcome {
-                answer: Some(SecretText(Zeroizing::new("done".into()))),
+                answer: Some(SecretText::from(Zeroizing::new("done".into()))),
                 stopped: None,
                 steps_used: 2
             }

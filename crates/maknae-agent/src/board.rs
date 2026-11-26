@@ -284,11 +284,11 @@ pub fn print_listing(
                 .map(|t| t.seq)
         });
         writeln!(out, "{}", board_entry_header(e, reply_seq))?;
-        write_board_text(out, "    ", &e.post.draft.body.0)?;
+        write_board_text(out, "    ", e.post.draft.body.expose())?;
         for a in &e.post.draft.attachments {
             writeln!(out, "{}", board_attachment_line(a))?;
             if attachments {
-                write_board_text(out, "      ", &a.content.0)?;
+                write_board_text(out, "      ", a.content.expose())?;
             }
         }
     }
@@ -1007,7 +1007,7 @@ mod tests {
     const NOT_MOVED: &str = "protocol error: the kernel's listing did not move back";
 
     fn secret(s: &str) -> SecretText {
-        SecretText(zeroize::Zeroizing::new(s.into()))
+        SecretText::from(zeroize::Zeroizing::new(s.into()))
     }
 
     fn entry(seq: u64) -> BoardEntry {

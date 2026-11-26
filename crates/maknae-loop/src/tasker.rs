@@ -262,7 +262,7 @@ mod tests {
     }
 
     fn text(s: &str) -> SecretText {
-        SecretText(zeroize::Zeroizing::new(s.into()))
+        SecretText::from(zeroize::Zeroizing::new(s.into()))
     }
 
     fn agent() -> AgentId {
@@ -427,7 +427,7 @@ mod tests {
         };
         let c = client(transport, vec![RespResult::Ok(Payload::TaskReports(page))]);
         let got = c.collect(&agent(), None).await.unwrap();
-        assert_eq!(got.entries[0].text.0.len(), body.len());
+        assert_eq!(got.entries[0].text.expose().len(), body.len());
     }
 
     #[tokio::test]
@@ -688,11 +688,11 @@ mod tests {
         assert!(matches!(
             &verbs[0],
             Verb::TaskSubmit { task, .. } if task.agent == "hobi"
-                && matches!(&task.ask, Ask::Prompt { prompt } if prompt.0.as_str() == "ask")
+                && matches!(&task.ask, Ask::Prompt { prompt } if prompt.expose() == "ask")
         ));
         assert!(matches!(
             &verbs[1],
-            Verb::TaskAdd { task, text, .. } if *task == task_ref() && text.0.as_str() == "more"
+            Verb::TaskAdd { task, text, .. } if *task == task_ref() && text.expose() == "more"
         ));
         assert!(matches!(&verbs[2], Verb::TaskStop { task } if *task == task_ref()));
         assert!(matches!(&verbs[3], Verb::TaskDrop { task } if *task == other));

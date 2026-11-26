@@ -2750,7 +2750,9 @@ mod tests {
                     version: maknae_proto::TASK_VERSION,
                     agent: "hobi".into(),
                     ask: maknae_proto::Ask::Prompt {
-                        prompt: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+                        prompt: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                            "p".into(),
+                        )),
                     },
                     labels: maknae_proto::Labels {},
                     bindings: vec![],
@@ -2759,7 +2761,7 @@ mod tests {
             },
             Verb::TaskAdd {
                 task: task_ref(),
-                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("p".into())),
+                text: maknae_proto::SecretText::from(maknae_io::Zeroizing::new("p".into())),
                 bindings: vec![],
                 forge_tokens: maknae_proto::ForgeTokens::default(),
             },
@@ -2779,7 +2781,7 @@ mod tests {
                 seen_follow_ups: None,
             },
             Verb::TaskReport {
-                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("r".into())),
+                text: maknae_proto::SecretText::from(maknae_io::Zeroizing::new("r".into())),
                 seen_follow_ups: None,
             },
             Verb::AgentList { after: None },
@@ -2789,7 +2791,7 @@ mod tests {
                     kind: maknae_proto::PostKind::Note,
                     to: maknae_proto::Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new("b".into())),
+                    body: maknae_proto::SecretText::from(maknae_io::Zeroizing::new("b".into())),
                     attachments: vec![],
                 },
             },

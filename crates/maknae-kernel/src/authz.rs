@@ -1254,7 +1254,7 @@ mod tests {
         store.start_for_test(&id);
         assert!(cite(&id).unwrap().is_some());
         store
-            .publish_report(&id, maknae_proto::SecretText(String::new().into()), None)
+            .publish_report(&id, maknae_proto::SecretText::new(String::new()), None)
             .unwrap();
         assert_eq!(cite(&id), Err(DenyCause::TaskNotWorking { cited: id }));
     }
@@ -1285,7 +1285,7 @@ mod tests {
             assert_eq!(cited.root.partition(), "users/1000");
             id
         };
-        let empty = || SecretText(String::new().into());
+        let empty = || SecretText::new(String::new());
         let queued = store
             .insert_for_test(task_of("hobi", 1000), HOBI)
             .task

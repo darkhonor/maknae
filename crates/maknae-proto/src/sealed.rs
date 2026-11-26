@@ -412,7 +412,7 @@ mod tests {
                 "{:?}",
                 crate::Verb::TaskAdd {
                     task: crate::TaskRef::parse(&"a5".repeat(16)).unwrap(),
-                    text: crate::SecretText(zeroize::Zeroizing::new("more".into())),
+                    text: crate::SecretText::from(zeroize::Zeroizing::new("more".into())),
                     bindings: vec![],
                     forge_tokens: tokens.clone(),
                 }

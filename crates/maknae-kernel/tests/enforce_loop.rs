@@ -3574,7 +3574,7 @@ fn routed_home_path(home: &std::path::Path, tilde: &str) -> std::path::PathBuf {
     let call = maknae_proto::ProposedToolCall {
         name: "read_file".into(),
         call_id: "c1".into(),
-        arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(format!(
+        arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(format!(
             r#"{{"path":"{tilde}"}}"#
         ))),
         refused: None,

@@ -240,7 +240,7 @@ mod tests {
 
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
-            text: SecretText(Zeroizing::new(s.into())),
+            text: SecretText::from(Zeroizing::new(s.into())),
         }
     }
     fn user(s: &str) -> Turn {
@@ -265,7 +265,7 @@ mod tests {
         ProposedToolCall {
             name: name.into(),
             call_id: id.into(),
-            arguments: SecretText(Zeroizing::new("{}".into())),
+            arguments: SecretText::from(Zeroizing::new("{}".into())),
             refused: None,
         }
     }
@@ -280,7 +280,7 @@ mod tests {
             blocks: vec![text(s)],
             tool_calls: vec![call("read_file", "c1")],
             usage: None,
-            reasoning: Some(SecretText(Zeroizing::new("hidden".into()))),
+            reasoning: Some(SecretText::from(Zeroizing::new("hidden".into()))),
         }
     }
 
@@ -319,7 +319,7 @@ mod tests {
         let shed = Turn::Assistant {
             content: vec![text("a")],
             tool_calls: vec![],
-            reasoning: Some(SecretText(Zeroizing::new("r".into()))),
+            reasoning: Some(SecretText::from(Zeroizing::new("r".into()))),
         };
         assert_eq!(
             head_of(std::slice::from_ref(&plain)),
@@ -356,7 +356,7 @@ mod tests {
         let full = Turn::Assistant {
             content: vec![text("a")],
             tool_calls: vec![],
-            reasoning: Some(SecretText(Zeroizing::new("r".into()))),
+            reasoning: Some(SecretText::from(Zeroizing::new("r".into()))),
         };
         let bare = Turn::Assistant {
             content: vec![text("a")],

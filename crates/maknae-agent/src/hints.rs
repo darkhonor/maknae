@@ -1511,7 +1511,7 @@ mod tests {
                     version: TASK_VERSION,
                     agent: "hobi".into(),
                     ask: Ask::Prompt {
-                        prompt: SecretText(Zeroizing::new(prompt.clone())),
+                        prompt: SecretText::from(Zeroizing::new(prompt.clone())),
                     },
                     labels: Labels {},
                     bindings: c.bindings.clone(),

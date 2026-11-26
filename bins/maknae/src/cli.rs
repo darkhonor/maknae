@@ -2195,7 +2195,7 @@ mod tests {
                     kind: maknae_proto::PostKind::Note,
                     to: maknae_proto::Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(zeroize::Zeroizing::new("hi".into())),
+                    body: maknae_proto::SecretText::from(zeroize::Zeroizing::new("hi".into())),
                     attachments: vec![],
                 },
             },

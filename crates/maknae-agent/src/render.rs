@@ -164,7 +164,7 @@ fn task_agent_text(got: &TaskAgentOutcome) -> Zeroizing<String> {
             agent,
             stored,
             text,
-        } => return report_text(agent, stored.as_deref(), &text.0),
+        } => return report_text(agent, stored.as_deref(), text.expose()),
         TaskAgentOutcome::Unavailable => UNAVAILABLE,
         TaskAgentOutcome::NotAccepted => NOT_ACCEPTED,
         TaskAgentOutcome::OutcomeUnknown => SUB_OUTCOME_UNKNOWN,
@@ -492,7 +492,7 @@ mod tests {
             &ToolOutcome::TaskAgent(T::Report {
                 agent: "jin".into(),
                 stored: Some("/h/r.md".into()),
-                text: maknae_proto::SecretText(Zeroizing::new("short".into())),
+                text: maknae_proto::SecretText::from(Zeroizing::new("short".into())),
             }),
             2,
         );
@@ -944,7 +944,7 @@ mod tests {
                 ToolOutcome::TaskAgent(crate::plane::TaskAgentOutcome::Report {
                     agent: "jin".into(),
                     stored: None,
-                    text: maknae_proto::SecretText(zeroize::Zeroizing::new(
+                    text: maknae_proto::SecretText::from(zeroize::Zeroizing::new(
                         "SENTINEL-REPORT".into(),
                     )),
                 }),

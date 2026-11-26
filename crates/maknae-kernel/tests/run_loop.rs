@@ -785,7 +785,7 @@ async fn a_read_declared_as_a_prompt_is_refused_as_a_mismatch() {
 
 #[tokio::test]
 async fn a_prompt_class_frame_uses_the_prompt_cap() {
-    let text = maknae_proto::SecretText(maknae_io::Zeroizing::new("x".repeat(200 * 1024)));
+    let text = maknae_proto::SecretText::from(maknae_io::Zeroizing::new("x".repeat(200 * 1024)));
     let body = request_bytes(maknae_proto::Verb::SessionPrompt {
         conversation: common::CONV.into(),
         turns: vec![maknae_proto::Turn::User {

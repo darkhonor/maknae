@@ -466,7 +466,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> StepHook<Tool<'_, P, C>> for T
                 *self.last_beat = now;
                 take_addendum(tool.plane, self.id, tool.bindings, &mut news);
                 for item in &news.items {
-                    transcript.push_user(&item.0);
+                    transcript.push_user(item.expose());
                 }
                 StepControl::Continue
             }
@@ -551,10 +551,10 @@ fn partition_is_relative_and_canonical(partition: &str) -> bool {
 fn first_turn(persona: Option<&SecretText>, from: Option<&str>, prompt: &str) -> Zeroizing<String> {
     let given = from.map(|agent| format!("Task from agent {agent}:\n\n"));
     let given = given.as_deref().unwrap_or("");
-    let held = persona.map_or(0, |p| p.0.len() + 2);
+    let held = persona.map_or(0, |p| p.expose().len() + 2);
     let mut text = Zeroizing::new(String::with_capacity(held + given.len() + prompt.len()));
     if let Some(persona) = persona {
-        text.push_str(&persona.0);
+        text.push_str(persona.expose());
         text.push_str("\n\n");
     }
     text.push_str(given);
@@ -563,7 +563,7 @@ fn first_turn(persona: Option<&SecretText>, from: Option<&str>, prompt: &str) ->
 }
 
 fn secret(text: &str) -> SecretText {
-    SecretText(Zeroizing::new(text.to_string()))
+    SecretText::from(Zeroizing::new(text.to_string()))
 }
 
 pub struct TaskDriver<P, C> {
@@ -861,7 +861,7 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             maknae_proto::Tasker::Agent { agent, .. } => Some(agent.as_str()),
             maknae_proto::Tasker::Uid(_) | maknae_proto::Tasker::Remote(_) => None,
         };
-        let first = first_turn(persona.as_ref(), from, &prompt.0);
+        let first = first_turn(persona.as_ref(), from, prompt.expose());
         let opened = Session::open(
             &mut self.plane,
             Path::new(&cwd),
@@ -983,11 +983,11 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 self.plane.note(DriverEvent::Loop(e));
             }
             if let Some(answer) = outcome.answer {
-                held.answer = Some(answer.0);
+                held.answer = Some(answer.into_inner());
             }
             let stopped = match outcome.stopped {
                 None | Some(StopReason::NothingPending) => match held.answer.take() {
-                    Some(answer) => match self.done(&mut held, SecretText(answer)).await {
+                    Some(answer) => match self.done(&mut held, SecretText::from(answer)).await {
                         Ok(news) => {
                             then = Then::Resume(news);
                             continue;
@@ -1335,7 +1335,7 @@ mod tests {
             text: SecretText,
             seen: Option<u32>,
         ) -> Result<ReportOutcome, String> {
-            self.log(format!("report {}", *text.0));
+            self.log(format!("report {}", text.expose()));
             self.w.lock().unwrap().report_seen.push(seen);
             if self.shutdown_on_report {
                 let w = self.w.lock().unwrap();
@@ -1420,7 +1420,7 @@ mod tests {
     }
 
     fn st(s: &str) -> SecretText {
-        SecretText(Zeroizing::new(s.into()))
+        SecretText::from(Zeroizing::new(s.into()))
     }
     fn id(n: u8) -> TaskId {
         TaskId([n; 16])
@@ -1595,7 +1595,7 @@ mod tests {
     fn user_text(t: &Turn) -> String {
         match t {
             Turn::User { content } => match &content[0] {
-                ContentBlock::Text { text } => text.0.to_string(),
+                ContentBlock::Text { text } => text.expose().to_string(),
                 other => panic!("{other:?}"),
             },
             other => panic!("not a user turn: {other:?}"),
@@ -2119,7 +2119,7 @@ mod tests {
     fn tool_text(t: &Turn) -> String {
         match t {
             Turn::Tool { content, .. } => match &content[0] {
-                ContentBlock::Text { text } => text.0.to_string(),
+                ContentBlock::Text { text } => text.expose().to_string(),
                 other => panic!("{other:?}"),
             },
             other => panic!("not a tool turn: {other:?}"),
@@ -3489,10 +3489,7 @@ mod tests {
         let (mut d, w) = driver(f, PersonaMode::Own);
         let mut session = Session::new(CONV, "q", d.config.budget, d.config.context, None);
         let first = session.run(&mut d.plane, &mut |_| {}).await;
-        assert_eq!(
-            first.answer.as_ref().map(|a| a.0.as_str()),
-            Some("held-629")
-        );
+        assert_eq!(first.answer.as_ref().map(|a| a.expose()), Some("held-629"));
         let held = Held {
             id: id(1),
             session,
@@ -3500,7 +3497,7 @@ mod tests {
             bindings: Bound::of(vec![]),
             seen: 0,
             last_beat: Duration::ZERO,
-            answer: first.answer.map(|a| a.0),
+            answer: first.answer.map(|a| a.into_inner()),
             resumes: 0,
         };
         d.work(held, Then::Resume(News::default())).await;

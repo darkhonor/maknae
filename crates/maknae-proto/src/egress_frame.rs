@@ -831,7 +831,7 @@ mod tests {
 
     fn text(s: &str) -> crate::ContentBlock {
         crate::ContentBlock::Text {
-            text: crate::SecretText(Zeroizing::new(s.into())),
+            text: crate::SecretText::from(Zeroizing::new(s.into())),
         }
     }
 
@@ -990,7 +990,7 @@ mod tests {
         let over = crate::ProposedToolCall {
             name: "read_file".into(),
             call_id: "c1".into(),
-            arguments: crate::SecretText(zeroize::Zeroizing::new(
+            arguments: crate::SecretText::from(zeroize::Zeroizing::new(
                 "a".repeat(crate::MAX_TOOL_CALL_ARGS_BYTES + 1),
             )),
             refused: None,
@@ -1170,7 +1170,7 @@ mod tests {
         let stub = crate::ProposedToolCall {
             name: "write_file".into(),
             call_id: "c".into(),
-            arguments: crate::SecretText(zeroize::Zeroizing::new(String::new())),
+            arguments: crate::SecretText::from(zeroize::Zeroizing::new(String::new())),
             refused: Some(crate::CallRefusal::ArgumentsOverBound { bytes: 70_000 }),
         };
         let r = EgressSocketReply::Prompt(EgressFrameReply::Reply(crate::PromptReply {

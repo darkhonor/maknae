@@ -4592,7 +4592,7 @@ async fn serve_task_verb<S, E, P>(
             bindings,
             tokens,
         } => {
-            if text.0.len() > tasks.text_max {
+            if text.expose().len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 trail
                     .unauthorized(stream, &decided("deny", &r.to_string(), "unauthorized"))
@@ -5030,7 +5030,7 @@ async fn serve_task_verb<S, E, P>(
                 &held.id,
                 Some(held.tasker.clone()),
             );
-            if text.0.len() > tasks.text_max {
+            if text.expose().len() > tasks.text_max {
                 let r = TaskRefusal::TooLong;
                 intent.outcome.result = "deny".into();
                 trail
@@ -5162,7 +5162,7 @@ async fn submit_authority<P: Authorizer + Send + Sync + 'static>(
             version: maknae_proto::TASK_VERSION,
             agent: target.as_str().to_owned(),
             ask: maknae_proto::Ask::Prompt {
-                prompt: maknae_proto::SecretText(String::new().into()),
+                prompt: maknae_proto::SecretText::new(String::new()),
             },
             labels: maknae_proto::Labels {},
             bindings: Vec::new(),
@@ -12452,7 +12452,7 @@ mod record_widths {
     }
 
     fn task_verbs(agent: &str) -> Vec<Verb> {
-        let text = || maknae_proto::SecretText(String::new().into());
+        let text = || maknae_proto::SecretText::new(String::new());
         let task = || maknae_proto::TaskRef::from_id(&TASK);
         vec![
             Verb::TaskSubmit {
@@ -13246,7 +13246,7 @@ mod record_widths {
     }
 
     fn widest_post() -> maknae_proto::PostDraft {
-        let secret = |n: usize| maknae_proto::SecretText("b".repeat(n).into());
+        let secret = |n: usize| maknae_proto::SecretText::new("b".repeat(n));
         maknae_proto::PostDraft {
             kind: maknae_proto::PostKind::Question,
             to: maknae_proto::Addressee::Agents(widest_addressees()),
@@ -13917,7 +13917,7 @@ mod record_widths {
     fn prompt_content() -> crate::egress::ContentMeasure {
         let turn = maknae_proto::Turn::User {
             content: vec![maknae_proto::ContentBlock::Text {
-                text: maknae_proto::SecretText(maknae_io::Zeroizing::new("t".into())),
+                text: maknae_proto::SecretText::from(maknae_io::Zeroizing::new("t".into())),
             }],
         };
         crate::egress::ContentMeasure {
@@ -14344,7 +14344,9 @@ mod record_widths {
                 .map(|_| maknae_proto::ProposedToolCall {
                     name: name.clone(),
                     call_id: id.clone(),
-                    arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(String::new())),
+                    arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                        String::new(),
+                    )),
                     refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound {
                         bytes: args.len() as u64,
                     }),
@@ -19924,7 +19926,7 @@ mod home_resolution_tests {
                 choice: None,
             },
             Verb::TaskReport {
-                text: maknae_proto::SecretText("r".repeat(over).into()),
+                text: maknae_proto::SecretText::new("r".repeat(over)),
                 seen_follow_ups: None,
             },
         ];
@@ -19943,7 +19945,7 @@ mod home_resolution_tests {
                 version: maknae_proto::TASK_VERSION,
                 agent: "hobi".into(),
                 ask: maknae_proto::Ask::Prompt {
-                    prompt: maknae_proto::SecretText("p".repeat(over).into()),
+                    prompt: maknae_proto::SecretText::new("p".repeat(over)),
                 },
                 labels: maknae_proto::Labels {},
                 bindings: vec![],
@@ -25841,7 +25843,7 @@ mod reload_tests {
         task.tasker = tasker;
         task.parent = parent;
         task.ask = maknae_proto::Ask::Prompt {
-            prompt: maknae_proto::SecretText(HELD_PROMPT.to_string().into()),
+            prompt: maknae_proto::SecretText::new(HELD_PROMPT.to_string()),
         };
         let signed = maknae_proto::SignedTask {
             task,
@@ -26924,7 +26926,7 @@ mod reload_tests {
                     kind: maknae_proto::PostKind::Note,
                     to: maknae_proto::Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(POST_BODY.to_string().into()),
+                    body: maknae_proto::SecretText::new(POST_BODY.to_string()),
                     attachments: Vec::new(),
                 },
                 &crate::enrollment::FixedEnrollment(Default::default()),
@@ -30960,7 +30962,7 @@ mod task_sweep_tests {
         store
             .publish_report(
                 &parent,
-                maknae_proto::SecretText(String::new().into()),
+                maknae_proto::SecretText::new(String::new()),
                 Some(TaskClose::Stopped),
             )
             .unwrap();
@@ -31294,7 +31296,7 @@ mod task_sweep_tests {
                     kind: maknae_proto::PostKind::Note,
                     to: maknae_proto::Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new(body.into())),
+                    body: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(body.into())),
                     attachments: Vec::new(),
                 },
                 &crate::enrollment::FixedEnrollment(Default::default()),
@@ -31592,7 +31594,9 @@ mod reply_encoding_tests {
                     kind: PostKind::Note,
                     to: Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new("b".repeat(body))),
+                    body: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                        "b".repeat(body),
+                    )),
                     attachments: Vec::new(),
                 },
             })

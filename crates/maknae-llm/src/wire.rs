@@ -309,11 +309,11 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
     let msg = choice.message;
     let reasoning = msg
         .reasoning_content
-        .filter(|r| !r.0.is_empty())
-        .or(msg.reasoning.filter(|r| !r.0.is_empty()));
+        .filter(|r| !r.expose().is_empty())
+        .or(msg.reasoning.filter(|r| !r.expose().is_empty()));
 
     let mut blocks = Vec::new();
-    if let Some(text) = msg.content.filter(|c| !c.0.is_empty()) {
+    if let Some(text) = msg.content.filter(|c| !c.expose().is_empty()) {
         blocks.push(maknae_proto::ContentBlock::Text { text });
     }
 
@@ -328,11 +328,12 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
             arguments: c.function.arguments,
             refused: None,
         };
-        if proposed.arguments.0.len() > maknae_proto::MAX_TOOL_CALL_ARGS_BYTES {
+        if proposed.arguments.expose().len() > maknae_proto::MAX_TOOL_CALL_ARGS_BYTES {
             proposed.refused = Some(maknae_proto::CallRefusal::ArgumentsOverBound {
-                bytes: proposed.arguments.0.len() as u64,
+                bytes: proposed.arguments.expose().len() as u64,
             });
-            proposed.arguments = maknae_proto::SecretText(zeroize::Zeroizing::new(String::new()));
+            proposed.arguments =
+                maknae_proto::SecretText::from(zeroize::Zeroizing::new(String::new()));
         }
         if !maknae_proto::proposed_tool_call_is_acceptable(&proposed) {
             return Err(ReplyError::Unacceptable(format!(
@@ -353,7 +354,7 @@ pub fn to_prompt_reply(resp: ChatResponse, offered: &[String]) -> Result<Complet
         });
     }
     let (reasoning, notice) = match reasoning {
-        Some(r) if r.0.len() > maknae_proto::MAX_REASONING_BYTES => {
+        Some(r) if r.expose().len() > maknae_proto::MAX_REASONING_BYTES => {
             (None, Some(ReplyNotice::ReasoningOverBound))
         }
         r => (r, None),
@@ -535,7 +536,7 @@ pub fn with_preamble(content: Vec<ChatMessage>) -> Vec<ChatMessage> {
         // wrapped anyway, because `content` carries kernel-served content on
         // the other roles and one field cannot have two types. Costs one
         // allocation per request, which the preamble already paid for.
-        content: maknae_proto::SecretText(zeroize::Zeroizing::new(CORE_PROMPT.to_string())),
+        content: maknae_proto::SecretText::from(zeroize::Zeroizing::new(CORE_PROMPT.to_string())),
         tool_calls: vec![],
         tool_call_id: None,
         reasoning_content: None,
@@ -613,7 +614,7 @@ mod tests {
     /// goes RED on the `SECRET-TURN-CONTENT` sentinel — observed 2026-09-22,
     /// codex round 2 item A.
     fn secret(s: &str) -> maknae_proto::SecretText {
-        maknae_proto::SecretText(zeroize::Zeroizing::new(s.to_string()))
+        maknae_proto::SecretText::from(zeroize::Zeroizing::new(s.to_string()))
     }
 
     fn offered() -> Vec<String> {
@@ -729,7 +730,7 @@ mod tests {
             (calls[0].name.as_str(), calls[0].call_id.as_str()),
             ("write_file", "c0")
         );
-        assert!(calls[0].arguments.0.is_empty());
+        assert!(calls[0].arguments.expose().is_empty());
         assert_eq!(
             calls[0].refused,
             Some(maknae_proto::CallRefusal::ArgumentsOverBound {
@@ -739,7 +740,7 @@ mod tests {
         assert_eq!(
             (
                 calls[1].call_id.as_str(),
-                calls[1].arguments.0.as_str(),
+                calls[1].arguments.expose(),
                 calls[1].refused
             ),
             ("c1", "{\"path\":\"/w/a\"}", None)
@@ -767,7 +768,7 @@ mod tests {
             let c = prompt_reply_of(parse(&body).unwrap(), &offered()).unwrap();
             assert_eq!(c.tool_calls[0].refused.is_some(), stubbed, "{len}");
             assert_eq!(
-                c.tool_calls[0].arguments.0.len(),
+                c.tool_calls[0].arguments.expose().len(),
                 if stubbed { 0 } else { len },
                 "{len}"
             );
@@ -806,7 +807,7 @@ mod tests {
         ]}}]})
         .to_string();
         let reply = prompt_reply_of(parse(&body).unwrap(), &offered()).unwrap();
-        assert_eq!(reply.tool_calls[0].arguments.0.as_str(), arguments);
+        assert_eq!(reply.tool_calls[0].arguments.expose(), arguments);
     }
 
     #[test]
@@ -878,7 +879,7 @@ mod tests {
                 kind: "function".into(),
                 function: OutboundToolFn {
                     name: "read_file".into(),
-                    arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(
+                    arguments: maknae_proto::SecretText::from(zeroize::Zeroizing::new(
                         r#"{"path":"a"}"#.into(),
                     )),
                 },
@@ -932,7 +933,9 @@ mod tests {
                 kind: "function".into(),
                 function: OutboundToolFn {
                     name: "write_file".into(),
-                    arguments: maknae_proto::SecretText(zeroize::Zeroizing::new(sentinel.into())),
+                    arguments: maknae_proto::SecretText::from(zeroize::Zeroizing::new(
+                        sentinel.into(),
+                    )),
                 },
             }],
             tool_call_id: None,
@@ -1048,12 +1051,12 @@ mod tests {
         // the file must tell you exactly what the model received -- and any
         // per-call mutation would invalidate the provider's cache prefix.
         assert_eq!(
-            out[0].content.0.as_str(),
+            out[0].content.expose(),
             CORE_PROMPT,
             "the preamble reaching the provider is not the file's bytes"
         );
         assert_eq!(
-            out[1].content.0.as_str(),
+            out[1].content.expose(),
             "hello",
             "client content must follow, not be replaced"
         );
@@ -1075,7 +1078,7 @@ mod tests {
 
         let systems: Vec<&ChatMessage> = out.iter().filter(|m| m.role == "system").collect();
         assert_eq!(systems.len(), 1, "exactly one system message, ours");
-        assert_eq!(systems[0].content.0.as_str(), CORE_PROMPT);
+        assert_eq!(systems[0].content.expose(), CORE_PROMPT);
         assert_eq!(out[0].role, "system", "ours stays at position zero");
     }
 
@@ -1666,7 +1669,7 @@ mod tests {
     }
 
     fn reasoning_of(c: &Completion) -> Option<&str> {
-        c.reply.reasoning.as_ref().map(|r| r.0.as_str())
+        c.reply.reasoning.as_ref().map(|r| r.expose())
     }
 
     #[test]
@@ -1759,7 +1762,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            c.reply.reasoning.as_ref().map(|r| r.0.len()),
+            c.reply.reasoning.as_ref().map(|r| r.expose().len()),
             Some(maknae_proto::MAX_REASONING_BYTES)
         );
         assert_eq!(c.notice, None);
@@ -1827,12 +1830,12 @@ mod tests {
 
     #[test]
     fn an_assistant_message_sends_reasoning_as_reasoning_content_and_omits_it_when_absent() {
-        let mut m = ChatMessage::user(maknae_proto::SecretText(zeroize::Zeroizing::new(
+        let mut m = ChatMessage::user(maknae_proto::SecretText::from(zeroize::Zeroizing::new(
             "q".into(),
         )));
         assert!(!serde_json::to_string(&m).unwrap().contains("reasoning"));
         m.role = "assistant".into();
-        m.reasoning_content = Some(maknae_proto::SecretText(zeroize::Zeroizing::new(
+        m.reasoning_content = Some(maknae_proto::SecretText::from(zeroize::Zeroizing::new(
             "why".into(),
         )));
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();

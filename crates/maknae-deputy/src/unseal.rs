@@ -198,7 +198,7 @@ mod tests {
             conversation: "conv1".into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Text {
-                    text: SecretText(Zeroizing::new("hello".into())),
+                    text: SecretText::from(Zeroizing::new("hello".into())),
                 }],
             }],
             output_tokens: None,

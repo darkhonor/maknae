@@ -48,7 +48,7 @@ const _: () = assert!(
 static ONE_DAEMON: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn secret(s: &str) -> SecretText {
-    SecretText(Zeroizing::new(s.into()))
+    SecretText::from(Zeroizing::new(s.into()))
 }
 
 /// Signs each hand-out with a kernel leaf of the test CA, as `PlaneSigner` does.
@@ -228,7 +228,7 @@ fn tool_results(turns: &[Turn]) -> Vec<String> {
         .iter()
         .filter_map(|t| match t {
             Turn::Tool { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => Some(text.0.to_string()),
+                Some(ContentBlock::Text { text }) => Some(text.expose().to_string()),
                 _ => None,
             },
             _ => None,
@@ -562,7 +562,7 @@ impl World {
             RespResult::Ok(Payload::TaskReports(page)) => page
                 .entries
                 .iter()
-                .map(|e| (e.task.to_id(), e.close, e.text.0.to_string()))
+                .map(|e| (e.task.to_id(), e.close, e.text.expose().to_string()))
                 .collect(),
             other => panic!("collect: {other:?}"),
         }
@@ -1018,7 +1018,7 @@ async fn an_agent_carries_out_a_prompt_task_in_its_taskers_partition() {
     assert_eq!(prompts.len(), 2);
     let first = match &prompts[0][0] {
         Turn::User { content } => match &content[0] {
-            ContentBlock::Text { text } => text.0.to_string(),
+            ContentBlock::Text { text } => text.expose().to_string(),
             other => panic!("{other:?}"),
         },
         other => panic!("{other:?}"),
@@ -1092,7 +1092,7 @@ async fn an_agent_with_no_policy_file_works_a_task_to_its_report() {
 fn user_text(turn: &Turn) -> Option<String> {
     match turn {
         Turn::User { content } => match content.first() {
-            Some(ContentBlock::Text { text }) => Some(text.0.to_string()),
+            Some(ContentBlock::Text { text }) => Some(text.expose().to_string()),
             _ => None,
         },
         _ => None,

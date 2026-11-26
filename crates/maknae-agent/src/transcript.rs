@@ -9,7 +9,7 @@ pub struct Transcript {
 
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {
-        text: SecretText(Zeroizing::new(s.to_string())),
+        text: SecretText::from(Zeroizing::new(s.to_string())),
     }
 }
 
@@ -55,7 +55,7 @@ impl Transcript {
     }
     pub fn bytes(&self) -> u64 {
         let block = |b: &ContentBlock| match b {
-            ContentBlock::Text { text } => text.0.len(),
+            ContentBlock::Text { text } => text.expose().len(),
             _ => 0,
         };
         let n: usize = self
@@ -73,9 +73,9 @@ impl Transcript {
                     content.iter().map(block).sum::<usize>()
                         + tool_calls
                             .iter()
-                            .map(|c| c.arguments.0.len())
+                            .map(|c| c.arguments.expose().len())
                             .sum::<usize>()
-                        + reasoning.as_ref().map_or(0, |r| r.0.len())
+                        + reasoning.as_ref().map_or(0, |r| r.expose().len())
                 }
             })
             .sum();
@@ -125,14 +125,14 @@ mod tests {
     use zeroize::Zeroizing;
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
-            text: SecretText(Zeroizing::new(s.into())),
+            text: SecretText::from(Zeroizing::new(s.into())),
         }
     }
     fn call(id: &str) -> ProposedToolCall {
         ProposedToolCall {
             name: "read_file".into(),
             call_id: id.into(),
-            arguments: SecretText(Zeroizing::new("{}".into())),
+            arguments: SecretText::from(Zeroizing::new("{}".into())),
             refused: None,
         }
     }
@@ -193,7 +193,7 @@ mod tests {
             tool_calls: vec![ProposedToolCall {
                 name: "read_file".into(),
                 call_id: "c1".into(),
-                arguments: SecretText(Zeroizing::new("{\"p\":1}".into())),
+                arguments: SecretText::from(Zeroizing::new("{\"p\":1}".into())),
                 refused: None,
             }],
             usage: None,
@@ -204,7 +204,9 @@ mod tests {
     }
 
     fn why(s: &str) -> Option<maknae_proto::SecretText> {
-        Some(maknae_proto::SecretText(zeroize::Zeroizing::new(s.into())))
+        Some(maknae_proto::SecretText::from(zeroize::Zeroizing::new(
+            s.into(),
+        )))
     }
 
     fn reply_with_reasoning(id: &str, r: &str) -> PromptReply {
@@ -276,7 +278,7 @@ mod tests {
             Some(Turn::Tool { call_id, content }) => {
                 assert_eq!(call_id, "call_0");
                 assert!(
-                    matches!(&content[0], ContentBlock::Text { text } if text.0.as_str() == "lost")
+                    matches!(&content[0], ContentBlock::Text { text } if text.expose() == "lost")
                 );
             }
             other => panic!("{other:?}"),
@@ -299,7 +301,7 @@ mod tests {
             .iter()
             .map(|turn| match turn {
                 Turn::Tool { call_id, content } => match &content[0] {
-                    ContentBlock::Text { text } => (call_id.clone(), text.0.to_string()),
+                    ContentBlock::Text { text } => (call_id.clone(), text.expose().to_string()),
                     _ => panic!(),
                 },
                 _ => panic!("{turn:?}"),

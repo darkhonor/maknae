@@ -557,7 +557,7 @@ mod tests {
             conversation: "conv1".into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Text {
-                    text: SecretText(maknae_io::Zeroizing::new(
+                    text: SecretText::from(maknae_io::Zeroizing::new(
                         "the president flies at 0300".into(),
                     )),
                 }],
@@ -759,7 +759,7 @@ mod tests {
         // under the request cap, over any socket buffer
         big.turns = vec![Turn::User {
             content: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+                text: SecretText::from(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
             }],
         }];
         let started = std::time::Instant::now();
@@ -797,7 +797,7 @@ mod tests {
             let mut big = req();
             big.turns = vec![Turn::User {
                 content: vec![ContentBlock::Text {
-                    text: SecretText(maknae_io::Zeroizing::new("x".repeat(over))),
+                    text: SecretText::from(maknae_io::Zeroizing::new("x".repeat(over))),
                 }],
             }];
             match e.send(&intent, big) {
@@ -849,7 +849,7 @@ mod tests {
         let reply = maknae_proto::PromptReply {
             reasoning: None,
             blocks: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new("ok".into())),
+                text: SecretText::from(maknae_io::Zeroizing::new("ok".into())),
             }],
             tool_calls: vec![],
             usage: None,
@@ -1231,7 +1231,7 @@ mod tests {
         // over the default socket buffers, under the request cap
         big.turns = vec![Turn::User {
             content: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
+                text: SecretText::from(maknae_io::Zeroizing::new("x".repeat(900 * 1024))),
             }],
         }];
         match e.send(&intent, big) {
@@ -1277,7 +1277,7 @@ mod tests {
     fn turn_of(n: usize) -> Turn {
         Turn::User {
             content: vec![ContentBlock::Text {
-                text: SecretText(maknae_io::Zeroizing::new("x".repeat(n))),
+                text: SecretText::from(maknae_io::Zeroizing::new("x".repeat(n))),
             }],
         }
     }

@@ -237,7 +237,7 @@ impl<T: Tasker, L: Leaf, S: TokenSupply> Kernel<T, L, S> {
                 let remotes = &self.hints.remotes;
                 let chosen = choose(
                     &[&Links, remotes],
-                    text.0.as_str(),
+                    text.expose(),
                     self.hints.forges.as_deref(),
                     None,
                 );
@@ -247,12 +247,8 @@ impl<T: Tasker, L: Leaf, S: TokenSupply> Kernel<T, L, S> {
                     .map(|view| Answer::Submitted(view, chosen.unbound))
             }
             Op::Add { task, text, bound } => {
-                let mut chosen = choose(
-                    &[&Links],
-                    text.0.as_str(),
-                    self.hints.forges.as_deref(),
-                    None,
-                );
+                let mut chosen =
+                    choose(&[&Links], text.expose(), self.hints.forges.as_deref(), None);
                 chosen
                     .bindings
                     .retain(|BindingRequest::Git(g)| !bound.iter().any(|b| same(b, g)));
@@ -1023,7 +1019,7 @@ mod tests {
                     task: v.task.clone(),
                     agent: "hobi".into(),
                     close: None,
-                    text: SecretText(Zeroizing::new(text.into())),
+                    text: SecretText::from(Zeroizing::new(text.into())),
                     at_secs: 0,
                     cursor: TaskCursor::from_seq(seq),
                 });
@@ -1272,7 +1268,7 @@ mod tests {
 
     fn submit_op(prompt: &str) -> Op {
         Op::Submit {
-            text: SecretText(Zeroizing::new(prompt.into())),
+            text: SecretText::from(Zeroizing::new(prompt.into())),
         }
     }
 
@@ -1436,7 +1432,7 @@ mod tests {
         let task = TaskRef::from_id(&TaskId([9; 16]));
         let add = |text: &str| Op::Add {
             task: task.clone(),
-            text: SecretText(Zeroizing::new(text.into())),
+            text: SecretText::from(Zeroizing::new(text.into())),
             bound: vec![already.clone()],
         };
         let answer = kernel

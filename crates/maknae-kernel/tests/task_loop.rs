@@ -58,7 +58,7 @@ fn request_body(verb: Verb, task: Option<TaskId>) -> Vec<u8> {
 }
 
 fn secret(s: &str) -> SecretText {
-    SecretText(Zeroizing::new(s.into()))
+    SecretText::from(Zeroizing::new(s.into()))
 }
 
 const LEAF: u8 = 1;
@@ -783,9 +783,10 @@ fn only(pairs: &[(&str, u32)]) -> FixedEnrollment {
 
 fn follow_ups(r: RespResult) -> (u32, Vec<String>) {
     match r {
-        RespResult::Ok(Payload::TaskFollowUps(f)) => {
-            (f.from, f.items.iter().map(|i| i.0.to_string()).collect())
-        }
+        RespResult::Ok(Payload::TaskFollowUps(f)) => (
+            f.from,
+            f.items.iter().map(|i| i.expose().to_string()).collect(),
+        ),
         other => panic!("not follow-ups: {other:?}"),
     }
 }
@@ -1097,7 +1098,7 @@ async fn a_foreign_task_id_is_indistinguishable_from_an_unknown_one() {
             |t: TaskRef| Verb::TaskDrop { task: t },
             |t: TaskRef| Verb::TaskAdd {
                 task: t,
-                text: SecretText(Zeroizing::new("more".into())),
+                text: SecretText::from(Zeroizing::new("more".into())),
                 bindings: vec![],
                 forge_tokens: maknae_proto::ForgeTokens::default(),
             },
@@ -1185,7 +1186,7 @@ async fn add_appends_a_follow_up_to_the_running_task_only() {
     ));
     let held = w.store().record(&working).unwrap().follow_ups;
     assert_eq!(held.len(), 1);
-    assert_eq!(&*held[0].0, "sentinel-628-more");
+    assert_eq!(held[0].expose(), "sentinel-628-more");
 }
 
 #[tokio::test]
@@ -1294,7 +1295,7 @@ async fn the_33rd_follow_up_and_one_byte_over_the_total_are_refused() {
     w.working(&id);
     let add = |text: String| Verb::TaskAdd {
         task: r(&id),
-        text: SecretText(Zeroizing::new(text)),
+        text: SecretText::from(Zeroizing::new(text)),
         bindings: vec![],
         forge_tokens: maknae_proto::ForgeTokens::default(),
     };
@@ -1312,7 +1313,7 @@ async fn the_33rd_follow_up_and_one_byte_over_the_total_are_refused() {
     w.working(&id);
     let add = |text: String| Verb::TaskAdd {
         task: r(&id),
-        text: SecretText(Zeroizing::new(text)),
+        text: SecretText::from(Zeroizing::new(text)),
         bindings: vec![],
         forge_tokens: maknae_proto::ForgeTokens::default(),
     };
@@ -1332,7 +1333,7 @@ async fn the_33rd_follow_up_and_one_byte_over_the_total_are_refused() {
         .unwrap()
         .follow_ups
         .iter()
-        .map(|f| f.0.len())
+        .map(|f| f.expose().len())
         .sum();
     assert_eq!(total, max);
 }
@@ -1358,7 +1359,7 @@ async fn collect_returns_each_report_until_acknowledged_and_never_after() {
     w.report(&a, "sentinel-628-report-a");
     let first = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&first), vec![a]);
-    assert_eq!(&*first.entries[0].text.0, "sentinel-628-report-a");
+    assert_eq!(first.entries[0].text.expose(), "sentinel-628-report-a");
     let again = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&again), vec![a]);
     let upto = first.entries[0].cursor.seq();
@@ -1491,7 +1492,7 @@ async fn a_full_size_report_is_collected_whole_and_alone() {
     w.report(&b, &"s".repeat(max));
     let first = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&first), vec![a]);
-    assert_eq!(first.entries[0].text.0.len(), max);
+    assert_eq!(first.entries[0].text.expose().len(), max);
     let upto = first
         .next
         .expect("the small report waits for the next page");
@@ -1652,7 +1653,7 @@ async fn an_agent_claims_in_fifo_order_across_taskers() {
     assert_eq!(second.task.task_id, b);
     assert_eq!(partition, format!("tasks/users/{}", w.me));
     let maknae_proto::Ask::Prompt { prompt } = &second.task.ask;
-    assert_eq!(&*prompt.0, "sentinel-628-b");
+    assert_eq!(prompt.expose(), "sentinel-628-b");
     w.agent_reports("hobi", &b, "rb").await;
     assert_eq!(w.claimed("hobi").await, c);
     w.agent_reports("hobi", &c, "rc").await;
@@ -1831,7 +1832,7 @@ async fn a_report_reaches_only_the_tasks_own_tasker() {
     let rec = w.store().record(&theirs).unwrap();
     assert_eq!(rec.state, TaskState::Reported);
     assert_eq!(
-        rec.report.as_ref().map(|(t, at)| (&**t.0, *at)),
+        rec.report.as_ref().map(|(t, at)| (t.expose(), *at)),
         Some(("sentinel-628-theirs", T0 + 7))
     );
     assert!(reports(w.ask(collect("hobi", None)).await)
@@ -1841,7 +1842,7 @@ async fn a_report_reaches_only_the_tasks_own_tasker() {
     w.agent_reports("hobi", &mine, "sentinel-628-mine").await;
     let page = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&page), vec![mine]);
-    assert_eq!(&**page.entries[0].text.0, "sentinel-628-mine");
+    assert_eq!(page.entries[0].text.expose(), "sentinel-628-mine");
     assert_eq!(page.entries[0].close, None);
 }
 
@@ -2003,7 +2004,7 @@ async fn a_sub_tasks_report_is_collected_by_the_submitting_agent() {
     );
     let page = reports(w.agent("hobi", collect("suga", None), Some(parent)).await);
     assert_eq!(report_ids(&page), vec![sub]);
-    assert_eq!(&**page.entries[0].text.0, "sentinel-628-sub");
+    assert_eq!(page.entries[0].text.expose(), "sentinel-628-sub");
 }
 
 #[tokio::test]
@@ -2157,7 +2158,7 @@ async fn a_lapsed_lease_closes_the_task_with_agent_lost() {
     assert_eq!(report_ids(&page), vec![id]);
     assert_eq!(page.entries[0].close, Some(TaskClose::AgentLost));
     assert!(
-        page.entries[0].text.0.is_empty(),
+        page.entries[0].text.expose().is_empty(),
         "the kernel writes no report text"
     );
     assert_eq!(page.entries[0].at_secs, T0 + lease + 1);
@@ -2190,7 +2191,7 @@ async fn a_working_task_survives_restart_and_is_reclaimable() {
     let (task, _) = w.claim("hobi").await.expect("the working task again");
     assert_eq!(task.task.task_id, id);
     let maknae_proto::Ask::Prompt { prompt } = &task.task.ask;
-    assert_eq!(&*prompt.0, "sentinel-628-restart");
+    assert_eq!(prompt.expose(), "sentinel-628-restart");
     assert!(matches!(
         w.agent_reports("hobi", &id, "done").await,
         RespResult::Ok(Payload::TaskAcknowledged(_))
@@ -2225,7 +2226,10 @@ async fn deenrolling_an_agent_closes_its_tasks_once() {
             (rec.state, rec.close),
             (TaskState::Closed, Some(TaskClose::AgentGone))
         );
-        assert!(rec.report.as_ref().is_some_and(|(t, _)| t.0.is_empty()));
+        assert!(rec
+            .report
+            .as_ref()
+            .is_some_and(|(t, _)| t.expose().is_empty()));
     }
     let before = w.store().record(&working).unwrap().rseq;
     assert_eq!(
@@ -2461,7 +2465,7 @@ async fn a_caller_collects_agent_gone_notices_after_deenrollment() {
     assert_eq!(report_ids(&page), vec![working, queued]);
     for e in &page.entries {
         assert_eq!(e.close, Some(TaskClose::AgentGone));
-        assert!(e.text.0.is_empty());
+        assert!(e.text.expose().is_empty());
         assert_eq!(e.at_secs, T0 + 9);
     }
     let upto = page.entries[1].cursor.seq();
@@ -2742,13 +2746,13 @@ async fn a_full_size_task_round_trips_within_the_frame_caps() {
     };
     let signed: maknae_proto::SignedTask = ciborium::from_reader(d.signed.0.as_slice()).unwrap();
     let maknae_proto::Ask::Prompt { prompt } = &signed.task.ask;
-    assert_eq!((signed.task.task_id, prompt.0.len()), (id, max));
+    assert_eq!((signed.task.task_id, prompt.expose().len()), (id, max));
     assert!(matches!(
         w.agent_reports("hobi", &id, &"r".repeat(max)).await,
         RespResult::Ok(Payload::TaskAcknowledged(_))
     ));
     let page = reports(w.ask(collect("hobi", None)).await);
-    assert_eq!(page.entries[0].text.0.len(), max);
+    assert_eq!(page.entries[0].text.expose().len(), max);
 }
 
 #[tokio::test]
@@ -3099,7 +3103,7 @@ async fn a_lowered_prompt_cap_strands_no_stored_report_and_no_queued_prompt() {
         .await
         .expect("the oversize prompt is still handed out");
     let maknae_proto::Ask::Prompt { prompt } = &task.task.ask;
-    assert_eq!((task.task.task_id, prompt.0.len()), (big, 2 * floor));
+    assert_eq!((task.task.task_id, prompt.expose().len()), (big, 2 * floor));
     w.cfg.prompt_max_bytes = 2 * floor;
     w.agent_reports("hobi", &big, &"r".repeat(2 * floor)).await;
     w.cfg.prompt_max_bytes = floor;
@@ -3107,7 +3111,7 @@ async fn a_lowered_prompt_cap_strands_no_stored_report_and_no_queued_prompt() {
     w.agent_reports("hobi", &done, "ok").await;
     let page = reports(w.ask(collect("hobi", None)).await);
     assert_eq!(report_ids(&page), vec![big]);
-    assert_eq!(page.entries[0].text.0.len(), 2 * floor);
+    assert_eq!(page.entries[0].text.expose().len(), 2 * floor);
     let rest = reports(
         w.ask(collect("hobi", Some(page.entries[0].cursor.seq())))
             .await,
@@ -3378,7 +3382,7 @@ async fn a_person_removed_from_taskers_has_queued_tasks_withdrawn_and_the_runnin
     assert_eq!(report_ids(&page), vec![working, queued]);
     assert_eq!(page.entries[0].close, None);
     assert_eq!(page.entries[1].close, Some(TaskClose::Withdrawn));
-    assert!(page.entries[1].text.0.is_empty());
+    assert!(page.entries[1].text.expose().is_empty());
 }
 
 #[tokio::test]
@@ -4174,7 +4178,7 @@ async fn an_agent_taskers_verbs_reach_only_the_sub_tasks_of_the_task_it_cites() 
     }
     let got = reports(w.agent("hobi", collect("jin", None), Some(t1)).await);
     assert_eq!(report_ids(&got), vec![s1], "the report survives");
-    assert_eq!(&**got.entries[0].text.0, "sentinel-609-scoped");
+    assert_eq!(got.entries[0].text.expose(), "sentinel-609-scoped");
     assert_eq!(
         ids(&page(w.agent("hobi", list("jin", None), Some(t1)).await)),
         vec![s1]
@@ -4936,7 +4940,7 @@ mod board {
     fn bodies(page: &BoardPage) -> Vec<String> {
         page.posts
             .iter()
-            .map(|p| p.draft.body.0.to_string())
+            .map(|p| p.draft.body.expose().to_string())
             .collect()
     }
 
@@ -5004,7 +5008,7 @@ mod board {
         assert_eq!(got.labels, Labels {});
         assert_eq!(got.draft.kind, PostKind::Question);
         assert_eq!(got.draft.to, Addressee::Agents(vec!["jin".into()]));
-        assert_eq!(got.draft.body.0.as_str(), "sentinel-695-question");
+        assert_eq!(got.draft.body.expose(), "sentinel-695-question");
         assert_eq!(
             bodies(&page_of(w.board("hobi", read(None), h).await.0)),
             ["sentinel-695-question"]
@@ -8387,7 +8391,13 @@ mod board {
             let shown: Vec<(PostId, String, Vec<BoardHold>)> = l
                 .entries
                 .iter()
-                .map(|e| (e.post.id, e.post.draft.body.0.to_string(), e.held.clone()))
+                .map(|e| {
+                    (
+                        e.post.id,
+                        e.post.draft.body.expose().to_string(),
+                        e.held.clone(),
+                    )
+                })
                 .collect();
             assert_eq!(
                 shown,
@@ -8648,7 +8658,7 @@ mod board {
             let bodies = |l: &BoardListing| -> Vec<String> {
                 l.entries
                     .iter()
-                    .map(|e| e.post.draft.body.0.to_string())
+                    .map(|e| e.post.draft.body.expose().to_string())
                     .collect()
             };
             let (answer, records) = w.list(None).await;

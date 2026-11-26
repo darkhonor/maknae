@@ -91,17 +91,20 @@ impl maknae_kernel::Egress for Recording {
                         } => (
                             content,
                             tool_calls,
-                            reasoning.as_ref().map_or(0, |r| r.0.len() as u64),
+                            reasoning.as_ref().map_or(0, |r| r.expose().len() as u64),
                         ),
                     };
                 let text: u64 = content
                     .iter()
                     .map(|b| match b {
-                        ContentBlock::Text { text } => text.0.len() as u64,
+                        ContentBlock::Text { text } => text.expose().len() as u64,
                         _ => 0,
                     })
                     .sum();
-                let args: u64 = tool_calls.iter().map(|c| c.arguments.0.len() as u64).sum();
+                let args: u64 = tool_calls
+                    .iter()
+                    .map(|c| c.arguments.expose().len() as u64)
+                    .sum();
                 text + args + reasoning
             })
             .sum();
@@ -143,7 +146,7 @@ impl maknae_kernel::Egress for Recording {
 // No `zeroize` dep in the kernel: `maknae_io::Zeroizing` is the same type.
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {
-        text: SecretText(maknae_io::Zeroizing::new(s.into())),
+        text: SecretText::from(maknae_io::Zeroizing::new(s.into())),
     }
 }
 fn prompt(s: &str) -> Verb {
@@ -968,7 +971,7 @@ async fn non_text_content_and_a_bad_conversation_id_are_refused_before_any_decis
                         tool_calls: vec![ProposedToolCall {
                             name: "read_file".into(),
                             call_id: "c1".into(),
-                            arguments: SecretText(maknae_io::Zeroizing::new(
+                            arguments: SecretText::from(maknae_io::Zeroizing::new(
                                 "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES + 1),
                             )),
                             refused: None,
@@ -1791,7 +1794,7 @@ async fn a_reply_over_the_cap_only_because_of_its_reasoning_is_delivered_without
                     blocks: vec![text(&"a".repeat(4096))],
                     tool_calls: vec![],
                     usage: None,
-                    reasoning: Some(SecretText(maknae_io::Zeroizing::new(
+                    reasoning: Some(SecretText::from(maknae_io::Zeroizing::new(
                         "r".repeat(maknae_proto::MAX_REASONING_BYTES),
                     ))),
                 },
@@ -1826,7 +1829,7 @@ fn plain_call(name: &str, id: &str) -> ProposedToolCall {
     ProposedToolCall {
         name: name.into(),
         call_id: id.into(),
-        arguments: SecretText(maknae_io::Zeroizing::new("{}".into())),
+        arguments: SecretText::from(maknae_io::Zeroizing::new("{}".into())),
         refused: None,
     }
 }
@@ -1835,7 +1838,7 @@ fn stub_call(name: &str, id: &str, bytes: u64) -> ProposedToolCall {
     ProposedToolCall {
         name: name.into(),
         call_id: id.into(),
-        arguments: SecretText(maknae_io::Zeroizing::new(String::new())),
+        arguments: SecretText::from(maknae_io::Zeroizing::new(String::new())),
         refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }),
     }
 }

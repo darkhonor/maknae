@@ -459,7 +459,7 @@ pub fn print_end(
     err: &mut impl Write,
 ) -> std::io::Result<u8> {
     if let Some(answer) = &outcome.answer {
-        writeln!(out, "{}", answer.0.as_str())?;
+        writeln!(out, "{}", answer.expose())?;
         return Ok(0);
     }
     crate::stderr::line(
@@ -1465,7 +1465,7 @@ mod tests {
                 blocks: text
                     .map(|t| {
                         vec![ContentBlock::Text {
-                            text: SecretText(zeroize::Zeroizing::new(t.into())),
+                            text: SecretText::from(zeroize::Zeroizing::new(t.into())),
                         }]
                     })
                     .unwrap_or_default(),
@@ -1474,7 +1474,7 @@ mod tests {
                     .map(|(id, path)| ProposedToolCall {
                         name: "write_file".into(),
                         call_id: (*id).into(),
-                        arguments: SecretText(zeroize::Zeroizing::new(format!(
+                        arguments: SecretText::from(zeroize::Zeroizing::new(format!(
                             r#"{{"path":"{path}","content":"x"}}"#
                         ))),
                         refused: None,

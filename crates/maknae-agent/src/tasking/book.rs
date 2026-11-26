@@ -442,7 +442,7 @@ impl Book {
                 } else if conv.push(EntryKind::Request, &line).is_err() {
                     self.refuse(conv, text::CONVERSATION_FULL);
                 } else {
-                    let text = SecretText(line);
+                    let text = SecretText::from(line);
                     self.queue.push_back((Op::Submit { text }, Asked::Submit));
                     return self.after_entry(now);
                 }
@@ -554,7 +554,7 @@ impl Book {
         self.queue.push_back((
             Op::Add {
                 task,
-                text: SecretText(copy),
+                text: SecretText::from(copy),
                 bound,
             },
             Asked::Add(n),
@@ -868,7 +868,7 @@ impl Book {
             }
             let body: &str = match report.close {
                 Some(close) => text::close_line(close),
-                None => &report.text.0,
+                None => report.text.expose(),
             };
             if conv.would_drop_unseen(display_safe_len(&head) + 1 + display_safe_len(body)) {
                 return;
@@ -1253,7 +1253,7 @@ mod tests {
             task: task(n),
             agent: "hobi".into(),
             close,
-            text: SecretText(Zeroizing::new(text.into())),
+            text: SecretText::from(Zeroizing::new(text.into())),
             at_secs: 0,
             cursor: TaskCursor::from_seq(seq),
         }
@@ -1350,7 +1350,7 @@ mod tests {
         fn submit(&mut self, line: &str, n: u8, seq: u64) {
             self.enter(line);
             match self.op() {
-                Op::Submit { text } => assert_eq!(text.0.as_str(), line),
+                Op::Submit { text } => assert_eq!(text.expose(), line),
                 other => panic!("expected a submit, got {other:?}"),
             }
             self.answer(Ok(Answer::Submitted(
@@ -1444,7 +1444,7 @@ mod tests {
         match run.op() {
             Op::Add { task: t, text, .. } => {
                 assert_eq!(t, task(1));
-                assert_eq!(text.0.as_str(), "the logs too");
+                assert_eq!(text.expose(), "the logs too");
             }
             other => panic!("{other:?}"),
         }
@@ -1671,7 +1671,7 @@ mod tests {
         run.answer(page(vec![view(1, 1, TaskState::Queued)], None));
         assert_eq!(run.book.status().len(), 1);
         run.enter("third");
-        assert!(matches!(run.op(), Op::Submit { text } if text.0.as_str() == "third"));
+        assert!(matches!(run.op(), Op::Submit { text } if text.expose() == "third"));
         run.answer(Err(Failure::Unreachable { after_write: false }));
         assert_eq!(
             run.last_text(),

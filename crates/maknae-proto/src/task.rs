@@ -83,7 +83,7 @@ pub enum Ask {
 impl std::fmt::Debug for Ask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ask::Prompt { prompt } => write!(f, "Prompt(<{} bytes>)", prompt.0.len()),
+            Ask::Prompt { prompt } => write!(f, "Prompt(<{} bytes>)", prompt.expose().len()),
         }
     }
 }
@@ -1175,7 +1175,7 @@ mod tests {
 
     fn prompt(text: &str) -> Ask {
         Ask::Prompt {
-            prompt: SecretText(zeroize::Zeroizing::new(text.into())),
+            prompt: SecretText::from(zeroize::Zeroizing::new(text.into())),
         }
     }
 
@@ -1543,7 +1543,7 @@ mod tests {
     }
 
     fn secret(s: &str) -> SecretText {
-        SecretText(zeroize::Zeroizing::new(s.into()))
+        SecretText::from(zeroize::Zeroizing::new(s.into()))
     }
 
     fn task_ref() -> TaskRef {

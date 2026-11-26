@@ -42,7 +42,7 @@ impl std::error::Error for TaskSignatureError {}
 
 fn signing_bound(task: &TaskObject) -> usize {
     match &task.ask {
-        Ask::Prompt { prompt } => prompt.0.len().saturating_add(TASK_ENVELOPE_MARGIN),
+        Ask::Prompt { prompt } => prompt.expose().len().saturating_add(TASK_ENVELOPE_MARGIN),
     }
 }
 
@@ -200,7 +200,7 @@ mod tests {
             parent: None,
             agent: to.into(),
             ask: Ask::Prompt {
-                prompt: SecretText(String::from(PROMPT).into()),
+                prompt: SecretText::new(String::from(PROMPT)),
             },
             labels: Labels {},
             bindings: vec![],
@@ -401,7 +401,7 @@ mod tests {
         let tampers: [(&str, Tamper); 5] = [
             ("prompt", |t| {
                 t.ask = Ask::Prompt {
-                    prompt: SecretText(String::from("task-12-forged").into()),
+                    prompt: SecretText::new(String::from("task-12-forged")),
                 }
             }),
             ("agent", |t| t.agent = "hobi".into()),
@@ -636,7 +636,7 @@ mod tests {
         let cap = maknae_config::TransportConfig::default().prompt_max_bytes;
         let mut big = task("suga");
         big.ask = Ask::Prompt {
-            prompt: SecretText("p".repeat(cap).into()),
+            prompt: SecretText::new("p".repeat(cap)),
         };
         let signed = sign_task(&ca.kernel(k, None), big).unwrap();
         let s = &signed.signature;

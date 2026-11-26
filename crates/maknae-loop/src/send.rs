@@ -582,7 +582,9 @@ mod tests {
             RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
                 reasoning: None,
                 blocks: vec![maknae_proto::ContentBlock::Text {
-                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("y".repeat(100 * 1024))),
+                    text: maknae_proto::SecretText::from(zeroize::Zeroizing::new(
+                        "y".repeat(100 * 1024),
+                    )),
                 }],
                 tool_calls: vec![],
                 usage: None,
@@ -646,7 +648,7 @@ mod tests {
                 seen_follow_ups: Some(3),
             },
             maknae_proto::Verb::TaskReport {
-                text: maknae_proto::SecretText(zeroize::Zeroizing::new("r".into())),
+                text: maknae_proto::SecretText::from(zeroize::Zeroizing::new("r".into())),
                 seen_follow_ups: None,
             },
         ] {
@@ -672,7 +674,7 @@ mod tests {
     fn tasker_verbs() -> Vec<maknae_proto::Verb> {
         use maknae_proto::{Ask, Labels, SecretText, TaskId, TaskRef, TaskSubmission, Verb};
         let task = TaskRef::from_id(&TaskId([3; 16]));
-        let text = || SecretText(zeroize::Zeroizing::new("t".into()));
+        let text = || SecretText::from(zeroize::Zeroizing::new("t".into()));
         vec![
             Verb::TaskSubmit {
                 task: TaskSubmission {
@@ -788,7 +790,7 @@ mod tests {
                     kind: maknae_proto::PostKind::Note,
                     to: maknae_proto::Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(zeroize::Zeroizing::new("b".into())),
+                    body: maknae_proto::SecretText::from(zeroize::Zeroizing::new("b".into())),
                     attachments: vec![],
                 },
             },
@@ -851,7 +853,9 @@ mod tests {
             RespResult::Ok(Payload::PromptReply(maknae_proto::PromptReply {
                 reasoning: None,
                 blocks: vec![maknae_proto::ContentBlock::Text {
-                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("sentinel-413".into())),
+                    text: maknae_proto::SecretText::from(zeroize::Zeroizing::new(
+                        "sentinel-413".into(),
+                    )),
                 }],
                 tool_calls: vec![],
                 usage: None,

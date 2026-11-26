@@ -278,7 +278,7 @@ pub fn board_attachment_line(a: &Attachment) -> String {
     format!(
         "  attachment {}  {media}  {} bytes",
         one_line(&a.label),
-        a.content.0.len()
+        a.content.expose().len()
     )
 }
 
@@ -582,7 +582,7 @@ mod tests {
     }
 
     fn secret(s: &str) -> maknae_proto::SecretText {
-        maknae_proto::SecretText(zeroize::Zeroizing::new(s.into()))
+        maknae_proto::SecretText::from(zeroize::Zeroizing::new(s.into()))
     }
 
     fn board_entry(seq: u64, author: &str, to: Addressee) -> BoardEntry {
