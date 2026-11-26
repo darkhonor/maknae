@@ -46,8 +46,9 @@ pub struct Subject {
     /// `drop`, `collect`, `claim` or `report`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_op: Option<String>,
-    /// The kernel's own board operation: `expire` or `hold` on a `board.manage` record,
-    /// `release` on an `admin.release` record.
+    /// The board operation: a person's `settings` or `clear` on a `board.manage` record and
+    /// `list` on a `board.read` record; the kernel's own `expire` or `hold` on a
+    /// `board.manage` record, `release` on an `admin.release` record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_op: Option<String>,
     /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).

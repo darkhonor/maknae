@@ -1917,6 +1917,32 @@ impl<P> DeniesLabel<P> {
 
 board_double!(DeniesLabel);
 
+/// Denies a request holding `label` whose subject is `uid`.
+pub struct DeniesLabelTo<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+    pub uid: u32,
+}
+
+impl<P> DeniesLabelTo<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        let subject = req.subject.0.get("uid");
+        if holds(req, self.label)
+            && subject == Some(&maknae_security::AttrValue::Int(i64::from(self.uid)))
+        {
+            Verdict::Deny {
+                reason: "sentinel-714: label withheld".into(),
+            }
+        } else {
+            verdict
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(DeniesLabelTo);
+
 /// Turns a `Permit` on a request holding `label` into one whose obligation has no handler.
 pub struct PermitsWithObligation<P> {
     pub inner: Arc<P>,

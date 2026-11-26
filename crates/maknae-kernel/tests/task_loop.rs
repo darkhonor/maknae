@@ -4805,10 +4805,82 @@ mod board {
             self.agents.board.get(self.key(), id).unwrap().seq
         }
 
+        /// A post written through the store on `key`'s board, as the kernel writes one.
+        fn stored_on(
+            &self,
+            key: BoardKey,
+            author: &str,
+            draft: PostDraft,
+            labels: PostLabels,
+        ) -> PostId {
+            self.agents
+                .board
+                .post(
+                    key,
+                    (Author::Agent(author.into()), Some(uid_of(author))),
+                    None,
+                    labels,
+                    draft,
+                    &*self.agents.view,
+                )
+                .unwrap()
+                .post
+                .id
+        }
+
+        /// A person's listing below `before`, decided by `authorizer`, and its board records.
+        async fn list_as<P>(
+            &self,
+            authorizer: &Arc<P>,
+            before: Option<u64>,
+        ) -> (RespResult, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
+            let records = Records::new(0);
+            let raw = {
+                let _shared = STORE.read().await;
+                let (session, gate) = self.person_session();
+                let body = request_body(Verb::BoardList { before }, None);
+                self.serve_as(
+                    Arc::clone(authorizer),
+                    session,
+                    gate,
+                    body,
+                    &records,
+                    None,
+                    self.wiring(),
+                )
+                .await
+            };
+            (answer_of(&raw).await, board_records(&records))
+        }
+
         fn cursor(&self, agent: &str) -> u64 {
             let agent = maknae_config::AgentId::parse(agent).unwrap();
             self.agents.board.plan_read(self.key(), &agent, None).cursor
         }
+    }
+
+    async fn answer_of(raw: &[u8]) -> RespResult {
+        let mut cursor = raw;
+        let frame = common::read_frame(&mut cursor, 1 << 20)
+            .await
+            .expect("one frame");
+        maknae_proto::decode_response(&frame).unwrap().result
+    }
+
+    fn board_records(records: &Arc<Records>) -> Vec<AuditRecord> {
+        records
+            .snapshot()
+            .into_iter()
+            .filter(|r| r.action.starts_with("board."))
+            .collect()
     }
 
     fn note(body: &str) -> PostDraft {
@@ -6885,6 +6957,62 @@ mod board {
                 ["sentinel-698-r1", "sentinel-698-r2"]
             );
         }
+
+        #[tokio::test]
+        async fn a_listing_whose_request_is_not_permitted_again_is_refused_try_again() {
+            const REVOKED: &str = "roles:\n  user:\n    allow: [\"session.task\"]\n";
+            for (tag, posts) in [
+                ("board-one-snapshot-revoked", 2),
+                ("board-one-snapshot-empty", 0),
+            ] {
+                let w = switched_world(tag, BOARD_ROLES);
+                for i in 0..posts {
+                    w.stored("suga", &format!("sentinel-714-r{i}"), PostLabels::default());
+                }
+                let install = w.installs(BOARD_ON, REVOKED);
+                let pdp = BeforeDeciding::new(&w.pdp, "board.read", true, install);
+                let (answer, records) = w.list_as(&pdp, None).await;
+                assert_eq!(
+                    refused(&answer),
+                    Some(BoardDefect::TryAgain),
+                    "{tag}: {answer:?}"
+                );
+                assert_eq!(
+                    said(&records),
+                    one(
+                        "deny",
+                        "board: the decision did not complete",
+                        "unavailable"
+                    ),
+                    "{tag}"
+                );
+                assert_eq!(records[0].subject.board_op.as_deref(), Some("list"));
+                assert!(records[0].board.is_none(), "{records:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_listing_decided_across_an_install_is_refused_try_again() {
+            let w = switched_world("board-one-snapshot-list", BOARD_ROLES);
+            for body in ["sentinel-714-l1", "sentinel-714-l2"] {
+                w.stored("suga", body, PostLabels::default());
+            }
+            let install = w.installs(BOARD_ON, BOARD_ROLES);
+            let pdp = BeforeDeciding::new(&w.pdp, "board.read", true, install);
+            let (answer, records) = w.list_as(&pdp, None).await;
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+            assert_eq!(said(&records), one("deny", POLICY_CHANGED, "unauthorized"));
+            assert_eq!(records[0].subject.board_op.as_deref(), Some("list"));
+            assert_eq!(records[0].object, Some(format!("board:users/{}", w.me)));
+            assert!(records[0].board.is_none(), "{records:?}");
+            let pdp = Arc::clone(&w.pdp);
+            match w.list_as(&pdp, None).await.0 {
+                RespResult::Ok(Payload::BoardListing(l)) => {
+                    assert_eq!(l.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+                }
+                other => panic!("not a listing: {other:?}"),
+            }
+        }
     }
 
     mod manage {
@@ -8003,6 +8131,499 @@ mod board {
                     enabled: false,
                     report: maknae_kernel::Report::Every
                 }
+            );
+        }
+    }
+
+    mod list {
+        use super::*;
+        use maknae_audit_append::BoardAudit;
+        use maknae_proto::{BoardHold, BoardListing};
+
+        const LISTED: &str = "done";
+        const LISTED_OLDER: &str = "done; older posts remain";
+
+        fn list_world(tag: &str, role: &str) -> World {
+            world_of(
+                tag,
+                role,
+                BOARD_ROLES,
+                &[
+                    ("hobi", HOBI_UID, PLAIN),
+                    ("suga", SUGA_UID, PLAIN),
+                    ("jin", JIN_UID, PLAIN),
+                ],
+            )
+        }
+
+        fn enrolled() -> FixedEnrollment {
+            only(&[("hobi", HOBI_UID), ("suga", SUGA_UID), ("jin", JIN_UID)])
+        }
+
+        impl World {
+            async fn list(&self, before: Option<u64>) -> (RespResult, Vec<AuditRecord>) {
+                let pdp = Arc::clone(&self.pdp);
+                self.list_as(&pdp, before).await
+            }
+
+            fn own(&self) -> Option<String> {
+                Some(format!("board:users/{}", self.me))
+            }
+
+            /// Holds `author`'s posts on this board for their author, written.
+            fn hold_for(&self, author: u32) {
+                let board = &self.agents.board;
+                board.mark(&maknae_kernel::Containing(
+                    enrolled(),
+                    [author].into_iter().collect(),
+                ));
+                let due = board.due(100);
+                assert!(!due.is_empty());
+                assert_eq!(board.perform(&due, &*self.agents.view), due.len());
+                board.mark(&*self.agents.view);
+            }
+        }
+
+        fn listing_of(r: RespResult) -> BoardListing {
+            match r {
+                RespResult::Ok(Payload::BoardListing(l)) => l,
+                other => panic!("not a listing: {other:?}"),
+            }
+        }
+
+        fn seqs(l: &BoardListing) -> Vec<u64> {
+            l.entries.iter().map(|e| e.seq).collect()
+        }
+
+        type Said = (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<BoardAudit>,
+        );
+
+        fn trail(records: &[AuditRecord]) -> Vec<Said> {
+            records
+                .iter()
+                .map(|r| {
+                    (
+                        r.action.clone(),
+                        r.subject.board_op.clone(),
+                        r.outcome.result.clone(),
+                        r.outcome.reason.clone(),
+                        r.outcome.posture.clone(),
+                        r.object.clone(),
+                        r.board.clone(),
+                    )
+                })
+                .collect()
+        }
+
+        fn rec(
+            (result, reason, posture): (&str, &str, &str),
+            object: Option<String>,
+            board: Option<BoardAudit>,
+        ) -> Said {
+            (
+                "board.read".into(),
+                Some("list".into()),
+                result.into(),
+                reason.into(),
+                posture.into(),
+                object,
+                board,
+            )
+        }
+
+        fn counted(seqs: Option<(u64, u64)>, returned: u32, withheld: u32) -> Option<BoardAudit> {
+            Some(BoardAudit {
+                first_seq: seqs.map(|s| s.0),
+                last_seq: seqs.map(|s| s.1),
+                returned: Some(returned),
+                withheld: Some(withheld),
+                ..BoardAudit::default()
+            })
+        }
+
+        fn done(reason: &str) -> (&str, &str, &str) {
+            ("permit", reason, "authorized")
+        }
+
+        #[tokio::test]
+        async fn a_person_lists_their_own_board_latest_first_held_posts_marked() {
+            let w = list_world("list-own", "user");
+            let hobi = w.stored("hobi", "sentinel-714-hobi", PostLabels::default());
+            let jin = w.stored("jin", "sentinel-714-jin", PostLabels::default());
+            w.hold_for(HOBI_UID);
+            let (answer, records) = w.list(None).await;
+            let l = listing_of(answer);
+            assert_eq!(seqs(&l), [1, 2]);
+            assert_eq!(l.older, None);
+            let shown: Vec<(PostId, String, Vec<BoardHold>)> = l
+                .entries
+                .iter()
+                .map(|e| (e.post.id, e.post.draft.body.0.to_string(), e.held.clone()))
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    (hobi, "sentinel-714-hobi".into(), vec![BoardHold::Author]),
+                    (jin, "sentinel-714-jin".into(), vec![]),
+                ]
+            );
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((1, 2)), 2, 0))]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_listing_pages_back_with_before_and_says_older() {
+            let w = list_world("list-pages", "user");
+            for i in 1..=40 {
+                let author = if i % 2 == 0 { "hobi" } else { "jin" };
+                w.stored(author, &format!("sentinel-714-{i}"), PostLabels::default());
+            }
+            let (answer, records) = w.list(None).await;
+            let top = listing_of(answer);
+            assert_eq!(seqs(&top), (9..=40).collect::<Vec<_>>());
+            assert_eq!(top.older, Some(9));
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    done(LISTED_OLDER),
+                    w.own(),
+                    counted(Some((9, 40)), 32, 0)
+                )]
+            );
+            let (answer, records) = w.list(Some(9)).await;
+            let below = listing_of(answer);
+            assert_eq!(seqs(&below), (1..=8).collect::<Vec<_>>());
+            assert_eq!(below.older, None);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((1, 8)), 8, 0))]
+            );
+            let (answer, records) = w.list(Some(1)).await;
+            let none = listing_of(answer);
+            assert!(none.entries.is_empty());
+            assert_eq!(none.older, None);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(None, 0, 0))]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_page_of_maximum_posts_is_cut_by_the_byte_budget() {
+            let w = list_world("list-budget", "user");
+            assert_eq!(
+                w.cfg.prompt_max_bytes,
+                maknae_config::PROMPT_MAX_BYTES_FLOOR
+            );
+            let big = "b".repeat(maknae_proto::BOARD_POST_MAX_BYTES);
+            for _ in 0..3 {
+                w.stored("hobi", &big, PostLabels::default());
+            }
+            let mut before = None;
+            let mut pages = Vec::new();
+            loop {
+                let (answer, records) = w.list(before).await;
+                let l = listing_of(answer);
+                assert!(!l.entries.is_empty() && l.entries.len() < 32);
+                let reason = if l.older.is_some() {
+                    LISTED_OLDER
+                } else {
+                    LISTED
+                };
+                assert_eq!(said(&records), one("permit", reason, "authorized"));
+                pages.push(seqs(&l));
+                match l.older {
+                    Some(lowest) => {
+                        assert_eq!(Some(lowest), l.entries.first().map(|e| e.seq));
+                        before = Some(lowest);
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(pages, [vec![3], vec![2], vec![1]]);
+        }
+
+        #[tokio::test]
+        async fn a_listing_writes_nothing_and_moves_no_cursor() {
+            let mut w = list_world("list-writes-nothing", "user");
+            w.switch(true, &["hobi"]);
+            w.enable(w.me, true);
+            let h = w.at_work("hobi");
+            let first = w.stored("jin", "sentinel-714-a", PostLabels::default());
+            w.stored("jin", "sentinel-714-b", PostLabels::default());
+            assert_eq!(
+                page_of(w.board("hobi", read(None), h).await.0).posts.len(),
+                2
+            );
+            page_of(w.board("hobi", read(Some(first)), h).await.0);
+            w.stored("suga", "sentinel-714-c", PostLabels::default());
+            assert_eq!(
+                page_of(w.board("hobi", read(None), h).await.0).posts.len(),
+                2
+            );
+            let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+            let snapshot = |w: &World| {
+                (
+                    w.board_blobs.records(),
+                    w.board_blobs.attempts(),
+                    w.cursor("hobi"),
+                    w.agents.board.sent_to(w.key(), &hobi),
+                )
+            };
+            let before = snapshot(&w);
+            assert!(before.0.contains_key(&format!("cursor.{}.hobi", w.me)));
+            assert_eq!(before.0.len(), 5);
+            assert_eq!(before.2, 1);
+            assert_eq!(before.3, [2, 3].into());
+            let (one_answer, _) = w.list(None).await;
+            let (two_answer, _) = w.list(None).await;
+            assert_eq!(snapshot(&w), before);
+            assert_eq!(listing_of(one_answer), listing_of(two_answer));
+        }
+
+        #[tokio::test]
+        async fn a_listing_is_served_while_every_switch_is_off() {
+            let mut w = list_world("list-switches-off", "user");
+            w.switch(false, &[]);
+            w.enable(w.me, false);
+            w.stored("hobi", "sentinel-714-off", PostLabels::default());
+            let (answer, records) = w.list(None).await;
+            assert_eq!(seqs(&listing_of(answer)), [1]);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((1, 1)), 1, 0))]
+            );
+        }
+
+        fn denier(w: &World) -> Arc<common::DeniesLabelTo<Pdp>> {
+            Arc::new(common::DeniesLabelTo {
+                inner: Arc::clone(&w.pdp),
+                label: LABEL,
+                uid: w.me,
+            })
+        }
+
+        #[tokio::test]
+        async fn a_post_an_operand_withholds_from_the_person_is_absent_and_unmarked() {
+            let w = list_world("list-withheld", "user");
+            w.stored("hobi", "sentinel-714-first", PostLabels::default());
+            for i in 2..=32 {
+                w.stored("hobi", &format!("sentinel-714-held-{i}"), labelled());
+            }
+            for i in 33..=35 {
+                w.stored("jin", &format!("sentinel-714-{i}"), PostLabels::default());
+            }
+            let pdp = denier(&w);
+            let (answer, records) = w.list_as(&pdp, None).await;
+            let top = listing_of(answer);
+            assert_eq!(seqs(&top), [33, 34, 35]);
+            assert_eq!(top.older, Some(33));
+            assert!(top.entries.iter().all(|e| e.held.is_empty()));
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    done(LISTED_OLDER),
+                    w.own(),
+                    counted(Some((33, 35)), 3, 29)
+                )]
+            );
+            let (answer, records) = w.list_as(&pdp, Some(33)).await;
+            let below = listing_of(answer);
+            assert_eq!(seqs(&below), [1]);
+            assert_eq!(below.older, None);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((1, 1)), 1, 31))]
+            );
+            let (answer, _) = w.list(None).await;
+            assert_eq!(listing_of(answer).entries.len(), 32);
+        }
+
+        #[tokio::test]
+        async fn a_reply_to_a_withheld_post_carries_no_link() {
+            let w = list_world("list-reply-link", "user");
+            let hidden = w.stored("hobi", "sentinel-714-hidden", labelled());
+            let shown = w.stored("hobi", "sentinel-714-shown", PostLabels::default());
+            for i in 0..32 {
+                w.stored(
+                    "jin",
+                    &format!("sentinel-714-fill-{i}"),
+                    PostLabels::default(),
+                );
+            }
+            let key = w.key();
+            w.stored_on(
+                key,
+                "suga",
+                reply("sentinel-714-to-hidden", hidden),
+                PostLabels::default(),
+            );
+            w.stored_on(
+                key,
+                "suga",
+                reply("sentinel-714-to-shown", shown),
+                PostLabels::default(),
+            );
+            let (answer, records) = w.list_as(&denier(&w), None).await;
+            let l = listing_of(answer);
+            assert_eq!(seqs(&l), (5..=36).collect::<Vec<_>>());
+            let replies: Vec<Option<PostId>> = l.entries[30..]
+                .iter()
+                .map(|e| e.post.draft.in_reply_to)
+                .collect();
+            assert_eq!(replies, [None, Some(shown)]);
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    done(LISTED_OLDER),
+                    w.own(),
+                    counted(Some((5, 36)), 32, 0)
+                )]
+            );
+            let (answer, _) = w.list(None).await;
+            let plain = listing_of(answer);
+            assert_eq!(plain.entries[30].post.draft.in_reply_to, Some(hidden));
+        }
+
+        #[tokio::test]
+        async fn an_undecided_post_is_omitted_and_the_listing_answers() {
+            let w = list_world("list-undecided", "user");
+            w.stored("hobi", "sentinel-714-a", PostLabels::default());
+            w.stored("hobi", "sentinel-714-undecided", labelled());
+            w.stored("hobi", "sentinel-714-c", PostLabels::default());
+            let pdp = Arc::new(common::PermitsWithObligation {
+                inner: Arc::clone(&w.pdp),
+                label: LABEL,
+            });
+            let (answer, records) = w.list_as(&pdp, None).await;
+            assert_eq!(seqs(&listing_of(answer)), [1, 3]);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((1, 3)), 2, 1))]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_listing_reaches_only_the_callers_own_board() {
+            use ciborium::Value;
+            let w = list_world("list-own-board", "user");
+            w.stored_on(
+                BoardKey(OTHER),
+                "hobi",
+                note("sentinel-714-other"),
+                PostLabels::default(),
+            );
+            w.stored("hobi", "sentinel-714-mine", PostLabels::default());
+            let bodies = |l: &BoardListing| -> Vec<String> {
+                l.entries
+                    .iter()
+                    .map(|e| e.post.draft.body.0.to_string())
+                    .collect()
+            };
+            let (answer, records) = w.list(None).await;
+            let mine = listing_of(answer);
+            assert_eq!(bodies(&mine), ["sentinel-714-mine"]);
+            assert_eq!(records[0].object, w.own());
+
+            let mut request: Value = ciborium::from_reader(
+                request_body(Verb::BoardList { before: None }, None).as_slice(),
+            )
+            .unwrap();
+            fn widen(v: &mut Value) -> bool {
+                match v {
+                    Value::Map(entries) => entries.iter_mut().any(|(k, val)| {
+                        if *k == Value::Text("BoardList".into()) {
+                            if let Value::Map(fields) = val {
+                                fields.push((
+                                    Value::Text("board".into()),
+                                    Value::Integer(OTHER.into()),
+                                ));
+                            }
+                            true
+                        } else {
+                            widen(val)
+                        }
+                    }),
+                    _ => false,
+                }
+            }
+            assert!(widen(&mut request));
+            let mut body = Vec::new();
+            ciborium::into_writer(&request, &mut body).unwrap();
+            let records = Records::new(0);
+            let raw = w.raw_body(body, &records).await;
+            assert_eq!(listing_of(answer_of(&raw).await), mine);
+            assert_eq!(board_records(&records)[0].object, w.own());
+        }
+
+        #[tokio::test]
+        async fn a_contained_person_is_refused_their_listing() {
+            let w = list_world("list-contained", "adversary");
+            w.stored("hobi", "sentinel-714-contained", PostLabels::default());
+            let attempts = w.board_blobs.attempts();
+            let (answer, records) = w.list(None).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    ("deny", "subject contained: role=adversary", "unauthorized"),
+                    w.own(),
+                    None
+                )]
+            );
+            assert_eq!(w.board_blobs.attempts(), attempts);
+        }
+
+        #[tokio::test]
+        async fn a_listing_on_the_agent_channel_is_refused_before_any_decision() {
+            let mut w = list_world("list-agent", "user");
+            w.switch(true, &["hobi"]);
+            w.enable(w.me, true);
+            let h = w.at_work("hobi");
+            w.stored("jin", "sentinel-714-agent", PostLabels::default());
+            let (answer, records) = w.board("hobi", Verb::BoardList { before: None }, h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    (
+                        "deny",
+                        "board: not served on the agent channel",
+                        "unavailable"
+                    ),
+                    None,
+                    None
+                )]
+            );
+            assert_eq!(records[0].subject.role, None);
+            assert!(records[0].rule.is_none());
+        }
+
+        #[tokio::test]
+        async fn a_listing_skips_a_post_past_retention_even_when_held() {
+            let w = list_world("list-retention", "user");
+            w.stored("hobi", "sentinel-714-aged-held", PostLabels::default());
+            w.stored("jin", "sentinel-714-aged", PostLabels::default());
+            w.hold_for(HOBI_UID);
+            w.clock.set(T0 + 1);
+            w.stored("jin", "sentinel-714-kept", PostLabels::default());
+            let (answer, _) = w.list(None).await;
+            assert_eq!(seqs(&listing_of(answer)), [1, 2, 3]);
+            w.clock.set(T0 + 7 * 24 * 60 * 60);
+            let (answer, records) = w.list(None).await;
+            assert_eq!(seqs(&listing_of(answer)), [3]);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((3, 3)), 1, 0))]
             );
         }
     }

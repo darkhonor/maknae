@@ -4651,9 +4651,9 @@ mod tests {
         draft.attachments.clear();
         draft.body = board_text(1);
         let entry = listing_entry(draft);
-        let pages = crate::BOARD_READ_PAGE_POSTS + 1;
+        let entries = crate::BOARD_READ_PAGE_POSTS + 1;
         assert!(
-            pages * encoded_len(&entry) <= crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR),
+            entries * encoded_len(&entry) <= crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR),
             "{}",
             encoded_len(&entry)
         );
@@ -4689,9 +4689,9 @@ mod tests {
         draft.attachments.clear();
         draft.body = board_text(1);
         let post = board_post(draft);
-        let pages = crate::BOARD_READ_PAGE_POSTS + 1;
+        let posts = crate::BOARD_READ_PAGE_POSTS + 1;
         assert!(
-            pages * encoded_len(&post) <= crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR),
+            posts * encoded_len(&post) <= crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR),
             "{}",
             encoded_len(&post)
         );

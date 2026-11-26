@@ -601,6 +601,11 @@ impl MemTaskBlobs {
         self.map().contains_key(name)
     }
 
+    /// Every record held now, by name.
+    pub fn records(&self) -> std::collections::BTreeMap<String, Zeroizing<Vec<u8>>> {
+        self.map().clone()
+    }
+
     pub fn aside(&self) -> Vec<String> {
         self.0
             .aside
