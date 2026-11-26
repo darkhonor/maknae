@@ -868,7 +868,7 @@ SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
              "external": (PLAIN_FILL, MUTED, INK)}
 SEQ_KINDS = ("call", "reply", "self", "ref")
 _STEP_ID = re.compile(r"[a-z][a-z0-9-]*")
-FRAG_HEAD, FRAG_PAD, FRAG_INSET = 32, 10, 8
+FRAG_HEAD, FRAG_PAD, FRAG_GAP, FRAG_INSET = 32, 10, 16, 8
 REF_MARGIN = 60
 PRODUCT_NAMES = (
     "generated-tcb-components.svg",
@@ -1024,27 +1024,54 @@ def sequence(name: str) -> str:
         ys.append(cur + 12 * up)
         cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide"))
                            + (s["kind"] == "ref"))
-        for k in sorted((k for k, sp in enumerate(spans) if sp[1] == i), key=lambda k: -depth[k]):
+        closing = sorted((k for k, sp in enumerate(spans) if sp[1] == i), key=lambda k: -depth[k])
+        for k in closing:
             cur += FRAG_PAD
             fbot[k] = cur
+        cur += FRAG_GAP if closing else 0
     body_h = cur - 34 + 26
     def ref_edges(i):
         a, b = sorted((xs[idx[steps[i]["from"]]], xs[idx[steps[i]["to"]]]))
         return (a - REF_MARGIN, b + REF_MARGIN) if steps[i]["kind"] == "ref" else (a, b)
 
+    def place(n):
+        s, lab = steps[n], lines[n]
+        a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
+        if s["kind"] == "ref":
+            r0, r1 = ref_edges(n)
+            return (r0 + r1) / 2, "middle", r0, r1
+        if s["kind"] == "self":
+            # A self-message on a right-hand lifeline can run its evidence off
+            # the canvas -- fully-qualified paths are long. Flip it to the left
+            # of the lifeline when it will not fit to the right.
+            need = max(len(f'{n+1}. {shown[n]}') * 5.6,
+                       len(s.get("evidence", "")) * 4.6,
+                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
+            if a + 40 + need > W - 24:
+                return a - 40, "end", a - 40 - need, a
+            return a + 40, "start", a, a + 40 + need
+        half = max(max(len(ln) for ln in lab) * 5.6,
+                   len(s.get("evidence", "")) * 4.6,
+                   len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
+                   len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
+        lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
+        return lx, "middle", min(lx - half, a, b), max(lx + half, a, b)
+
     maxdepth, fx = max(depth, default=0), []
     for k, ((i0, i1), f) in enumerate(zip(spans, frags), 1):
         lx = [e for i in range(i0, i1 + 1) for e in ref_edges(i)]
-        X0 = max(LEFT - 52, min(lx) - 70 - FRAG_INSET * maxdepth)
-        X1 = min(W - 12, max(lx) + 70 + FRAG_INSET * maxdepth)
+        tx = [place(i)[2:] for i in range(i0, i1 + 1)]
+        X0 = max(8, min(min(lx) - 70, min(t[0] for t in tx) - 6) - FRAG_INSET * maxdepth)
+        X1 = min(W - 8, max(max(lx) + 70, max(t[1] for t in tx) + 6) + FRAG_INSET * maxdepth)
         x0, x1 = X0 + FRAG_INSET * depth[k - 1], X1 - FRAG_INSET * depth[k - 1]
+        for i, (t0, t1) in zip(range(i0, i1 + 1), tx):
+            if t0 < x0 or t1 > x1:
+                sys.exit(f"{name}: fragment {k}: step {i + 1}'s text runs past the box; "
+                         f"raise pitch or shorten it")
         drawn = f"«{f['status']}» [{f['guard']}]" if "status" in f else f"[{f['guard']}]"
         if (len(f["operator"]) * 6 + 14) + len(drawn) * 5.4 + 16 > x1 - x0:
             sys.exit(f"{name}: fragment {k}: guard does not fit its box; shorten it")
-        for i in range(i0, i1 + 1):
-            if steps[i]["kind"] == "ref" and not (x0 <= ref_edges(i)[0] and ref_edges(i)[1] <= x1):
-                sys.exit(f"{name}: fragment {k} cannot enclose ref step {i + 1}; start the ref on "
-                         f"a lifeline other than the first, or nest less deeply")
         fx.append((x0, x1, drawn))
     notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
     DCOLS = int((W - 2 * (LEFT - 52)) / 5.6)
@@ -1146,26 +1173,10 @@ def sequence(name: str) -> str:
         if s["kind"] == "self":
             p.append(f'<path d="M {a} {y-6} h 30 v 20 h -30" fill="none" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
-            # A self-message on a right-hand lifeline can run its evidence off
-            # the canvas -- fully-qualified paths are long. Flip it to the left
-            # of the lifeline when it will not fit to the right.
-            need = max(len(f'{n+1}. {shown[n]}') * 5.6,
-                       len(s.get("evidence", "")) * 4.6,
-                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
-                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
-            if a + 40 + need > W - 24:
-                lx, anc = a - 40, "end"
-            else:
-                lx, anc = a + 40, "start"
         else:
             p.append(f'<line x1="{a}" y1="{y+4}" x2="{b}" y2="{y+4}" stroke="{stroke}" '
                      f'stroke-width="1"{dash} marker-end="url(#{mark})"/>')
-            half = max(max(len(ln) for ln in lab) * 5.6,
-                       len(s.get("evidence", "")) * 4.6,
-                       len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
-                       len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
-            lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
-            anc = "middle"
+        lx, anc, _, _ = place(n)
         for k, ln in enumerate(lab):
             up = len(lab) - 1 - k
             p.append(text(lx, y - 2 - 12 * up, f'{n+1}. {ln}' if k == 0 else ln, 10,

@@ -219,6 +219,11 @@ class FragmentRendering(unittest.TestCase):
         self.assertGreaterEqual(r[2][1], r[1][1] + r[1][3])
         self.assertLessEqual(r[2][1] + 14, text_y(svg, "2. second") - 10)
 
+    def test_step_after_a_fragment_clears_its_bottom(self):
+        svg = render(ids(BASE + THIRD) + frag(first="s1", last="s1"))
+        r = frag_rects(svg)[1]
+        self.assertGreaterEqual(text_y(svg, "2. second") - 12, r[1] + r[3])
+
     def test_nested_fragments_sharing_a_last_step_nest_their_bottoms(self):
         svg = render(ids(BASE) + frag(first="s1", last="s2") + frag(operator="opt", first="s2", last="s2"))
         r = frag_rects(svg)
@@ -230,7 +235,7 @@ class FragmentRendering(unittest.TestCase):
         self.assertLess(r[1][1] + r[1][3], text_y(svg, "«live» built"))
 
     def test_guard_fits_bare_but_not_with_its_stereotype_exits(self):
-        g = "g" * 40
+        g = "g" * 46
         self.assertIn(f"[{g}]", render(ids(LIVE) + frag(operator="opt", guard=g)))
         exits(self, ids(LIVE) + frag(operator="opt", guard=g, status='"#736"', evidence='"#736"'),
               "guard does not fit")
@@ -244,6 +249,19 @@ class FragmentRendering(unittest.TestCase):
 
     def test_no_fragment_output_unchanged(self):
         self.assertNotIn("data-frag", render(BASE))
+
+    def test_fragment_widens_to_enclose_its_steps_text(self):
+        ev = "e" * 70
+        svg = render(ids(BASE.replace('evidence = "crates/maknae-kernel/src/task.rs"', f'evidence = "{ev}"', 1))
+                     + frag())
+        x = float(re.search(r'<text x="([-\d.]+)"[^>]*>' + ev + "<", svg).group(1))
+        r = frag_rects(svg)[1]
+        self.assertLessEqual(r[0], x - len(ev) * 4.6 / 2)
+        self.assertGreaterEqual(r[0] + r[2], x + len(ev) * 4.6 / 2)
+
+    def test_step_text_that_cannot_fit_its_box_exits(self):
+        t = ids(BASE.replace('evidence = "crates/maknae-kernel/src/task.rs"', f'evidence = "{"e" * 75}"', 1))
+        exits(self, t + frag() + frag(operator="opt", first="s1", last="s1"), "text runs past the box")
 
     def test_loop_is_shaded_and_opt_is_not(self):
         svg = render(ids(BASE) + frag(first="s1", last="s2") + frag(operator="opt", first="s1", last="s1"))
@@ -315,9 +333,11 @@ class RefSteps(unittest.TestCase):
         self.assertGreaterEqual(f[0] + f[2], r[0] + r[2])
         self.assertLessEqual(f[1] + 14, r[1])
 
-    def test_fragment_cannot_enclose_a_ref_on_lifeline_zero_exits(self):
-        exits(self, with_ref(ids(THREE), ref_step(frm="a")) + frag(first="r", last="s1"),
-              "cannot enclose ref step")
+    def test_fragment_encloses_a_ref_on_lifeline_zero(self):
+        svg = render(with_ref(ids(THREE), ref_step(frm="a")) + frag(first="r", last="s1"))
+        f, r = frag_rects(svg)[1], ref_rect(svg)
+        self.assertLessEqual(f[0], r[0])
+        self.assertGreaterEqual(f[0] + f[2], r[0] + r[2])
 
     def test_product_names_match_main(self):
         self.assertIn("generated-task-tool-lifecycle.svg", generate.PRODUCT_NAMES)
