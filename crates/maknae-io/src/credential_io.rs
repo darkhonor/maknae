@@ -350,4 +350,19 @@ mod tests {
         assert_eq!(a.write_timeout().unwrap(), Some(Duration::from_secs(5)));
         assert_eq!(b.read_timeout().unwrap(), Some(Duration::from_secs(7)));
     }
+
+    #[test]
+    fn receive_restores_the_read_timeout_after_a_peer_pauses_mid_frame() {
+        let (mut a, b) = UnixStream::pair().unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(7))).unwrap();
+        let body = one().encode();
+        let peer = std::thread::spawn(move || {
+            a.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            a.write_all(&body).unwrap();
+        });
+        LaunchCredentials::receive(&b).unwrap();
+        peer.join().unwrap();
+        assert_eq!(b.read_timeout().unwrap(), Some(Duration::from_secs(7)));
+    }
 }
