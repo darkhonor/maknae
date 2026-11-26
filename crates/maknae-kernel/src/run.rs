@@ -12828,6 +12828,36 @@ mod record_widths {
             Option<&'static str>,
             Option<RuleCitation>,
         ) {
+            self.decision_citing(verb, facts, resource, None)
+        }
+
+        /// An agent's decision citing a task whose root is a person's board.
+        fn decided_tasked(&self, verb: &Verb) -> (Option<&'static str>, Option<RuleCitation>) {
+            let task = crate::handler::TaskStamp {
+                id: TASK,
+                tasker: "uid:1000".into(),
+                root: "users/1000".into(),
+                start: 0,
+            };
+            let (verdict, role, rule) = self.decision_citing(verb, None, &[], Some(&task));
+            assert!(
+                matches!(finalize(verdict), Decision::Permit { .. }),
+                "a cited agent request is permitted"
+            );
+            (role, rule)
+        }
+
+        fn decision_citing(
+            &self,
+            verb: &Verb,
+            facts: Option<&crate::conversation::facts::ConversationFacts>,
+            resource: &[(&str, String)],
+            task: Option<&crate::handler::TaskStamp>,
+        ) -> (
+            maknae_security::Verdict,
+            Option<&'static str>,
+            Option<RuleCitation>,
+        ) {
             let agent = AgentId::parse("hobi").expect("hobi is an agent id");
             let (stamp, uid) = if self.person {
                 (Stamp::Client, self.uid)
@@ -12835,7 +12865,7 @@ mod record_widths {
                 (
                     Stamp::Agent {
                         agent: &agent,
-                        task: None,
+                        task,
                     },
                     AGENT_UID,
                 )
@@ -13239,7 +13269,10 @@ mod record_widths {
             (result, reason, posture): (&str, &str, &str),
             board: maknae_audit_append::BoardAudit,
         ) -> Case {
-            let (role, rule) = self.decided(verb);
+            let (role, rule) = match self.person {
+                true => self.decided(verb),
+                false => self.decided_tasked(verb),
+            };
             let action = crate::handler::verb_to_action(verb);
             let mut rec = decision_record(
                 crate::board_verbs::on_board(
@@ -13515,13 +13548,11 @@ mod record_widths {
             }
             let (result, reason, posture) = at(&owed);
             all.push(self.manage_case(&clear, (result, &reason, posture), removed(0), ""));
-            for verb in [&write, &clear] {
-                all.push(self.manage_case(
-                    verb,
-                    ("deny", "subject contained: role=adversary", "unauthorized"),
-                    None,
-                    "",
-                ));
+            for who in [Who::contained(), Who::guest(), Who::unbound()] {
+                for verb in [&write, &clear] {
+                    let (reason, _, _) = refused(&who, verb);
+                    all.push(who.manage_case(verb, ("deny", &reason, "unauthorized"), None, ""));
+                }
             }
             all
         }
@@ -13599,10 +13630,10 @@ mod record_widths {
         }
     }
 
-    fn list_refused(who: &Who) -> (String, Option<&'static str>, Option<RuleCitation>) {
-        let (verdict, role, rule) = who.decision(&list_verb(), None, &[]);
+    fn refused(who: &Who, verb: &Verb) -> (String, Option<&'static str>, Option<RuleCitation>) {
+        let (verdict, role, rule) = who.decision(verb, None, &[]);
         let Decision::Deny { reason } = finalize(verdict) else {
-            panic!("the listing is refused");
+            panic!("the request is refused");
         };
         (reason, role, rule)
     }
@@ -13641,7 +13672,7 @@ mod record_widths {
             all.push(person.list_case(("deny", &reason, "unauthorized"), None, permitted()));
         }
         for who in [Who::contained(), Who::guest(), Who::unbound()] {
-            let (reason, role, rule) = list_refused(&who);
+            let (reason, role, rule) = refused(&who, &list_verb());
             all.push(who.list_case(("deny", &reason, "unauthorized"), None, (role, rule)));
         }
         all
@@ -13697,7 +13728,42 @@ mod record_widths {
     #[test]
     fn a_persons_board_manage_records_mirror_as_measured() {
         let cases = Who::new(true).manage_cases();
-        assert_each_case_mirrors_as_measured(&cases, &[]);
+        let refused: [(&str, usize, Option<&str>); 6] = [
+            (
+                "settings: deny subject contained: role=adversary",
+                994,
+                Some("adversary"),
+            ),
+            (
+                "clear: deny subject contained: role=adversary",
+                988,
+                Some("adversary"),
+            ),
+            (
+                "settings: deny role guest: no rule for board.manage",
+                985,
+                Some("guest"),
+            ),
+            (
+                "clear: deny role guest: no rule for board.manage",
+                979,
+                Some("guest"),
+            ),
+            ("settings: deny subject resolves to no role", 959, None),
+            ("clear: deny subject resolves to no role", 953, None),
+        ];
+        let labels: Vec<String> = refused
+            .iter()
+            .map(|(l, _, _)| format!("board.manage {l}"))
+            .collect();
+        let in_full: Vec<&str> = labels.iter().map(String::as_str).collect();
+        assert_each_case_mirrors_as_measured(&cases, &in_full);
+        for (label, (_, width, role)) in in_full.iter().zip(refused) {
+            let c = cases.iter().find(|c| c.label == *label).expect("a case");
+            let shape = (macos_mirror(&c.rec).full_len, c.rec.subject.role.as_deref());
+            assert_eq!(shape, (width, role), "{label}");
+            assert!(c.rec.rule.is_none(), "{label}");
+        }
         let widest = format!(
             "board.manage clear: permit {}the board store did not answer in time (32 ids)",
             crate::task::OUTCOME_UNKNOWN
@@ -13710,6 +13776,7 @@ mod record_widths {
         assert_eq!(macos_mirror(&c.rec).full_len, 2263);
         let narrowest = cases
             .iter()
+            .filter(|c| !in_full.contains(&c.label.as_str()))
             .map(|c| macos_mirror(&c.rec).full_len)
             .min()
             .expect("cases");
@@ -13764,6 +13831,10 @@ mod record_widths {
     fn the_board_records_of_the_widest_agent_mirror_as_measured() {
         let cases = Who::new(false).board_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
+        for c in &cases {
+            let shape = (c.rec.subject.role.as_deref(), c.rec.rule.is_some());
+            assert_eq!(shape, (Some("user"), true), "{}", c.label);
+        }
         assert_eq!(
             widest_label(&cases),
             "board.post: permit done",
