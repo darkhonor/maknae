@@ -386,7 +386,7 @@ label = "/add: TaskAdd, a follow-up, while Working"
 status = "live"
 evidence = "ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::add_appends_a_follow_up_to_the_running_task_only"
-note = "Refused once Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, as a signed addendum. Ruled 2026-11-26, not built: with a stored-token agent it is held with its follow-up through steps 13 to 21."
+note = "Refused once Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, as a signed addendum. The agent gets it on its next heartbeat. Ruled 2026-11-26, not built: a stored-token agent's add is held through steps 13 to 21."
 
 [[step]]
 id = "ask"
