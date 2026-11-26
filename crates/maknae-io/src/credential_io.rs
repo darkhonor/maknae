@@ -48,10 +48,13 @@ impl LaunchCredentials {
                 ))
             }
         };
-        let deadline = Instant::now() + budget;
         let body = self.encode();
-        write_by(stream, &(body.len() as u32).to_be_bytes(), deadline)?;
-        write_by(stream, &body, deadline)
+        let sent = deadline(budget).and_then(|at| {
+            write_by(stream, &(body.len() as u32).to_be_bytes(), at)?;
+            write_by(stream, &body, at)
+        });
+        let restored = stream.set_write_timeout(Some(budget));
+        sent.and(restored)
     }
 
     /// Reads one credentials frame into a buffer that is zeroized from allocation. The read
@@ -63,22 +66,42 @@ impl LaunchCredentials {
         let Ok(Some(budget)) = stream.read_timeout() else {
             return Err(ReceiveError::NoTimeout);
         };
-        let deadline = Instant::now() + budget;
-        let mut len = [0u8; 4];
-        read_by(stream, &mut len, deadline).map_err(ReceiveError::Io)?;
-        let len = u32::from_be_bytes(len) as usize;
-        if len > MAX_FRAME {
-            return Err(ReceiveError::TooLong);
-        }
-        let mut body = Zeroizing::new(vec![0u8; len]);
-        read_by(stream, &mut body, deadline).map_err(ReceiveError::Io)?;
-        Self::decode(&body).map_err(ReceiveError::Decode)
+        let got = deadline(budget)
+            .map_err(ReceiveError::Io)
+            .and_then(|at| read_frame(stream, at));
+        let restored = stream
+            .set_read_timeout(Some(budget))
+            .map_err(ReceiveError::Io);
+        let frame = got?;
+        restored?;
+        Self::decode(&frame).map_err(ReceiveError::Decode)
     }
 }
 
 fn blocking(stream: &UnixStream) -> bool {
     fcntl(stream, FcntlArg::F_GETFL)
         .is_ok_and(|flags| !OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK))
+}
+
+fn read_frame(stream: &UnixStream, at: Instant) -> Result<Zeroizing<Vec<u8>>, ReceiveError> {
+    let mut len = [0u8; 4];
+    read_by(stream, &mut len, at).map_err(ReceiveError::Io)?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_FRAME {
+        return Err(ReceiveError::TooLong);
+    }
+    let mut body = Zeroizing::new(vec![0u8; len]);
+    read_by(stream, &mut body, at).map_err(ReceiveError::Io)?;
+    Ok(body)
+}
+
+fn deadline(budget: Duration) -> io::Result<Instant> {
+    Instant::now().checked_add(budget).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the stream timeout is out of range",
+        )
+    })
 }
 
 fn remaining(deadline: Instant) -> io::Result<Duration> {
@@ -160,6 +183,17 @@ mod tests {
                 .unwrap();
         }
         (a, b)
+    }
+
+    fn big() -> LaunchCredentials {
+        let mut lc = LaunchCredentials::new([4; 16]);
+        for i in 0..crate::credential::MAX_CREDENTIALS {
+            DeliveredCredential::new(Zeroizing::new(vec![b'v'; crate::credential::MAX_VALUE]))
+                .unwrap()
+                .deliver_to(&mut lc, CredentialSlot::env_var(&format!("T{i}")).unwrap())
+                .unwrap();
+        }
+        lc
     }
 
     fn one() -> LaunchCredentials {
@@ -299,5 +333,21 @@ mod tests {
             other => panic!("expected the deadline, got {other:?}"),
         }
         assert!(took < Duration::from_millis(900), "{took:?}");
+    }
+
+    #[test]
+    fn send_and_receive_leave_the_callers_timeouts_as_they_were() {
+        let (a, b) = UnixStream::pair().unwrap();
+        a.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(7))).unwrap();
+        let sender = std::thread::spawn(move || {
+            big().send(&a).unwrap();
+            a
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        LaunchCredentials::receive(&b).unwrap();
+        let a = sender.join().unwrap();
+        assert_eq!(a.write_timeout().unwrap(), Some(Duration::from_secs(5)));
+        assert_eq!(b.read_timeout().unwrap(), Some(Duration::from_secs(7)));
     }
 }
