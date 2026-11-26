@@ -282,6 +282,7 @@ A target decision, not built (maintainer rulings, 2026-11-26 and 2026-11-27, in 
 19. In decision 7, "Rootless Podman on a host." On a host, the runtime the site chose (statement 2); rootless Podman by default.
 20. In Consequences, "Once built, the uid network rule over the account and its subordinate range fences it (decision 10), and SELinux confinement of its container launches and the RuntimeClass bound it further." The container launches are the helper's, bounded by its domain and the `MaknaeRuntimeClass`.
 21. In Consequences' Owed list, "entering Podman's rootless network namespace for the relay". This is the helper's ([#481](https://github.com/darkhonor/maknae/issues/481)).
+22. In decision 14, "What the model gets back is set per entry: `full`, `redacted` or `status_only`." No `full` mode was built (`OutputToModel` has `Redacted` and `StatusOnly`); the modes are those two (statement 9).
 
 ## Consequences
 
