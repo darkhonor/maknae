@@ -133,7 +133,7 @@ fn read_by(stream: &UnixStream, mut buf: &mut [u8], at: Instant) -> io::Result<(
 fn write_by(stream: &UnixStream, mut buf: &[u8], at: Instant) -> io::Result<()> {
     while !buf.is_empty() {
         wait(stream, PollFlags::POLLOUT, at)?;
-        match send(stream, buf, SendFlags::DONTWAIT | SendFlags::NOSIGNAL) {
+        match send(stream, buf, SendFlags::DONTWAIT) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
             Ok(n) => buf = &buf[n..],
             Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
