@@ -256,6 +256,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(board),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
+        count_breaker: Default::default(),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -560,6 +561,7 @@ impl World {
                     .expect("the board reopens"),
                 ),
                 switches: self.agents.switches.clone(),
+                count_breaker: Default::default(),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),
@@ -9692,6 +9694,63 @@ mod board {
                 let resp = w.agent_response("hobi", CLAIM).await;
                 assert!(matches!(resp.result, RespResult::Ok(_)), "{resp:?}");
                 assert_eq!(resp.board_unseen, None);
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(3))
+                );
+            }
+
+            #[tokio::test]
+            async fn an_agents_counted_verb_carries_no_count() {
+                const READS: &str =
+                    "schema_version: 1\nactions:\n  allow: [\"session.task\", \"board.read\"]\n";
+                let mut w = world_of(
+                    "unseen-agent-status",
+                    "user",
+                    UNSEEN_ROLES,
+                    &[
+                        ("hobi", HOBI_UID, READS),
+                        ("suga", SUGA_UID, TASKED_BY_HOBI),
+                    ],
+                );
+                w.switch(true, &["hobi", "suga"]);
+                w.report_to(w.me, Report::Every);
+                w.report_to(HOBI_UID, Report::Every);
+                let parent = w.submit("hobi", "sentinel-715-parent").await;
+                assert_eq!(w.claimed("hobi").await, parent);
+                let sub = match w
+                    .agent("hobi", submit("suga", "sentinel-715-sub"), Some(parent))
+                    .await
+                {
+                    RespResult::Ok(Payload::TaskAccepted(v)) => v.task.to_id(),
+                    other => panic!("{other:?}"),
+                };
+                w.plain("suga", 3);
+                for i in 1..=3 {
+                    w.stored_on(
+                        BoardKey(HOBI_UID),
+                        "suga",
+                        note(&format!("sentinel-715-hobi-{i}")),
+                        PostLabels::default(),
+                    );
+                }
+                let raw = w
+                    .agent_raw(
+                        "hobi",
+                        Verb::TaskStatus { task: r(&sub) },
+                        Some(parent),
+                        &Records::new(0),
+                    )
+                    .await;
+                let mut cursor = &raw[..];
+                let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+                let resp = maknae_proto::decode_response(&frame).unwrap();
+                assert!(
+                    matches!(resp.result, RespResult::Ok(Payload::TaskState(_))),
+                    "{resp:?}"
+                );
+                assert_eq!(resp.board_unseen, None);
+                assert!(!has_field(&raw));
                 assert_eq!(
                     unseen_of(&w.counted(w.status()).await),
                     Some(BoardUnseen::Exact(3))

@@ -1,6 +1,6 @@
 //! The board verbs (#695): the switch gate, the per-post decision and the page walk.
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use maknae_audit_append::{AuditRecord, BoardAudit};
@@ -291,7 +291,7 @@ pub(crate) async fn base_holds<P: Authorizer + Send + Sync + 'static>(
     .is_some()
 }
 
-type Breaker = tokio::sync::Mutex<BlockingBreaker>;
+pub(crate) type Breaker = tokio::sync::Mutex<BlockingBreaker>;
 
 /// A breaker, and the surface its trip is logged as.
 pub(crate) struct Guard {
@@ -306,16 +306,11 @@ fn posts_guard() -> Guard {
     }
 }
 
-static COUNT_BREAKER: OnceLock<Arc<Breaker>> = OnceLock::new();
-
-pub(crate) fn count_breaker() -> Arc<Breaker> {
-    Arc::clone(COUNT_BREAKER.get_or_init(|| Arc::new(Default::default())))
-}
-
-/// The unseen count's own breaker: a count that times out trips no other decision.
-pub(crate) fn count_guard() -> Guard {
+/// The unseen count under the daemon's own count `breaker`: a count that times out trips no
+/// other decision.
+fn count_guard(breaker: &Arc<Breaker>) -> Guard {
     Guard {
-        breaker: count_breaker(),
+        breaker: Arc::clone(breaker),
         label: "board unseen count",
     }
 }
@@ -903,6 +898,7 @@ pub(crate) async fn unseen<P: Authorizer + Send + Sync + 'static>(
     store: &BoardStore,
     key: BoardKey,
     view: &dyn EnrollmentView,
+    breaker: &Arc<Breaker>,
     d: &Deciding<'_, P>,
 ) -> Option<maknae_proto::BoardUnseen> {
     if store.settings(key).report == Report::Off {
@@ -915,7 +911,7 @@ pub(crate) async fn unseen<P: Authorizer + Send + Sync + 'static>(
         .iter()
         .map(|l| post_request(d.request, key, &l.stored))
         .collect();
-    let verdicts = decided(&count_guard(), d, asked).await?;
+    let verdicts = decided(&count_guard(breaker), d, asked).await?;
     let permitted = w
         .posts
         .iter()
@@ -2321,10 +2317,13 @@ mod tests {
     #[test]
     fn the_count_decides_under_its_own_breaker_and_label() {
         let shared = crate::run::authz_decide_breaker();
-        let count = count_guard();
+        let owned: Arc<Breaker> = Arc::default();
+        let count = count_guard(&owned);
         assert_eq!(count.label, "board unseen count");
-        assert!(Arc::ptr_eq(&count.breaker, &count_breaker()));
+        assert!(Arc::ptr_eq(&count.breaker, &owned));
         assert!(!Arc::ptr_eq(&count.breaker, &shared));
+        let other: Arc<Breaker> = Arc::default();
+        assert!(!Arc::ptr_eq(&count_guard(&other).breaker, &owned));
         let posts = posts_guard();
         assert_eq!(posts.label, "board post decision");
         assert!(Arc::ptr_eq(&posts.breaker, &shared));

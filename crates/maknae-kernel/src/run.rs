@@ -1332,7 +1332,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             au3_1: &au3_1,
             unseen: std::sync::Mutex::new(unseen_count(
                 &request.verb,
-                (session.agent(), peer_uid),
+                &session,
                 &agents,
                 Asking {
                     authorizer: &authorizer,
@@ -1376,7 +1376,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             au3_1: &au3_1,
             unseen: std::sync::Mutex::new(unseen_count(
                 &request.verb,
-                (session.agent(), peer_uid),
+                &session,
                 &agents,
                 Asking {
                     authorizer: &authorizer,
@@ -3162,14 +3162,15 @@ type Pending<'a> = std::pin::Pin<
 /// The caller's unseen count for a reply to `verb`, computed only when awaited.
 fn unseen_count<'a, P: Authorizer + Send + Sync + 'static>(
     verb: &Verb,
-    (channel_agent, uid): (Option<&maknae_config::AgentId>, u32),
+    session: &SessionRecord,
     agents: &'a AgentAdmission,
     a: Asking<'a, P>,
 ) -> Option<Pending<'a>> {
     use crate::board_verbs as bv;
-    if !bv::counts(verb, channel_agent) {
+    if !bv::counts(verb, session.agent()) {
         return None;
     }
+    let uid = session.uid;
     let listing = Verb::BoardList {
         before: None,
         new: true,
@@ -3185,7 +3186,7 @@ fn unseen_count<'a, P: Authorizer + Send + Sync + 'static>(
             request: &read,
         };
         let key = crate::board_store::BoardKey(uid);
-        bv::unseen(&agents.board, key, &*agents.view, &d).await
+        bv::unseen(&agents.board, key, &*agents.view, &agents.count_breaker, &d).await
     }))
 }
 
@@ -6137,6 +6138,8 @@ pub struct AgentAdmission {
     pub reach: Arc<dyn crate::egress_socket::ReachEgress>,
     pub board: Arc<crate::board::BoardStore>,
     pub switches: Arc<dyn crate::board_verbs::BoardSwitches>,
+    /// Admits the unseen count's decisions; the daemon's one, never the request path's.
+    pub count_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
 }
 
 /// The operator's banner: loaded at start, replaced by each applied reload.
@@ -6153,6 +6156,7 @@ impl AgentAdmission {
             reach: crate::egress_socket::no_reach("no egress socket in this test"),
             board: Arc::new(crate::board::BoardStore::new()),
             switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
+            count_breaker: Arc::default(),
         }
     }
 }
@@ -7941,6 +7945,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     tasks: Arc<crate::task::TaskStore>,
     board: Arc<crate::board::BoardStore>,
     switches: Arc<dyn crate::board_verbs::BoardSwitches>,
+    count_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
     banner: Banner,
     banner_load: BannerLoader,
     #[cfg(test)]
@@ -8071,6 +8076,7 @@ where
             reach,
             board: Arc::clone(&self.board),
             switches: Arc::clone(&self.switches),
+            count_breaker: Arc::clone(&self.count_breaker),
         }
     }
 
@@ -11902,6 +11908,7 @@ async fn boot_after_sink(
                 &authorizer,
             ))),
         )),
+        count_breaker: Arc::default(),
         banner: Arc::new(std::sync::RwLock::new(banner)),
         banner_load: seams.banner_load,
         #[cfg(test)]
@@ -22149,6 +22156,7 @@ mod reload_fixture {
                 None => crate::board::BoardStore::new(),
             }),
             switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
+            count_breaker: Arc::default(),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),

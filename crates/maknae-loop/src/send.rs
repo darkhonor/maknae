@@ -80,9 +80,10 @@ fn reply_wait(
     verb: &maknae_proto::Verb,
     transport: &maknae_config::TransportConfig,
 ) -> std::time::Duration {
-    let counted = match maknae_proto::carries_board_unseen(verb) {
-        true => maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
-        false => 0,
+    let counted = if maknae_proto::carries_board_unseen(verb) {
+        maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS
+    } else {
+        0
     };
     verb_wait(verb, transport) + std::time::Duration::from_millis(counted)
 }
