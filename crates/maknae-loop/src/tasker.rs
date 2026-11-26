@@ -243,7 +243,9 @@ impl<D: Dial> TaskerClient<D> {
         let counted = maknae_proto::carries_board_unseen(&verb);
         let sent = self.link.send_located(verb).await;
         *self.unseen.lock().unwrap_or_else(PoisonError::into_inner) = match &sent {
-            Ok(sent) if counted => sent.board_unseen,
+            Ok(sent) if counted && matches!(sent.outcome, SentOutcome::Payload(_)) => {
+                sent.board_unseen
+            }
             _ => None,
         };
         match sent.map(|sent| sent.outcome) {
@@ -371,6 +373,23 @@ mod tests {
         c.list_page(&agent(), None).await.unwrap();
         assert_eq!(c.take_board_unseen(), None);
         c.collect(&agent(), None).await.unwrap();
+        assert_eq!(c.take_board_unseen(), None);
+    }
+
+    #[tokio::test]
+    async fn a_count_on_a_refusal_is_never_kept() {
+        let c = TaskerClient::over(
+            FakeKernel::scripted(vec![
+                counted(
+                    RespResult::Ok(Payload::TaskState(view(1))),
+                    Some(BoardUnseen::Exact(4)),
+                ),
+                counted(refused(), Some(BoardUnseen::Exact(7))),
+            ]),
+            Default::default(),
+        );
+        c.status(&task_ref()).await.unwrap();
+        assert!(c.status(&task_ref()).await.is_err());
         assert_eq!(c.take_board_unseen(), None);
     }
 

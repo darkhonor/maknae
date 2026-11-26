@@ -1034,6 +1034,7 @@ async fn round_trip(
             &mut err,
             send,
             tokio::time::sleep,
+            std::time::Instant::now,
         );
         return tokio::select! {
             said = watching => Ok(print_said(&said, &mut std::io::stdout(), &mut std::io::stderr())),
@@ -2301,9 +2302,9 @@ mod tests {
         ));
         assert!(matches!(
             board_sub(&["maknae", "board", "watch"]),
-            BoardSub::Watch { interval: 10 }
+            BoardSub::Watch { interval: 30 }
         ));
-        assert_eq!(maknae_agent::board::BOARD_WATCH_INTERVAL_DEFAULT, 10);
+        assert_eq!(maknae_agent::board::BOARD_WATCH_INTERVAL_DEFAULT, 30);
         for (n, want) in [("1", 1), ("3600", 3600)] {
             match board_sub(&["maknae", "board", "watch", "--interval", n]) {
                 BoardSub::Watch { interval } => assert_eq!(interval, want),
@@ -2519,6 +2520,7 @@ mod tests {
                 }
             },
             |_| async {},
+            std::time::Instant::now,
         )
         .await;
         let (mut out, mut err) = (vec![], vec![]);

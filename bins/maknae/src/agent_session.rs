@@ -2292,7 +2292,7 @@ mod tests {
         *kernel.leaf.0.lock().unwrap() = Some(now);
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
-            Event::Done(Err(Failure::NoIdentity), _)
+            Event::Done(Err(Failure::NoIdentity), None)
         ));
         assert_eq!(
             kernel.tasker.calls().len(),

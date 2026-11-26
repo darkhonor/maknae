@@ -14,12 +14,14 @@ use maknae_proto::{
 };
 use std::future::Future;
 use std::io::{BufRead, Read, Write};
+use std::time::{Duration, Instant};
 
 pub const BOARD_CLEAR_REQUESTS_MAX: u32 = 64;
 pub const BOARD_LIST_REQUESTS_MAX: u32 = 64;
 pub const BOARD_LIST_LAST_MAX: u16 = 1024;
-pub const BOARD_WATCH_INTERVAL_DEFAULT: u16 = 10;
+pub const BOARD_WATCH_INTERVAL_DEFAULT: u16 = 30;
 pub const BOARD_WATCH_INTERVAL_MAX: u16 = 3600;
+pub const BOARD_WATCH_SETTINGS_EVERY_SECS: u64 = 60;
 pub const CONFIRM_ANSWER_MAX_BYTES: u64 = 64;
 const CONFIRM_PROMPT: &[u8] = b"clear every post on your board that is not held? [y/N] ";
 const NOT_A_BOARD_REPLY: &str = "protocol error: the kernel's answer was not a board reply";
@@ -386,20 +388,44 @@ fn show(summary: bool, listed: &Listed, out: &mut dyn Write) -> std::io::Result<
     out.flush()
 }
 
+/// Whether a poll reads the settings: at the start, and again once
+/// `BOARD_WATCH_SETTINGS_EVERY_SECS` have passed since the last read that answered.
+fn settings_due(read_at: Option<Instant>, now: Instant) -> bool {
+    read_at.is_none_or(|at| {
+        now.saturating_duration_since(at) >= Duration::from_secs(BOARD_WATCH_SETTINGS_EVERY_SECS)
+    })
+}
+
+/// The last `report` read, as whether it is `summary`, and when it was read.
+type Reading = Option<(Instant, bool)>;
+
 /// One poll; `Some` ends the watch with what the person is told.
-async fn poll<F, Fut>(out: &mut dyn Write, err: &mut dyn Write, send: &mut F) -> Option<Said>
+async fn poll<F, Fut>(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    send: &mut F,
+    reading: &mut Reading,
+    now: Instant,
+) -> Option<Said>
 where
     F: FnMut(Verb) -> Fut,
     Fut: Future<Output = Result<WireOutcome, String>>,
 {
-    let summary = match settings_reply(send(manage(BoardOp::Settings { set: None })).await) {
-        Ok(held) => match held.report {
-            BoardReport::Off => return Some(ended(vec![BOARD_WATCH_OFF.into()])),
-            BoardReport::Summary => true,
-            BoardReport::Every => false,
+    let summary = match *reading {
+        Some((read_at, summary)) if !settings_due(Some(read_at), now) => summary,
+        _ => match settings_reply(send(manage(BoardOp::Settings { set: None })).await) {
+            Ok(held) => {
+                let summary = match held.report {
+                    BoardReport::Off => return Some(ended(vec![BOARD_WATCH_OFF.into()])),
+                    BoardReport::Summary => true,
+                    BoardReport::Every => false,
+                };
+                *reading = Some((now, summary));
+                summary
+            }
+            Err(Stop::Busy(_)) => return None,
+            Err(stop) => return Some(ended(stop.err(BoardCommand::Settings, false))),
         },
-        Err(Stop::Busy(_)) => return None,
-        Err(stop) => return Some(ended(stop.err(BoardCommand::Settings, false))),
     };
     let (listed, stop) = walk(ListWant::New, None, &mut *send).await;
     let through = match polled(&listed, stop) {
@@ -425,22 +451,25 @@ where
 }
 
 /// Polls every `interval` for posts above the mark, reports them by the person's `report`,
-/// then marks through them; ends only with what the person is told.
-pub async fn watch<F, Fut, Z, ZFut>(
-    interval: std::time::Duration,
+/// then marks through them; ends only with what the person is told. `clock` is monotonic.
+pub async fn watch<F, Fut, Z, ZFut, C>(
+    interval: Duration,
     out: &mut dyn Write,
     err: &mut dyn Write,
     mut send: F,
     mut sleep: Z,
+    mut clock: C,
 ) -> Said
 where
     F: FnMut(Verb) -> Fut,
     Fut: Future<Output = Result<WireOutcome, String>>,
-    Z: FnMut(std::time::Duration) -> ZFut,
+    Z: FnMut(Duration) -> ZFut,
     ZFut: Future<Output = ()>,
+    C: FnMut() -> Instant,
 {
+    let mut reading = None;
     loop {
-        if let Some(said) = poll(out, err, &mut send).await {
+        if let Some(said) = poll(out, err, &mut send, &mut reading, clock()).await {
             return said;
         }
         sleep(interval).await;
@@ -1604,22 +1633,32 @@ mod tests {
     const WATCH_OFF: &str = "board reporting is off; turn it on with maknae board settings --report summary or --report every";
     const READ_REFUSED: &str = "you may not read your board: not authorized";
     const MANAGE_REFUSED: &str = "you may not manage a board: not authorized";
-    const TEN: std::time::Duration = std::time::Duration::from_secs(10);
+    const MINUTE: Duration = Duration::from_secs(BOARD_WATCH_SETTINGS_EVERY_SECS);
 
     struct Watched {
         said: Said,
         sent: Vec<Verb>,
         err: String,
-        slept: Vec<std::time::Duration>,
+        slept: Vec<Duration>,
     }
 
     async fn watch_into(out: &mut dyn Write, replies: Vec<Result<WireOutcome, String>>) -> Watched {
+        watch_every(MINUTE, out, replies).await
+    }
+
+    /// The clock moves only by what the watch sleeps.
+    async fn watch_every(
+        interval: Duration,
+        out: &mut dyn Write,
+        replies: Vec<Result<WireOutcome, String>>,
+    ) -> Watched {
         let mut replies: VecDeque<_> = replies.into();
         let mut sent = vec![];
         let mut err = vec![];
         let mut slept = vec![];
+        let now = std::cell::Cell::new(Instant::now());
         let said = watch(
-            std::time::Duration::from_secs(u64::from(BOARD_WATCH_INTERVAL_DEFAULT)),
+            interval,
             out,
             &mut err,
             |v| {
@@ -1629,8 +1668,10 @@ mod tests {
             },
             |d| {
                 slept.push(d);
+                now.set(now.get() + d);
                 async {}
             },
+            || now.get(),
         )
         .await;
         Watched {
@@ -1642,9 +1683,20 @@ mod tests {
     }
 
     async fn run_watch(replies: Vec<Result<WireOutcome, String>>) -> (Watched, String) {
+        run_watch_every(MINUTE, replies).await
+    }
+
+    async fn run_watch_every(
+        interval: Duration,
+        replies: Vec<Result<WireOutcome, String>>,
+    ) -> (Watched, String) {
         let mut out = vec![];
-        let w = watch_into(&mut out, replies).await;
+        let w = watch_every(interval, &mut out, replies).await;
         (w, String::from_utf8(out).unwrap())
+    }
+
+    fn settings_reads(sent: &[Verb]) -> usize {
+        sent.iter().filter(|v| **v == read()).count()
     }
 
     fn every() -> Result<WireOutcome, String> {
@@ -1918,7 +1970,7 @@ mod tests {
         .await;
         assert_eq!(out, printed(&listed(vec![entry(7)]), false));
         assert_eq!(w.err, "");
-        assert_eq!(w.slept, vec![TEN; 5]);
+        assert_eq!(w.slept, vec![MINUTE; 5]);
         assert_eq!(
             w.sent.iter().filter(|v| **v == seen_verb(7)).count(),
             1,
@@ -1964,7 +2016,7 @@ mod tests {
             w.err,
             format!("maknae: {MARK_UNKNOWN}\nmaknae: {MARK_UNKNOWN}\n")
         );
-        assert_eq!(w.slept, vec![TEN; 3]);
+        assert_eq!(w.slept, vec![MINUTE; 3]);
         assert_eq!(w.said, said(&[], &[MANAGE_REFUSED], false));
     }
 
@@ -2017,19 +2069,125 @@ mod tests {
 
     #[tokio::test]
     async fn the_watch_sleeps_the_interval_between_polls() {
-        let (w, _) = run_watch(vec![
-            every(),
-            page(&[], None),
-            every(),
-            page(&[], None),
-            unauthorized(),
-        ])
+        let thirty = Duration::from_secs(u64::from(BOARD_WATCH_INTERVAL_DEFAULT));
+        assert_eq!(thirty, Duration::from_secs(30));
+        let (w, _) = run_watch_every(
+            thirty,
+            vec![every(), page(&[], None), page(&[], None), unauthorized()],
+        )
         .await;
-        assert_eq!(w.slept, vec![TEN, TEN]);
+        assert_eq!(w.slept, vec![thirty, thirty]);
+    }
+
+    #[test]
+    fn a_settings_read_is_due_at_the_start_and_once_a_minute() {
+        let t = Instant::now();
+        assert!(settings_due(None, t));
+        assert!(!settings_due(Some(t), t));
+        assert!(!settings_due(Some(t), t + Duration::from_secs(59)));
+        assert!(settings_due(Some(t), t + MINUTE));
+        assert!(settings_due(Some(t), t + Duration::from_secs(61)));
+        assert!(settings_due(Some(t), t + Duration::from_secs(300)));
+        assert!(!settings_due(Some(t + MINUTE), t));
+    }
+
+    #[tokio::test]
+    async fn a_short_interval_reads_the_settings_once_a_minute() {
+        let mut replies = vec![every()];
+        replies.extend((0..12).map(|_| page(&[], None)));
+        replies.extend([every(), page(&[4], None), marked(), page(&[], None)]);
+        replies.push(unauthorized());
+        let (w, out) = run_watch_every(Duration::from_secs(5), replies).await;
+        assert_eq!(settings_reads(&w.sent), 2);
+        assert_eq!(w.sent[13], read());
+        assert_eq!(w.slept.len(), 14);
+        assert_eq!(out, printed(&listed(vec![entry(4)]), false));
+        assert_eq!(w.said, said(&[], &[READ_REFUSED], false));
+    }
+
+    #[tokio::test]
+    async fn a_long_interval_reads_the_settings_every_poll() {
+        let (w, _) = run_watch_every(
+            Duration::from_secs(300),
+            vec![
+                every(),
+                page(&[], None),
+                every(),
+                page(&[], None),
+                settled(s(true, Off)),
+            ],
+        )
+        .await;
+        assert_eq!(settings_reads(&w.sent), 3);
+        assert_eq!(w.said, said(&[], &[WATCH_OFF], false));
+    }
+
+    #[tokio::test]
+    async fn between_reads_the_last_report_is_used() {
+        let (_, out) = run_watch_every(
+            Duration::from_secs(30),
+            vec![
+                settled(s(true, Summary)),
+                page(&[], None),
+                page_of(vec![by(5, "jin", PostKind::Note)], None),
+                marked(),
+                unauthorized(),
+            ],
+        )
+        .await;
         assert_eq!(
-            std::time::Duration::from_secs(u64::from(BOARD_WATCH_INTERVAL_DEFAULT)),
-            TEN
+            out,
+            "board: 1 new post; by author: jin 1; by kind: note 1\n"
         );
+    }
+
+    #[tokio::test]
+    async fn a_busy_settings_re_read_is_quiet_and_reads_again_next_poll() {
+        let (w, out) = run_watch_every(
+            Duration::from_secs(30),
+            vec![
+                every(),
+                page(&[], None),
+                page(&[], None),
+                try_again(),
+                every(),
+                page(&[5], None),
+                marked(),
+                unauthorized(),
+            ],
+        )
+        .await;
+        assert_eq!(
+            w.sent[..6],
+            [
+                read(),
+                new_at(None),
+                new_at(None),
+                read(),
+                read(),
+                new_at(None)
+            ]
+        );
+        assert_eq!(out, printed(&listed(vec![entry(5)]), false));
+        assert_eq!(w.said, said(&[], &[READ_REFUSED], false));
+    }
+
+    #[tokio::test]
+    async fn off_on_a_re_read_ends_the_watch() {
+        let (w, out) = run_watch_every(
+            Duration::from_secs(30),
+            vec![
+                every(),
+                page(&[], None),
+                page(&[], None),
+                settled(s(true, Off)),
+            ],
+        )
+        .await;
+        assert_eq!(out, "");
+        assert_eq!(settings_reads(&w.sent), 2);
+        assert_eq!(w.slept.len(), 2);
+        assert_eq!(w.said, said(&[], &[WATCH_OFF], false));
     }
 
     #[tokio::test]
