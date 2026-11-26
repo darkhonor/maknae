@@ -289,7 +289,7 @@ pub fn write_board_text(
     indent: &str,
     text: &str,
 ) -> std::io::Result<()> {
-    let mut buf = [0; DISPLAY_PIECE_MAX];
+    let mut buf = zeroize::Zeroizing::new([0; DISPLAY_PIECE_MAX]);
     for piece in text.split('\n') {
         out.write_all(indent.as_bytes())?;
         for c in piece.chars() {

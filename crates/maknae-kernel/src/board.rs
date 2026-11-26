@@ -488,10 +488,16 @@ impl BoardStore {
         )
     }
 
-    /// Whether `view`'s installed load is still `load`, read under the memory lock.
-    pub(crate) fn still_installed(&self, load: &Load, view: &dyn EnrollmentView) -> bool {
+    /// Whether `view`'s installed load and live generation are still `load` and
+    /// `generation`, read under the memory lock.
+    pub(crate) fn still_installed(
+        &self,
+        load: &Load,
+        generation: u64,
+        view: &dyn EnrollmentView,
+    ) -> bool {
         let _held = self.held();
-        view.load() == *load
+        view.load() == *load && view.generation() == generation
     }
 
     pub fn settings(&self, key: BoardKey) -> Settings {
@@ -837,16 +843,17 @@ impl BoardStore {
         }
     }
 
-    /// `None` when `view`'s load is no longer `load`; else those of `seqs` still listable.
+    /// `None` when `view`'s load or live generation is no longer `installed`; else those of
+    /// `seqs` still listable.
     pub(crate) fn confirm_listing(
         &self,
         key: BoardKey,
-        load: &Load,
+        (load, generation): (&Load, u64),
         view: &dyn EnrollmentView,
         seqs: &[u64],
     ) -> Option<BTreeSet<u64>> {
         let held = self.held();
-        if view.load() != *load {
+        if view.load() != *load || view.generation() != generation {
             return None;
         }
         let now = self.now();
@@ -880,10 +887,15 @@ impl BoardStore {
     /// Runs `install` and then [`Self::mark`] against it, in one hold of the memory lock, so
     /// a check made under that lock sees the install with its marks or neither. `install`
     /// swaps what `view` reads; it must not block, do I/O or take a board lock.
-    pub(crate) fn install_and_mark(&self, install: impl FnOnce(), view: &dyn EnrollmentView) {
+    pub(crate) fn install_and_mark<T>(
+        &self,
+        install: impl FnOnce() -> T,
+        view: &dyn EnrollmentView,
+    ) -> T {
         let mut held = self.held();
-        install();
+        let installed = install();
         held.mark(view);
+        installed
     }
 
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
@@ -4530,22 +4542,29 @@ mod tests {
         let seqs = [1, 2, 3, 4, 5, 6, 999];
         let fixed = crate::enrollment::Load::fixed();
         assert_eq!(
-            store.confirm_listing(BOB, &fixed, &free(), &seqs),
+            store.confirm_listing(BOB, (&fixed, 0), &free(), &seqs),
             Some([1, 2, 3, 4, 5, 6].into())
         );
         store.clear(BOB, &[(cleared.seq, cleared.post.id)], &free());
         store.held().expiring.insert((BOB, expiring.seq));
         clock.set(T0 + RETAIN);
         assert_eq!(
-            store.confirm_listing(BOB, &fixed, &free(), &seqs),
+            store.confirm_listing(BOB, (&fixed, 0), &free(), &seqs),
             Some([aged_held.seq, kept.seq, held.seq].into())
         );
         assert!(expired(&aged, T0 + RETAIN));
         assert!(expired(&aged_held, T0 + RETAIN));
         let installed = crate::enrollment::Load::installed(Arc::new(1_u8));
-        assert_eq!(store.confirm_listing(BOB, &installed, &free(), &seqs), None);
         assert_eq!(
-            store.confirm_listing(BoardKey(4242), &fixed, &free(), &seqs),
+            store.confirm_listing(BOB, (&installed, 0), &free(), &seqs),
+            None
+        );
+        assert_eq!(
+            store.confirm_listing(BOB, (&fixed, 1), &free(), &seqs),
+            None
+        );
+        assert_eq!(
+            store.confirm_listing(BoardKey(4242), (&fixed, 0), &free(), &seqs),
             Some(BTreeSet::new())
         );
     }

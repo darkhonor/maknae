@@ -405,7 +405,7 @@ impl<'o, 'b> Line<'o, 'b> {
     /// columns left; past the byte budget, ends the row at its last whole cell
     /// with [`CUT`].
     fn chars(&mut self, chars: impl Iterator<Item = char>) -> Result<(), FrameError> {
-        let mut buf = [0; DISPLAY_PIECE_MAX];
+        let mut buf = Zeroizing::new([0; DISPLAY_PIECE_MAX]);
         for c in chars {
             if self.cut {
                 return Ok(());
@@ -469,7 +469,7 @@ fn screen_piece(c: char, buf: &mut [u8; DISPLAY_PIECE_MAX]) -> (&str, usize) {
 }
 
 fn text_width(text: &str) -> usize {
-    let mut buf = [0; DISPLAY_PIECE_MAX];
+    let mut buf = Zeroizing::new([0; DISPLAY_PIECE_MAX]);
     text.chars().map(|c| screen_piece(c, &mut buf).1).sum()
 }
 

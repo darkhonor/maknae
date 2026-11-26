@@ -7013,6 +7013,128 @@ mod board {
                 other => panic!("not a listing: {other:?}"),
             }
         }
+
+        /// `inner`, which installs `next` as the live values at its first `load` once `armed`.
+        struct InstallsAtTheNextLoad {
+            inner: Arc<dyn maknae_kernel::EnrollmentView>,
+            pdp: Arc<Pdp>,
+            armed: Arc<std::sync::atomic::AtomicBool>,
+            next: std::sync::Mutex<Option<maknae_kernel::LiveValues>>,
+        }
+
+        impl maknae_kernel::EnrollmentView for InstallsAtTheNextLoad {
+            fn agent_uid(&self, id: &maknae_config::AgentId) -> Option<u32> {
+                self.inner.agent_uid(id)
+            }
+            fn agents(&self) -> Vec<(maknae_config::AgentId, u32)> {
+                self.inner.agents()
+            }
+            fn is_enrolled(&self, uid: u32) -> bool {
+                self.inner.is_enrolled(uid)
+            }
+            fn contained(&self, uid: u32) -> bool {
+                self.inner.contained(uid)
+            }
+            fn unresolved(&self, uid: u32) -> bool {
+                self.inner.unresolved(uid)
+            }
+            fn board(&self, agent: &maknae_config::AgentId) -> bool {
+                self.inner.board(agent)
+            }
+            fn load(&self) -> maknae_kernel::Load {
+                if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                    let next = self.next.lock().unwrap().take();
+                    if let Some(values) = next {
+                        self.pdp.install_live(values).unwrap();
+                    }
+                }
+                self.inner.load()
+            }
+            fn generation(&self) -> u64 {
+                self.inner.generation()
+            }
+        }
+
+        fn live_values(name: &str, uid: u32) -> maknae_kernel::LiveValues {
+            maknae_kernel::LiveValues {
+                principal: maknae_config::Principal {
+                    name: name.into(),
+                    uid,
+                },
+                view: Default::default(),
+                providers: None,
+            }
+        }
+
+        impl World {
+            /// Arms at the first `board.read` batch; the view then installs `next` when the
+            /// request's final check reads the policy load.
+            fn principal_after_the_batch(
+                &mut self,
+                next: maknae_kernel::LiveValues,
+            ) -> Arc<BeforeDeciding> {
+                let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.agents.view = Arc::new(InstallsAtTheNextLoad {
+                    inner: Arc::clone(&self.agents.view),
+                    pdp: Arc::clone(&self.pdp),
+                    armed: Arc::clone(&armed),
+                    next: std::sync::Mutex::new(Some(next)),
+                });
+                BeforeDeciding::new(&self.pdp, "board.read", true, move || {
+                    armed.store(true, std::sync::atomic::Ordering::SeqCst)
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn a_listing_whose_principal_is_replaced_before_its_final_check_is_refused() {
+            let mut w = switched_world("board-one-principal-list", BOARD_ROLES);
+            for body in ["sentinel-714-p1", "sentinel-714-p2"] {
+                w.stored("suga", body, PostLabels::default());
+            }
+            let pdp = w.principal_after_the_batch(live_values(&w.user.clone(), w.me));
+            let (answer, records) = w.list_as(&pdp, None).await;
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+            assert_eq!(said(&records), one("deny", POLICY_CHANGED, "unauthorized"));
+            assert_eq!(records[0].subject.board_op.as_deref(), Some("list"));
+            assert!(records[0].board.is_none(), "{records:?}");
+
+            let pdp = Arc::clone(&w.pdp);
+            match w.list_as(&pdp, None).await.0 {
+                RespResult::Ok(Payload::BoardListing(l)) => {
+                    assert_eq!(l.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+                }
+                other => panic!("not a listing: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_read_whose_principal_is_replaced_before_its_final_check_sends_nothing() {
+            let mut w = switched_world("board-one-principal-read", BOARD_ROLES);
+            let h = w.at_work("hobi");
+            for body in ["sentinel-714-q1", "sentinel-714-q2"] {
+                w.stored("suga", body, PostLabels::default());
+            }
+            let pdp = w.principal_after_the_batch(live_values(&w.user.clone(), w.me));
+            let (answer, records) = w.board_as(&pdp, "hobi", read(None), h).await;
+            assert_eq!(refused(&answer), Some(BoardDefect::TryAgain), "{answer:?}");
+            assert_eq!(
+                said(&records),
+                [
+                    (
+                        "permit".into(),
+                        "intent recorded".into(),
+                        "authorized".into()
+                    ),
+                    ("deny".into(), POLICY_CHANGED.into(), "unauthorized".into()),
+                ]
+            );
+            assert_eq!(w.cursor("hobi"), 0);
+            assert_eq!(
+                bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+                ["sentinel-714-q1", "sentinel-714-q2"]
+            );
+        }
     }
 
     mod manage {

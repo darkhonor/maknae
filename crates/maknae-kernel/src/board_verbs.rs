@@ -1282,8 +1282,9 @@ mod tests {
             Load::installed(first),
             "the load the switch was read on"
         );
-        assert!(!swap.board.still_installed(&load, &swap));
-        assert!(swap.board.still_installed(&swap.load(), &swap));
+        assert!(!swap.board.still_installed(&load, 0, &swap));
+        assert!(swap.board.still_installed(&swap.load(), 0, &swap));
+        assert!(!swap.board.still_installed(&swap.load(), 1, &swap));
         assert_ne!(load, swap.load());
     }
 

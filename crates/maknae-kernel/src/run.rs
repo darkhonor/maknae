@@ -3819,6 +3819,7 @@ async fn serve_board_verb<S, E, P>(
             return;
         }
     };
+    let installed = board.agents.view.generation();
     let (_, _, generation) = live.admission();
     let request = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
     let (verdict, role, rule) =
@@ -3855,7 +3856,7 @@ async fn serve_board_verb<S, E, P>(
             .await;
         return;
     };
-    let still = || store.still_installed(&load, &*board.agents.view);
+    let still = || store.still_installed(&load, installed, &*board.agents.view);
     if !still() {
         let rec = decided("deny", bv::POLICY_CHANGED, "unauthorized");
         trail
@@ -4061,7 +4062,7 @@ async fn serve_board_list<S, E, P>(
     }
     let key = crate::board_store::BoardKey(trail.uid);
     let (store, view) = (&board.agents.board, &*board.agents.view);
-    let load = view.load();
+    let (load, installed) = (view.load(), view.generation());
     let (_, _, generation) = a.live.admission();
     let request = build_authz_request(verb, trail.uid, None, a.lane, None, None, a.stamp);
     let (verdict, role, rule) =
@@ -4108,7 +4109,7 @@ async fn serve_board_list<S, E, P>(
         .map(|e| e.seq)
         .chain(page.links.values().copied())
         .collect();
-    let Some(live_seqs) = store.confirm_listing(key, &load, view, &seqs) else {
+    let Some(live_seqs) = store.confirm_listing(key, (&load, installed), view, &seqs) else {
         let rec = said("deny", bv::POLICY_CHANGED, "unauthorized");
         trail
             .refuse_board(stream, &rec, BoardDefect::TryAgain)
@@ -8551,9 +8552,8 @@ where
             None
         } else {
             let deadline = Instant::now() + self.turn_wait;
-            match crate::composition::HeldLiveTurn::take(Arc::clone(&self.authorizer), deadline)
-                .await
-            {
+            let (pdp, board) = (Arc::clone(&self.authorizer), Arc::clone(&self.board));
+            match crate::composition::HeldLiveTurn::take(pdp, board, deadline).await {
                 Some(held) => Some(held),
                 None => return accept_unavailable(ACCEPT_DECIDING, ACCEPT_DECIDING.into()),
             }
@@ -13713,9 +13713,19 @@ mod record_widths {
                 (945, None, false),
             ]
         );
-        let unhonourable = "board.read list: deny unhonorable obligation: workspace.mask";
-        assert_eq!(full(unhonourable), 1091);
-        assert!(case(unhonourable).rec.rule.is_some());
+        let permitted: Vec<(usize, bool)> = [
+            "board.read list: deny board: the decision did not complete",
+            "board.read list: deny board: the policy changed during the request",
+            "board.read list: deny unhonorable obligation: tool.launch",
+            "board.read list: deny unhonorable obligation: workspace.mask",
+        ]
+        .iter()
+        .map(|l| (full(l), case(l).rec.rule.is_some()))
+        .collect();
+        assert_eq!(
+            permitted,
+            [(1088, true), (1097, true), (1088, true), (1091, true)]
+        );
         let agent = "board.read list: deny board: not served on the agent channel";
         assert_eq!(full(agent), 1140);
         let c = case(agent);

@@ -207,7 +207,11 @@ where
         let below = before.is_none_or(|sent| {
             page.entries.iter().all(|e| e.seq < sent) && page.older.is_none_or(|n| n < sent)
         });
-        if !(ascending && below) {
+        let older_at_most_lowest = page
+            .entries
+            .first()
+            .is_none_or(|lowest| page.older.is_none_or(|n| n <= lowest.seq));
+        if !(ascending && below && older_at_most_lowest) {
             break Some(vec![NOT_MOVED_BACK.into()]);
         }
         collected += page.entries.len();
@@ -1216,6 +1220,36 @@ mod tests {
         )
         .await;
         assert_eq!((seqs(&l), stop), (vec![4, 5], None));
+    }
+
+    #[tokio::test]
+    async fn a_page_whose_older_is_above_its_lowest_entry_stops_the_walk() {
+        let (l, stop, sent) = run_list(
+            ListWant::All,
+            vec![page(&[5, 6], Some(6)), page(&[5], None)],
+        )
+        .await;
+        assert_eq!(sent, vec![at(None)]);
+        assert!(l.entries.is_empty());
+        assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+        let (l, stop, _) = run_list(
+            ListWant::All,
+            vec![page(&[8, 9], Some(8)), page(&[5, 6], Some(6))],
+        )
+        .await;
+        assert_eq!(seqs(&l), vec![8, 9]);
+        assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+        let (l, stop, _) = run_list(
+            ListWant::All,
+            vec![
+                page(&[8, 9], Some(7)),
+                page(&[5, 6], Some(5)),
+                page(&[], Some(3)),
+                page(&[1], None),
+            ],
+        )
+        .await;
+        assert_eq!((seqs(&l), stop), (vec![1, 5, 6, 8, 9], None));
     }
 
     fn strictly_ascending(l: &Listed) -> bool {
