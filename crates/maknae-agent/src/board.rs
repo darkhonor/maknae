@@ -997,7 +997,7 @@ mod tests {
         );
     }
 
-    const CONTAINED: &str = "subject contained: role=adversary";
+    const UNAUTHORIZED: &str = "not authorized";
     const NOT_READ: &str = "the board could not be read; try again";
     const OLDER: &str = "older posts remain; run maknae board --all to see them";
     const NOT_MOVED: &str = "protocol error: the kernel's listing did not move back";
@@ -1294,18 +1294,14 @@ mod tests {
             ListWant::Last(5),
             vec![
                 page(&[5, 6], Some(5)),
-                refused(ProtoErrCode::Unauthorized, CONTAINED),
+                refused(ProtoErrCode::Unauthorized, UNAUTHORIZED),
             ],
         )
         .await;
         assert!(l.older);
         assert_eq!(
             listing_said(ListWant::Last(5), &l, stop),
-            said(
-                &[],
-                &["you may not read your board: subject contained: role=adversary"],
-                false
-            )
+            said(&[], &["you may not read your board: not authorized"], false)
         );
         let (l, stop, _) = run_list(ListWant::Latest, vec![page(&[7], Some(7))]).await;
         assert_eq!(
@@ -1318,16 +1314,12 @@ mod tests {
     async fn a_refused_listing_says_so_and_exits_one() {
         let (l, stop, sent) = run_list(
             ListWant::Latest,
-            vec![refused(ProtoErrCode::Unauthorized, CONTAINED)],
+            vec![refused(ProtoErrCode::Unauthorized, UNAUTHORIZED)],
         )
         .await;
         assert_eq!(sent, vec![at(None)]);
         assert!(l.entries.is_empty());
-        let want = said(
-            &[],
-            &["you may not read your board: subject contained: role=adversary"],
-            false,
-        );
+        let want = said(&[], &["you may not read your board: not authorized"], false);
         assert_eq!(stop, Some(want.clone()));
         assert_eq!(listing_said(ListWant::Latest, &l, stop), want);
         for defect in [BoardDefect::TryAgain, BoardDefect::OutcomeUnknown] {
@@ -1360,25 +1352,17 @@ mod tests {
     async fn settings_and_clear_refusals_still_say_manage() {
         let (said_, _) = run_settings(
             SettingsChange::default(),
-            vec![refused(ProtoErrCode::Unauthorized, CONTAINED)],
+            vec![refused(ProtoErrCode::Unauthorized, UNAUTHORIZED)],
         )
         .await;
         assert_eq!(
             said_,
-            said(
-                &[],
-                &["you may not manage a board: subject contained: role=adversary"],
-                false
-            )
+            said(&[], &["you may not manage a board: not authorized"], false)
         );
-        let (said_, _) = run_clear(vec![refused(ProtoErrCode::Unauthorized, CONTAINED)]).await;
+        let (said_, _) = run_clear(vec![refused(ProtoErrCode::Unauthorized, UNAUTHORIZED)]).await;
         assert_eq!(
             said_,
-            said(
-                &[],
-                &["you may not manage a board: subject contained: role=adversary"],
-                false
-            )
+            said(&[], &["you may not manage a board: not authorized"], false)
         );
     }
 

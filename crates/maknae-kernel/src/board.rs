@@ -166,9 +166,11 @@ impl Held {
         self.held_back(key, s) || expired(s, now)
     }
 
-    /// On a person's listing: not past retention at `now` and not in its expiry's delete.
+    /// On a person's listing: not in its expiry's delete, and held, marked for a hold, or not
+    /// past retention at `now`.
     fn listable(&self, key: BoardKey, s: &Stored, now: i64) -> bool {
-        !expired(s, now) && !self.expiring.contains(&(key, s.seq))
+        !self.expiring.contains(&(key, s.seq))
+            && (!s.held.is_empty() || self.marked.contains_key(&(key, s.seq)) || !expired(s, now))
     }
 
     fn live(&self, key: BoardKey, id: PostId, now: i64) -> Option<&Arc<Stored>> {
@@ -4408,7 +4410,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_skips_posts_past_retention_and_in_their_expiry() {
+    fn a_listing_skips_unheld_posts_past_retention_and_posts_in_their_expiry() {
         let b = MemTaskBlobs::default();
         let (store, clock) = wide(&b);
         let aged = put_as(&store, BOB, 1, 2001);
@@ -4424,16 +4426,20 @@ mod tests {
         let all = store.listing(BOB, None, 32, &free());
         assert_eq!(
             listed_seqs(&all),
-            [to_expiring.seq, to_held.seq, to_aged.seq]
+            [to_expiring.seq, to_held.seq, to_aged.seq, aged_held.seq]
         );
+        assert_eq!(all.posts[3].held, [HeldFor::Author].into());
         assert!(!all.more);
         assert!(all.targets.is_empty());
         let two = store.listing(BOB, None, 2, &free());
         assert_eq!(listed_seqs(&two), [to_expiring.seq, to_held.seq]);
         assert!(two.more);
-        assert!(two.targets.is_empty());
+        let targets: Vec<u64> = two.targets.iter().map(|s| s.seq).collect();
+        assert_eq!(targets, [aged_held.seq]);
         let three = store.listing(BOB, None, 3, &free());
-        assert!(!three.more);
+        assert!(three.more);
+        let four = store.listing(BOB, None, 4, &free());
+        assert!(!four.more);
     }
 
     #[test]
@@ -4500,7 +4506,8 @@ mod tests {
             containing(&enrolled, &[1000, 2001]),
             free(),
         ] {
-            store.listing(BOB, None, 32, &view);
+            let w = store.listing(BOB, None, 32, &view);
+            assert_eq!(listed_seqs(&w).last(), Some(&aged.seq));
         }
         assert_eq!(b.attempts(), attempts);
         assert_eq!(store.due(100), due);
@@ -4513,26 +4520,28 @@ mod tests {
         let b = MemTaskBlobs::default();
         let (store, clock) = wide(&b);
         let aged = put_as(&store, BOB, 1, 2001);
+        let aged_held = put_as(&store, BOB, 6, 2010);
         clock.set(T0 + 1);
         let cleared = put_as(&store, BOB, 2, 2001);
         let expiring = put_as(&store, BOB, 3, 2001);
         let kept = put_as(&store, BOB, 4, 2001);
         let held = put_as(&store, BOB, 5, 2010);
         holding(&store, &[2010]);
-        let seqs = [1, 2, 3, 4, 5, 999];
+        let seqs = [1, 2, 3, 4, 5, 6, 999];
         let fixed = crate::enrollment::Load::fixed();
         assert_eq!(
             store.confirm_listing(BOB, &fixed, &free(), &seqs),
-            Some([1, 2, 3, 4, 5].into())
+            Some([1, 2, 3, 4, 5, 6].into())
         );
         store.clear(BOB, &[(cleared.seq, cleared.post.id)], &free());
         store.held().expiring.insert((BOB, expiring.seq));
         clock.set(T0 + RETAIN);
         assert_eq!(
             store.confirm_listing(BOB, &fixed, &free(), &seqs),
-            Some([kept.seq, held.seq].into())
+            Some([aged_held.seq, kept.seq, held.seq].into())
         );
         assert!(expired(&aged, T0 + RETAIN));
+        assert!(expired(&aged_held, T0 + RETAIN));
         let installed = crate::enrollment::Load::installed(Arc::new(1_u8));
         assert_eq!(store.confirm_listing(BOB, &installed, &free(), &seqs), None);
         assert_eq!(

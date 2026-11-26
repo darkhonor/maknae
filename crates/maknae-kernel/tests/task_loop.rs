@@ -8655,21 +8655,52 @@ mod board {
         }
 
         #[tokio::test]
-        async fn a_listing_skips_a_post_past_retention_even_when_held() {
+        async fn a_held_post_past_retention_is_listed_and_an_unheld_one_is_not() {
             let w = list_world("list-retention", "user");
-            w.stored("hobi", "sentinel-714-aged-held", PostLabels::default());
+            let aged_held = w.stored("hobi", "sentinel-714-aged-held", PostLabels::default());
             w.stored("jin", "sentinel-714-aged", PostLabels::default());
-            w.hold_for(HOBI_UID);
             w.clock.set(T0 + 1);
-            w.stored("jin", "sentinel-714-kept", PostLabels::default());
-            let (answer, _) = w.list(None).await;
-            assert_eq!(seqs(&listing_of(answer)), [1, 2, 3]);
+            for i in 0..32 {
+                w.stored(
+                    "jin",
+                    &format!("sentinel-714-kept-{i}"),
+                    PostLabels::default(),
+                );
+            }
+            let key = w.key();
+            w.stored_on(
+                key,
+                "suga",
+                reply("sentinel-714-to-aged-held", aged_held),
+                PostLabels::default(),
+            );
+            w.hold_for(HOBI_UID);
             w.clock.set(T0 + 7 * 24 * 60 * 60);
             let (answer, records) = w.list(None).await;
-            assert_eq!(seqs(&listing_of(answer)), [3]);
+            let top = listing_of(answer);
+            assert_eq!(seqs(&top), (4..=35).collect::<Vec<_>>());
+            assert_eq!(top.entries[31].post.draft.in_reply_to, Some(aged_held));
+            assert_eq!(top.older, Some(4));
             assert_eq!(
                 trail(&records),
-                [rec(done(LISTED), w.own(), counted(Some((3, 3)), 1, 0))]
+                [rec(
+                    done(LISTED_OLDER),
+                    w.own(),
+                    counted(Some((4, 35)), 32, 0)
+                )]
+            );
+            let (answer, records) = w.list(Some(4)).await;
+            let below = listing_of(answer);
+            let shown: Vec<(u64, Vec<BoardHold>)> = below
+                .entries
+                .iter()
+                .map(|e| (e.seq, e.held.clone()))
+                .collect();
+            assert_eq!(shown, [(1, vec![BoardHold::Author]), (3, vec![])]);
+            assert_eq!(below.older, None);
+            assert_eq!(
+                trail(&records),
+                [rec(done(LISTED), w.own(), counted(Some((1, 3)), 2, 0))]
             );
         }
     }
