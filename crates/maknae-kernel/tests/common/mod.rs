@@ -1967,6 +1967,31 @@ impl<P> PermitsWithObligation<P> {
 
 board_double!(PermitsWithObligation);
 
+/// Turns a `Permit` on an `action` request into one whose obligation, `id`, has no handler.
+pub struct ObligesAction<P> {
+    pub inner: Arc<P>,
+    pub action: &'static str,
+    pub id: &'static str,
+}
+
+impl<P> ObligesAction<P> {
+    fn adjust(&self, req: &Request, verdict: Verdict) -> Verdict {
+        match verdict {
+            Verdict::Permit { .. } if req.action.0 == self.action => Verdict::Permit {
+                obligations: vec![Obligation {
+                    id: self.id.into(),
+                    params: maknae_security::Attributes::new(),
+                }],
+            },
+            other => other,
+        }
+    }
+
+    fn before_all(&self, _: &[Request]) {}
+}
+
+board_double!(ObligesAction);
+
 /// Answers `Indeterminate` for a request holding `label`, and only for that request.
 pub struct UndecidedOnLabel<P> {
     pub inner: Arc<P>,

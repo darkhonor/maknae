@@ -8584,6 +8584,52 @@ mod board {
         }
 
         #[tokio::test]
+        async fn a_listing_whose_permit_carries_an_unhonourable_obligation_is_refused() {
+            let w = list_world("list-unhonourable", "user");
+            w.stored("hobi", "sentinel-714-unhonourable", PostLabels::default());
+            let pdp = Arc::new(common::ObligesAction {
+                inner: Arc::clone(&w.pdp),
+                action: "board.read",
+                id: "sentinel-714-ob",
+            });
+            let (answer, records) = w.list_as(&pdp, None).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    (
+                        "deny",
+                        "unhonorable obligation: sentinel-714-ob",
+                        "unauthorized"
+                    ),
+                    w.own(),
+                    None
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_role_without_board_read_is_refused_its_listing() {
+            let w = world_of(
+                "list-ungranted",
+                "user",
+                "roles:\n  user:\n    allow: [\"session.task\"]\n",
+                &[("hobi", HOBI_UID, PLAIN)],
+            );
+            w.stored("hobi", "sentinel-714-ungranted", PostLabels::default());
+            let (answer, records) = w.list(None).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [rec(
+                    ("deny", "role user: no rule for board.read", "unauthorized"),
+                    w.own(),
+                    None
+                )]
+            );
+        }
+
+        #[tokio::test]
         async fn a_listing_on_the_agent_channel_is_refused_before_any_decision() {
             let mut w = list_world("list-agent", "user");
             w.switch(true, &["hobi"]);

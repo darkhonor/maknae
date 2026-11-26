@@ -809,7 +809,8 @@ pub(crate) fn list_audit(p: &Paged) -> BoardAudit {
 }
 
 /// One page of `key`'s board below `before`, its window and reply targets decided in one
-/// batch. `None` when the batch did not confirm the request's own decision.
+/// batch. `None` when the batch did not confirm the request's own decision, or the newest
+/// released post alone is over `budget`.
 pub(crate) async fn list_page<P: Authorizer + Send + Sync + 'static>(
     store: &BoardStore,
     key: BoardKey,
