@@ -409,7 +409,7 @@ struct BoardArgs {
     /// List the newest n posts.
     #[arg(
         long,
-        conflicts_with = "all",
+        conflicts_with_all = ["all", "new"],
         value_parser = clap::value_parser!(u16)
             .range(1..=i64::from(maknae_agent::board::BOARD_LIST_LAST_MAX))
     )]
@@ -417,6 +417,12 @@ struct BoardArgs {
     /// List every post on your board.
     #[arg(long)]
     all: bool,
+    /// List only the posts you have not marked seen, oldest first; marks nothing.
+    #[arg(long, conflicts_with_all = ["all", "last"])]
+    new: bool,
+    /// Start the listing below post n.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    before: Option<u64>,
     /// Print each attachment's content.
     #[arg(long)]
     attachments: bool,
@@ -438,6 +444,19 @@ enum BoardSub {
         /// Clear without asking first.
         #[arg(long)]
         yes: bool,
+    },
+    /// Mark every post on your board seen.
+    Seen,
+    /// Report new posts as they arrive, by your report setting, and mark them seen.
+    Watch {
+        /// Seconds between polls.
+        #[arg(
+            long,
+            default_value_t = maknae_agent::board::BOARD_WATCH_INTERVAL_DEFAULT,
+            value_parser = clap::value_parser!(u16)
+                .range(1..=i64::from(maknae_agent::board::BOARD_WATCH_INTERVAL_MAX))
+        )]
+        interval: u16,
     },
 }
 
@@ -494,12 +513,13 @@ fn print_said(
     said.ok
 }
 
-fn list_want(last: Option<u16>, all: bool) -> maknae_agent::board::ListWant {
+fn list_want(last: Option<u16>, all: bool, new: bool) -> maknae_agent::board::ListWant {
     use maknae_agent::board::ListWant;
-    match (last, all) {
-        (_, true) => ListWant::All,
-        (Some(n), false) => ListWant::Last(n),
-        (None, false) => ListWant::Latest,
+    match (last, all, new) {
+        (_, _, true) => ListWant::New,
+        (_, true, false) => ListWant::All,
+        (Some(n), false, false) => ListWant::Last(n),
+        (None, false, false) => ListWant::Latest,
     }
 }
 
@@ -598,8 +618,13 @@ pub(crate) enum Verb {
         change: maknae_agent::board::SettingsChange,
     },
     BoardClear,
+    BoardSeen,
+    BoardWatch {
+        interval: u16,
+    },
     BoardList {
         want: maknae_agent::board::ListWant,
+        before: Option<u64>,
         attachments: bool,
     },
 }
@@ -628,6 +653,8 @@ impl Verb {
             Verb::SessionClose { .. } => "session close",
             Verb::BoardSettings { .. } => "board settings",
             Verb::BoardClear => "board clear",
+            Verb::BoardSeen => "board seen",
+            Verb::BoardWatch { .. } => "board watch",
             Verb::BoardList { .. } => "board",
         }
     }
@@ -778,9 +805,15 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::BoardClear => maknae_proto::Verb::BoardManage {
                 op: maknae_proto::BoardOp::Clear,
             },
-            Verb::BoardList { .. } => maknae_proto::Verb::BoardList {
-                before: None,
-                new: false,
+            Verb::BoardSeen => maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Seen { through: u64::MAX },
+            },
+            Verb::BoardWatch { .. } => maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None },
+            },
+            Verb::BoardList { want, before, .. } => maknae_proto::Verb::BoardList {
+                before,
+                new: want == maknae_agent::board::ListWant::New,
             },
         }
     }
@@ -886,6 +919,22 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     outcome
 }
 
+/// Mints the plane leaf again within `REMINT_WITHIN_SECS` of its NotAfter; a failed mint is
+/// an error only once the leaf has expired.
+async fn fresh_leaf(client: &PlaneClient) -> Result<(), String> {
+    let now = maknae_io::now_unix()?;
+    let not_after = client.leaf_not_after_secs();
+    if not_after.is_some_and(|at| now.saturating_add(crate::agent_session::REMINT_WITHIN_SECS) < at)
+    {
+        return Ok(());
+    }
+    match client.mint().await {
+        Ok(_) => Ok(()),
+        Err(_) if not_after.is_some_and(|at| now < at) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// The post-mint round trip: connect → request → (bounded) response → print. Split out so
 /// [`execute`] shuts the plane client down on every return path before propagating this
 /// result. Returns `Ok(true)` on a served verb, `Ok(false)` on a daemon
@@ -953,8 +1002,40 @@ async fn round_trip(
             &mut std::io::stderr(),
         ));
     }
-    if let Verb::BoardList { want, attachments } = &verb {
-        let (listed, stop) = maknae_agent::board::list(*want, board_send).await;
+    if let Verb::BoardSeen = &verb {
+        let said = maknae_agent::board::seen(board_send).await;
+        return Ok(print_said(
+            &said,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ));
+    }
+    if let Verb::BoardWatch { interval } = &verb {
+        let mut ending = crate::screen::run::Ending::register().map_err(|e| e.to_string())?;
+        let send = |v| async move {
+            fresh_leaf(client).await?;
+            board_send(v).await
+        };
+        let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+        let watching = maknae_agent::board::watch(
+            std::time::Duration::from_secs(u64::from(*interval)),
+            &mut out,
+            &mut err,
+            send,
+            tokio::time::sleep,
+        );
+        return tokio::select! {
+            said = watching => Ok(print_said(&said, &mut std::io::stdout(), &mut std::io::stderr())),
+            _ = ending.next() => Ok(true),
+        };
+    }
+    if let Verb::BoardList {
+        want,
+        before,
+        attachments,
+    } = &verb
+    {
+        let (listed, stop) = maknae_agent::board::list(*want, *before, board_send).await;
         return show_listing(
             *want,
             *attachments,
@@ -1789,7 +1870,8 @@ pub async fn run_cli() -> ExitCode {
         Command::Board(args) => match args.sub {
             None => wire_exit_code(
                 execute(Verb::BoardList {
-                    want: list_want(args.last, args.all),
+                    want: list_want(args.last, args.all, args.new),
+                    before: args.before,
                     attachments: args.attachments,
                 })
                 .await,
@@ -1815,6 +1897,13 @@ pub async fn run_cli() -> ExitCode {
                 }
                 wire_exit_code(execute(Verb::BoardClear).await, &mut std::io::stderr())
             }
+            Some(BoardSub::Seen) => {
+                wire_exit_code(execute(Verb::BoardSeen).await, &mut std::io::stderr())
+            }
+            Some(BoardSub::Watch { interval }) => wire_exit_code(
+                execute(Verb::BoardWatch { interval }).await,
+                &mut std::io::stderr(),
+            ),
         },
         Command::Agent(_) => ExitCode::from(2),
         Command::Login => crate::login::run_login().await,
@@ -2041,16 +2130,16 @@ mod tests {
         use maknae_agent::board::ListWant;
         let a = board_args(&["maknae", "board"]);
         assert!(a.sub.is_none());
-        assert_eq!(list_want(a.last, a.all), ListWant::Latest);
+        assert_eq!(list_want(a.last, a.all, a.new), ListWant::Latest);
         assert!(!a.attachments);
         let a = board_args(&["maknae", "board", "--attachments"]);
         assert!(a.sub.is_none() && a.attachments);
-        assert_eq!(list_want(a.last, a.all), ListWant::Latest);
+        assert_eq!(list_want(a.last, a.all, a.new), ListWant::Latest);
         let a = board_args(&["maknae", "board", "--all", "--attachments"]);
-        assert_eq!(list_want(a.last, a.all), ListWant::All);
+        assert_eq!(list_want(a.last, a.all, a.new), ListWant::All);
         assert!(a.attachments);
         let a = board_args(&["maknae", "board", "--last", "7"]);
-        assert_eq!(list_want(a.last, a.all), ListWant::Last(7));
+        assert_eq!(list_want(a.last, a.all, a.new), ListWant::Last(7));
     }
 
     #[test]
@@ -2058,7 +2147,10 @@ mod tests {
         use maknae_agent::board::ListWant;
         for n in ["1", "1024"] {
             let a = board_args(&["maknae", "board", "--last", n]);
-            assert_eq!(list_want(a.last, a.all), ListWant::Last(n.parse().unwrap()));
+            assert_eq!(
+                list_want(a.last, a.all, a.new),
+                ListWant::Last(n.parse().unwrap())
+            );
         }
         for n in ["0", "1025", "-1", "x"] {
             let e = Cli::try_parse_from(["maknae", "board", "--last", n]).unwrap_err();
@@ -2106,6 +2198,7 @@ mod tests {
                 ArgumentConflict,
             ),
             (&["maknae", "board", "settings", "--all"], UnknownArgument),
+            (&["maknae", "board", "--new", "seen"], ArgumentConflict),
         ] {
             let e = Cli::try_parse_from(args).unwrap_err();
             assert_eq!(e.kind(), kind, "{args:?}: {e}");
@@ -2117,6 +2210,7 @@ mod tests {
     fn the_board_listing_is_sent_as_board_list_from_the_top() {
         let v = Verb::BoardList {
             want: maknae_agent::board::ListWant::All,
+            before: None,
             attachments: true,
         };
         assert_eq!(v.kind(), "board");
@@ -2127,6 +2221,206 @@ mod tests {
                 new: false,
             }
         );
+    }
+
+    #[test]
+    fn board_new_conflicts_with_all_and_last() {
+        use maknae_agent::board::ListWant;
+        for args in [
+            &["maknae", "board", "--new", "--all"][..],
+            &["maknae", "board", "--all", "--new"],
+            &["maknae", "board", "--new", "--last", "3"],
+            &["maknae", "board", "--last", "3", "--new"],
+        ] {
+            let e = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{args:?}: {e}"
+            );
+            assert_eq!(e.exit_code(), 2);
+        }
+        let a = board_args(&["maknae", "board", "--new", "--attachments"]);
+        assert_eq!(list_want(a.last, a.all, a.new), ListWant::New);
+        assert!(a.attachments && a.sub.is_none() && a.before.is_none());
+    }
+
+    #[test]
+    fn board_before_takes_1_and_up() {
+        for (n, want) in [("1", 1), ("9", 9), ("18446744073709551615", u64::MAX)] {
+            assert_eq!(
+                board_args(&["maknae", "board", "--before", n]).before,
+                Some(want)
+            );
+        }
+        assert_eq!(board_args(&["maknae", "board"]).before, None);
+        for n in ["0", "-1", "x", "18446744073709551616"] {
+            let e = Cli::try_parse_from(["maknae", "board", "--before", n]).unwrap_err();
+            assert_eq!(e.exit_code(), 2, "{n}: {e}");
+        }
+        let e = Cli::try_parse_from(["maknae", "board", "--before", "0"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation, "{e}");
+    }
+
+    #[test]
+    fn board_before_combines_with_new_last_and_all() {
+        use maknae_agent::board::ListWant;
+        for (flags, want) in [
+            (&["--new"][..], ListWant::New),
+            (&["--last", "3"], ListWant::Last(3)),
+            (&["--all"], ListWant::All),
+            (&["--attachments"], ListWant::Latest),
+        ] {
+            let mut args = vec!["maknae", "board", "--before", "9"];
+            args.extend_from_slice(flags);
+            let a = board_args(&args);
+            assert_eq!(
+                (list_want(a.last, a.all, a.new), a.before),
+                (want, Some(9)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn board_seen_and_watch_parse() {
+        assert!(matches!(
+            board_sub(&["maknae", "board", "seen"]),
+            BoardSub::Seen
+        ));
+        assert!(matches!(
+            board_sub(&["maknae", "board", "watch"]),
+            BoardSub::Watch { interval: 10 }
+        ));
+        assert_eq!(maknae_agent::board::BOARD_WATCH_INTERVAL_DEFAULT, 10);
+        for (n, want) in [("1", 1), ("3600", 3600)] {
+            match board_sub(&["maknae", "board", "watch", "--interval", n]) {
+                BoardSub::Watch { interval } => assert_eq!(interval, want),
+                other => panic!("{other:?}"),
+            }
+        }
+        for n in ["0", "3601"] {
+            let e = Cli::try_parse_from(["maknae", "board", "watch", "--interval", n]).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{n}: {e}"
+            );
+            assert_eq!(e.exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn the_board_flag_matrix_is_complete() {
+        let flags: [&[&str]; 5] = [
+            &["--new"],
+            &["--before", "3"],
+            &["--last", "2"],
+            &["--all"],
+            &["--attachments"],
+        ];
+        let conflicting = [("--new", "--all"), ("--new", "--last"), ("--last", "--all")];
+        for (i, a) in flags.iter().enumerate() {
+            for b in &flags[i + 1..] {
+                let mut args = vec!["maknae", "board"];
+                args.extend_from_slice(a);
+                args.extend_from_slice(b);
+                let parsed = Cli::try_parse_from(&args);
+                let conflict = conflicting
+                    .iter()
+                    .any(|(x, y)| (a[0] == *x && b[0] == *y) || (a[0] == *y && b[0] == *x));
+                match parsed {
+                    Ok(_) => assert!(!conflict, "{args:?} parsed"),
+                    Err(e) => {
+                        assert!(conflict, "{args:?}: {e}");
+                        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+                        assert_eq!(e.exit_code(), 2);
+                    }
+                }
+            }
+        }
+        let subs: [&[&str]; 4] = [&["seen"], &["watch"], &["settings"], &["clear", "--yes"]];
+        for sub in subs {
+            for flag in flags {
+                let mut before = vec!["maknae", "board"];
+                before.extend_from_slice(flag);
+                before.extend_from_slice(sub);
+                let e = Cli::try_parse_from(&before).unwrap_err();
+                assert_eq!(
+                    e.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{before:?}: {e}"
+                );
+                assert_eq!(e.exit_code(), 2);
+                let mut after = vec!["maknae", "board"];
+                after.extend_from_slice(sub);
+                after.extend_from_slice(flag);
+                let e = Cli::try_parse_from(&after).unwrap_err();
+                assert_eq!(
+                    e.kind(),
+                    clap::error::ErrorKind::UnknownArgument,
+                    "{after:?}: {e}"
+                );
+                assert_eq!(e.exit_code(), 2);
+            }
+            for other in subs {
+                let mut args = vec!["maknae", "board"];
+                args.extend_from_slice(sub);
+                args.extend_from_slice(other);
+                let e = Cli::try_parse_from(&args).unwrap_err();
+                assert_eq!(e.exit_code(), 2, "{args:?}: {e}");
+            }
+        }
+        for (sub, flag) in [
+            ("seen", "--interval"),
+            ("settings", "--interval"),
+            ("clear", "--interval"),
+        ] {
+            let e = Cli::try_parse_from(["maknae", "board", sub, flag, "5"]).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{sub}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_board_verbs_map_to_their_first_request() {
+        use maknae_agent::board::ListWant;
+        assert_eq!(Verb::BoardSeen.kind(), "board seen");
+        assert_eq!(Verb::BoardWatch { interval: 10 }.kind(), "board watch");
+        assert_eq!(
+            maknae_proto::Verb::from(Verb::BoardSeen),
+            maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Seen { through: u64::MAX }
+            }
+        );
+        assert_eq!(
+            maknae_proto::Verb::from(Verb::BoardWatch { interval: 10 }),
+            maknae_proto::Verb::BoardManage {
+                op: maknae_proto::BoardOp::Settings { set: None }
+            }
+        );
+        for (want, before, new) in [
+            (ListWant::New, Some(9), true),
+            (ListWant::New, None, true),
+            (ListWant::Latest, Some(9), false),
+            (ListWant::Last(3), None, false),
+            (ListWant::All, Some(1), false),
+        ] {
+            let v = Verb::BoardList {
+                want,
+                before,
+                attachments: false,
+            };
+            assert_eq!(v.kind(), "board");
+            assert_eq!(
+                maknae_proto::Verb::from(v),
+                maknae_proto::Verb::BoardList { before, new },
+                "{want:?}"
+            );
+        }
     }
 
     #[test]

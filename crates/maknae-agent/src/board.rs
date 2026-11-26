@@ -3,13 +3,14 @@
 //! person is told.
 use crate::tasking::text::{
     board_attachment_line, board_cleared_line, board_entry_header, board_list_stopped_line,
-    board_refused_line, board_settings_lines, board_stopped_line, board_unknown_line, one_line,
-    write_board_text, BoardCommand, BOARD_NO_POSTS, BOARD_OLDER,
+    board_refused_line, board_settings_lines, board_stopped_line, board_summary_line,
+    board_unknown_line, one_line, write_board_text, BoardCommand, BOARD_NO_POSTS, BOARD_OLDER,
+    BOARD_SEEN, BOARD_WATCH_MARK_UNKNOWN, BOARD_WATCH_OFF,
 };
 use crate::wire::WireOutcome;
 use maknae_proto::{
-    BoardCleared, BoardEntry, BoardListing, BoardOp, BoardReport, BoardSettings, Payload,
-    ProtoErrCode, Verb,
+    BoardCleared, BoardDefect, BoardEntry, BoardListing, BoardOp, BoardReport, BoardSettings,
+    Payload, ProtoErrCode, Verb,
 };
 use std::future::Future;
 use std::io::{BufRead, Read, Write};
@@ -17,6 +18,8 @@ use std::io::{BufRead, Read, Write};
 pub const BOARD_CLEAR_REQUESTS_MAX: u32 = 64;
 pub const BOARD_LIST_REQUESTS_MAX: u32 = 64;
 pub const BOARD_LIST_LAST_MAX: u16 = 1024;
+pub const BOARD_WATCH_INTERVAL_DEFAULT: u16 = 10;
+pub const BOARD_WATCH_INTERVAL_MAX: u16 = 3600;
 pub const CONFIRM_ANSWER_MAX_BYTES: u64 = 64;
 const CONFIRM_PROMPT: &[u8] = b"clear every post on your board that is not held? [y/N] ";
 const NOT_A_BOARD_REPLY: &str = "protocol error: the kernel's answer was not a board reply";
@@ -29,6 +32,7 @@ pub enum ListWant {
     Latest,
     Last(u16),
     All,
+    New,
 }
 
 /// The posts listed, oldest first; `older`: posts older than these remain.
@@ -77,16 +81,18 @@ pub enum Confirm {
     NeedsYes,
 }
 
+/// `Busy`: the store did not do it or cannot say whether it did; asking again is safe.
 /// `Unconfirmed`: no answer the request could be judged by, so a change may have landed.
 enum Stop {
     Answered(String),
+    Busy(String),
     Unconfirmed(String),
 }
 
 impl Stop {
     fn err(self, command: BoardCommand, sent_a_change: bool) -> Vec<String> {
         match self {
-            Stop::Answered(line) => vec![line],
+            Stop::Answered(line) | Stop::Busy(line) => vec![line],
             Stop::Unconfirmed(line) if sent_a_change => {
                 vec![line, board_unknown_line(command).into()]
             }
@@ -98,6 +104,12 @@ impl Stop {
 fn answer(sent: Result<WireOutcome, String>, command: BoardCommand) -> Result<Payload, Stop> {
     match sent {
         Ok(WireOutcome::Payload(payload)) => Ok(payload),
+        Ok(WireOutcome::Refused {
+            code:
+                code @ ProtoErrCode::BoardRefused(BoardDefect::TryAgain | BoardDefect::OutcomeUnknown),
+            message,
+            ..
+        }) => Err(Stop::Busy(refused_line(code, &message, command))),
         Ok(WireOutcome::Refused { code, message, .. }) => {
             Err(Stop::Answered(refused_line(code, &message, command)))
         }
@@ -113,7 +125,7 @@ fn refused_line(code: ProtoErrCode, message: &str, command: BoardCommand) -> Str
         ProtoErrCode::BoardRefused(defect) => board_refused_line(defect, command),
         ProtoErrCode::Unauthorized => match command {
             BoardCommand::List => format!("you may not read your board: {}", one_line(message)),
-            BoardCommand::Settings | BoardCommand::Clear => {
+            BoardCommand::Settings | BoardCommand::Clear | BoardCommand::Seen => {
                 format!("you may not manage a board: {}", one_line(message))
             }
         },
@@ -138,6 +150,13 @@ fn settings_reply(sent: Result<WireOutcome, String>) -> Result<BoardSettings, St
 fn cleared_reply(sent: Result<WireOutcome, String>) -> Result<BoardCleared, Stop> {
     match answer(sent, BoardCommand::Clear)? {
         Payload::BoardCleared(cleared) => Ok(cleared),
+        _ => Err(Stop::Unconfirmed(NOT_A_BOARD_REPLY.into())),
+    }
+}
+
+fn seen_reply(sent: Result<WireOutcome, String>) -> Result<(), Stop> {
+    match answer(sent, BoardCommand::Seen)? {
+        Payload::BoardSeen => Ok(()),
         _ => Err(Stop::Unconfirmed(NOT_A_BOARD_REPLY.into())),
     }
 }
@@ -186,22 +205,40 @@ where
     }
 }
 
-/// Walks back from the newest page; the `Said`, when there is one, is why the walk stopped.
-pub async fn list<F, Fut>(want: ListWant, mut send: F) -> (Listed, Option<Said>)
+/// Walks back from the newest page, or from below `start`; the `Said`, when there is one, is
+/// why the walk stopped.
+pub async fn list<F, Fut>(want: ListWant, start: Option<u64>, send: F) -> (Listed, Option<Said>)
+where
+    F: FnMut(Verb) -> Fut,
+    Fut: Future<Output = Result<WireOutcome, String>>,
+{
+    let (listed, stop) = walk(want, start, send).await;
+    (
+        listed,
+        stop.map(|stop| Said {
+            out: vec![],
+            err: stop.err(BoardCommand::List, false),
+            ok: false,
+        }),
+    )
+}
+
+async fn walk<F, Fut>(want: ListWant, start: Option<u64>, mut send: F) -> (Listed, Option<Stop>)
 where
     F: FnMut(Verb) -> Fut,
     Fut: Future<Output = Result<WireOutcome, String>>,
 {
     let mut pages: Vec<Vec<BoardEntry>> = vec![];
     let mut collected: usize = 0;
-    let mut before = None;
+    let mut before = start;
     let mut older = None;
     let mut requests: u32 = 0;
+    let new = want == ListWant::New;
     let stop = loop {
         requests += 1;
-        let page = match listing_reply(send(Verb::BoardList { before, new: false }).await) {
+        let page = match listing_reply(send(Verb::BoardList { before, new }).await) {
             Ok(page) => page,
-            Err(stop) => break Some(stop.err(BoardCommand::List, false)),
+            Err(stop) => break Some(stop),
         };
         let ascending = page.entries.windows(2).all(|w| w[0].seq < w[1].seq);
         let below = before.is_none_or(|sent| {
@@ -212,7 +249,7 @@ where
             .first()
             .is_none_or(|lowest| page.older.is_none_or(|n| n <= lowest.seq));
         if !(ascending && below && older_at_most_lowest) {
-            break Some(vec![NOT_MOVED_BACK.into()]);
+            break Some(Stop::Unconfirmed(NOT_MOVED_BACK.into()));
         }
         collected += page.entries.len();
         pages.push(page.entries);
@@ -220,20 +257,20 @@ where
         let enough = match want {
             ListWant::Latest => collected > 0,
             ListWant::Last(n) => collected >= usize::from(n),
-            ListWant::All => false,
+            ListWant::All | ListWant::New => false,
         };
         if older.is_none() || enough {
             break None;
         }
         if requests >= BOARD_LIST_REQUESTS_MAX {
-            break Some(vec![board_list_stopped_line(collected as u64)]);
+            break Some(Stop::Answered(board_list_stopped_line(collected as u64)));
         }
         before = older;
     };
     let mut entries: Vec<BoardEntry> = pages.into_iter().rev().flatten().collect();
     let dropped = match want {
         ListWant::Last(n) => entries.len().saturating_sub(usize::from(n)),
-        ListWant::Latest | ListWant::All => 0,
+        ListWant::Latest | ListWant::All | ListWant::New => 0,
     };
     entries.drain(..dropped);
     (
@@ -241,11 +278,7 @@ where
             entries,
             older: older.is_some() || dropped > 0,
         },
-        stop.map(|err| Said {
-            out: vec![],
-            err,
-            ok: false,
-        }),
+        stop,
     )
 }
 
@@ -293,6 +326,122 @@ pub fn print_listing(
         }
     }
     Ok(())
+}
+
+/// Marks through the newest post: the kernel clamps `u64::MAX` to the highest sequence issued.
+pub async fn seen<F, Fut>(mut send: F) -> Said
+where
+    F: FnMut(Verb) -> Fut,
+    Fut: Future<Output = Result<WireOutcome, String>>,
+{
+    match seen_reply(send(manage(BoardOp::Seen { through: u64::MAX })).await) {
+        Ok(()) => Said {
+            out: vec![BOARD_SEEN.into()],
+            err: vec![],
+            ok: true,
+        },
+        Err(stop) => Said {
+            out: vec![],
+            err: stop.err(BoardCommand::Seen, true),
+            ok: false,
+        },
+    }
+}
+
+/// What one watch poll's walk comes to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Polled {
+    Quiet,
+    Show { through: u64 },
+    End(Said),
+}
+
+fn polled(listed: &Listed, stop: Option<Stop>) -> Polled {
+    match (stop, listed.entries.last()) {
+        (Some(Stop::Busy(_)), _) | (None, None) => Polled::Quiet,
+        (Some(stop), _) => Polled::End(ended(stop.err(BoardCommand::List, false))),
+        (None, Some(newest)) => Polled::Show {
+            through: newest.seq,
+        },
+    }
+}
+
+fn ended(err: Vec<String>) -> Said {
+    Said {
+        out: vec![],
+        err,
+        ok: false,
+    }
+}
+
+fn show(summary: bool, listed: &Listed, out: &mut dyn Write) -> std::io::Result<()> {
+    if summary {
+        writeln!(out, "{}", board_summary_line(&listed.entries))?;
+    } else {
+        print_listing(listed, false, out)?;
+    }
+    out.flush()
+}
+
+/// One poll; `Some` ends the watch with what the person is told.
+async fn poll<F, Fut>(out: &mut dyn Write, err: &mut dyn Write, send: &mut F) -> Option<Said>
+where
+    F: FnMut(Verb) -> Fut,
+    Fut: Future<Output = Result<WireOutcome, String>>,
+{
+    let summary = match settings_reply(send(manage(BoardOp::Settings { set: None })).await) {
+        Ok(held) => match held.report {
+            BoardReport::Off => return Some(ended(vec![BOARD_WATCH_OFF.into()])),
+            BoardReport::Summary => true,
+            BoardReport::Every => false,
+        },
+        Err(Stop::Busy(_)) => return None,
+        Err(stop) => return Some(ended(stop.err(BoardCommand::Settings, false))),
+    };
+    let (listed, stop) = walk(ListWant::New, None, &mut *send).await;
+    let through = match polled(&listed, stop) {
+        Polled::Quiet => return None,
+        Polled::End(said) => return Some(said),
+        Polled::Show { through } => through,
+    };
+    if let Err(error) = show(summary, &listed, out) {
+        return Some(ended(vec![format!(
+            "cannot print the board: {}",
+            one_line(&error.to_string())
+        )]));
+    }
+    match seen_reply(send(manage(BoardOp::Seen { through })).await) {
+        Ok(()) => None,
+        Err(Stop::Busy(_)) => {
+            let _ = writeln!(err, "maknae: {BOARD_WATCH_MARK_UNKNOWN}");
+            None
+        }
+        Err(Stop::Answered(line)) => Some(ended(vec![line])),
+        Err(Stop::Unconfirmed(line)) => Some(ended(vec![line, BOARD_WATCH_MARK_UNKNOWN.into()])),
+    }
+}
+
+/// Polls every `interval` for posts above the mark, reports them by the person's `report`,
+/// then marks through them; ends only with what the person is told.
+pub async fn watch<F, Fut, Z, ZFut>(
+    interval: std::time::Duration,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    mut send: F,
+    mut sleep: Z,
+) -> Said
+where
+    F: FnMut(Verb) -> Fut,
+    Fut: Future<Output = Result<WireOutcome, String>>,
+    Z: FnMut(std::time::Duration) -> ZFut,
+    ZFut: Future<Output = ()>,
+{
+    loop {
+        if let Some(said) = poll(out, err, &mut send).await {
+            return said;
+        }
+        sleep(interval).await;
+    }
 }
 
 /// The caller has already confirmed.
@@ -1050,9 +1199,17 @@ mod tests {
         want: ListWant,
         replies: Vec<Result<WireOutcome, String>>,
     ) -> (Listed, Option<Said>, Vec<Verb>) {
+        run_list_from(want, None, replies).await
+    }
+
+    async fn run_list_from(
+        want: ListWant,
+        start: Option<u64>,
+        replies: Vec<Result<WireOutcome, String>>,
+    ) -> (Listed, Option<Said>, Vec<Verb>) {
         let mut replies: VecDeque<_> = replies.into();
         let mut sent = vec![];
-        let (listed, stop) = list(want, |v| {
+        let (listed, stop) = list(want, start, |v| {
             sent.push(v);
             let r = replies.pop_front().expect("script exhausted");
             async move { r }
@@ -1380,6 +1537,546 @@ mod tests {
             let (_, stop, _) = run_list(ListWant::Latest, vec![bad]).await;
             assert_eq!(stop, Some(said(&[], &[NOT_A_BOARD_REPLY], false)));
         }
+    }
+
+    fn new_at(before: Option<u64>) -> Verb {
+        Verb::BoardList { before, new: true }
+    }
+
+    fn seen_verb(through: u64) -> Verb {
+        Verb::BoardManage {
+            op: BoardOp::Seen { through },
+        }
+    }
+
+    fn marked() -> Result<WireOutcome, String> {
+        Ok(WireOutcome::Payload(Payload::BoardSeen))
+    }
+
+    fn page_of(entries: Vec<BoardEntry>, older: Option<u64>) -> Result<WireOutcome, String> {
+        Ok(WireOutcome::Payload(Payload::BoardListing(BoardListing {
+            entries,
+            older,
+        })))
+    }
+
+    fn by(seq: u64, author: &str, kind: PostKind) -> BoardEntry {
+        let mut e = entry(seq);
+        e.post.author = Author::Agent(author.into());
+        e.post.draft.kind = kind;
+        e
+    }
+
+    fn try_again() -> Result<WireOutcome, String> {
+        refused(
+            ProtoErrCode::BoardRefused(BoardDefect::TryAgain),
+            "try again",
+        )
+    }
+
+    fn unknown() -> Result<WireOutcome, String> {
+        refused(
+            ProtoErrCode::BoardRefused(BoardDefect::OutcomeUnknown),
+            "outcome unknown",
+        )
+    }
+
+    fn unauthorized() -> Result<WireOutcome, String> {
+        refused(ProtoErrCode::Unauthorized, UNAUTHORIZED)
+    }
+
+    fn sends_no_seen(sent: &[Verb]) -> bool {
+        !sent.iter().any(|v| {
+            matches!(
+                v,
+                Verb::BoardManage {
+                    op: BoardOp::Seen { .. }
+                }
+            )
+        })
+    }
+
+    const MARK_UNKNOWN: &str = "the mark may not have moved; the same posts may print again";
+    const WATCH_OFF: &str = "board reporting is off; turn it on with maknae board settings --report summary or --report every";
+    const READ_REFUSED: &str = "you may not read your board: not authorized";
+    const MANAGE_REFUSED: &str = "you may not manage a board: not authorized";
+    const TEN: std::time::Duration = std::time::Duration::from_secs(10);
+
+    struct Watched {
+        said: Said,
+        sent: Vec<Verb>,
+        err: String,
+        slept: Vec<std::time::Duration>,
+    }
+
+    async fn watch_into(out: &mut dyn Write, replies: Vec<Result<WireOutcome, String>>) -> Watched {
+        let mut replies: VecDeque<_> = replies.into();
+        let mut sent = vec![];
+        let mut err = vec![];
+        let mut slept = vec![];
+        let said = watch(
+            std::time::Duration::from_secs(u64::from(BOARD_WATCH_INTERVAL_DEFAULT)),
+            out,
+            &mut err,
+            |v| {
+                sent.push(v);
+                let r = replies.pop_front().expect("script exhausted");
+                async move { r }
+            },
+            |d| {
+                slept.push(d);
+                async {}
+            },
+        )
+        .await;
+        Watched {
+            said,
+            sent,
+            err: String::from_utf8(err).unwrap(),
+            slept,
+        }
+    }
+
+    async fn run_watch(replies: Vec<Result<WireOutcome, String>>) -> (Watched, String) {
+        let mut out = vec![];
+        let w = watch_into(&mut out, replies).await;
+        (w, String::from_utf8(out).unwrap())
+    }
+
+    fn every() -> Result<WireOutcome, String> {
+        settled(s(true, Every))
+    }
+
+    #[tokio::test]
+    async fn new_walks_above_the_mark_to_its_end_oldest_first() {
+        let (l, stop, sent) = run_list(
+            ListWant::New,
+            vec![page(&[7, 8], Some(7)), page(&[5, 6], None)],
+        )
+        .await;
+        assert_eq!(sent, vec![new_at(None), new_at(Some(7))]);
+        assert_eq!(seqs(&l), vec![5, 6, 7, 8]);
+        assert!(!l.older);
+        assert_eq!(stop, None);
+        assert_eq!(listing_said(ListWant::New, &l, stop), said(&[], &[], true));
+
+        let (l, stop, sent) = run_list(ListWant::New, vec![page(&[], None)]).await;
+        assert_eq!(sent, vec![new_at(None)]);
+        assert_eq!(
+            listing_said(ListWant::New, &l, stop),
+            said(&["no posts"], &[], true)
+        );
+    }
+
+    #[tokio::test]
+    async fn before_starts_the_walk_below_it() {
+        let (l, stop, sent) =
+            run_list_from(ListWant::Latest, Some(9), vec![page(&[7, 8], Some(7))]).await;
+        assert_eq!(sent, vec![at(Some(9))]);
+        assert_eq!((seqs(&l), l.older, stop), (vec![7, 8], true, None));
+
+        let (l, stop, sent) = run_list_from(
+            ListWant::All,
+            Some(9),
+            vec![page(&[7, 8], Some(7)), page(&[6], None)],
+        )
+        .await;
+        assert_eq!(sent, vec![at(Some(9)), at(Some(7))]);
+        assert_eq!((seqs(&l), stop), (vec![6, 7, 8], None));
+
+        let (_, _, sent) = run_list_from(ListWant::New, Some(9), vec![page(&[8], None)]).await;
+        assert_eq!(sent, vec![new_at(Some(9))]);
+
+        for bad in [page(&[8, 9], None), page(&[10], None), page(&[], Some(9))] {
+            let (_, stop, _) = run_list_from(ListWant::Latest, Some(9), vec![bad]).await;
+            assert_eq!(stop, Some(said(&[], &[NOT_MOVED], false)));
+        }
+
+        let (l, stop, _) = run_list_from(ListWant::Latest, Some(1), vec![page(&[], None)]).await;
+        assert_eq!(
+            listing_said(ListWant::Latest, &l, stop),
+            said(&["no posts"], &[], true)
+        );
+    }
+
+    #[tokio::test]
+    async fn new_and_before_send_no_seen() {
+        for (want, start) in [
+            (ListWant::New, None),
+            (ListWant::New, Some(9)),
+            (ListWant::Latest, Some(9)),
+            (ListWant::Last(3), Some(9)),
+            (ListWant::All, Some(9)),
+            (ListWant::Latest, None),
+        ] {
+            let (l, _, sent) = run_list_from(
+                want,
+                start,
+                vec![page(&[7, 8], Some(7)), page(&[5, 6], None)],
+            )
+            .await;
+            assert!(!l.entries.is_empty(), "{want:?}");
+            assert!(sends_no_seen(&sent), "{want:?} {start:?}: {sent:?}");
+            assert!(
+                sent.iter().all(|v| matches!(v, Verb::BoardList { .. })),
+                "{sent:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn seen_sends_the_newest_and_says_so() {
+        let mut sent = vec![];
+        let said_ = seen(|v| {
+            sent.push(v);
+            async { marked() }
+        })
+        .await;
+        assert_eq!(sent, vec![seen_verb(u64::MAX)]);
+        assert_eq!(said_, said(&[BOARD_SEEN], &[], true));
+    }
+
+    async fn run_seen(reply: Result<WireOutcome, String>) -> Said {
+        let mut reply = Some(reply);
+        seen(|_| {
+            let r = reply.take().expect("one request");
+            async move { r }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_refused_seen_says_manage_and_an_unanswered_one_says_unknown() {
+        const SEEN_UNKNOWN: &str = "the outcome is unknown; run maknae board seen again";
+        assert_eq!(
+            run_seen(unauthorized()).await,
+            said(&[], &[MANAGE_REFUSED], false)
+        );
+        assert_eq!(
+            run_seen(Err("connection\u{1b}reset".into())).await,
+            said(&[], &["connection\\u{001b}reset", SEEN_UNKNOWN], false)
+        );
+        assert_eq!(
+            run_seen(try_again()).await,
+            said(&[], &["the board store did not do it; try again"], false)
+        );
+        assert_eq!(run_seen(unknown()).await, said(&[], &[SEEN_UNKNOWN], false));
+        for bad in [settled(s(true, Every)), write_done(), page(&[1], None)] {
+            assert_eq!(
+                run_seen(bad).await,
+                said(&[], &[NOT_A_BOARD_REPLY, SEEN_UNKNOWN], false)
+            );
+        }
+    }
+
+    #[test]
+    fn polled_is_quiet_without_entries_and_shows_through_the_newest() {
+        assert_eq!(polled(&listed(vec![]), None), Polled::Quiet);
+        assert_eq!(
+            polled(&listed(vec![entry(4), entry(5)]), None),
+            Polled::Show { through: 5 }
+        );
+        assert_eq!(
+            polled(&listed(vec![entry(9)]), None),
+            Polled::Show { through: 9 }
+        );
+    }
+
+    #[test]
+    fn polled_retries_a_busy_stop_and_ends_on_any_other() {
+        let some = listed(vec![entry(4)]);
+        assert_eq!(
+            polled(&some, Some(Stop::Busy("busy".into()))),
+            Polled::Quiet
+        );
+        assert_eq!(
+            polled(&listed(vec![]), Some(Stop::Busy("busy".into()))),
+            Polled::Quiet
+        );
+        assert_eq!(
+            polled(&some, Some(Stop::Answered("no".into()))),
+            Polled::End(said(&[], &["no"], false))
+        );
+        assert_eq!(
+            polled(&listed(vec![]), Some(Stop::Unconfirmed("gone".into()))),
+            Polled::End(said(&[], &["gone"], false))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watch_with_report_off_refuses_and_sends_nothing_more() {
+        for off in [s(true, Off), s(false, Off)] {
+            let (w, out) = run_watch(vec![settled(off)]).await;
+            assert_eq!(w.said, said(&[], &[WATCH_OFF], false));
+            assert_eq!(w.sent, vec![read()]);
+            assert_eq!((out.as_str(), w.err.as_str()), ("", ""));
+            assert!(w.slept.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_prints_each_new_post_once_and_marks_through_it() {
+        let (w, out) = run_watch(vec![
+            every(),
+            page(&[4, 5], None),
+            marked(),
+            every(),
+            page(&[6], None),
+            marked(),
+            every(),
+            unauthorized(),
+        ])
+        .await;
+        assert_eq!(
+            out,
+            printed(&listed(vec![entry(4), entry(5), entry(6)]), false)
+        );
+        assert_eq!(
+            w.sent,
+            vec![
+                read(),
+                new_at(None),
+                seen_verb(5),
+                read(),
+                new_at(None),
+                seen_verb(6),
+                read(),
+                new_at(None),
+            ]
+        );
+        assert_eq!(w.said, said(&[], &[READ_REFUSED], false));
+        assert_eq!(w.err, "");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_poll_prints_nothing_and_writes_no_mark() {
+        let (w, out) = run_watch(vec![every(), page(&[], None), unauthorized()]).await;
+        assert_eq!(w.sent, vec![read(), new_at(None), read()]);
+        assert!(sends_no_seen(&w.sent));
+        assert_eq!((out.as_str(), w.err.as_str()), ("", ""));
+        assert_eq!(w.said, said(&[], &[MANAGE_REFUSED], false));
+    }
+
+    #[tokio::test]
+    async fn a_summary_watch_prints_counts_by_author_and_kind() {
+        let summary = || settled(s(true, Summary));
+        let (w, out) = run_watch(vec![
+            summary(),
+            page_of(
+                vec![
+                    by(4, "jin", PostKind::Note),
+                    by(5, "hobi", PostKind::Question),
+                    by(6, "hobi", PostKind::Note),
+                ],
+                None,
+            ),
+            marked(),
+            summary(),
+            page_of(vec![by(7, "hobi", PostKind::Note)], None),
+            marked(),
+            unauthorized(),
+        ])
+        .await;
+        assert_eq!(
+            out,
+            "board: 3 new posts; by author: hobi 2, jin 1; by kind: note 2, question 1\nboard: 1 new post; by author: hobi 1; by kind: note 1\n"
+        );
+        assert!(w.sent.contains(&seen_verb(6)) && w.sent.contains(&seen_verb(7)));
+        assert_eq!(w.said, said(&[], &[MANAGE_REFUSED], false));
+    }
+
+    #[tokio::test]
+    async fn a_busy_listing_or_settings_read_is_a_quiet_poll() {
+        let (w, out) = run_watch(vec![
+            try_again(),
+            every(),
+            try_again(),
+            every(),
+            unknown(),
+            every(),
+            page(&[8, 9], Some(8)),
+            try_again(),
+            every(),
+            page(&[7], None),
+            marked(),
+            unauthorized(),
+        ])
+        .await;
+        assert_eq!(out, printed(&listed(vec![entry(7)]), false));
+        assert_eq!(w.err, "");
+        assert_eq!(w.slept, vec![TEN; 5]);
+        assert_eq!(
+            w.sent.iter().filter(|v| **v == seen_verb(7)).count(),
+            1,
+            "{:?}",
+            w.sent
+        );
+        assert!(!w.sent.contains(&seen_verb(9)));
+        assert_eq!(w.said, said(&[], &[MANAGE_REFUSED], false));
+    }
+
+    #[tokio::test]
+    async fn report_turned_off_mid_run_ends_the_watch() {
+        let (w, out) = run_watch(vec![
+            every(),
+            page(&[3], None),
+            marked(),
+            settled(s(true, Off)),
+        ])
+        .await;
+        assert_eq!(out, printed(&listed(vec![entry(3)]), false));
+        assert_eq!(w.sent.len(), 4);
+        assert_eq!(w.said, said(&[], &[WATCH_OFF], false));
+    }
+
+    #[tokio::test]
+    async fn a_busy_mark_write_says_so_and_goes_on() {
+        let (w, out) = run_watch(vec![
+            every(),
+            page(&[4], None),
+            try_again(),
+            every(),
+            page(&[4], None),
+            unknown(),
+            every(),
+            page(&[4], None),
+            marked(),
+            unauthorized(),
+        ])
+        .await;
+        let once = printed(&listed(vec![entry(4)]), false);
+        assert_eq!(out, once.repeat(3));
+        assert_eq!(
+            w.err,
+            format!("maknae: {MARK_UNKNOWN}\nmaknae: {MARK_UNKNOWN}\n")
+        );
+        assert_eq!(w.slept, vec![TEN; 3]);
+        assert_eq!(w.said, said(&[], &[MANAGE_REFUSED], false));
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_or_unreachable_watch_ends() {
+        let (w, out) = run_watch(vec![unauthorized()]).await;
+        assert_eq!(
+            (w.said, w.sent.len(), out),
+            (said(&[], &[MANAGE_REFUSED], false), 1, String::new())
+        );
+        let (w, _) = run_watch(vec![every(), unauthorized()]).await;
+        assert_eq!(w.said, said(&[], &[READ_REFUSED], false));
+        let (w, out) = run_watch(vec![every(), page(&[4], None), unauthorized()]).await;
+        assert_eq!(w.said, said(&[], &[MANAGE_REFUSED], false));
+        assert_eq!(out, printed(&listed(vec![entry(4)]), false));
+        let (w, _) = run_watch(vec![Err("reset\u{1b}".into())]).await;
+        assert_eq!(w.said, said(&[], &["reset\\u{001b}"], false));
+        let (w, _) = run_watch(vec![every(), Err("reset".into())]).await;
+        assert_eq!(w.said, said(&[], &["reset"], false));
+        let (w, _) = run_watch(vec![every(), page(&[4], None), Err("reset".into())]).await;
+        assert_eq!(w.said, said(&[], &["reset", MARK_UNKNOWN], false));
+        let (w, _) = run_watch(vec![every(), page(&[4], None), write_done()]).await;
+        assert_eq!(w.said, said(&[], &[NOT_A_BOARD_REPLY, MARK_UNKNOWN], false));
+        let (w, _) = run_watch(vec![cleared(1, false)]).await;
+        assert_eq!(w.said, said(&[], &[NOT_A_BOARD_REPLY], false));
+        let (w, _) = run_watch(vec![every(), page(&[9, 8], None)]).await;
+        assert_eq!(w.said, said(&[], &[NOT_MOVED], false));
+        let (w, _) = run_watch(vec![
+            every(),
+            page(&[4], None),
+            refused(ProtoErrCode::BoardRefused(BoardDefect::Full), "full"),
+        ])
+        .await;
+        assert_eq!(
+            w.said,
+            said(&[], &["the kernel refused: board full"], false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capped_poll_prints_nothing_and_ends() {
+        let mut replies = vec![every()];
+        replies.extend((0..64).map(|i| page(&[1000 - i], Some(1000 - i))));
+        let (w, out) = run_watch(replies).await;
+        assert_eq!(out, "");
+        assert!(sends_no_seen(&w.sent));
+        assert_eq!(w.sent.len(), 65);
+        assert_eq!(
+            w.said,
+            said(
+                &[],
+                &["stopped after 64 requests and 64 posts; older posts remain"],
+                false
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn the_watch_sleeps_the_interval_between_polls() {
+        let (w, _) = run_watch(vec![
+            every(),
+            page(&[], None),
+            every(),
+            page(&[], None),
+            unauthorized(),
+        ])
+        .await;
+        assert_eq!(w.slept, vec![TEN, TEN]);
+        assert_eq!(
+            std::time::Duration::from_secs(u64::from(BOARD_WATCH_INTERVAL_DEFAULT)),
+            TEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_print_failure_ends_the_watch_without_a_mark() {
+        for (report, write_fails, line) in [
+            (Every, true, "cannot print the board: write broke"),
+            (Every, false, "cannot print the board: flush broke"),
+            (Summary, true, "cannot print the board: write broke"),
+            (Summary, false, "cannot print the board: flush broke"),
+        ] {
+            let mut out = BrokenWrite { write_fails };
+            let w = watch_into(&mut out, vec![settled(s(true, report)), page(&[4], None)]).await;
+            assert_eq!(w.said, said(&[], &[line], false), "{report:?}");
+            assert!(sends_no_seen(&w.sent));
+            assert!(w.slept.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hostile_post_in_a_watch_prints_escaped_line_by_line() {
+        let mut e = entry(3);
+        e.post.author = Author::Agent("h\u{1b}[2J\u{202e}o".into());
+        e.post.draft.body = secret("a\u{1b}[2J\rb\nc\u{0}d\u{202e}\ne");
+        let (w, out) = run_watch(vec![
+            every(),
+            page_of(vec![e], None),
+            marked(),
+            unauthorized(),
+        ])
+        .await;
+        for b in [0x1b, 0x0d, 0x00] {
+            assert!(!out.as_bytes().contains(&b), "{b:#x} in {out:?}");
+        }
+        assert!(!out.contains('\u{202e}'), "{out:?}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "{out:?}");
+        assert!(lines[0].starts_with("#3  "), "{out:?}");
+        assert!(lines[1..].iter().all(|l| l.starts_with("    ")), "{out:?}");
+        assert!(w.sent.contains(&seen_verb(3)));
+    }
+
+    #[tokio::test]
+    async fn a_hostile_author_in_a_watch_summary_is_escaped() {
+        let (_, out) = run_watch(vec![
+            settled(s(true, Summary)),
+            page_of(vec![by(3, "x\u{1b}[2J\ny", PostKind::Note)], None),
+            marked(),
+            unauthorized(),
+        ])
+        .await;
+        assert_eq!(
+            out,
+            "board: 1 new post; by author: x\\u{001b}[2J y 1; by kind: note 1\n"
+        );
     }
 
     #[tokio::test]

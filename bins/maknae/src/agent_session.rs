@@ -28,7 +28,7 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 /// A leaf this close to its NotAfter is minted again before the next verb.
-const REMINT_WITHIN_SECS: u64 = 60;
+pub(crate) const REMINT_WITHIN_SECS: u64 = 60;
 const PLAIN_TICK: Duration = Duration::from_millis(250);
 const CUT_OFF: &str =
     "a request was still being sent when the session ended; its outcome is unknown";

@@ -4,8 +4,8 @@ use crate::render::DISPLAY_PIECE_MAX;
 use crate::screen::MenuItem;
 use maknae_proto::{
     Addressee, AgentEntry, AgentStanding, Attachment, Author, Binding, BoardDefect, BoardEntry,
-    BoardHold, BoardReport, BoardSettings, EmptyReason, ForgeOp, ForgeOps, Media, ReachSummary,
-    TaskClose, TaskState,
+    BoardHold, BoardReport, BoardSettings, EmptyReason, ForgeOp, ForgeOps, Media, PostKind,
+    ReachSummary, TaskClose, TaskState,
 };
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
@@ -305,6 +305,58 @@ pub enum BoardCommand {
     List,
     Settings,
     Clear,
+    Seen,
+}
+
+pub const BOARD_SEEN: &str = "every post on your board is marked seen";
+pub const BOARD_WATCH_MARK_UNKNOWN: &str =
+    "the mark may not have moved; the same posts may print again";
+pub const BOARD_WATCH_OFF: &str =
+    "board reporting is off; turn it on with maknae board settings --report summary or --report every";
+
+fn kind_rank(kind: PostKind) -> usize {
+    match kind {
+        PostKind::Note => 0,
+        PostKind::Question => 1,
+        PostKind::Answer => 2,
+        PostKind::Intent => 3,
+    }
+}
+
+/// Counts by author and by kind; every author id through [`one_line`], and no body is read.
+pub fn board_summary_line(entries: &[BoardEntry]) -> String {
+    let mut authors = std::collections::BTreeMap::<&str, u64>::new();
+    let mut kinds: Vec<PostKind> = Vec::with_capacity(entries.len());
+    for e in entries {
+        let Author::Agent(author) = &e.post.author;
+        *authors.entry(author).or_default() += 1;
+        kinds.push(e.post.draft.kind);
+    }
+    kinds.sort_by_key(|k| kind_rank(*k));
+    let mut by_kind: Vec<(PostKind, u64)> = vec![];
+    for kind in kinds {
+        match by_kind.last_mut() {
+            Some((last, n)) if *last == kind => *n += 1,
+            _ => by_kind.push((kind, 1)),
+        }
+    }
+    let new_posts = match entries.len() {
+        1 => "1 new post".to_owned(),
+        n => format!("{n} new posts"),
+    };
+    format!(
+        "board: {new_posts}; by author: {}; by kind: {}",
+        authors
+            .iter()
+            .map(|(author, n)| format!("{} {n}", one_line(author)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        by_kind
+            .iter()
+            .map(|(kind, n)| format!("{} {n}", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 pub fn board_unknown_line(command: BoardCommand) -> &'static str {
@@ -314,6 +366,7 @@ pub fn board_unknown_line(command: BoardCommand) -> &'static str {
             "the outcome is unknown; run maknae board settings to see what is in force"
         }
         BoardCommand::Clear => "the outcome is unknown; run maknae board clear again",
+        BoardCommand::Seen => "the outcome is unknown; run maknae board seen again",
     }
 }
 
@@ -321,7 +374,9 @@ pub fn board_refused_line(defect: BoardDefect, command: BoardCommand) -> String 
     match defect {
         BoardDefect::TryAgain => match command {
             BoardCommand::List => BOARD_LIST_NOT_READ.into(),
-            BoardCommand::Settings => "the board store did not do it; try again".into(),
+            BoardCommand::Settings | BoardCommand::Seen => {
+                "the board store did not do it; try again".into()
+            }
             BoardCommand::Clear => "the clear stopped; run maknae board clear again".into(),
         },
         BoardDefect::OutcomeUnknown => board_unknown_line(command).into(),
@@ -579,6 +634,71 @@ mod tests {
             board_unknown_line(BoardCommand::Clear),
             "the outcome is unknown; run maknae board clear again"
         );
+    }
+
+    #[test]
+    fn a_seen_refusal_shares_the_settings_lines_and_names_seen_again() {
+        use BoardDefect::*;
+        assert_eq!(
+            board_refused_line(TryAgain, BoardCommand::Seen),
+            "the board store did not do it; try again"
+        );
+        assert_eq!(
+            board_refused_line(OutcomeUnknown, BoardCommand::Seen),
+            "the outcome is unknown; run maknae board seen again"
+        );
+        assert_eq!(
+            board_unknown_line(BoardCommand::Seen),
+            "the outcome is unknown; run maknae board seen again"
+        );
+        assert_eq!(
+            board_refused_line(Full, BoardCommand::Seen),
+            "the kernel refused: board full"
+        );
+    }
+
+    fn of_kind(seq: u64, author: &str, kind: PostKind) -> BoardEntry {
+        let mut e = board_entry(seq, author, Addressee::Board);
+        e.post.draft.kind = kind;
+        e
+    }
+
+    #[test]
+    fn a_summary_counts_authors_ascending_and_kinds_in_their_order() {
+        use PostKind::*;
+        assert_eq!(
+            board_summary_line(&[of_kind(1, "jin", Note)]),
+            "board: 1 new post; by author: jin 1; by kind: note 1"
+        );
+        let entries = [
+            of_kind(1, "zed", Intent),
+            of_kind(2, "jin", Answer),
+            of_kind(3, "hobi", Question),
+            of_kind(4, "jin", Note),
+            of_kind(5, "zed", Intent),
+            of_kind(6, "hobi", Answer),
+            of_kind(7, "hobi", Note),
+        ];
+        assert_eq!(
+            board_summary_line(&entries),
+            "board: 7 new posts; by author: hobi 3, jin 2, zed 2; by kind: note 2, question 1, answer 2, intent 2"
+        );
+        assert_eq!(
+            board_summary_line(&[of_kind(1, "a", Intent), of_kind(2, "b", Question)]),
+            "board: 2 new posts; by author: a 1, b 1; by kind: question 1, intent 1"
+        );
+    }
+
+    #[test]
+    fn a_summary_escapes_each_author_and_reads_no_body() {
+        let mut e = of_kind(1, "x\u{1b}[2J\ny", PostKind::Note);
+        e.post.draft.body = secret("sentinel-715-body\u{1b}");
+        let line = board_summary_line(&[e]);
+        assert_eq!(
+            line,
+            "board: 1 new post; by author: x\\u{001b}[2J y 1; by kind: note 1"
+        );
+        assert!(!line.contains("sentinel-715-body"));
     }
 
     fn secret(s: &str) -> maknae_proto::SecretText {
