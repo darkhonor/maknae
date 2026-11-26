@@ -7,7 +7,7 @@
 <text x="40" y="79" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#5F5E5A">Inside the loop, the tasker may add to the task, the agent may ask (#736), a tool call may wait for the tasker's approval (#174), and the tasker may stop it; halting its containers is #481. Each step shows its build state.</text>
 <defs><marker id="call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill="#2C2C2A"/></marker><marker id="rep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#5F5E5A" stroke-width="1.1"/></marker></defs>
 <rect data-frag-fill="1" x="103.70000000000005" y="1002" width="561.5999999999999" height="164" fill="#FAEFD2" fill-opacity="0.6"/>
-<rect data-frag-fill="2" x="8" y="1332" width="1151" height="1256" fill="#FAEFD2" fill-opacity="0.6"/>
+<rect data-frag-fill="2" x="14" y="1332" width="1145" height="1256" fill="#FAEFD2" fill-opacity="0.6"/>
 <rect x="384.5" y="116" width="390.0" height="2752" fill="#EEEDFE" opacity="0.35"/>
 <line x1="384.5" y1="116" x2="384.5" y2="2868" stroke="#B3452F" stroke-width="1.2" stroke-dasharray="7 4"/>
 <text x="376.5" y="110" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#B3452F">untrusted · tasker uid · agent uid</text>
@@ -42,14 +42,14 @@
 <path d="M 103.70000000000005 1002 h 38 v 9 l -5 5 h -33 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
 <text x="109.70000000000005" y="1012.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">loop</text>
 <text x="149.70000000000005" y="1012.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">[until a task is queued for this agent]</text>
-<rect data-frag="2" x="8" y="1332" width="1151" height="1256" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
-<path d="M 8 1332 h 38 v 9 l -5 5 h -33 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
-<text x="14" y="1342.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">loop</text>
-<text x="54" y="1342.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">[until TaskReport, or the task ends]</text>
-<rect data-frag="3" x="16" y="1680" width="543.8" height="108" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
-<path d="M 16 1680 h 32 v 9 l -5 5 h -27 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
-<text x="22" y="1690.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">opt</text>
-<text x="56" y="1690.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">[the tasker adds]</text>
+<rect data-frag="2" x="14" y="1332" width="1145" height="1256" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
+<path d="M 14 1332 h 38 v 9 l -5 5 h -33 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
+<text x="20" y="1342.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">loop</text>
+<text x="60" y="1342.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">[until TaskReport, or the task ends]</text>
+<rect data-frag="3" x="22" y="1680" width="530" height="108" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
+<path d="M 22 1680 h 32 v 9 l -5 5 h -27 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
+<text x="28" y="1690.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">opt</text>
+<text x="62" y="1690.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">[the tasker adds]</text>
 <rect data-frag="4" x="22" y="1806" width="530" height="196" fill="none" stroke="#2C2C2A" stroke-width="0.9"/>
 <path d="M 22 1806 h 32 v 9 l -5 5 h -27 z" fill="#FFFFFF" stroke="#2C2C2A" stroke-width="0.9"/>
 <text x="28" y="1816.5" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="600" fill="#2C2C2A">opt</text>
@@ -171,7 +171,7 @@
 <text x="287.0" y="1708" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">22. «live» /add: TaskAdd, a follow-up,</text>
 <text x="287.0" y="1720" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">while Working</text>
 <text x="287.0" y="1737" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs</text>
-<text x="287.0" y="1749" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">test: crates/maknae-kernel/tests/task_loop.rs::an_addendum_is_sealed_signed_and_handed_to_the_agent_that_verifies_it</text>
+<text x="287.0" y="1749" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="7.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">test: crates/maknae-kernel/tests/task_loop.rs::add_appends_a_follow_up_to_the_running_task_only</text>
 <line x1="287" y1="1852" x2="482" y2="1852" stroke="#2C2C2A" stroke-width="1" marker-end="url(#call)"/>
 <text x="384.5" y="1834" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">23. «#736» a question: a report kind</text>
 <text x="384.5" y="1846" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="600" fill="#2C2C2A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">that keeps the task Working</text>
@@ -287,5 +287,5 @@
 <text x="62" y="3608" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">credentials (task D3, ruled 2026-11-26). Egress calls GET /repos with it and maps the answer to reach operations as the tasker side is (ADR-0037 decision 7), and the kernel keeps the result as a</text>
 <text x="62" y="3622" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">hand-out reach record beside the signed task, which recording it does not re-sign; sub-task reach and the task view read that record too. If the leg fails or its frame never arrives, the agent</text>
 <text x="62" y="3636" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">side is empty and the task acts on nothing (fail closed), with no new close. This assumes a fine-grained token, whose permissions block was measured 2026-10-22; a classic token is unmeasured.</text>
-<text x="24" y="3668" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/task-tool-lifecycle.toml@bbd8fa1fea · maknae 10c0afc4 · 2026-11-25</text><text x="1143" y="3668" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="3668" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/task-tool-lifecycle.toml@6007fbaca1 · maknae 10c0afc4 · 2026-11-25</text><text x="1143" y="3668" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

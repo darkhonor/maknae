@@ -291,7 +291,7 @@ kind = "call"
 label = "/add: TaskAdd, a follow-up, while Working"
 status = "live"
 evidence = "ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs"
-test = "crates/maknae-kernel/tests/task_loop.rs::an_addendum_is_sealed_signed_and_handed_to_the_agent_that_verifies_it"
+test = "crates/maknae-kernel/tests/task_loop.rs::add_appends_a_follow_up_to_the_running_task_only"
 note = "Refused once the task is Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, and is a signed addendum. The agent gets it on its next heartbeat."
 
 [[step]]
