@@ -3,11 +3,11 @@
 title = "An agent's task: bindings and reach, the pull hand-off, the agentic loop, the outcome and the revoke"
 subtitle = [
   "maknaed never dials an agent: maknae-agentd polls until a task is queued for it, then works it in the agentic loop. Each tool call is the one a person makes (generated-tool-invocation.svg).",
-  "An agent whose forge credential is a stored token is asked for it through forge_auth on its notice poll (#746) before its task is claimable.",
+  "When the agent's forge credential is a stored token, the kernel first asks the agent for it through forge_auth on its notice poll (#746), then sends one Reach frame that works both sides.",
   "Inside the loop, the tasker may add to the task, the agent may ask (#736), a tool call may wait for the tasker's approval (#174), and the tasker may stop it; halting its containers is #481. Each step shows its build state.",
 ]
 svg_title = "Maknae agent task lifecycle"
-svg_desc = "UML sequence diagram of an agent task, each step marked live, unreachable, decided or planned: binding recognition, the sealed tasker token, intake and the reach observation in the Egress Daemon, forge_auth on the agent's notice poll for a stored-token agent, the queue, the agent's claim poll, the hand-out, the agentic loop with the tool-call sequence, the credential's storage and re-mint, the heartbeat and the optional add, ask, approval and stop exchanges, then the report, the revoke and the collect."
+svg_desc = "UML sequence diagram of an agent task, each step marked live, unreachable or with the issue that builds it: binding recognition, the sealed tasker token, intake, forge_auth on the agent's notice poll for a stored-token agent, one Reach frame per server observing both sides in the Egress Daemon, the queue, the agent's claim poll, the hand-out, the agentic loop with the tool-call sequence, the credential's storage and re-mint, the heartbeat and the optional add, ask, approval and stop exchanges, then the report, the revoke and the collect."
 pitch = 195
 wrap_cols = 36
 precondition = "GitHub forge token in Vault at <kv_mount>/data/<user_prefix>/<you>/forges/<host>, field token: vault write -wrap-ttl=60s, or maknae forge login <host>. docs/first-provider.md U2."
@@ -105,6 +105,64 @@ test = "crates/maknae-kernel/src/task.rs::a_remote_tasker_with_a_binding_is_refu
 note = "A binding's server must be a current git forge host; a sub-task's binding must equal one of its parent's."
 
 [[step]]
+id = "queue-forge-auth"
+from = "kernel"
+to = "kernel"
+kind = "self"
+label = "queue forge_auth for the agent: a nonce and the forge servers"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+note = "No credential is carried. At most 8 outstanding per agent. The wait takes no reach permit."
+
+[[step]]
+id = "notice-poll"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "notice poll, every 5 s, on its own connection"
+status = "#746"
+evidence = "#746 · ADR-0033"
+note = "Control frames only. It never renews the claim lease; the heartbeat still does, so a wedged loop lapses."
+
+[[step]]
+id = "forge-auth"
+from = "kernel"
+to = "agentd"
+kind = "reply"
+label = "forge_auth: the nonce and the forge servers"
+status = "#746"
+evidence = "#746 · ADR-0033"
+
+[[step]]
+id = "agent-wrapped-read"
+from = "agentd"
+to = "vault"
+kind = "call"
+label = "wrapped read of its own stored token per named server; seal each wrapping token to egress"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+note = "At <kv_mount>/data/<agent_prefix>/<id>/forges/<host>, field token. The seal binds the nonce."
+
+[[step]]
+id = "forge-auth-answer"
+from = "agentd"
+to = "kernel"
+kind = "call"
+label = "forge_auth answer: per server, a sealed token, no token, or read refused"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+
+[[step]]
+id = "unanswered"
+from = "kernel"
+to = "tasker"
+kind = "reply"
+label = "refused: agent did not answer. Retry, or task another agent?"
+status = "#168"
+evidence = "#168 · ADR-0033"
+note = "After 10 s, or less when the reach deadline is short. Nothing is stored."
+
+[[step]]
 id = "reach-frame"
 from = "kernel"
 to = "egress"
@@ -113,7 +171,7 @@ label = "Reach frame: the bindings, the sealed tasker token, a deadline"
 status = "live"
 evidence = "ADR-0037 decision 7 · crates/maknae-kernel/src/reach.rs"
 test = "crates/maknae-kernel/src/reach.rs::a_parent_must_hold_each_binding_and_its_reach"
-note = "The kernel carries the tasker's token sealed and never opens it. Sub-tasks take the tasker side from the parent's reach."
+note = "The kernel carries the tasker's token sealed and never opens it. Sub-tasks take the tasker side from the parent's reach. Ruled 2026-11-26, not built (#168): the same frame carries the agent's sealed tokens."
 
 [[step]]
 id = "unwrap"
@@ -157,6 +215,25 @@ test = "crates/maknae-deputy/src/reach/drive.rs::a_token_held_past_the_deadline_
 note = "GET /repos is never called with an installation token: its permissions block reads all false (measured 2026-11-19)."
 
 [[step]]
+id = "agent-unwrap"
+from = "egress"
+to = "vault"
+kind = "call"
+label = "open the agent's seal, check the purpose, nonce and creation_path, unwrap its token"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+
+[[step]]
+id = "agent-observe"
+from = "egress"
+to = "github"
+kind = "call"
+label = "agent side: GET /repos/{base} and the head, as the machine user"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+note = "404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403 or 5xx refuses the submission."
+
+[[step]]
 id = "observations"
 from = "egress"
 to = "kernel"
@@ -164,7 +241,7 @@ kind = "reply"
 label = "observations, per binding and side"
 status = "live"
 evidence = "ADR-0037 decision 7 · crates/maknae-kernel/src/reach.rs"
-note = "Ruled 2026-11-26, not built: egress returns each observation with a copy sealed to itself, and computes the intersection (ADR-0037 decision 7)."
+note = "Ruled 2026-11-26, not built (#168): egress computes the intersection and returns it with both sides."
 
 [[step]]
 id = "queue"
@@ -175,7 +252,7 @@ label = "seal reach (tasker ∩ agent), sign the task, record it, queue it"
 status = "live"
 evidence = "ADR-0033 · ADR-0037 decision 7 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::a_person_submits_and_sees_the_task_queued"
-note = "Queued in the task store; nothing is sent to the agent. GitLab tools stay refused in tasks. Ruled 2026-11-26, not built: a stored-token agent's task is stored AwaitingReach here, signed once its reach is decided."
+note = "Queued in the task store; nothing is sent to the agent. GitLab tools stay refused in tasks. github-machine-user's reach is empty today (AtHandOut). Ruled 2026-11-26, not built (#168): observed through forge_auth, in the same Reach frame."
 
 [[step]]
 id = "echo"
@@ -185,104 +262,6 @@ kind = "reply"
 label = "echo what was bound and its reach"
 status = "live"
 evidence = "ADR-0037 decision 7 · crates/maknae-kernel/src/task.rs"
-note = "Ruled 2026-11-26, not built: for a stored-token agent it says \"awaiting the agent's reach\"; the effective reach shows in status and list once decided."
-
-[[step]]
-id = "queue-forge-auth"
-from = "kernel"
-to = "kernel"
-kind = "self"
-label = "queue forge_auth for the agent: the task and its forge servers"
-status = "decided"
-evidence = "ADR-0033 · ADR-0037 decision 7"
-note = "For an own-initiative task whose submitter holds a stored token, the submitter is asked too, for the tasker side. No credential is carried."
-
-[[step]]
-id = "notice-poll"
-from = "agentd"
-to = "kernel"
-kind = "call"
-label = "notice poll, every 5 s, on its own connection"
-status = "decided"
-evidence = "ADR-0033 · #746"
-note = "Control frames only. It never renews the claim lease; the heartbeat still does, so a wedged loop lapses."
-
-[[step]]
-id = "forge-auth"
-from = "kernel"
-to = "agentd"
-kind = "reply"
-label = "forge_auth: the task and its forge servers"
-status = "decided"
-evidence = "ADR-0033 · #746"
-
-[[step]]
-id = "agent-wrapped-read"
-from = "agentd"
-to = "vault"
-kind = "call"
-label = "wrapped read of its own stored token per named server; seal the wrapping token to egress"
-status = "decided"
-evidence = "ADR-0037 decision 7 · #168"
-note = "Its own token, stored beforehand at <kv_mount>/data/<agent_prefix>/<id>/forges/<host>, field token."
-
-[[step]]
-id = "forge-auth-answer"
-from = "agentd"
-to = "kernel"
-kind = "call"
-label = "forge_auth answer: the sealed wrapping tokens"
-status = "decided"
-evidence = "ADR-0033 · ADR-0037 decision 7 · #168"
-note = "Refused, forwarding nothing, unless a notice is outstanding: an AwaitingReach task, or a held add."
-
-[[step]]
-id = "agent-reach-frame"
-from = "kernel"
-to = "egress"
-kind = "call"
-label = "Reach frame: the agent's sealed token, the first-observed side sealed to egress"
-status = "decided"
-evidence = "ADR-0037 decision 7 · #168"
-note = "The kernel opens neither. The sealed side binds the task id and its bindings, so it cannot be altered or swapped."
-
-[[step]]
-id = "agent-unwrap"
-from = "egress"
-to = "vault"
-kind = "call"
-label = "open the seal, check the purpose and creation_path, unwrap the agent's token"
-status = "decided"
-evidence = "ADR-0037 decision 7 · #168"
-
-[[step]]
-id = "agent-observe"
-from = "egress"
-to = "github"
-kind = "call"
-label = "agent side: GET /repos/{base} and the head, as the machine user"
-status = "decided"
-evidence = "ADR-0037 decision 7 · #168"
-note = "404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403, 5xx or the deadline: the task closes NotReached (a held add is discarded)."
-
-[[step]]
-id = "agent-intersection"
-from = "egress"
-to = "kernel"
-kind = "reply"
-label = "both sides and the intersection"
-status = "decided"
-evidence = "ADR-0037 decision 7 · #168"
-
-[[step]]
-id = "sign-queue"
-from = "kernel"
-to = "kernel"
-kind = "self"
-label = "decide on the reach; sign the task with it, once; queue it"
-status = "decided"
-evidence = "ADR-0033 · ADR-0037 decision 7"
-note = "A task is never claimable before its reach is decided."
 
 [[step]]
 id = "poll"
@@ -312,7 +291,7 @@ label = "TaskClaim that finds a queued task"
 status = "live"
 evidence = "ADR-0033 · crates/maknae-kernel/src/run.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::an_agent_claims_in_fifo_order_across_taskers"
-note = "Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1). Ruled 2026-11-26, not built: claimable only once reach is decided."
+note = "Hand-out re-decides the tasker's role and the agent's taskers:, not the tasker's provider reach (ADR-0037 residual 1)."
 
 [[step]]
 id = "hand-out"
@@ -386,7 +365,7 @@ label = "/add: TaskAdd, a follow-up, while Working"
 status = "live"
 evidence = "ADR-0037 decision 2 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::add_appends_a_follow_up_to_the_running_task_only"
-note = "Refused once Reported. An /add with new bindings repeats steps 5 to 10, reach observed afresh, as a signed addendum. The agent gets it on its next heartbeat. Ruled 2026-11-26, not built: a stored-token agent's add is held through steps 13 to 21."
+note = "Refused once Reported. An /add with new bindings repeats steps 11 to 18 as a signed addendum, delivered on the next heartbeat. Ruled 2026-11-26, not built (#168): steps 5 to 10 first for a stored-token agent."
 
 [[step]]
 id = "ask"
@@ -502,7 +481,7 @@ kind = "self"
 label = "stop watch and cancel token halt the task's tool containers within N seconds"
 status = "#481"
 evidence = "#481"
-note = "Ruled 2026-11-26: conditions 1 to 5 end by construction; 6, a compromised agent, is cut off by the revoke (step 46)."
+note = "Ruled 2026-11-26: conditions 1 to 5 end by construction; 6, a compromised agent, is cut off by the revoke (step 44)."
 
 [[step]]
 id = "report"
@@ -532,7 +511,7 @@ label = "DELETE /installation/token, for a Revoke frame"
 status = "unreachable"
 evidence = "ADR-0038 decision 4 · bins/maknae-egress/src/serve.rs"
 test = "bins/maknae-egress/src/serve.rs::a_revoke_frame_opens_its_blob_and_deletes_that_token"
-note = "No kernel caller sends this until step 46 is built; an ADR-0038 as-built line follows then. The reach driver's metadata-read token is already revoked live (step 9)."
+note = "No kernel caller sends this until step 44 is built; an ADR-0038 as-built line follows then. The reach driver's metadata-read token is already revoked live (step 15)."
 [[step]]
 id = "collect"
 from = "tasker"
@@ -555,23 +534,39 @@ evidence = "crates/maknae-agent/src/tasking/book.rs"
 test = "crates/maknae-agent/src/tasking/book.rs::reports_on_open_are_marked_while_you_were_away_and_acknowledged_after_display"
 [[fragment]]
 operator = "opt"
-guard = "the agent's credential is a GitHub App"
-first = "transit-sign"
-last = "agent-side"
-
-[[fragment]]
-operator = "opt"
 guard = "a side's credential is a stored token"
 first = "queue-forge-auth"
-last = "sign-queue"
-status = "decided"
-evidence = "ADR-0037 decision 7"
+last = "forge-auth-answer"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
 
 [[fragment]]
 operator = "loop"
 guard = "every 5 s, in every state"
 first = "notice-poll"
 last = "forge-auth"
+
+[[fragment]]
+operator = "opt"
+guard = "no answer within 10 s"
+first = "unanswered"
+last = "unanswered"
+status = "#168"
+evidence = "#168 · ADR-0033"
+
+[[fragment]]
+operator = "opt"
+guard = "the agent's credential is a stored token"
+first = "agent-unwrap"
+last = "agent-observe"
+status = "#168"
+evidence = "#168 · ADR-0037 decision 7"
+
+[[fragment]]
+operator = "opt"
+guard = "the agent's credential is a GitHub App"
+first = "transit-sign"
+last = "agent-side"
 
 [[fragment]]
 operator = "loop"

@@ -9,7 +9,6 @@
 - **Amended:** 2026-11-19 by [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) (maintainer ruling): tool entries declare `binds:`; credential classes narrow from a task's bindings; the model sees a filtered view of the entries it may call; a tool entry carrying an unclaimed label is disabled. See the banners at decisions 7 and 13.
 - **Amended:** 2026-11-19 by [ADR-0038](ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md) (maintainer ruling): `minting: trust-plane` means the Egress Daemon. See decision 13.
 - **Amended:** 2026-11-25 by [#674](https://github.com/darkhonor/maknae/issues/674) PR 3a: the launch obligation's fields, grammars, drop-ins and the three command forms, per-role `Tool(...)` grants, and shapes in place of tool-aware `deny_args` matching. See the banners at decisions 6, 7 and 8.
-- **Amended:** 2026-11-26 by [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7 (maintainer ruling, [#746](https://github.com/darkhonor/maknae/issues/746)): a stored-token side is observed through `forge_auth` before the task is claimable, and the Egress Daemon computes the intersection. See decision 13.
 
 ## Context
 
@@ -189,8 +188,6 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
     **Amended 2026-11-19 ([#474](https://github.com/darkhonor/maknae/issues/474), [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7):** "the task's repositories" are the task's sealed `git` bindings, and the permission is the intersection of the tasker's reach and the agent's, observed at submission; the installation token is minted at hand-out, and each re-mint re-checks the agent's reach. A credential class's `kind` implements that reach check, and an entry whose class kind implements none is refused in tasks.
 
     **Amended 2026-11-19 by [ADR-0038](ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md) (#168):** `minting: trust-plane` is the Egress Daemon.
-
-    **Amended 2026-11-26 ([#746](https://github.com/darkhonor/maknae/issues/746), [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7, amendment 2026-11-26):** in the amendment of 2026-11-19 by ADR-0037, "observed at submission" holds for every side but a stored-token one, which is observed through `forge_auth` before the task is claimable. The Egress Daemon computes the intersection.
 
 14. **Secrets go to tools; the model gets redacted output.** Redaction prevents accidental disclosure; it is not a barrier against code that holds the credential (below).
     - A credential reaches a container only through its class's delivery, and is never placed in arguments the model writes.
