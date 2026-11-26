@@ -12,7 +12,7 @@ title = "Service Architecture"
 notation = "UML 2.5.1 deployment view"
 question = "What runs on the host, under which account, in which trust plane, and what may talk to what?"
 readers = "contributor, security assessor"
-legend = "Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon is built (#629): one instance per enrolled agent, under the agent's own account, logging in to Vault with its own AppRole and reaching maknaed only on the agent socket. Tool containers are proposed: decided by ADR-0036, not built; the CLI and the Agent Daemon launch them after a kernel decision. A direct-model interactive TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are vision."
+legend = "Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon is built (#629): one instance per enrolled agent, under the agent's own account, logging in to Vault with its own AppRole and reaching maknaed only on the agent socket. Tool containers are proposed: decided by ADR-0036, not built; the launch helper starts them for the CLI and the Agent Daemon after a kernel decision (ADR-0036, amendment 2026-11-27). A direct-model interactive TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are vision."
 baseline = "HOST SERVICES. Maknae installs from rpm, deb and the macOS .pkg as system services, each under its own account: systemd on Linux, launchd on macOS. The only containers drawn are tool invocations, decided by ADR-0036 and not yet built; the OCI Dockerfiles in packaging/oci are a deferred stub (#81). A containerized deployment (Compose or Kubernetes) is a possible future option, designed in design/container-architecture.md; this view is the baseline it would build from."
 evidence = "packaging/common/maknaed.service · packaging/common/maknae-egress.service · packaging/common/maknae-egress.socket · bins/maknae/src/enroll/agent_unit.rs · packaging/common/maknae.sysusers · packaging/macos/io.maknae.maknaed.plist · packaging/macos/io.maknae.maknae-egress.plist · packaging/isolation-contract.md · design/container-architecture.md"
 
@@ -132,7 +132,7 @@ name = "tool containers"
 plane = "runtime"
 col = 0
 trust = "untrusted"
-account = "rootless Podman"
+account = "the launch helper's runtime"
 unit = "one per invocation"
 status = "proposed"
 detail = "ADR-0036. Verified images by digest; commands from the tool's allowlist; mounts: the task's own directory in its tasker's partition (agent) or the operator's chosen workspace; network only via maknae-proxy. The only containers in the deployment."
@@ -281,13 +281,13 @@ status = "vision"
 [[flow]]
 from = "agent"
 to = "tools"
-label = "launches after a kernel decision"
+label = "launched by the launch helper after a kernel decision"
 status = "proposed"
 
 [[flow]]
 from = "cli"
 to = "tools"
-label = "launches after a kernel decision"
+label = "launched by the launch helper after a kernel decision"
 status = "proposed"
 
 [[flow]]

@@ -14,8 +14,8 @@
 <line x1="358" y1="120" x2="392" y2="120" stroke="#534AB7" stroke-width="1.4" stroke-dasharray="2 3"/>
 <text x="398" y="123" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="700" fill="#26215C">vision</text>
 <text x="58" y="140" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="700" fill="#2C2C2A">Solid = built. Dashed = proposed or post-mvp: designed, no code. Dotted = vision: NO ADR and NO code, unratified. The Agent Daemon is built (#629): one instance per enrolled agent, under the agent's own account, logging in to</text>
-<text x="58" y="153" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Vault with its own AppRole and reaching maknaed only on the agent socket. Tool containers are proposed: decided by ADR-0036, not built; the CLI and the Agent Daemon launch them after a kernel decision. A direct-model</text>
-<text x="58" y="166" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">interactive TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are vision.</text>
+<text x="58" y="153" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">Vault with its own AppRole and reaching maknaed only on the agent socket. Tool containers are proposed: decided by ADR-0036, not built; the launch helper starts them for the CLI and the Agent Daemon after a kernel decision</text>
+<text x="58" y="166" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#2C2C2A">(ADR-0036, amendment 2026-11-27). A direct-model interactive TUI, direct prompt delivery to the Egress Daemon, and shared and dedicated modes are vision.</text>
 <text x="58" y="215" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#26215C">Actors</text>
 <text x="58" y="229" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9" font-weight="400" fill="#5F5E5A">Outside the planes.</text>
 <rect x="536" y="207" width="254" height="55" rx="7" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.75"/>
@@ -101,7 +101,7 @@
 <rect x="258" y="947" width="254" height="138" rx="7" fill="#FDEEE9" stroke="#B3452F" stroke-width="0.75" stroke-dasharray="6 4"/>
 <text x="269" y="965" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#7A2415">tool containers</text>
 <text x="269" y="978" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#B3452F">«untrusted» · proposed</text>
-<text x="269" y="991" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">rootless Podman</text>
+<text x="269" y="991" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="8.5" font-weight="700" fill="#2C2C2A">the launch helper's runtime</text>
 <text x="269" y="1003" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#5F5E5A">one per invocation</text>
 <text x="269" y="1017" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">ADR-0036. Verified images by digest;</text>
 <text x="269" y="1028" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="8" font-weight="400" fill="#2C2C2A">commands from the tool's allowlist; mounts:</text>
@@ -141,7 +141,7 @@
 <path d="M 587 738 L 587 750 L 322 750 L 322 738" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
 <text x="454.15" y="762" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">unwrap (the user's wrapping token, after opening the seal)</text>
 <path d="M 663 1085 L 663 1097 L 385 1097 L 385 1085" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
-<text x="524.0" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">launches after a kernel decision</text>
+<text x="524.0" y="1109" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FBFAF7" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">launched by the launch helper after a kernel decision</text>
 <path d="M 663 262 C 663 298 663 298 663 334" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
 <text x="663.0" y="291" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">console</text>
 <path d="M 941 262 C 941 298 941 298 941 334" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
@@ -149,7 +149,7 @@
 <path d="M 587 494 C 587 552 385 552 385 611" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
 <text x="570.3734124977718" y="523" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">userpass · mints cli leaf (not requested by maknaed)</text>
 <path d="M 638 494 C 638 720 385 720 385 947" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="6 4" marker-end="url(#sa)"/>
-<text x="634.6016310691696" y="538" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">launches after a kernel decision</text>
+<text x="634.6016310691696" y="538" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">launched by the launch helper after a kernel decision</text>
 <path d="M 688 494 C 688 552 663 552 663 611" fill="none" stroke="#534AB7" stroke-width="1.1" stroke-dasharray="2 3" marker-end="url(#sa)"/>
 <text x="676.7831281974435" y="553" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="8.5" font-weight="400" fill="#5F5E5A" stroke="#FFFFFF" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round">prompt content, direct</text>
 <path d="M 739 494 C 739 552 899 552 899 611" fill="none" stroke="#534AB7" stroke-width="1.1" marker-end="url(#sa)"/>
@@ -203,5 +203,5 @@
 <text x="44" y="1397" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">makes the model call at the kernel's direction. None of its decisions ratifies tool containers, a direct-model interactive TUI, direct prompt delivery, or shared/dedicated modes; tool containers are decided by ADR-0036 (not built). The</text>
 <text x="44" y="1410" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">Agent Daemon (maknae-agentd, #629) runs one instance per enrolled agent under the agent's own account (systemd maknae-agent@&lt;id&gt;, launchd io.maknae.maknae-agentd.&lt;id&gt;), confined by its own SELinux domain or a shared AppArmor profile;</text>
 <text x="44" y="1423" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="9.5" font-weight="400" fill="#B3452F">it logs in with the agent's AppRole, has its agent leaf signed, claims kernel-signed tasks on the agent socket and works each in its tasker's partition of its home, with every request decided by maknaed.</text>
-<text x="24" y="1474" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/service-architecture.toml@b08ebb0a44 · maknae eab1fe83 · 2026-11-19</text><text x="1376" y="1474" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
+<text x="24" y="1474" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">source: design/diagrams/service-architecture.toml@bf48281b4a · maknae 10c0afc4 · 2026-11-25</text><text x="1376" y="1474" text-anchor="end" font-family="Helvetica, Arial, sans-serif" font-size="10" font-weight="400" fill="#5F5E5A">UML 2.5.1 (OMG formal/2017-12-05)</text>
 </svg>

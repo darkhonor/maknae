@@ -31,7 +31,7 @@ shade = false
 [[participant]]
 id = "model"
 label = "model"
-stereo = "«untrusted» never holds a credential"
+stereo = "«untrusted» never handed a delivered credential"
 kind = "untrusted"
 
 [[participant]]
@@ -98,9 +98,11 @@ id = "invoke"
 from = "model"
 to = "front"
 kind = "call"
-label = "invoke: entry, shape and slot values, never an option"
-status = "#479"
-evidence = "#479 · ADR-0036 decision 21"
+label = "invoke a tool by name with its arguments"
+status = "live"
+evidence = "ADR-0023 decision 4 · crates/maknae-agent/src/route.rs"
+test = "crates/maknae-agent/src/route.rs::task_agent_routes_its_agent_and_prompt_and_never_prints_the_prompt"
+note = "Live for the file tools and task_agent. A container tool's invoke carries an entry, a shape and slot values, never an option (#479, ADR-0036 decision 21)."
 
 # --- an in-kernel verb: live today -------------------------------------------
 
@@ -109,7 +111,7 @@ id = "verb"
 from = "front"
 to = "kernel"
 kind = "call"
-label = "fs.read or task_agent, citing the task"
+label = "fs.read or task_agent, citing the task when there is one"
 status = "live"
 evidence = "ADR-0023 decision 4 · crates/maknae-agent/src/route.rs"
 test = "crates/maknae-agent/src/route.rs::task_agent_routes_its_agent_and_prompt_and_never_prints_the_prompt"
@@ -176,6 +178,15 @@ label = "in a task: the shape's forge needs lie within the task's reach"
 status = "#168"
 evidence = "#168 · ADR-0037 decision 7"
 note = "The tool-call path stamps reach.git.base and reach.git.head on the request; nothing reads them. #168 PR C adds the refusal."
+
+[[step]]
+id = "bundle-check"
+from = "kernel"
+to = "kernel"
+kind = "self"
+label = "the workspace's credential bundle ∩ what the subject holds"
+status = "#479"
+evidence = "#479 · ADR-0036 decision 13"
 
 [[step]]
 id = "workspace"
