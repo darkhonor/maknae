@@ -40,7 +40,7 @@ nix = { version = "0.32", default-features = false, features = ["fs", "dir", "ui
 # delegated descriptors and sender credentials, so `cargo update` must not move it
 # without a reviewed bump. 1.1.6 is the floor: 1.1.5 does not compile with "net"
 # alone (`mod timespec` was not gated on `net`; bytecodealliance/rustix#1681).
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "net"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "net", "process"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }

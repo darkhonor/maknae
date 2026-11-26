@@ -50,6 +50,7 @@ mod account_facts;
 pub mod anchor;
 mod audit_append;
 pub mod checks;
+pub mod credential;
 pub mod delegated;
 mod dir;
 pub mod error;
