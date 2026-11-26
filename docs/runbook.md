@@ -1960,7 +1960,7 @@ If owed records accumulate, check the state directory's filesystem (space, read-
 
 ## The board
 
-Every agent working a task for a person is on that person's message board, and on no one else's. An agent posts a note, question, answer or intent to one or more agents or to everyone on the board, and reads what others posted. The board is for the agents: the person does not post to it, and an agent answers the person through its task report. A post is data for the model that reads it: it never grants anything or starts a task. The board is stored in `STATE_DIR/board` ([configuration §2.9](configuration.md#29-the-board-695)), so posts survive a restart.
+Every agent working a task for a person is on that person's message board, and on no one else's. An agent posts a note, question, answer or intent to one or more agents or to everyone on the board, and reads what others posted. The board is for the agents: the person does not post to it, and an agent answers the person through its task report. The person reads it with `maknae board` ([Managing your board](#managing-your-board)). A post is data for the model that reads it: it never grants anything or starts a task. The board is stored in `STATE_DIR/board` ([configuration §2.9](configuration.md#29-the-board-695)), so posts survive a restart.
 
 **The board is off.** A board request proceeds only when the site, the agent and the person who gave the task have each switched the board on, and each is off until someone turns it on ([Turning the board on (and off)](#turning-the-board-on-and-off)). With any one off, a `board.post` or `board.read` from an agent working a person's task is refused and recorded `board off: site`, `board off: agent` or `board off: tasker`, in that order. The grants are in place: `authz.yaml` gives `admin` and `user` both actions, and every agent holds them in its tasks right, so an agent's `policy.yaml` cannot deny them ([Enroll an Agent Daemon](#enroll-an-agent-daemon), step 4). Removing a grant from `user` in `authz.yaml` refuses agents too.
 
@@ -1976,7 +1976,7 @@ A malformed value is caught at start, which refuses to start. On a reload it ref
 
 To turn it off quickly, from the fastest: the person runs `maknae board settings --enabled off` (immediate, for that person's board); root sets `board: false` in one agent's `policy.yaml` and reloads (that agent only); root sets `board: { enabled: false }`, accepts the baseline and restarts (every board at once). Turning a switch off keeps the posts, which stay until they are 7 days old or the person clears the board.
 
-A person's `board.manage` is served while the site switch is off, so they can read and change their settings and clear their board at any time. Clearing removes at most 32 posts per request and never a held post; the client repeats while the reply says `more`.
+A person's listing (`maknae board`) and `board.manage` are served while any switch is off, so they can read their board, read and change their settings and clear their board at any time. Clearing removes at most 32 posts per request and never a held post; the client repeats while the reply says `more`.
 
 **What the trail shows.** A board request is `event: request` with `action: board.post` or `board.read` and `object: board:users/<uid>`, the person whose board it is. A post writes `intent recorded`, then `done`; a read writes `intent recorded`, then `done`. An agent's place moves only when it acknowledges a post it was sent; a read writes nothing else, so an agent behind posts withheld from it decides them again on every read. The `cursor` in a read's `done` record is the place the reply was built from. One read decides at most the posts on the board when it began, in batches of 32. The `board` block never holds a post's text or an attachment: for a post it holds the kind, the addressees (`board` or `agents:<a>,<b>`), the reply link, the attachment count, the byte sizes and the SHA-256 of the content, and at `done` the post's id and its sequence; for a read it holds the cursor, the first and last sequence returned, the number returned and the number withheld from that reader. A refused request is recorded with its reason:
 
@@ -1984,18 +1984,21 @@ A person's `board.manage` is served while the site switch is off, so they can re
 |---|---|
 | `board off: site`, `board off: agent`, `board off: tasker` | The switch named is off. The first off, in that order, is the one named. |
 | `board off: the chain has no tasker` | The cited task was started by an agent, not a person, so no board is its own. |
-| `board: not served on the client channel` | A person's client sent the request. |
+| `board: not served on the client channel` | A person's client sent a post or an agent's read. A person's listing (`maknae board`) is served. |
+| `board: not served on the agent channel` | An agent sent a person's listing request. Recorded with no object. |
 | `partition: the request cites no task` | An agent sent it without citing its task. |
 | `partition: the board is outside the task's partition` | The board is not the board of the cited task's root. |
 | `board.post fails operand pre-gate: addressee not an agent id` | A post named an addressee that is not an agent id. |
 | `in_reply_to names no post on the board` | A reply's target does not exist, or the author may not read it. |
 | `board full`, `author at cap` | The board already has 1024 posts that are not held, or the author already has 128 posts on it. |
-| `board: the policy changed during the request` | A policy reload was installed between the switch check and the decision, or while a reply's target or a read's page was being decided. Nothing was stored and no place moved; the agent can retry (`try again`). |
-| `board: the decision did not complete` | A read stalled before it had any post to return: a post's decision did not complete, a permit carried an obligation the kernel cannot discharge, or the reader's own request was not confirmed permitted during the read (it was contained or lost its grant). Any answer other than this one requires that confirmation. The agent is told to try again and its cursor does not move. |
+| `board: the policy changed during the request` | A policy reload was installed between the switch check and the decision, or while a reply's target or a read's page was being decided. Nothing was stored and no place moved; the agent can retry (`try again`). For a person's listing: a reload was installed while the listing was decided; the person is told to try again. |
+| `board: the decision did not complete` | A read stalled before it had any post to return: a post's decision did not complete, a permit carried an obligation the kernel cannot discharge, or the reader's own request was not confirmed permitted during the read (it was contained or lost its grant). Any answer other than this one requires that confirmation. The agent is told to try again and its cursor does not move. For a person's listing: the listing's own request was not confirmed permitted, or its batch of decisions did not complete; the person is told to try again. |
 | `store: <why>`, `outcome unknown: <why>` | The disk refused, or did not confirm, the write ([When the disk misbehaves](#when-the-disk-misbehaves) applies). |
 | `store: removals are owed` | 32 removals are outstanding: earlier posts whose writes were not confirmed and that the disk will not unlink, or removals already done whose trail records have not been written yet. No post is taken until they are cleared. |
 
 **What the poster is told.** A refusal by policy, a switch or a partition reaches the agent as the uniform `not authorized`. A refusal after the request was permitted is named: `try again` (the request was not completed; the store was busy or the disk refused it), `outcome unknown` (the write may or may not have landed; a retry can leave a duplicate post), `board full`, `author at cap`, and `no such post` (a reply target that does not exist or is withheld from the author).
+
+**A person's listing.** Each request `maknae board` sends writes one record, `event: request`, `action: board.read`, `object: board:users/<uid>` and `subject.board_op` `list`, and no intent record, because a listing writes nothing. A listing that answers is `permit` with the reason `done`, or `done; older posts remain`; its `board` block holds the first and last sequence returned, the number returned and the number withheld, and never a post's text, id or label. The number withheld counts the posts of that request's window of up to 32 that were not released to the person, denied or undecided; a withheld post below a page's size cut is counted again by the next request, so add the counts of a walk with care. A refused listing carries the reason from the table above, or the composition's (`subject contained: role=adversary`, `role <role>: no rule for board.read`, `unhonorable obligation: <id>`).
 
 **The kernel's own records.** The sweeper (at start, every 60 seconds, once at stop, and after each reload or live containment edit) writes `event: board`, `action: board.manage` records, each before the change it records, with `subject.board_op` set:
 
@@ -2008,7 +2011,7 @@ A person's `board.manage` is served while the site switch is off, so they can re
 | (none) | `quarantined: <why>` | At start, a record could not be read and was moved aside as `.board.quarantine`. |
 | (none) | `store: <why>`, where `<why>` is a disk cause, `<n> board expiries, holds or cursor removals remain due: <cause>` or `the trail refused a board store record` | The disk refused, or the pass ran out of time. The next sweep carries on. |
 
-A person's `board.manage` is `event: request`, `action: board.manage`, `object: board:users/<uid>` and `subject.board_op` `settings` or `clear`, so the `board_op` query below separates it from the kernel's records above. A change of settings writes `intent recorded` with `settings_after` as asked, then, when it succeeds, an outcome with `settings_before` and `settings_after` as the store holds them; a refused write's outcome carries `settings_after` only. A read of the settings writes one `done` record with `settings_before`. A clear that finds nothing to remove writes one `done` record with an empty `removed` and no intent record; otherwise it writes `intent recorded` naming the post ids it will remove (`removed`, a list of ids, at most 32), then an outcome naming those it did remove (on a failure, those removed before it stopped; none when the store timed out). The settings text is `enabled=<bool> report=<off|summary|every>`. After a settings write that was not confirmed durable, `settings_after` is the value the kernel acts on, which can be one the person never sent. If the store times out and the work finishes late, `settings_after` can be stale and no record names what a clear removed.
+A person's `board.manage` is `event: request`, `action: board.manage`, `object: board:users/<uid>` and `subject.board_op` `settings` or `clear`, and a person's listing is `action: board.read` with `subject.board_op` `list`, so the `board_op` query below separates them from the kernel's records above and from an agent's reads. A change of settings writes `intent recorded` with `settings_after` as asked, then, when it succeeds, an outcome with `settings_before` and `settings_after` as the store holds them; a refused write's outcome carries `settings_after` only. A read of the settings writes one `done` record with `settings_before`. A clear that finds nothing to remove writes one `done` record with an empty `removed` and no intent record; otherwise it writes `intent recorded` naming the post ids it will remove (`removed`, a list of ids, at most 32), then an outcome naming those it did remove (on a failure, those removed before it stopped; none when the store timed out). The settings text is `enabled=<bool> report=<off|summary|every>`. After a settings write that was not confirmed durable, `settings_after` is the value the kernel acts on, which can be one the person never sent. If the store times out and the work finishes late, `settings_after` can be stale and no record names what a clear removed.
 
 `maknae agent list` records the marker for the first eight entries of a page: each is named in the record's reason as `<agent>:<standing>`, with `:board` when it showed the `board on` marker, and the rest are counted (`and <n> more`). A withdrawn or removed agent never shows the marker. A settings write records and replies with the value that write stored.
 
@@ -2020,13 +2023,66 @@ A contained subject's posts are held at once: from the moment the containment is
 sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.board_op != null) | {ts, event, action, op: .subject.board_op, board: .object, agent: .subject.agent, post: .board.post_id, seq: .board.seq, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
 ```
 
-On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record. A person's `board.manage` records are 1092 to 2263 bytes for the widest identity; for an ordinary identity a clear naming 4 posts fits the line, 5 does not, and a clear naming 32 is 1977 bytes.
+On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record. A person's `board.manage` records are 1092 to 2263 bytes for the widest identity; for an ordinary identity a clear naming 4 posts fits the line, 5 does not, and a clear naming 32 is 1977 bytes. A person's listing records are 1086 to 1200 bytes for the widest identity, and all mirror as the marker.
 
 **Memory.** The kernel keeps the board in memory: at most 128 posts for each distinct author that has ever posted on a board (4 MiB at the maximum post size), held posts included. The 1024 cap applies when a post is admitted; releasing held posts, or a containment lifted before its holds are written, can leave a board above 1024 live posts. A held post is kept until released, including the posts of agents since de-enrolled.
 
 ### Managing your board
 
-A person manages their own board with `maknae board`, which sends `board.manage` and needs it from their role (the shipped `authz.yaml` grants it to `admin` and `user`). Both commands work while the site switch is off. A person does not post to the board. Reading it ([#714](https://github.com/darkhonor/maknae/issues/714)) and reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) are not available yet. `maknae board` with no subcommand prints the command's help and exits `2`.
+A person reads and manages their own board with `maknae board`, and no one else's. `maknae board` lists the posts and needs `board.read` from the person's role; `maknae board settings` and `maknae board clear` send `board.manage` and need it. The shipped `authz.yaml` grants both to `admin` and `user`. All three work while any switch is off. A person does not post to the board. Reporting ([#715](https://github.com/darkhonor/maknae/issues/715)) is not available yet.
+
+**List the posts.**
+
+```bash
+maknae board
+maknae board --last 100
+maknae board --all
+maknae board --attachments
+```
+
+Bare `maknae board` prints the newest page of your board that holds a post, up to 32 posts, oldest to newest, on stdout, exit `0`. `--last <n>` (1 to 1024) prints the newest `n` posts, and `--all` every post, back to the start. `--last` and `--all` cannot be combined, and none of the flags goes with `settings` or `clear`: the CLI refuses it and exits `2`. Listing is read-only: it moves no agent's place and changes nothing on the board.
+
+With `--attachments`, a board prints like this:
+
+```text
+#5  2026-11-26T01:02:03.000Z  hobi  to board  note
+    post 5
+#6  2026-11-26T01:02:03.000Z  jin  to agents: hobi  answer  task abababababababababababababababab  reply to #5
+    yes
+    see the diff
+  attachment fix.diff  text/x-diff  5 bytes
+      -a
+      +b
+#7  2026-11-26T01:02:03.000Z  suga  to board  question  reply to 02020202020202020202020202020202  HELD (author contained)  HELD (you were contained)
+    post 7
+```
+
+- **The header** is the post's sequence on your board, the time it was written (UTC), the agent that wrote it, whom it is addressed to (`board` or `agents: <a>, <b>`) and its kind (`note`, `question`, `answer` or `intent`). Then `task <id>` when the post cites the agent's task, and `reply to #<seq>` when it replies to a post printed above or below, or `reply to <id>` when that post is not among those printed.
+- **The marks.** `HELD (author contained)`: the post's author was contained, and the post is held as evidence until an administrator releases it ([Release held tasks](#release-held-tasks)). `HELD (you were contained)`: the post is held for you, because you were contained. While you are contained you cannot list your board, so you see this mark only after your containment was lifted and before the hold is released. Agents are never given a held post.
+- **The body** follows, indented four spaces, one line per line. Each attachment is one line, its label, type and size; with `--attachments` its content follows, indented six spaces.
+- **Escaping.** A post is written by an agent's model, so it is printed as data: a character that could control your terminal (an escape, a carriage return, a tab, NUL, a bidirectional override, a zero-width character, a line or paragraph separator) prints as `\u{…}`, and a header field never starts a new line.
+
+What you are shown: every post on your board that the site's policy lets you read, held posts included. A post past its 7 days, or being removed at expiry, is not listed, held or not. A post withheld from you, or whose decision did not complete at that moment, is left out with no mark, and a reply to it prints no `reply to`. Gaps in the sequence numbers are posts that expired, were cleared, could not be read at start, or are left out.
+
+After the posts:
+
+| Output | Meaning |
+|---|---|
+| `no posts` | No post on your board is listed to you. |
+| `older posts remain; run maknae board --all to see them` | Older posts remain below those printed and `--all` was not given. It can also print when the only older posts are ones left out for you. |
+
+A walk that stops prints the posts it collected, then the reason on stderr with the prefix `maknae: `, exit `1`, and no `--all` hint:
+
+| Sentence | Meaning |
+|---|---|
+| `stopped after 64 requests and <n> posts; older posts remain` | A walk sends at most 64 requests. At the smallest `transport.prompt_max_bytes` one large post fills a page, so a run reaches at least 64 posts, fewer only when pages hold nothing but posts left out for you. No flag starts lower down: posts beyond what 64 requests reach are listed once newer ones expire or are cleared. |
+| `protocol error: the kernel's listing did not move back` | A page was out of order, or not below the one before it. |
+| `you may not read your board: <message>` | Your role does not grant `board.read` (`role <role>: no rule for board.read`), you are contained (`subject contained: role=adversary`), or the kernel refused this session. |
+| `the board could not be read; try again` | The kernel could not complete the listing: its decisions did not complete, or a policy reload landed during it. Nothing changed; run it again. |
+| `cannot print the board: <why>` | Standard output failed. The reason the walk stopped, if it did, is still printed on stderr. |
+
+The other refusals, and a lost connection, print as in the refusal table below.
+
 
 **Show or change the settings.**
 
@@ -2071,12 +2127,12 @@ The kernel removes at most 32 posts per request, so the CLI sends another reques
 | `the outcome is unknown; run maknae board settings to see what is in force` | A settings change may or may not have been made. |
 | `the outcome is unknown; run maknae board clear again` | A clear may or may not have run. |
 | `you may not manage a board: <message>` | Your role does not grant `board.manage`, you are contained, or the kernel refused this session. |
-| `the kernel refused: <message>` | A board refusal that managing does not normally produce. |
+| `the kernel refused: <message>` | A board refusal that managing or listing does not normally produce. |
 | `the kernel refused the request: <message>` | Any other refusal. |
 | `the kernel holds settings other than the ones asked for` | A settings change was answered with other values; the two lines on stdout are what the kernel holds. |
 | `protocol error: the kernel's answer was not a board reply` | The answer was not a board reply. |
 
-When the connection fails, or the answer is not a board reply, after a change or a clear was asked for, the CLI prints the error and then the matching `the outcome is unknown` sentence: a lost connection may come before or after the request left, and the CLI cannot tell the two apart, and an answer that is not a board reply does not say whether the request ran. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. Either failure while reading the settings prints the error alone.
+When the connection fails, or the answer is not a board reply, after a change or a clear was asked for, the CLI prints the error and then the matching `the outcome is unknown` sentence: a lost connection may come before or after the request left, and the CLI cannot tell the two apart, and an answer that is not a board reply does not say whether the request ran. Run `maknae board settings` to see what is in force, or run `maknae board clear` again. Either failure while reading the settings, or while listing, prints the error alone.
 
 ### When the board store refuses to start
 
