@@ -857,7 +857,7 @@ sudo restorecon -Rv /etc/maknae
 
 ### 6. Store your key and choose your provider
 
-As yourself, not root, store your own API key in Vault under your own login: [first-provider step U2](first-provider.md#u2-store-your-key-in-vault). Then write `~/.maknae/providers.yaml`, naming the provider and model from step 5, the key's `subpath` and `field`, and the model's `context_tokens`: [first-provider step U3](first-provider.md#u3-choose-your-provider).
+As yourself, not root, store your own API key in Vault under your own login: [first-provider step U2](first-provider.md#u2-store-your-credentials-in-vault). Then write `~/.maknae/providers.yaml`, naming the provider and model from step 5, the key's `subpath` and `field`, and the model's `context_tokens`: [first-provider step U3](first-provider.md#u3-choose-your-provider).
 
 - **The key never goes in a file on this host,** and never in `providers.yaml`, which names only where it is in Vault.
 - **Use the model's documented window** for `context_tokens`. `output_tokens` is optional; it rides on every prompt, and the intent record carries it (`docs/configuration.md` §6.1.1).
@@ -1124,7 +1124,7 @@ maknae logout                                   # revokes your Vault token and e
 
 `/etc/maknae/egress-bounds.yaml` is enroll's; with no providers authorized it is not read, so it can stay.
 
-**Retiring your key.** You delete it yourself, with your own login: the `maknae-user` policy grants `delete` on your own `metadata/` path (`deploy/vault-pki/main.tf`), and deleting the metadata removes every version. Get a token as in [first-provider step U2](first-provider.md#u2-store-your-key-in-vault), with the same `VAULT_ADDR` and `VAULT_CACERT`, then paste it at the prompt. This form is not yet measured:
+**Retiring your key.** You delete it yourself, with your own login: the `maknae-user` policy grants `delete` on your own `metadata/` path (`deploy/vault-pki/main.tf`), and deleting the metadata removes every version. Get a token as in [first-provider step U2](first-provider.md#u2-store-your-credentials-in-vault), with the same `VAULT_ADDR` and `VAULT_CACERT`, then paste it at the prompt. This form is not yet measured:
 
 ```bash
 read -rsp "Maknae user token: " VT && echo && VAULT_TOKEN="$VT" vault delete <kv_mount>/metadata/<user_prefix>/<username>/<subpath>; unset VT
@@ -1767,7 +1767,7 @@ The Egress Daemon can mint short-lived GitHub App installation tokens for an age
 
 ## Store your forge login
 
-A task bound to a GitHub forge is checked against GitHub as you, at submission: what you may do on each bound repository, intersected with what the agent may do, is sealed into the task as its reach ([Task an agent](#task-an-agent)). Your client needs a token for that check, and it reads it from your own Vault subtree, never from `gh`. Store it once per forge, after `maknae login`:
+A task bound to a GitHub forge is checked against GitHub as you, at submission: what you may do on each bound repository, intersected with what the agent may do, is sealed into the task as its reach ([Task an agent](#task-an-agent)). Your client needs a token for that check, and it reads it from your own Vault subtree, never from `gh`. Store it once per forge, after `maknae login`. First-time setup stores it with your provider key: [first-provider U2](first-provider.md#u2-store-your-credentials-in-vault). Or:
 
 ```bash
 maknae forge login github.com

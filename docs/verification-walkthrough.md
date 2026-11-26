@@ -29,7 +29,7 @@ Controls are cited two ways. A pair such as `cli_b × key_a` is a cell of the is
 - Vault userpass users with a password set ([step 1](first-provider.md#1-create-the-user-in-vault));
 - bound in `/etc/maknae/bindings.yaml` to a role that `/etc/maknae/authz.yaml` grants `session.prompt` and `provider:openai` (step 4a, part 3);
 - logged in to Vault with `maknae login` ([U1](first-provider.md#u1-log-in));
-- holding their own key at subpath `openai`, field `api_key` ([U2](first-provider.md#u2-store-your-key-in-vault));
+- holding their own key at subpath `openai`, field `api_key` ([U2](first-provider.md#u2-store-your-credentials-in-vault));
 - holding their own `~/.maknae/providers.yaml` with one entry for `openai` and `gpt-5.6-luna` ([U3](first-provider.md#u3-choose-your-provider)).
 
 Below, `<A>` and `<B>` are their account names. `<kv>` is the KV v2 mount and `<prefix>` the user prefix (enroll's defaults: `maknae-kv` and `maknae/users`).
@@ -45,7 +45,7 @@ export VAULT_ADDR=https://<vault-host>:8200        # vault.addr from ~/.maknae/m
 export VAULT_CACERT=~/.maknae/tls/vault-ca.crt
 ```
 
-Get a user token without replacing any token the `vault` CLI already holds, as in [U2](first-provider.md#u2-store-your-key-in-vault):
+Get a user token without replacing any token the `vault` CLI already holds, as in [U2](first-provider.md#u2-store-your-credentials-in-vault):
 
 ```bash
 vault login -method=userpass -path=maknae-userpass -token-only username=<user>
