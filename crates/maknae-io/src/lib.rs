@@ -50,6 +50,7 @@ mod account_facts;
 pub mod anchor;
 mod audit_append;
 pub mod checks;
+pub mod credential;
 mod credential_io;
 pub use credential_io::deny_core_dumps;
 pub mod delegated;

@@ -47,6 +47,8 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 maknae-sys = { path = "../maknae-sys" }
 
 [dev-dependencies]
+# #751: the compile-fail doctest that proves DeliveredCredential does not serialize.
+serde_json = "1"
 # Every fixture needs a private, mode-controlled directory tree; $TMPDIR is 1777.
 tempfile = "3"
 
