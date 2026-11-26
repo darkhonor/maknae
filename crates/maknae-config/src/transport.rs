@@ -57,6 +57,9 @@ pub const CONTAINMENT_REPLY_STAGES: u64 = 10;
 /// The bounded stages an agent list passes through after the session checks: the
 /// page's decisions (at most two decision bounds) and the outcome append.
 pub const AGENT_LIST_REPLY_STAGES: u64 = 3;
+/// The bounded stage a person's counted reply passes through after its outcome append: the
+/// board's unseen count, one decision batch.
+pub const BOARD_UNSEEN_REPLY_STAGES: u64 = 1;
 /// The bounded stages `admin.baseline.accept` passes through in sequence.
 pub const BASELINE_ACCEPT_REPLY_STAGES: u64 = 11;
 /// The bounded stages one held task's release passes through: the reload turn, the

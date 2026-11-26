@@ -1330,6 +1330,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq,
             au3_1: &au3_1,
+            unseen: std::sync::Mutex::new(unseen_count(
+                &request.verb,
+                (session.agent(), peer_uid),
+                &agents,
+                Asking {
+                    authorizer: &authorizer,
+                    live: &live,
+                    timeout: authz_decide_timeout,
+                    lane,
+                    stamp: &stamp,
+                },
+            )),
         };
         serve_conversation_verb(
             &mut stream,
@@ -1362,6 +1374,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq,
             au3_1: &au3_1,
+            unseen: std::sync::Mutex::new(unseen_count(
+                &request.verb,
+                (session.agent(), peer_uid),
+                &agents,
+                Asking {
+                    authorizer: &authorizer,
+                    live: &live,
+                    timeout: authz_decide_timeout,
+                    lane,
+                    stamp: &stamp,
+                },
+            )),
         };
         let tasks = TaskCtx {
             agents: &agents,
@@ -1400,6 +1424,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq,
             au3_1: &au3_1,
+            unseen: std::sync::Mutex::new(None),
         };
         serve_board_verb(
             &mut stream,
@@ -3127,6 +3152,41 @@ struct Trail<'a, E> {
     session_id: u64,
     seq: &'a Seq,
     au3_1: &'a serde_json::Value,
+    unseen: std::sync::Mutex<Option<Pending<'a>>>,
+}
+
+type Pending<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<maknae_proto::BoardUnseen>> + Send + 'a>,
+>;
+
+/// The caller's unseen count for a reply to `verb`, computed only when awaited.
+fn unseen_count<'a, P: Authorizer + Send + Sync + 'static>(
+    verb: &Verb,
+    (channel_agent, uid): (Option<&maknae_config::AgentId>, u32),
+    agents: &'a AgentAdmission,
+    a: Asking<'a, P>,
+) -> Option<Pending<'a>> {
+    use crate::board_verbs as bv;
+    if !bv::counts(verb, channel_agent) {
+        return None;
+    }
+    let listing = Verb::BoardList {
+        before: None,
+        new: true,
+    };
+    let read = build_authz_request(&listing, uid, None, a.lane, None, None, a.stamp);
+    let (authorizer, live, timeout) = (a.authorizer, a.live, a.timeout);
+    Some(Box::pin(async move {
+        let d = bv::Deciding {
+            authorizer,
+            live,
+            generation: live.generation(),
+            timeout,
+            request: &read,
+        };
+        let key = crate::board_store::BoardKey(uid);
+        bv::unseen(&agents.board, key, &*agents.view, &d).await
+    }))
 }
 
 impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
@@ -3264,7 +3324,11 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         if !may_respond(self.record_bounded(outcome).await) {
             return false;
         }
-        let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), catalog_digest);
+        let mut response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), catalog_digest);
+        let pending = self.unseen.lock().ok().and_then(|mut p| p.take());
+        if let Some(count) = pending {
+            response.board_unseen = count.await;
+        }
         match encode_reply(&response) {
             Ok(bytes) => {
                 write_frame_bounded(
@@ -30798,6 +30862,14 @@ mod task_sweep_tests {
             maknae_config::AGENT_LIST_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
         );
         assert!(2 * AUTHZ_DECIDE_TIMEOUT + AUDIT_APPEND_TIMEOUT <= stages);
+    }
+
+    #[test]
+    fn the_clients_wait_covers_the_unseen_count() {
+        let stages = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
+        assert!(AUTHZ_DECIDE_TIMEOUT <= stages);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The board verbs (#695): the switch gate, the per-post decision and the page walk.
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use maknae_audit_append::{AuditRecord, BoardAudit};
@@ -11,7 +11,7 @@ use maknae_proto::{
 };
 use maknae_security::{AttrValue, Attributes, Authorizer, Decision, Verdict};
 
-use crate::blocking_guard::{admit_blocking, Offload};
+use crate::blocking_guard::{admit_blocking, BlockingBreaker, Offload};
 use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore, Window};
 use crate::board_store::{BoardKey, HeldFor, LabelValue, Report, Settings, Stored};
 use crate::boot::BootConfig;
@@ -249,6 +249,7 @@ pub(crate) async fn decide_posts<P: Authorizer + Send + Sync + 'static>(
         };
     }
     match decide_batch(
+        &posts_guard(),
         authorizer,
         live,
         admitted_generation,
@@ -278,6 +279,7 @@ pub(crate) async fn base_holds<P: Authorizer + Send + Sync + 'static>(
     base: &maknae_security::Request,
 ) -> bool {
     decide_batch(
+        &posts_guard(),
         authorizer,
         live,
         admitted_generation,
@@ -289,10 +291,59 @@ pub(crate) async fn base_holds<P: Authorizer + Send + Sync + 'static>(
     .is_some()
 }
 
+type Breaker = tokio::sync::Mutex<BlockingBreaker>;
+
+/// A breaker, and the surface its trip is logged as.
+pub(crate) struct Guard {
+    pub breaker: Arc<Breaker>,
+    pub label: &'static str,
+}
+
+fn posts_guard() -> Guard {
+    Guard {
+        breaker: crate::run::authz_decide_breaker(),
+        label: "board post decision",
+    }
+}
+
+static COUNT_BREAKER: OnceLock<Arc<Breaker>> = OnceLock::new();
+
+pub(crate) fn count_breaker() -> Arc<Breaker> {
+    Arc::clone(COUNT_BREAKER.get_or_init(|| Arc::new(Default::default())))
+}
+
+/// The unseen count's own breaker: a count that times out trips no other decision.
+pub(crate) fn count_guard() -> Guard {
+    Guard {
+        breaker: count_breaker(),
+        label: "board unseen count",
+    }
+}
+
+/// `d.request` decided again with `asked` in one batch under `guard`; an empty `asked`
+/// decides the request alone.
+async fn decided<P: Authorizer + Send + Sync + 'static>(
+    guard: &Guard,
+    d: &Deciding<'_, P>,
+    asked: Vec<maknae_security::Request>,
+) -> Option<Vec<PostVerdict>> {
+    decide_batch(
+        guard,
+        d.authorizer,
+        d.live,
+        d.generation,
+        d.timeout,
+        d.request,
+        asked,
+    )
+    .await
+}
+
 /// The posts' verdicts, or `None` when `base` is not permitted again, the batch did not
 /// complete, or the live values were replaced while it ran. `guarded_decide_cited_all`
 /// answers one verdict per request.
 async fn decide_batch<P: Authorizer + Send + Sync + 'static>(
+    guard: &Guard,
     authorizer: &Arc<P>,
     live: &Arc<crate::live::LiveConfig>,
     admitted_generation: u64,
@@ -305,9 +356,8 @@ async fn decide_batch<P: Authorizer + Send + Sync + 'static>(
     batch.push(base.clone());
     batch.extend(requests);
     let (a, live) = (Arc::clone(authorizer), Arc::clone(live));
-    let breaker = crate::run::authz_decide_breaker();
     let decided: Result<_, Offload> =
-        admit_blocking(&breaker, timeout, "board post decision", move || {
+        admit_blocking(&guard.breaker, timeout, guard.label, move || {
             let all = maknae_security::guarded_decide_cited_all(&*a, &batch);
             (all, live.generation())
         })
@@ -828,27 +878,75 @@ pub(crate) async fn list_page<P: Authorizer + Send + Sync + 'static>(
         .chain(&w.targets)
         .map(|s| post_request(d.request, key, s))
         .collect();
-    let verdicts = if asked.is_empty() {
-        if !base_holds(d.authorizer, d.live, d.generation, d.timeout, d.request).await {
-            return None;
-        }
-        Vec::new()
-    } else {
-        let decided = decide_posts(
-            d.authorizer,
-            d.live,
-            d.generation,
-            d.timeout,
-            d.request,
-            asked,
-        )
-        .await;
-        if !decided.confirmed {
-            return None;
-        }
-        decided.verdicts
-    };
+    let verdicts = decided(&posts_guard(), d, asked).await?;
     paged(w, &verdicts, budget).ok()
+}
+
+/// Whether a reply to `verb` carries the caller's unseen count: a request a person types,
+/// on the client channel.
+pub(crate) fn counts(verb: &maknae_proto::Verb, channel_agent: Option<&AgentId>) -> bool {
+    channel_agent.is_none() && maknae_proto::carries_board_unseen(verb)
+}
+
+/// One count before its final check: the view it was read on, the counted posts released
+/// to the person, and whether listable posts lie beyond them.
+pub(crate) struct Counted {
+    pub key: BoardKey,
+    pub installed: (Load, u64),
+    pub permitted: Vec<u64>,
+    pub more: bool,
+}
+
+/// How many posts above the person's seen mark on `key`'s board they may see, decided as the
+/// listing above the mark decides them; `None` when reporting is off or the count fails.
+pub(crate) async fn unseen<P: Authorizer + Send + Sync + 'static>(
+    store: &BoardStore,
+    key: BoardKey,
+    view: &dyn EnrollmentView,
+    d: &Deciding<'_, P>,
+) -> Option<maknae_proto::BoardUnseen> {
+    if store.settings(key).report == Report::Off {
+        return None;
+    }
+    let installed = (view.load(), view.generation());
+    let w = store.listing(key, None, BOARD_READ_PAGE_POSTS, view, true);
+    let asked = w
+        .posts
+        .iter()
+        .map(|l| post_request(d.request, key, &l.stored))
+        .collect();
+    let verdicts = decided(&count_guard(), d, asked).await?;
+    let permitted = w
+        .posts
+        .iter()
+        .zip(verdicts)
+        .filter(|(_, v)| *v == PostVerdict::Permit)
+        .map(|(l, _)| l.stored.seq)
+        .collect();
+    let counted = Counted {
+        key,
+        installed,
+        permitted,
+        more: w.more,
+    };
+    confirm_unseen(store, view, &counted)
+}
+
+/// The count `c` once its posts are confirmed against the live board under the memory lock:
+/// `None` when the view changed, `Over` when more remain, else the posts still listable.
+pub(crate) fn confirm_unseen(
+    store: &BoardStore,
+    view: &dyn EnrollmentView,
+    c: &Counted,
+) -> Option<maknae_proto::BoardUnseen> {
+    let live = store.confirm_listing(c.key, (&c.installed.0, c.installed.1), view, &c.permitted)?;
+    if c.more {
+        return Some(maknae_proto::BoardUnseen::Over);
+    }
+    u8::try_from(live.len())
+        .ok()
+        .filter(|n| *n <= maknae_proto::BOARD_UNSEEN_MAX)
+        .map(maknae_proto::BoardUnseen::Exact)
 }
 
 /// SHA-256 of the post's canonical content, 64 lowercase hex.
@@ -2122,6 +2220,156 @@ mod tests {
         assert!(none.verdicts.is_empty(), "an empty batch permits nothing");
         assert!(!none.confirmed, "and confirms nothing");
         assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn counts_needs_a_counted_verb_on_the_client_channel() {
+        use maknae_proto::{TaskId, TaskRef, Verb};
+        let status = Verb::TaskStatus {
+            task: TaskRef::from_id(&TaskId([3; 16])),
+        };
+        let list = Verb::TaskList {
+            agent: "hobi".into(),
+            after: None,
+        };
+        let session = Verb::SessionNew {
+            cwd: "/p".into(),
+            sensitive: vec![],
+        };
+        let hobi = AgentId::parse("hobi").unwrap();
+        assert!(counts(&status, None));
+        assert!(counts(&session, None));
+        assert!(!counts(&status, Some(&hobi)));
+        assert!(!counts(&session, Some(&hobi)));
+        assert!(!counts(&list, None));
+    }
+
+    #[test]
+    fn confirm_unseen_drops_what_left_and_refuses_a_changed_load() {
+        use maknae_proto::BoardUnseen;
+        const T0: i64 = 1_800_000_000;
+        let clock = Arc::new(crate::task_store::ManualClock::at(T0));
+        let store = BoardStore::open(
+            Box::new(crate::task_store::MemTaskBlobs::default()),
+            clock.clone(),
+        )
+        .unwrap();
+        let view = crate::enrollment::FixedEnrollment(Default::default());
+        let put = |body: &str| {
+            store
+                .post(
+                    BOB,
+                    (Author::Agent("hobi".into()), Some(2001)),
+                    None,
+                    PostLabels::default(),
+                    draft(body, None),
+                    &view,
+                )
+                .unwrap()
+                .seq
+        };
+        let first = put("sentinel-715-aged");
+        clock.set(T0 + 1);
+        let rest: Vec<u64> = (2..=32)
+            .map(|i| put(&format!("sentinel-715-{i}")))
+            .collect();
+        let counted = |permitted: Vec<u64>, more: bool| Counted {
+            key: BOB,
+            installed: (view.load(), view.generation()),
+            permitted,
+            more,
+        };
+        let all: Vec<u64> = std::iter::once(first).chain(rest.clone()).collect();
+        assert_eq!(
+            confirm_unseen(&store, &view, &counted(all.clone(), false)),
+            Some(BoardUnseen::Exact(32))
+        );
+        assert_eq!(
+            confirm_unseen(&store, &view, &counted(all[..3].to_vec(), false)),
+            Some(BoardUnseen::Exact(3))
+        );
+        assert_eq!(
+            confirm_unseen(&store, &view, &counted(Vec::new(), false)),
+            Some(BoardUnseen::Exact(0))
+        );
+        clock.set(T0 + crate::board_store::BOARD_RETENTION.as_secs() as i64);
+        assert_eq!(
+            confirm_unseen(&store, &view, &counted(all[..3].to_vec(), false)),
+            Some(BoardUnseen::Exact(2)),
+            "the aged post left before the reply"
+        );
+        assert_eq!(
+            confirm_unseen(&store, &view, &counted(all[..3].to_vec(), true)),
+            Some(BoardUnseen::Over)
+        );
+        assert_eq!(
+            confirm_unseen(&store, &view, &counted(Vec::new(), true)),
+            Some(BoardUnseen::Over)
+        );
+        let moved = Counted {
+            installed: (view.load(), view.generation() + 1),
+            ..counted(rest.clone(), false)
+        };
+        assert_eq!(confirm_unseen(&store, &view, &moved), None);
+        let reloaded = Counted {
+            installed: (Load::installed(Arc::new(1_u8)), view.generation()),
+            ..counted(rest, true)
+        };
+        assert_eq!(confirm_unseen(&store, &view, &reloaded), None);
+    }
+
+    #[test]
+    fn the_count_decides_under_its_own_breaker_and_label() {
+        let shared = crate::run::authz_decide_breaker();
+        let count = count_guard();
+        assert_eq!(count.label, "board unseen count");
+        assert!(Arc::ptr_eq(&count.breaker, &count_breaker()));
+        assert!(!Arc::ptr_eq(&count.breaker, &shared));
+        let posts = posts_guard();
+        assert_eq!(posts.label, "board post decision");
+        assert!(Arc::ptr_eq(&posts.breaker, &shared));
+    }
+
+    #[tokio::test]
+    async fn a_tripped_count_breaker_refuses_without_deciding() {
+        let base = maknae_security::Request {
+            subject: maknae_security::Subject(Attributes::new()),
+            resource: maknae_security::Resource(Attributes::new()),
+            action: maknae_security::Action("board.read".into()),
+            context: maknae_security::Context(Attributes::new()),
+        };
+        let posts: Vec<_> = (1..=2)
+            .map(|seq| post_request(&base, BOB, &stored(seq, None, PostLabels::default())))
+            .collect();
+        let live = Arc::new(crate::live::LiveConfig::new(Default::default(), None));
+        let pdp = Arc::new(Scripted {
+            base: Verdict::Permit {
+                obligations: Vec::new(),
+            },
+            calls: Default::default(),
+        });
+        let d = Deciding {
+            authorizer: &pdp,
+            live: &live,
+            generation: live.generation(),
+            timeout: Duration::from_secs(5),
+            request: &base,
+        };
+        let tripped = Guard {
+            breaker: Arc::new(tokio::sync::Mutex::new(BlockingBreaker::new(0))),
+            label: "sentinel-715-tripped",
+        };
+        assert_eq!(decided(&tripped, &d, posts.clone()).await, None);
+        assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(decided(&tripped, &d, Vec::new()).await, None);
+        assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let closed = Guard {
+            breaker: Arc::new(Default::default()),
+            label: "sentinel-715-closed",
+        };
+        assert_eq!(decided(&closed, &d, posts).await, Some(vec![P, P]));
+        assert_eq!(decided(&closed, &d, Vec::new()).await, Some(Vec::new()));
+        assert_eq!(pdp.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     /// Decides through `inner`, then installs new live values before the batch returns, as a

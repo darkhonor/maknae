@@ -80,6 +80,17 @@ fn reply_wait(
     verb: &maknae_proto::Verb,
     transport: &maknae_config::TransportConfig,
 ) -> std::time::Duration {
+    let counted = match maknae_proto::carries_board_unseen(verb) {
+        true => maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        false => 0,
+    };
+    verb_wait(verb, transport) + std::time::Duration::from_millis(counted)
+}
+
+fn verb_wait(
+    verb: &maknae_proto::Verb,
+    transport: &maknae_config::TransportConfig,
+) -> std::time::Duration {
     let stages = match verb {
         maknae_proto::Verb::AdminContain { .. } | maknae_proto::Verb::AdminRelease { .. } => {
             maknae_config::CONTAINMENT_REPLY_STAGES
@@ -720,6 +731,9 @@ mod tests {
     fn every_tasker_verb_waits_the_control_reply() {
         let transport = maknae_config::TransportConfig::default();
         let control = class_wait(maknae_proto::FrameClass::Control, &transport);
+        let counted = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
         for verb in tasker_verbs() {
             if matches!(
                 verb,
@@ -728,10 +742,48 @@ mod tests {
                     | maknae_proto::Verb::TaskAdd { .. }
             ) {
                 assert!(reply_wait(&verb, &transport) > control);
+            } else if matches!(
+                verb,
+                maknae_proto::Verb::TaskStatus { .. }
+                    | maknae_proto::Verb::TaskStop { .. }
+                    | maknae_proto::Verb::TaskDrop { .. }
+            ) {
+                assert_eq!(reply_wait(&verb, &transport), control + counted, "{verb:?}");
             } else {
                 assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_counted_verb_waits_one_stage_longer() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let stage = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
+        let task = maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([3; 16]));
+        let list = reply_wait(
+            &maknae_proto::Verb::TaskList {
+                agent: "hobi".into(),
+                after: None,
+            },
+            &transport,
+        );
+        assert_eq!(
+            reply_wait(&maknae_proto::Verb::TaskStatus { task }, &transport),
+            list + stage
+        );
+        let session = maknae_proto::Verb::SessionNew {
+            cwd: "/p".into(),
+            sensitive: vec![],
+        };
+        assert_eq!(
+            reply_wait(&session, &transport),
+            class_wait(maknae_proto::FrameClass::Attempt, &transport) + stage
+        );
     }
 
     #[test]
@@ -745,13 +797,20 @@ mod tests {
             maknae_config::REACH_DEADLINE_MS_MAX,
         ));
         assert_eq!(reach, std::time::Duration::from_secs(460));
+        let counted = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
         let mut reached = 0;
         for verb in tasker_verbs() {
             if matches!(
                 verb,
                 maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. }
             ) {
-                assert_eq!(reply_wait(&verb, &transport), control + reach, "{verb:?}");
+                assert_eq!(
+                    reply_wait(&verb, &transport),
+                    control + reach + counted,
+                    "{verb:?}"
+                );
                 reached += 1;
             }
         }

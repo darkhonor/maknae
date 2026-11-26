@@ -1455,6 +1455,20 @@ pub fn takes_task_request_cap(verb: &Verb) -> bool {
     }
 }
 
+/// Whether a person's reply to `verb` carries their board's unseen count: the requests a
+/// person types, not the ones a client polls.
+pub fn carries_board_unseen(verb: &Verb) -> bool {
+    matches!(
+        verb,
+        Verb::SessionNew { .. }
+            | Verb::TaskSubmit { .. }
+            | Verb::TaskAdd { .. }
+            | Verb::TaskStatus { .. }
+            | Verb::TaskStop { .. }
+            | Verb::TaskDrop { .. }
+    )
+}
+
 pub fn class_of(verb: &Verb) -> FrameClass {
     match verb {
         Verb::SessionPrompt { .. }
@@ -1566,6 +1580,8 @@ pub struct Response {
     pub catalog_digest: Option<CatalogDigest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obligations: Option<Vec<WireObligation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_unseen: Option<crate::BoardUnseen>,
 }
 
 impl Response {
@@ -1579,6 +1595,7 @@ impl Response {
             result,
             catalog_digest,
             obligations: None,
+            board_unseen: None,
         }
     }
 }
@@ -4258,6 +4275,70 @@ mod tests {
             }
         }
 
+        fn every_task_verb() -> Vec<Verb> {
+            let task = crate::TaskRef::from_id(&crate::TaskId([3; 16]));
+            let text = || SecretText(zeroize::Zeroizing::new("t".into()));
+            vec![
+                task_submit(1),
+                Verb::TaskAdd {
+                    task: task.clone(),
+                    text: text(),
+                    bindings: vec![],
+                    forge_tokens: crate::ForgeTokens::default(),
+                },
+                Verb::TaskStatus { task: task.clone() },
+                Verb::TaskList {
+                    agent: "hobi".into(),
+                    after: None,
+                },
+                Verb::TaskStop { task: task.clone() },
+                Verb::TaskDrop { task },
+                Verb::TaskCollect {
+                    agent: "hobi".into(),
+                    after: None,
+                    task: None,
+                },
+                Verb::TaskClaim {
+                    seen_follow_ups: None,
+                },
+                Verb::TaskReport {
+                    text: text(),
+                    seen_follow_ups: None,
+                },
+                Verb::AgentList { after: None },
+            ]
+        }
+
+        #[test]
+        fn only_the_persons_task_commands_and_session_new_carry_the_count() {
+            let carried: std::collections::BTreeSet<String> = every_verb()
+                .into_iter()
+                .map(|(verb, _)| verb)
+                .chain(every_task_verb())
+                .filter(carries_board_unseen)
+                .map(|verb| {
+                    format!("{verb:?}")
+                        .split(|c: char| !c.is_alphanumeric())
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(
+                carried,
+                [
+                    "SessionNew",
+                    "TaskAdd",
+                    "TaskDrop",
+                    "TaskStatus",
+                    "TaskStop",
+                    "TaskSubmit",
+                ]
+                .map(String::from)
+                .into()
+            );
+        }
+
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
@@ -5015,6 +5096,95 @@ mod tests {
         assert_eq!(old.protocol_version, PROTOCOL_VERSION);
         assert_eq!(old.result, RespResult::Ok(Payload::Pong));
         assert_eq!(old.catalog_digest, Some(CatalogDigest([0x11; 32])));
+    }
+
+    #[test]
+    fn a_response_without_board_unseen_encodes_as_before() {
+        let bare = Response::new(PROTOCOL_VERSION, RespResult::Ok(Payload::TaskIdle), None);
+        assert_eq!(bare.board_unseen, None);
+        let bytes = encode_response(&bare).unwrap();
+        assert!(!bytes
+            .windows(b"board_unseen".len())
+            .any(|w| w == b"board_unseen"));
+        #[derive(Serialize)]
+        struct PreChangeResponse {
+            protocol_version: u16,
+            result: RespResult,
+        }
+        let before = PreChangeResponse {
+            protocol_version: PROTOCOL_VERSION,
+            result: RespResult::Ok(Payload::TaskIdle),
+        };
+        assert_eq!(bytes, encode_response_value(&before));
+        assert_eq!(decode_response(&bytes).unwrap(), bare);
+        for unseen in [crate::BoardUnseen::Exact(3), crate::BoardUnseen::Over] {
+            let counted = Response {
+                board_unseen: Some(unseen),
+                ..bare.clone()
+            };
+            let bytes = encode_response(&counted).unwrap();
+            assert_eq!(decode_response(&bytes).unwrap(), counted);
+        }
+    }
+
+    fn encode_response_value<T: Serialize>(v: &T) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(v, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn a_pre_change_response_type_decodes_a_frame_with_board_unseen() {
+        #[derive(Debug, Deserialize)]
+        struct PreChangeResponse {
+            protocol_version: u16,
+            result: RespResult,
+            #[serde(default)]
+            catalog_digest: Option<CatalogDigest>,
+        }
+        for unseen in [crate::BoardUnseen::Exact(32), crate::BoardUnseen::Over] {
+            let response = Response {
+                board_unseen: Some(unseen),
+                ..Response::new(
+                    PROTOCOL_VERSION,
+                    RespResult::Ok(Payload::Pong),
+                    Some(CatalogDigest([0x11; 32])),
+                )
+            };
+            let bytes = encode_response(&response).unwrap();
+            assert!(bytes
+                .windows(b"board_unseen".len())
+                .any(|w| w == b"board_unseen"));
+            let old: PreChangeResponse = ciborium::from_reader(bytes.as_slice()).unwrap();
+            assert_eq!(old.protocol_version, PROTOCOL_VERSION);
+            assert_eq!(old.result, RespResult::Ok(Payload::Pong));
+            assert_eq!(old.catalog_digest, Some(CatalogDigest([0x11; 32])));
+        }
+    }
+
+    #[test]
+    fn a_response_with_an_exact_count_over_32_never_decodes() {
+        use ciborium::Value;
+        let bytes = encode_response(&Response {
+            board_unseen: Some(crate::BoardUnseen::Exact(32)),
+            ..Response::new(PROTOCOL_VERSION, RespResult::Ok(Payload::Pong), None)
+        })
+        .unwrap();
+        let mut value: Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let Value::Map(fields) = &mut value else {
+            panic!("a response is a map");
+        };
+        for (k, v) in fields.iter_mut() {
+            if *k == Value::Text("board_unseen".into()) {
+                *v = Value::Map(vec![(
+                    Value::Text("exact".into()),
+                    Value::Integer(33.into()),
+                )]);
+            }
+        }
+        let widened = encode_response_value(&value);
+        let refused = decode_response(&widened).unwrap_err().to_string();
+        assert!(refused.contains("is over 32"), "{refused}");
     }
 
     #[test]
