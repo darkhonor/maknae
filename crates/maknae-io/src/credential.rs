@@ -399,7 +399,7 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use rustix::process::{getrlimit, Resource};
     use zeroize::Zeroizing;
@@ -654,7 +654,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn largest() -> LaunchCredentials {
+    fn largest() -> LaunchCredentials {
         let mut lc = LaunchCredentials::new([1; 16]);
         for i in 0..MAX_CREDENTIALS {
             let name = format!("T{i:02}{}", "A".repeat(MAX_NAME - 3));
@@ -689,5 +689,20 @@ pub(crate) mod tests {
             back.slots().collect::<Vec<_>>(),
             lc.slots().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn the_largest_frame_travels_over_a_socket() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        for s in [&a, &b] {
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            s.set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+        }
+        let sender = std::thread::spawn(move || largest().send(&a));
+        let got = LaunchCredentials::receive(&b).unwrap();
+        sender.join().unwrap().unwrap();
+        assert_eq!(got.slots().count(), MAX_CREDENTIALS);
     }
 }

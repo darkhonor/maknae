@@ -37,7 +37,7 @@ impl LaunchCredentials {
     /// Writes the credentials frame. The stream must be blocking with a write timeout set;
     /// #755 writes the signed obligation's frame first, then this one, on the same stream.
     pub fn send(self, stream: &UnixStream) -> io::Result<()> {
-        if !blocking(stream)? || stream.write_timeout()?.is_none() {
+        if !blocking(stream) || !matches!(stream.write_timeout(), Ok(Some(_))) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a blocking stream with a write timeout is required",
@@ -51,10 +51,10 @@ impl LaunchCredentials {
 
     /// Reads one credentials frame into a buffer that is zeroized from allocation.
     pub fn receive(stream: &UnixStream) -> Result<Self, ReceiveError> {
-        if !blocking(stream).map_err(ReceiveError::Io)? {
+        if !blocking(stream) {
             return Err(ReceiveError::NotBlocking);
         }
-        if stream.read_timeout().map_err(ReceiveError::Io)?.is_none() {
+        if !matches!(stream.read_timeout(), Ok(Some(_))) {
             return Err(ReceiveError::NoTimeout);
         }
         let mut reader = stream;
@@ -70,9 +70,9 @@ impl LaunchCredentials {
     }
 }
 
-fn blocking(stream: &UnixStream) -> io::Result<bool> {
-    let flags = fcntl(stream, FcntlArg::F_GETFL).map_err(io::Error::from)?;
-    Ok(!OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK))
+fn blocking(stream: &UnixStream) -> bool {
+    fcntl(stream, FcntlArg::F_GETFL)
+        .is_ok_and(|flags| !OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK))
 }
 
 #[cfg(test)]
@@ -200,14 +200,5 @@ mod tests {
         let (a, b) = pair();
         drop(b);
         assert!(one().send(&a).is_err());
-    }
-
-    #[test]
-    fn the_largest_frame_travels() {
-        let (a, b) = pair();
-        let sender = std::thread::spawn(move || crate::credential::tests::largest().send(&a));
-        let got = LaunchCredentials::receive(&b).unwrap();
-        sender.join().unwrap().unwrap();
-        assert_eq!(got.slots().count(), crate::credential::MAX_CREDENTIALS);
     }
 }
