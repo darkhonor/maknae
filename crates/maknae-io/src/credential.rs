@@ -5,8 +5,8 @@ use zeroize::Zeroizing;
 
 use crate::credential_io::deny_core_dumps;
 
-/// A credential a front end holds to deliver to a tool. It never prints, copies, compares or
-/// serializes; it leaves only through `deliver_to` (#751).
+/// A credential a front end holds to deliver to a tool. It never prints, copies or compares,
+/// and its only encoding is the frame `deliver_to` and `send` write (#751).
 ///
 /// ```
 /// use maknae_io::{credential::DeliveredCredential, Zeroizing};
@@ -81,7 +81,7 @@ const TAG_GIT: u8 = 2;
 const TAG_CARGO: u8 = 3;
 const TAG_NETRC: u8 = 4;
 const TAG_FILE: u8 = 5;
-const HIJACK_ENV: [&str; 21] = [
+const HIJACK_ENV: [&str; 40] = [
     "PATH",
     "HOME",
     "TMPDIR",
@@ -103,6 +103,25 @@ const HIJACK_ENV: [&str; 21] = [
     "GIT_SSH_COMMAND",
     "GIT_EXEC_PATH",
     "GIT_CONFIG_GLOBAL",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_PROXY_COMMAND",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PAGER",
+    "PAGER",
+    "EDITOR",
+    "VISUAL",
+    "RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "RUSTFLAGS",
+    "PYTHONHOME",
+    "NODE_PATH",
+    "ZDOTDIR",
+    "GIT_CONFIG",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +172,7 @@ impl CredentialSlot {
         let charset = name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-        if name.is_empty() || name.len() > MAX_NAME || !charset || name == "." || name == ".." {
+        if name.is_empty() || name.len() > MAX_NAME || !charset || name.starts_with(['.', '-']) {
             return Err(SlotError::InvalidName);
         }
         Ok(Self::File(FileName(name.to_owned())))
@@ -221,6 +240,15 @@ impl CredentialSlot {
 /// c.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
 /// let _ = lc.encode();
 /// ```
+///
+/// ```compile_fail,E0277
+/// use maknae_io::credential::{CredentialSlot, DeliveredCredential, LaunchCredentials};
+/// use maknae_io::Zeroizing;
+/// let mut lc = LaunchCredentials::new([0; 16]);
+/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// c.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
+/// let _ = format!("{lc}");
+/// ```
 pub struct LaunchCredentials {
     invocation: [u8; 16],
     entries: Vec<(CredentialSlot, DeliveredCredential)>,
@@ -230,6 +258,8 @@ pub struct LaunchCredentials {
 pub enum DeliverErrorKind {
     DuplicateSlot,
     TooMany,
+    EmptyValue,
+    ValueTooLong,
 }
 
 #[derive(Debug)]
@@ -281,7 +311,11 @@ impl DeliveredCredential {
         into: &mut LaunchCredentials,
         slot: CredentialSlot,
     ) -> Result<(), DeliverError> {
-        let kind = if into.entries.iter().any(|(s, _)| *s == slot) {
+        let kind = if self.expose().is_empty() {
+            DeliverErrorKind::EmptyValue
+        } else if self.expose().len() > MAX_VALUE {
+            DeliverErrorKind::ValueTooLong
+        } else if into.entries.iter().any(|(s, _)| *s == slot) {
             DeliverErrorKind::DuplicateSlot
         } else if into.entries.len() >= MAX_CREDENTIALS {
             DeliverErrorKind::TooMany
@@ -364,6 +398,8 @@ impl LaunchCredentials {
             cred.deliver_to(&mut lc, slot).map_err(|e| match e.kind() {
                 DeliverErrorKind::DuplicateSlot => DecodeError::DuplicateSlot,
                 DeliverErrorKind::TooMany => DecodeError::TooMany,
+                DeliverErrorKind::EmptyValue => DecodeError::EmptyValue,
+                DeliverErrorKind::ValueTooLong => DecodeError::ValueTooLong,
             })?;
         }
         if !r.0.is_empty() {
@@ -624,6 +660,15 @@ mod tests {
                 one_env(b"LD_PRELOAD", b"v"),
                 DecodeError::BadName,
             ),
+            (
+                "bad file name",
+                {
+                    let mut b = one_env(b"../x", b"v");
+                    b[21] = TAG_FILE;
+                    b
+                },
+                DecodeError::BadName,
+            ),
         ];
         for (what, bytes, want) in cases {
             assert_eq!(
@@ -704,5 +749,65 @@ mod tests {
         let got = LaunchCredentials::receive(&b).unwrap();
         sender.join().unwrap().unwrap();
         assert_eq!(got.slots().count(), MAX_CREDENTIALS);
+    }
+
+    #[test]
+    fn deliver_to_refuses_an_empty_or_oversize_value_and_returns_it() {
+        let mut lc = LaunchCredentials::new([0; 16]);
+        let empty = DeliveredCredential::new(Zeroizing::new(Vec::new())).unwrap();
+        let err = empty
+            .deliver_to(&mut lc, CredentialSlot::Netrc)
+            .unwrap_err();
+        assert_eq!(err.kind(), DeliverErrorKind::EmptyValue);
+        let big = DeliveredCredential::new(Zeroizing::new(vec![b'x'; MAX_VALUE + 1])).unwrap();
+        let err = big.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap_err();
+        assert_eq!(err.kind(), DeliverErrorKind::ValueTooLong);
+        assert_eq!(err.into_credential().expose().len(), MAX_VALUE + 1);
+        let max = DeliveredCredential::new(Zeroizing::new(vec![b'x'; MAX_VALUE])).unwrap();
+        max.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
+        assert_eq!(lc.slots().count(), 1);
+    }
+
+    #[test]
+    fn file_names_that_hide_or_look_like_options_are_refused() {
+        for bad in [".netrc", ".git-credentials", ".bashrc", "-rf", "-"] {
+            assert_eq!(
+                CredentialSlot::file(bad),
+                Err(SlotError::InvalidName),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_hijack_names_are_refused() {
+        for refused in [
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "GIT_PROXY_COMMAND",
+            "GIT_EXTERNAL_DIFF",
+            "GIT_PAGER",
+            "PAGER",
+            "EDITOR",
+            "VISUAL",
+            "RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "RUSTFLAGS",
+            "PYTHONHOME",
+            "NODE_PATH",
+            "ZDOTDIR",
+            "GIT_CONFIG",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+        ] {
+            assert_eq!(
+                CredentialSlot::env_var(refused),
+                Err(SlotError::Refused),
+                "{refused}"
+            );
+        }
+        assert!(CredentialSlot::env_var("CARGO_REGISTRY_TOKEN").is_ok());
     }
 }

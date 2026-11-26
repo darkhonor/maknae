@@ -93,7 +93,7 @@ Option B (own the codec and the body) and Option C (B for the kernel↔deputy CB
 
 ## Amendment 2026-11-27 — delivered credentials and core dumps (#751)
 
-A credential a front end, or later the launch helper (#755), holds to deliver to a tool is secret-class. It is held only as `maknae_io::credential::DeliveredCredential`, and it travels to the helper only inside `LaunchCredentials`. Both meet decision 1: the value lives in a `Zeroizing` buffer, the encoded frame is allocated once at its exact length and zeroized, and the receive buffer is zeroized from allocation. Neither type has `Display`, `Clone`, `PartialEq` or serde, and `Debug` prints a fixed marker. Compile-fail doctests pin each of those.
+A credential a front end, or later the launch helper (#755), holds to deliver to a tool is secret-class. It is held only as `maknae_io::credential::DeliveredCredential`, and it travels to the helper only inside `LaunchCredentials`. Both meet decision 1: the value lives in a `Zeroizing` buffer, the encoded frame is allocated once at its exact length and zeroized, and the receive buffer is zeroized from allocation. `DeliveredCredential` has no `Display`, `Clone`, `PartialEq` or serde, and its `Debug` prints a fixed marker; compile-fail doctests pin each. `LaunchCredentials` has no `Display` (pinned by a compile-fail doctest), cannot derive the others while it holds `DeliveredCredential`s, and its `Debug` prints the slots, never a value. `deliver_to` refuses an empty value and one over 64 KiB, so every bundle it builds is one the receiver accepts, and `send` and `receive` bound the whole frame by the stream's timeout.
 
 Decision 3's core-dump exposure narrows for those processes, and only for them:
 
@@ -103,7 +103,7 @@ Decision 3's core-dump exposure narrows for those processes, and only for them:
 
 No front end holds a tool credential yet (the tool path is #479 and #168), so no production process calls `deny_core_dumps` today. The narrowing takes effect when the first holder is built.
 
-Residuals, added to decision 2's list:
+Residuals of this amendment (decision 2 lists third-party intermediates; these are process-level):
 
 - A piped core handler (`core_pattern` beginning with `|`) that does not honour the soft limit (`%c`) still stores the dump. With `suid_dumpable=2`, a non-dumpable process is still dumped, as root, to such a handler.
 - The window between fetching a value and constructing the `DeliveredCredential`, when the value sits in the fetching client's own buffers. A holder shortens it by calling `deny_core_dumps` before the fetch.

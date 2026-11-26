@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use zeroize::Zeroizing;
@@ -34,38 +35,43 @@ fn deny() -> rustix::io::Result<()> {
 }
 
 impl LaunchCredentials {
-    /// Writes the credentials frame. The stream must be blocking with a write timeout set;
-    /// #755 writes the signed obligation's frame first, then this one, on the same stream.
+    /// Writes the credentials frame. The stream must be blocking with a write timeout set, and
+    /// that timeout bounds the whole frame, not each write. #755 writes the signed obligation's
+    /// frame first, then this one, on the same stream.
     pub fn send(self, stream: &UnixStream) -> io::Result<()> {
-        if !blocking(stream) || !matches!(stream.write_timeout(), Ok(Some(_))) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a blocking stream with a write timeout is required",
-            ));
-        }
+        let budget = match stream.write_timeout() {
+            Ok(Some(budget)) if blocking(stream) => budget,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a blocking stream with a write timeout is required",
+                ))
+            }
+        };
+        let deadline = Instant::now() + budget;
         let body = self.encode();
-        let mut writer = stream;
-        writer.write_all(&(body.len() as u32).to_be_bytes())?;
-        writer.write_all(&body)
+        write_by(stream, &(body.len() as u32).to_be_bytes(), deadline)?;
+        write_by(stream, &body, deadline)
     }
 
-    /// Reads one credentials frame into a buffer that is zeroized from allocation.
+    /// Reads one credentials frame into a buffer that is zeroized from allocation. The read
+    /// timeout bounds the whole frame, not each read.
     pub fn receive(stream: &UnixStream) -> Result<Self, ReceiveError> {
         if !blocking(stream) {
             return Err(ReceiveError::NotBlocking);
         }
-        if !matches!(stream.read_timeout(), Ok(Some(_))) {
+        let Ok(Some(budget)) = stream.read_timeout() else {
             return Err(ReceiveError::NoTimeout);
-        }
-        let mut reader = stream;
+        };
+        let deadline = Instant::now() + budget;
         let mut len = [0u8; 4];
-        reader.read_exact(&mut len).map_err(ReceiveError::Io)?;
+        read_by(stream, &mut len, deadline).map_err(ReceiveError::Io)?;
         let len = u32::from_be_bytes(len) as usize;
         if len > MAX_FRAME {
             return Err(ReceiveError::TooLong);
         }
         let mut body = Zeroizing::new(vec![0u8; len]);
-        reader.read_exact(&mut body).map_err(ReceiveError::Io)?;
+        read_by(stream, &mut body, deadline).map_err(ReceiveError::Io)?;
         Self::decode(&body).map_err(ReceiveError::Decode)
     }
 }
@@ -73,6 +79,51 @@ impl LaunchCredentials {
 fn blocking(stream: &UnixStream) -> bool {
     fcntl(stream, FcntlArg::F_GETFL)
         .is_ok_and(|flags| !OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK))
+}
+
+fn remaining(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::Error::from(io::ErrorKind::TimedOut));
+    }
+    Ok(left)
+}
+
+fn timed_out(e: io::Error) -> io::Error {
+    match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            io::Error::from(io::ErrorKind::TimedOut)
+        }
+        _ => e,
+    }
+}
+
+fn read_by(stream: &UnixStream, mut buf: &mut [u8], deadline: Instant) -> io::Result<()> {
+    let mut reader = stream;
+    while !buf.is_empty() {
+        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        match reader.read(buf) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(n) => buf = &mut buf[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(timed_out(e)),
+        }
+    }
+    Ok(())
+}
+
+fn write_by(stream: &UnixStream, mut buf: &[u8], deadline: Instant) -> io::Result<()> {
+    let mut writer = stream;
+    while !buf.is_empty() {
+        stream.set_write_timeout(Some(remaining(deadline)?))?;
+        match writer.write(buf) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(timed_out(e)),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -99,7 +150,6 @@ mod tests {
     }
 
     use crate::credential::{CredentialSlot, DeliveredCredential};
-    use std::time::Duration;
 
     fn pair() -> (UnixStream, UnixStream) {
         let (a, b) = UnixStream::pair().unwrap();
@@ -200,5 +250,54 @@ mod tests {
         let (a, b) = pair();
         drop(b);
         assert!(one().send(&a).is_err());
+    }
+
+    #[test]
+    fn send_needs_a_write_timeout_not_only_a_read_timeout() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        a.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        assert_eq!(
+            one().send(&a).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn a_peer_that_closes_mid_body_is_an_unexpected_eof() {
+        let (mut a, b) = pair();
+        a.write_all(&100u32.to_be_bytes()).unwrap();
+        a.write_all(b"MKLC").unwrap();
+        drop(a);
+        match LaunchCredentials::receive(&b) {
+            Err(ReceiveError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("expected EOF, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_peer_that_trickles_bytes_hits_the_deadline_not_just_the_idle_timeout() {
+        let (mut a, b) = UnixStream::pair().unwrap();
+        b.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let trickle = std::thread::spawn(move || {
+            let _ = a.write_all(&8u32.to_be_bytes());
+            for _ in 0..8 {
+                std::thread::sleep(Duration::from_millis(150));
+                if a.write_all(b"X").is_err() {
+                    break;
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        let got = LaunchCredentials::receive(&b);
+        let took = started.elapsed();
+        drop(b);
+        trickle.join().unwrap();
+        match got {
+            Err(ReceiveError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{e:?}"),
+            other => panic!("expected the deadline, got {other:?}"),
+        }
+        assert!(took < Duration::from_millis(900), "{took:?}");
     }
 }
