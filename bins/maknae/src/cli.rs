@@ -912,26 +912,36 @@ async fn execute(verb: Verb) -> Result<bool, String> {
     )?;
 
     let (client, trust) = minted_plane(&document, &dir, &session.token).await?;
-    let outcome = round_trip(verb, request, content, &transport, &client, &trust).await;
+    let outcome = round_trip(
+        verb,
+        request,
+        content,
+        &transport,
+        &client,
+        &trust,
+        session.expires_at,
+    )
+    .await;
     if let Err(e) = client.shutdown().await {
         crate::stderr::line(&mut std::io::stderr(), format_args!("maknae-vault: {e}"));
     }
     outcome
 }
 
-/// Mints the plane leaf again within `REMINT_WITHIN_SECS` of its NotAfter; a failed mint is
-/// an error only once the leaf has expired.
-async fn fresh_leaf(client: &PlaneClient) -> Result<(), String> {
-    let now = maknae_io::now_unix()?;
-    let not_after = client.leaf_not_after_secs();
-    if not_after.is_some_and(|at| now.saturating_add(crate::agent_session::REMINT_WITHIN_SECS) < at)
-    {
-        return Ok(());
-    }
-    match client.mint().await {
-        Ok(_) => Ok(()),
-        Err(_) if not_after.is_some_and(|at| now < at) => Ok(()),
-        Err(e) => Err(e.to_string()),
+/// Readies the leaf before a request; `Err` is what the person is told.
+async fn leaf_ready(
+    leaf: &impl crate::agent_session::Leaf,
+    login_expires_at: u64,
+    now: u64,
+) -> Result<(), String> {
+    let login_expired = crate::agent::login_expired(login_expires_at, now);
+    match maknae_agent::plane::leaf_step(leaf.not_after(), now, login_expired) {
+        maknae_agent::plane::LeafStep::Fresh => Ok(()),
+        maknae_agent::plane::LeafStep::LoginExpired => Err(crate::agent::LOGIN_EXPIRED.into()),
+        maknae_agent::plane::LeafStep::Remint { valid } => match leaf.remint().await {
+            Err(_) if valid => Ok(()),
+            minted => minted,
+        },
     }
 }
 
@@ -952,6 +962,7 @@ async fn round_trip(
     transport: &maknae_config::TransportConfig,
     client: &PlaneClient,
     trust: &std::sync::Arc<maknae_vault::TrustBundle>,
+    login_expires_at: u64,
 ) -> Result<bool, String> {
     if let Verb::SessionList { cwd } = &verb {
         let entries = maknae_agent::conversations::list_all(|v| async move {
@@ -1013,7 +1024,7 @@ async fn round_trip(
     if let Verb::BoardWatch { interval } = &verb {
         let mut ending = crate::screen::run::Ending::register().map_err(|e| e.to_string())?;
         let send = |v| async move {
-            fresh_leaf(client).await?;
+            leaf_ready(client, login_expires_at, maknae_io::now_unix()?).await?;
             board_send(v).await
         };
         let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -2421,6 +2432,103 @@ mod tests {
                 "{want:?}"
             );
         }
+    }
+
+    struct TestLeaf {
+        not_after: Option<u64>,
+        mint_fails: bool,
+        mints: std::sync::atomic::AtomicU32,
+    }
+
+    impl crate::agent_session::Leaf for TestLeaf {
+        fn not_after(&self) -> Option<u64> {
+            self.not_after
+        }
+        async fn remint(&self) -> Result<(), String> {
+            self.mints.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.mint_fails {
+                Err("vault: permission denied".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn test_leaf(not_after: Option<u64>, mint_fails: bool) -> TestLeaf {
+        TestLeaf {
+            not_after,
+            mint_fails,
+            mints: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn mints(leaf: &TestLeaf) -> u32 {
+        leaf.mints.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    const NOW: u64 = 1_000_000;
+    const LOGIN_VALID: u64 = NOW + 3600;
+    const LOGIN_GONE: u64 = NOW;
+
+    #[tokio::test]
+    async fn the_watch_readies_its_leaf_as_a_session_does() {
+        let fresh = test_leaf(Some(NOW + 3600), false);
+        assert_eq!(leaf_ready(&fresh, LOGIN_GONE, NOW).await, Ok(()));
+        assert_eq!(mints(&fresh), 0);
+
+        let near = test_leaf(Some(NOW + 10), false);
+        assert_eq!(leaf_ready(&near, LOGIN_VALID, NOW).await, Ok(()));
+        assert_eq!(mints(&near), 1);
+
+        let near_failing = test_leaf(Some(NOW + 10), true);
+        assert_eq!(leaf_ready(&near_failing, LOGIN_VALID, NOW).await, Ok(()));
+        assert_eq!(mints(&near_failing), 1);
+
+        let gone_failing = test_leaf(Some(NOW), true);
+        assert_eq!(
+            leaf_ready(&gone_failing, LOGIN_VALID, NOW).await,
+            Err("vault: permission denied".into())
+        );
+
+        let none = test_leaf(None, false);
+        assert_eq!(leaf_ready(&none, LOGIN_VALID, NOW).await, Ok(()));
+        assert_eq!(mints(&none), 1);
+
+        let expired = test_leaf(Some(NOW + 10), false);
+        assert_eq!(
+            leaf_ready(&expired, LOGIN_GONE, NOW).await,
+            Err(crate::agent::LOGIN_EXPIRED.into())
+        );
+        assert_eq!(mints(&expired), 0);
+    }
+
+    #[tokio::test]
+    async fn an_expired_login_ends_the_watch_with_the_login_line() {
+        let leaf = test_leaf(Some(NOW + 10), false);
+        let mut sent = 0;
+        let said = maknae_agent::board::watch(
+            std::time::Duration::from_secs(10),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |_| {
+                let ready = leaf_ready(&leaf, LOGIN_GONE, NOW);
+                sent += 1;
+                async move {
+                    ready.await?;
+                    Err("sent".to_owned())
+                }
+            },
+            |_| async {},
+        )
+        .await;
+        let (mut out, mut err) = (vec![], vec![]);
+        assert!(!print_said(&said, &mut out, &mut err));
+        assert_eq!(out, b"");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!("maknae: {}\n", crate::agent::LOGIN_EXPIRED)
+        );
+        assert_eq!((sent, mints(&leaf)), (1, 0));
     }
 
     #[test]

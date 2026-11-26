@@ -284,9 +284,85 @@ pub trait Plane {
     }
 }
 
+/// A plane leaf is minted again this close to its NotAfter.
+pub const REMINT_WITHIN_SECS: u64 = 60;
+
+/// What a client does with its plane leaf before a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeafStep {
+    Fresh,
+    LoginExpired,
+    /// `valid`: the current leaf still serves the request if the mint fails.
+    Remint {
+        valid: bool,
+    },
+}
+
+/// `not_after` is `None` until a leaf has been minted (a minted leaf always has a NotAfter
+/// after its NotBefore), so `None` asks for a first mint with no leaf to fall back on.
+pub fn leaf_step(not_after: Option<u64>, now: u64, login_expired: bool) -> LeafStep {
+    match not_after {
+        Some(at) if now.saturating_add(REMINT_WITHIN_SECS) < at => LeafStep::Fresh,
+        _ if login_expired => LeafStep::LoginExpired,
+        Some(at) => LeafStep::Remint { valid: now < at },
+        None => LeafStep::Remint { valid: false },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leaf_far_from_its_not_after_is_fresh_whatever_the_login() {
+        for expired in [false, true] {
+            assert_eq!(leaf_step(Some(1061), 1000, expired), LeafStep::Fresh);
+            assert_eq!(
+                leaf_step(Some(u64::MAX), u64::MAX - 61, expired),
+                LeafStep::Fresh
+            );
+        }
+    }
+
+    #[test]
+    fn a_leaf_near_its_not_after_is_reminted_while_the_login_is_valid() {
+        assert_eq!(
+            leaf_step(Some(1060), 1000, false),
+            LeafStep::Remint { valid: true }
+        );
+        assert_eq!(
+            leaf_step(Some(1001), 1000, false),
+            LeafStep::Remint { valid: true }
+        );
+        assert_eq!(
+            leaf_step(Some(1000), 1000, false),
+            LeafStep::Remint { valid: false }
+        );
+        assert_eq!(
+            leaf_step(Some(900), 1000, false),
+            LeafStep::Remint { valid: false }
+        );
+        assert_eq!(
+            leaf_step(Some(u64::MAX), u64::MAX, false),
+            LeafStep::Remint { valid: false }
+        );
+    }
+
+    #[test]
+    fn a_leaf_near_its_not_after_with_the_login_expired_says_so_and_mints_nothing() {
+        for at in [Some(1060), Some(1001), Some(1000), Some(900), None] {
+            assert_eq!(leaf_step(at, 1000, true), LeafStep::LoginExpired, "{at:?}");
+        }
+    }
+
+    #[test]
+    fn no_leaf_yet_is_a_first_mint_with_nothing_to_fall_back_on() {
+        assert_eq!(
+            leaf_step(None, 1000, false),
+            LeafStep::Remint { valid: false }
+        );
+        assert_eq!(leaf_step(None, 0, false), LeafStep::Remint { valid: false });
+    }
     fn test_page(content: &[u8]) -> ReadPage {
         ReadPage {
             content: zeroize::Zeroizing::new(content.to_vec()),

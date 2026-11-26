@@ -7,6 +7,7 @@ use crate::screen::run::{Caller, Driver, Ending, Exit, Pace, Step};
 use crate::screen::term::{both_terminals, Session, TermError};
 use crate::stderr::errln;
 use maknae_agent::hints::{choose, token_servers, Forge, Links, RemoteUrl, Remotes};
+use maknae_agent::plane::{leaf_step, LeafStep};
 use maknae_agent::screen::blocks::{Conversation, EntryId, EntryKind};
 use maknae_agent::screen::{Commands, HeaderLine, MenuItem};
 use maknae_agent::tasking::book::{joined, Alloc, Answer, Book, Entered, Failure, Op, Standing};
@@ -27,8 +28,6 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
-/// A leaf this close to its NotAfter is minted again before the next verb.
-pub(crate) const REMINT_WITHIN_SECS: u64 = 60;
 const PLAIN_TICK: Duration = Duration::from_millis(250);
 const CUT_OFF: &str =
     "a request was still being sent when the session ended; its outcome is unknown";
@@ -146,12 +145,21 @@ pub(crate) trait Leaf {
 
 struct PlaneLeaf(Arc<PlaneClient>);
 
-impl Leaf for PlaneLeaf {
+impl Leaf for PlaneClient {
     fn not_after(&self) -> Option<u64> {
-        self.0.leaf_not_after_secs()
+        self.leaf_not_after_secs()
     }
     async fn remint(&self) -> Result<(), String> {
-        self.0.mint().await.map(|_| ()).map_err(|e| e.to_string())
+        self.mint().await.map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
+impl Leaf for PlaneLeaf {
+    fn not_after(&self) -> Option<u64> {
+        self.0.as_ref().not_after()
+    }
+    async fn remint(&self) -> Result<(), String> {
+        self.0.as_ref().remint().await
     }
 }
 
@@ -211,15 +219,14 @@ impl Workdir {
 
 impl<T: Tasker, L: Leaf, S: TokenSupply> Kernel<T, L, S> {
     async fn send(&self, op: Op, now: u64) -> Event {
-        let not_after = self.leaf.not_after();
-        let fresh = not_after.is_some_and(|at| now.saturating_add(REMINT_WITHIN_SECS) < at);
-        if !fresh {
-            if crate::agent::login_expired(self.login_expires_at, now) {
-                return Event::LoginExpired;
-            }
-            let valid = not_after.is_some_and(|at| now < at);
-            if self.leaf.remint().await.is_err() && !valid {
-                return Event::Done(Err(Failure::NoIdentity), None);
+        let login_expired = crate::agent::login_expired(self.login_expires_at, now);
+        match leaf_step(self.leaf.not_after(), now, login_expired) {
+            LeafStep::Fresh => {}
+            LeafStep::LoginExpired => return Event::LoginExpired,
+            LeafStep::Remint { valid } => {
+                if self.leaf.remint().await.is_err() && !valid {
+                    return Event::Done(Err(Failure::NoIdentity), None);
+                }
             }
         }
         let answer = self.perform(op, now).await;
@@ -1884,7 +1891,8 @@ mod tests {
             "a fresh leaf is reused"
         );
 
-        *kernel.leaf.not_after.lock().unwrap() = Some(now + REMINT_WITHIN_SECS);
+        *kernel.leaf.not_after.lock().unwrap() =
+            Some(now + maknae_agent::plane::REMINT_WITHIN_SECS);
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
             Event::Done(Ok(_), _)

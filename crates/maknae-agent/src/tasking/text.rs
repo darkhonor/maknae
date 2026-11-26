@@ -314,6 +314,13 @@ pub const BOARD_WATCH_MARK_UNKNOWN: &str =
 pub const BOARD_WATCH_OFF: &str =
     "board reporting is off; turn it on with maknae board settings --report summary or --report every";
 
+const KINDS: [PostKind; 4] = [
+    PostKind::Note,
+    PostKind::Question,
+    PostKind::Answer,
+    PostKind::Intent,
+];
+
 fn kind_rank(kind: PostKind) -> usize {
     match kind {
         PostKind::Note => 0,
@@ -322,6 +329,8 @@ fn kind_rank(kind: PostKind) -> usize {
         PostKind::Intent => 3,
     }
 }
+
+pub const BOARD_WATCH_BACKLOG: &str = "too many posts are unseen to watch from here; run maknae board --new to read them or maknae board seen to skip them";
 
 pub fn board_unseen_line(u: BoardUnseen) -> Option<String> {
     let posts = match u {
@@ -336,19 +345,11 @@ pub fn board_unseen_line(u: BoardUnseen) -> Option<String> {
 /// Counts by author and by kind; every author id through [`one_line`], and no body is read.
 pub fn board_summary_line(entries: &[BoardEntry]) -> String {
     let mut authors = std::collections::BTreeMap::<&str, u64>::new();
-    let mut kinds: Vec<PostKind> = Vec::with_capacity(entries.len());
+    let mut kinds = [0u64; KINDS.len()];
     for e in entries {
         let Author::Agent(author) = &e.post.author;
         *authors.entry(author).or_default() += 1;
-        kinds.push(e.post.draft.kind);
-    }
-    kinds.sort_by_key(|k| kind_rank(*k));
-    let mut by_kind: Vec<(PostKind, u64)> = vec![];
-    for kind in kinds {
-        match by_kind.last_mut() {
-            Some((last, n)) if *last == kind => *n += 1,
-            _ => by_kind.push((kind, 1)),
-        }
+        kinds[kind_rank(e.post.draft.kind)] += 1;
     }
     let new_posts = match entries.len() {
         1 => "1 new post".to_owned(),
@@ -361,8 +362,10 @@ pub fn board_summary_line(entries: &[BoardEntry]) -> String {
             .map(|(author, n)| format!("{} {n}", one_line(author)))
             .collect::<Vec<_>>()
             .join(", "),
-        by_kind
+        KINDS
             .iter()
+            .zip(kinds)
+            .filter(|(_, n)| *n > 0)
             .map(|(kind, n)| format!("{} {n}", kind.as_str()))
             .collect::<Vec<_>>()
             .join(", ")
@@ -696,6 +699,17 @@ mod tests {
         let mut e = board_entry(seq, author, Addressee::Board);
         e.post.draft.kind = kind;
         e
+    }
+
+    #[test]
+    fn each_kind_sits_at_its_rank() {
+        for (rank, kind) in KINDS.iter().enumerate() {
+            assert_eq!(kind_rank(*kind), rank, "{kind:?}");
+        }
+        assert_eq!(
+            KINDS.map(PostKind::as_str),
+            ["note", "question", "answer", "intent"]
+        );
     }
 
     #[test]

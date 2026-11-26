@@ -5,7 +5,7 @@ use crate::tasking::text::{
     board_attachment_line, board_cleared_line, board_entry_header, board_list_stopped_line,
     board_refused_line, board_settings_lines, board_stopped_line, board_summary_line,
     board_unknown_line, one_line, write_board_text, BoardCommand, BOARD_NO_POSTS, BOARD_OLDER,
-    BOARD_SEEN, BOARD_WATCH_MARK_UNKNOWN, BOARD_WATCH_OFF,
+    BOARD_SEEN, BOARD_WATCH_BACKLOG, BOARD_WATCH_MARK_UNKNOWN, BOARD_WATCH_OFF,
 };
 use crate::wire::WireOutcome;
 use maknae_proto::{
@@ -82,17 +82,19 @@ pub enum Confirm {
 }
 
 /// `Busy`: the store did not do it or cannot say whether it did; asking again is safe.
-/// `Unconfirmed`: no answer the request could be judged by, so a change may have landed.
+/// `Capped`: the walk reached its request cap. `Unconfirmed`: no answer the request could be
+/// judged by, so a change may have landed.
 enum Stop {
     Answered(String),
     Busy(String),
+    Capped(String),
     Unconfirmed(String),
 }
 
 impl Stop {
     fn err(self, command: BoardCommand, sent_a_change: bool) -> Vec<String> {
         match self {
-            Stop::Answered(line) | Stop::Busy(line) => vec![line],
+            Stop::Answered(line) | Stop::Busy(line) | Stop::Capped(line) => vec![line],
             Stop::Unconfirmed(line) if sent_a_change => {
                 vec![line, board_unknown_line(command).into()]
             }
@@ -263,7 +265,7 @@ where
             break None;
         }
         if requests >= BOARD_LIST_REQUESTS_MAX {
-            break Some(Stop::Answered(board_list_stopped_line(collected as u64)));
+            break Some(Stop::Capped(board_list_stopped_line(collected as u64)));
         }
         before = older;
     };
@@ -359,6 +361,7 @@ pub enum Polled {
 fn polled(listed: &Listed, stop: Option<Stop>) -> Polled {
     match (stop, listed.entries.last()) {
         (Some(Stop::Busy(_)), _) | (None, None) => Polled::Quiet,
+        (Some(Stop::Capped(_)), _) => Polled::End(ended(vec![BOARD_WATCH_BACKLOG.into()])),
         (Some(stop), _) => Polled::End(ended(stop.err(BoardCommand::List, false))),
         (None, Some(newest)) => Polled::Show {
             through: newest.seq,
@@ -416,7 +419,7 @@ where
             let _ = writeln!(err, "maknae: {BOARD_WATCH_MARK_UNKNOWN}");
             None
         }
-        Err(Stop::Answered(line)) => Some(ended(vec![line])),
+        Err(Stop::Answered(line) | Stop::Capped(line)) => Some(ended(vec![line])),
         Err(Stop::Unconfirmed(line)) => Some(ended(vec![line, BOARD_WATCH_MARK_UNKNOWN.into()])),
     }
 }
@@ -1596,6 +1599,7 @@ mod tests {
         })
     }
 
+    const BACKLOG: &str = "too many posts are unseen to watch from here; run maknae board --new to read them or maknae board seen to skip them";
     const MARK_UNKNOWN: &str = "the mark may not have moved; the same posts may print again";
     const WATCH_OFF: &str = "board reporting is off; turn it on with maknae board settings --report summary or --report every";
     const READ_REFUSED: &str = "you may not read your board: not authorized";
@@ -1780,6 +1784,16 @@ mod tests {
             polled(&listed(vec![entry(9)]), None),
             Polled::Show { through: 9 }
         );
+    }
+
+    #[test]
+    fn a_capped_walk_ends_the_watch_naming_its_remedy() {
+        for entries in [vec![], vec![entry(4)]] {
+            assert_eq!(
+                polled(&listed(entries), Some(Stop::Capped("stopped".into()))),
+                Polled::End(said(&[], &[BACKLOG], false))
+            );
+        }
     }
 
     #[test]
@@ -1998,14 +2012,7 @@ mod tests {
         assert_eq!(out, "");
         assert!(sends_no_seen(&w.sent));
         assert_eq!(w.sent.len(), 65);
-        assert_eq!(
-            w.said,
-            said(
-                &[],
-                &["stopped after 64 requests and 64 posts; older posts remain"],
-                false
-            )
-        );
+        assert_eq!(w.said, said(&[], &[BACKLOG], false));
     }
 
     #[tokio::test]
