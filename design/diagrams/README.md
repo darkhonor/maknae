@@ -88,7 +88,7 @@ to `ci/gates/`. A stereotype is readable by anyone who knows UML; a bespoke glyp
 | `generated-read-path.svg` | UML sequence (≈ DoDAF SV-10c) | *Where does a read cross a trust boundary, and by what mechanism?* | security assessor, contributor | generated |
 | `generated-credential-path.svg` | UML sequence (≈ DoDAF SV-10c) | *What can each hop see of a user's model key on one turn, and what enforces it?* | security assessor, accreditor | generated |
 | `generated-tool-invocation.svg` | UML sequence (≈ DoDAF SV-10c) | *Who decides one tool call, who runs it, where does its credential come from, what does its network reach, and what does the model see?* The same steps for `maknae` and `maknae-agentd`; each step marked `«live»`, `«unreachable»`, `«decided»` or `«#N»` | security assessor, contributor | generated |
-| `generated-task-tool-lifecycle.svg` | UML sequence (≈ DoDAF SV-10c) | *How does an agent's task start, bound and end its tool calls: bindings, reach, the claim, the credential's life, the outcome?* Each step marked as above | security assessor, contributor | generated |
+| `generated-task-tool-lifecycle.svg` | UML sequence (≈ DoDAF SV-10c) | *How does an agent's task start, run and end: bindings and reach, the pull hand-off, the agentic loop and its optional exchanges, the outcome and the revoke?* Each step marked as above | security assessor, contributor | generated |
 | `generated-isolation-matrix.svg` | access-control matrix (Lampson 1974) | *Which subject can read, carry or unwrap which user's credential, and by what control?* | security assessor, accreditor | generated |
 | `generated-decision-cycle.svg` | UML activity (decision nodes) | *How does each `maknae-authz-*` backend layer into one decision, and in what order?* | security assessor, contributor | generated |
 | `generated-data-model.svg` | IDEF1X | *What is the shape of the data we record and enforce?* | security assessor, contributor | generated |
@@ -249,6 +249,29 @@ numbered D1, D2, … in step order, flagged under their step, and listed in full
 "Open decisions". The ADR and path citations in them must resolve, as evidence does; issue
 numbers are not checked, since generation makes no network call. A ruling is
 then recorded in the ADR, and its `decide` entry removed.
+
+A step may carry an `id` (lowercase letters, digits and hyphens, unique in the file). Ids
+are not drawn; fragments name steps by them. A top-level `precondition` string is drawn
+as the first line of Notes, labeled `Before step 1.`; it must fit on one line.
+
+UML 2.5.1 combined fragments (17.6) and interaction uses (17.7) are drawn from:
+
+- `[[fragment]]` with `operator` (`loop` or `opt`), `guard`, and `first` and `last` step
+  ids. A `loop` box is shaded so the repeated process stands out; an `opt` box is outline
+  only. Two fragments are either disjoint or one contains the other; partial overlap
+  and two fragments on exactly the same steps both fail generation. A fragment may carry
+  `status` and `evidence`, checked by the step rules, and drawn as `«status» [guard]`; a
+  fragment status needs the steps marked. A box widens to hold its steps' text, and
+  generation fails when the canvas cannot hold it (raise `pitch`) or when the guard does
+  not fit.
+- A step with `kind = "ref"` names another generated diagram in `target` and spans the
+  lifelines `from` to `to`. It draws a box, not an arrow, and takes no `sees` or `decide`.
+
+The renderer's checks are pinned by `test_generate.py`, stdlib only and not yet run in CI:
+
+```bash
+python3 -I -m unittest discover -s design/diagrams -p test_generate.py -v
+```
 
 ## Adding a diagram
 
