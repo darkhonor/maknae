@@ -61,7 +61,7 @@ impl DeliveredCredential {
         Self::new(Zeroizing::new(std::mem::take(&mut *secret).into_bytes()))
     }
 
-    pub(crate) fn expose(&self) -> &[u8] {
+    fn expose(&self) -> &[u8] {
         &self.0
     }
 }
@@ -738,15 +738,15 @@ mod tests {
 
     #[test]
     fn the_largest_frame_travels_over_a_socket() {
-        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
         for s in [&a, &b] {
             s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
             s.set_write_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
         }
-        let sender = std::thread::spawn(move || largest().send(&a));
-        let got = LaunchCredentials::receive(&b).unwrap();
+        let sender = std::thread::spawn(move || largest().send(&mut a));
+        let got = LaunchCredentials::receive(&mut b).unwrap();
         sender.join().unwrap().unwrap();
         assert_eq!(got.slots().count(), MAX_CREDENTIALS);
     }

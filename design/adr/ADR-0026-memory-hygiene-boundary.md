@@ -93,11 +93,11 @@ Option B (own the codec and the body) and Option C (B for the kernel↔deputy CB
 
 ## Amendment 2026-11-27 — delivered credentials and core dumps (#751)
 
-A credential a front end, or later the launch helper (#755), holds to deliver to a tool is secret-class. It is held only as `maknae_io::credential::DeliveredCredential`, and it travels to the helper only inside `LaunchCredentials`. Both meet decision 1: the value lives in a `Zeroizing` buffer, the encoded frame is allocated once at its exact length and zeroized, and the receive buffer is zeroized from allocation. `DeliveredCredential` has no `Display`, `Clone`, `PartialEq` or serde, and its `Debug` prints a fixed marker; compile-fail doctests pin each. `LaunchCredentials` has no `Display` (pinned by a compile-fail doctest), cannot derive the others while it holds `DeliveredCredential`s, and its `Debug` prints the slots, never a value. `deliver_to` refuses an empty value and one over 64 KiB, so every bundle it builds is one the receiver accepts, and `send` and `receive` bound the whole frame by the stream's timeout.
+A credential a front end, or later the launch helper (#755), holds to deliver to a tool is secret-class. It is held only as `maknae_io::credential::DeliveredCredential`, and it travels to the helper only inside `LaunchCredentials`. Both meet decision 1: the value lives in a `Zeroizing` buffer, the encoded frame is allocated once at its exact length and zeroized, and the receive buffer is zeroized from allocation. `DeliveredCredential` has no `Display`, `Clone`, `PartialEq` or serde, and its `Debug` prints a fixed marker; compile-fail doctests pin each. `LaunchCredentials` has no `Display` (pinned by a compile-fail doctest), cannot derive the others while it holds `DeliveredCredential`s, and its `Debug` prints the slots, never a value. `deliver_to` refuses an empty value and one over 64 KiB, so every bundle it builds is one the receiver accepts, `send` and `receive` bound the whole frame by the stream's timeout, waiting with `poll` and never changing the stream's options.
 
 Decision 3's core-dump exposure narrows for those processes, and only for them:
 
-- `maknae_io::deny_core_dumps` lowers the soft `RLIMIT_CORE` to 0 and, on Linux, sets the process non-dumpable (`PR_SET_DUMPABLE` 0). It runs once per process, and a failure is sticky. Constructing a `DeliveredCredential` calls it, and a holder calls it before fetching a credential. It moves only the soft limit, so it needs no `setrlimit` permission under a confined domain.
+- `maknae_io::deny_core_dumps` lowers the soft `RLIMIT_CORE` to 0 and, on Linux, sets the process non-dumpable (`PR_SET_DUMPABLE` 0). It reapplies on every call, since a uid or gid change resets dumpability, and a failure is sticky. Constructing a `DeliveredCredential` calls it, `receive` calls it before reading a byte, and a holder calls it before fetching a credential. It moves only the soft limit, so it needs no `setrlimit` permission under a confined domain.
 - The agent daemon's unit (`maknae-agent@.service`) sets `LimitCORE=0`, which `packaging/isolation-contract.md` pins.
 - `maknaed`'s and `maknae-egress`'s units are unchanged. Decision 3's sentence about them still holds, and decision 4's `LimitCORE=0` on both units stays unfiled.
 
@@ -105,7 +105,7 @@ No front end holds a tool credential yet (the tool path is #479 and #168), so no
 
 Residuals of this amendment (decision 2 lists third-party intermediates; these are process-level):
 
-- A piped core handler (`core_pattern` beginning with `|`) that does not honour the soft limit (`%c`) still stores the dump. With `suid_dumpable=2`, a non-dumpable process is still dumped, as root, to such a handler.
+- A piped core handler (`core_pattern` beginning with `|`) that does not honour the soft limit (`%c`) stores the dump of a process that is still dumpable: on macOS, or on Linux when a uid or gid change has reset dumpability since the last `deny_core_dumps` call. A non-dumpable process is not dumped.
 - The window between fetching a value and constructing the `DeliveredCredential`, when the value sits in the fetching client's own buffers. A holder shortens it by calling `deny_core_dumps` before the fetch.
 - Non-dumpable is Linux-only. On macOS only the soft core limit applies; nothing equivalent to `PR_SET_DUMPABLE` is set.
 
