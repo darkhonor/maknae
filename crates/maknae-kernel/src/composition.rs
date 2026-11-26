@@ -1237,6 +1237,43 @@ mod tests {
                 ));
             }
         }
+        out.push_str(
+            "# a person's board listing through the Composition: board.read on the client channel, the caller's own board (shown as own); the partition operand abstains.\n",
+        );
+        for (who, uid, stamp, _) in rows.iter().filter(|r| matches!(r.2, Stamp::Client)) {
+            let c = match who.as_str() {
+                "guest" => &guests,
+                "user" => &users,
+                _ => &shipped,
+            };
+            let verb = maknae_proto::Verb::BoardList { before: None };
+            let r = build_authz_request(
+                &verb,
+                *uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                stamp,
+            );
+            let d = c.decide_cited(&r);
+            let rule = d.rule.map(|c| {
+                let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                format!("{} in #{section}", c.key)
+            });
+            let board = match r.resource.0.get(maknae_security::RESOURCE_BOARD) {
+                Some(AttrValue::Str(b)) if *b == format!("users/{uid}") => "own".to_owned(),
+                other => format!("{other:?}"),
+            };
+            let op = r.context.0.str(maknae_security::CONTEXT_BOARD_OP);
+            out.push_str(&format!(
+                "{who} {} {op:?} board={board} -> {:?} {:?} {rule:?} => {:?}\n",
+                r.action.0,
+                d.verdict,
+                d.role,
+                maknae_security::finalize(d.verdict.clone())
+            ));
+        }
         out
     }
 

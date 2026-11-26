@@ -152,6 +152,7 @@ pub(crate) fn task_verb(verb: &Verb) -> Option<TaskVerb<'_>> {
         | Verb::BoardPost { .. }
         | Verb::BoardRead { .. }
         | Verb::BoardManage { .. }
+        | Verb::BoardList { .. }
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail

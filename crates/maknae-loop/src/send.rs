@@ -31,7 +31,8 @@ fn reply_caps(verb: &maknae_proto::Verb, transport: &maknae_config::TransportCon
         | maknae_proto::Verb::TaskCollect { .. }
         | maknae_proto::Verb::AgentList { .. }
         | maknae_proto::Verb::BoardPost { .. }
-        | maknae_proto::Verb::BoardRead { .. } => FrameCaps::responses(
+        | maknae_proto::Verb::BoardRead { .. }
+        | maknae_proto::Verb::BoardList { .. } => FrameCaps::responses(
             maknae_proto::prompt_response_cap(maknae_config::PROMPT_MAX_CEILING),
         ),
         _ => response_caps(transport),
@@ -792,6 +793,7 @@ mod tests {
                 },
             },
             maknae_proto::Verb::BoardRead { seen_through: None },
+            maknae_proto::Verb::BoardList { before: None },
         ] {
             assert_eq!(reply_caps(&verb, &transport).prompt, ceiling, "{verb:?}");
         }

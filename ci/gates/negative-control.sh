@@ -1150,6 +1150,7 @@ pub enum Payload {
     BoardPage(crate::BoardPage),
     BoardSettings(crate::BoardSettings),
     BoardCleared(crate::BoardCleared),
+    BoardListing(crate::BoardListing),
 }
 
 pub struct SecretText(pub zeroize::Zeroizing<String>);

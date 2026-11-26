@@ -173,9 +173,10 @@ pub fn dispatch_verb(verb: &Verb) -> Dispatch {
         | Verb::McpPromptGet
         | Verb::McpSamplingCreate => Dispatch::NoBehaviour,
         Verb::ToolCatalog {} => Dispatch::ToolCatalogRequested,
-        Verb::BoardPost { .. } | Verb::BoardRead { .. } | Verb::BoardManage { .. } => {
-            Dispatch::BoardRequested
-        }
+        Verb::BoardPost { .. }
+        | Verb::BoardRead { .. }
+        | Verb::BoardManage { .. }
+        | Verb::BoardList { .. } => Dispatch::BoardRequested,
         Verb::TaskSubmit { .. }
         | Verb::TaskAdd { .. }
         | Verb::TaskStatus { .. }
@@ -213,6 +214,7 @@ pub fn board_op(verb: &Verb) -> Option<&'static str> {
         | Verb::ToolCatalog {}
         | Verb::BoardPost { .. }
         | Verb::BoardRead { .. }
+        | Verb::BoardList { .. }
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -293,6 +295,7 @@ pub fn task_op(verb: &Verb) -> Option<&'static str> {
         | Verb::BoardPost { .. }
         | Verb::BoardRead { .. }
         | Verb::BoardManage { .. }
+        | Verb::BoardList { .. }
         | Verb::AdminStatus
         | Verb::AdminConfigShow
         | Verb::AdminAuditTail
@@ -539,6 +542,7 @@ pub fn verb_to_action(verb: &Verb) -> &'static str {
         Verb::BoardPost { .. } => "board.post",
         Verb::BoardRead { .. } => "board.read",
         Verb::BoardManage { .. } => "board.manage",
+        Verb::BoardList { .. } => "board.read",
     }
 }
 
@@ -666,7 +670,7 @@ pub fn build_authz_request(
             AttrValue::Str(format!("{}/{}", a.provider.name, a.model)),
         );
     }
-    if let (Verb::BoardManage { .. }, Stamp::Client) = (verb, stamp) {
+    if let (Verb::BoardManage { .. } | Verb::BoardList { .. }, Stamp::Client) = (verb, stamp) {
         resource.insert(
             maknae_security::RESOURCE_BOARD,
             AttrValue::Str(format!("users/{peer_uid}")),
@@ -1119,7 +1123,10 @@ mod tests {
         for verb in verbs.iter().filter(|v| {
             !matches!(
                 v,
-                Verb::BoardPost { .. } | Verb::BoardRead { .. } | Verb::BoardManage { .. }
+                Verb::BoardPost { .. }
+                    | Verb::BoardRead { .. }
+                    | Verb::BoardManage { .. }
+                    | Verb::BoardList { .. }
             )
         }) {
             assert_eq!(board(verb, Some(&person)), None, "{}", verb_to_action(verb));
@@ -1138,6 +1145,49 @@ mod tests {
                 "{}",
                 verb_to_action(verb)
             );
+        }
+    }
+
+    #[test]
+    fn the_listing_is_stamped_with_the_callers_own_board_on_the_client_channel_only() {
+        use maknae_security::{AttrValue, RESOURCE_BOARD};
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let person = TaskStamp {
+            id: maknae_proto::TaskId([0x69; 16]),
+            tasker: "uid:1000".into(),
+            root: "users/1000".into(),
+            start: 0,
+        };
+        let listing = Verb::BoardList { before: Some(9) };
+        let request = |uid: u32, stamp: &Stamp<'_>| {
+            build_authz_request(
+                &listing,
+                uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                stamp,
+            )
+        };
+        for uid in [1000, 1002] {
+            let client = request(uid, &Stamp::Client);
+            assert_eq!(
+                client.resource.0.get(RESOURCE_BOARD),
+                Some(&AttrValue::Str(format!("users/{uid}")))
+            );
+            assert_eq!(client.action.0, "board.read");
+            assert_eq!(
+                client.context.0.str(maknae_security::CONTEXT_BOARD_OP),
+                None
+            );
+            assert_eq!(client.context.0.str(maknae_security::CONTEXT_TASK_OP), None);
+        }
+        for task in [Some(&person), None] {
+            let agent = request(1000, &Stamp::Agent { agent: &hobi, task });
+            assert_eq!(agent.resource.0.get(RESOURCE_BOARD), None);
+            assert_eq!(agent.action.0, "board.read");
+            assert_eq!(agent.context.0.str(maknae_security::CONTEXT_BOARD_OP), None);
         }
     }
 
@@ -2755,6 +2805,7 @@ mod tests {
             Verb::BoardManage {
                 op: maknae_proto::BoardOp::Clear,
             },
+            Verb::BoardList { before: None },
         ]
     }
 
@@ -2924,7 +2975,7 @@ mod tests {
         let terms: std::collections::BTreeSet<&str> =
             all_verbs().iter().map(verb_to_action).collect();
         assert_eq!(terms.len(), 63);
-        assert_eq!(all_verbs().len(), 76);
+        assert_eq!(all_verbs().len(), 77);
     }
 
     /// Two terms sharing an action string would be decided as one another —
@@ -2952,6 +3003,14 @@ mod tests {
         let (manage, rest): (Vec<Verb>, Vec<Verb>) = rest
             .into_iter()
             .partition(|v| verb_to_action(v) == "board.manage");
+        let (read, rest): (Vec<Verb>, Vec<Verb>) = rest
+            .into_iter()
+            .partition(|v| verb_to_action(v) == "board.read");
+        assert_eq!(
+            names(&read),
+            ["BoardRead", "BoardList"],
+            "only an agent's read and a person's listing share board.read"
+        );
         assert_eq!(
             names(&manage),
             ["BoardManage", "BoardManage", "BoardManage"],

@@ -767,6 +767,10 @@ pub enum Verb {
     BoardManage {
         op: crate::BoardOp,
     },
+    /// The newest page of the caller's own board below `before`; `None` from the top.
+    BoardList {
+        before: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,6 +842,8 @@ pub enum Payload {
     BoardSettings(crate::BoardSettings),
     /// What a permitted `board.manage` clear removed.
     BoardCleared(crate::BoardCleared),
+    /// A page of the caller's own board, each post released only on its own `board.read` Permit.
+    BoardListing(crate::BoardListing),
 }
 
 pub const TOOL_CATALOG_ENVELOPE: usize = 1024;
@@ -1402,7 +1408,8 @@ pub fn takes_task_request_cap(verb: &Verb) -> bool {
         | Verb::AgentList { .. }
         | Verb::BoardPost { .. }
         | Verb::BoardRead { .. }
-        | Verb::BoardManage { .. } => false,
+        | Verb::BoardManage { .. }
+        | Verb::BoardList { .. } => false,
     }
 }
 
@@ -1415,7 +1422,8 @@ pub fn class_of(verb: &Verb) -> FrameClass {
         | Verb::TaskClaim { .. }
         | Verb::TaskCollect { .. }
         | Verb::BoardPost { .. }
-        | Verb::BoardRead { .. } => FrameClass::Prompt,
+        | Verb::BoardRead { .. }
+        | Verb::BoardList { .. } => FrameClass::Prompt,
         Verb::SessionNew { .. }
         | Verb::Read { .. }
         | Verb::FsWrite { .. }
@@ -4162,6 +4170,8 @@ mod tests {
                     },
                     FrameClass::Control,
                 ),
+                (Verb::BoardList { before: None }, FrameClass::Prompt),
+                (Verb::BoardList { before: Some(7) }, FrameClass::Prompt),
             ]
         }
 
@@ -4175,7 +4185,7 @@ mod tests {
         #[test]
         fn class_of_pins_every_verb() {
             let all = every_verb();
-            assert_eq!(all.len(), 66);
+            assert_eq!(all.len(), 68);
             for (verb, class) in all {
                 assert_eq!(class_of(&verb), class, "{verb:?}");
             }
@@ -4584,6 +4594,69 @@ mod tests {
             bytes.len()
         );
         assert_eq!(decode_response(&bytes).unwrap(), response);
+    }
+
+    fn listing_entry(draft: crate::PostDraft) -> crate::BoardEntry {
+        crate::BoardEntry {
+            seq: u64::MAX,
+            post: board_post(draft),
+            held: vec![crate::BoardHold::Author, crate::BoardHold::Person],
+        }
+    }
+
+    #[test]
+    fn a_listing_of_max_entries_ended_by_the_byte_budget_fits_the_prompt_response_at_the_floor() {
+        let budget = crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR);
+        let mut entries = Vec::new();
+        let mut used = 0usize;
+        loop {
+            let entry = listing_entry(max_board_draft());
+            let size = encoded_len(&entry);
+            if used + size > budget || entries.len() == crate::BOARD_READ_PAGE_POSTS {
+                break;
+            }
+            used += size;
+            entries.push(entry);
+        }
+        assert!(!entries.is_empty());
+        assert!(entries.len() < crate::BOARD_READ_PAGE_POSTS);
+        let decoded_entries: Vec<crate::BoardEntry> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| crate::BoardEntry {
+                seq: u64::MAX - u64::try_from(entries.len() - 1 - i).unwrap(),
+                ..e.clone()
+            })
+            .collect();
+        let response = Response::new(
+            PROTOCOL_VERSION,
+            RespResult::Ok(Payload::BoardListing(crate::BoardListing {
+                entries: decoded_entries,
+                older: Some(u64::MAX),
+            })),
+            Some(CatalogDigest([0xff; 32])),
+        );
+        let bytes = encode_response(&response).unwrap();
+        assert!(
+            bytes.len() <= crate::prompt_response_cap(PROMPT_MAX_BYTES_FLOOR),
+            "{}",
+            bytes.len()
+        );
+        assert_eq!(decode_response(&bytes).unwrap(), response);
+    }
+
+    #[test]
+    fn a_listing_of_32_minimum_entries_fits_the_floor() {
+        let mut draft = max_board_draft();
+        draft.attachments.clear();
+        draft.body = board_text(1);
+        let entry = listing_entry(draft);
+        let pages = crate::BOARD_READ_PAGE_POSTS + 1;
+        assert!(
+            pages * encoded_len(&entry) <= crate::board_page_budget(PROMPT_MAX_BYTES_FLOOR),
+            "{}",
+            encoded_len(&entry)
+        );
     }
 
     #[test]
