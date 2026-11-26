@@ -328,7 +328,7 @@ pub fn display_piece(c: char, buf: &mut [u8; DISPLAY_PIECE_MAX]) -> &str {
 
 /// The bytes [`display_safe`] would write for `s`.
 pub fn display_safe_len(s: &str) -> usize {
-    let mut buf = [0; DISPLAY_PIECE_MAX];
+    let mut buf = Zeroizing::new([0; DISPLAY_PIECE_MAX]);
     s.chars().map(|c| display_piece(c, &mut buf).len()).sum()
 }
 
@@ -341,7 +341,7 @@ pub fn display_safe(s: &str, out: &mut FixedText) -> Result<(), Full> {
     if display_safe_len(s) > out.room() {
         return Err(Full);
     }
-    let mut buf = [0; DISPLAY_PIECE_MAX];
+    let mut buf = Zeroizing::new([0; DISPLAY_PIECE_MAX]);
     for c in s.chars() {
         out.push_str(display_piece(c, &mut buf))?;
     }

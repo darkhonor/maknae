@@ -3740,6 +3740,17 @@ async fn serve_board_verb<S, E, P>(
 {
     use crate::board_verbs as bv;
     let action = verb_to_action(verb);
+    if let Verb::BoardList { before } = verb {
+        let asking = Asking {
+            authorizer,
+            live,
+            timeout,
+            lane,
+            stamp,
+        };
+        serve_board_list(stream, trail, verb, *before, asking, &board).await;
+        return;
+    }
     if let Verb::BoardManage { op } = verb {
         let key = bv::manage_key(board.channel_agent, trail.uid);
         let (_, _, generation) = live.admission();
@@ -3808,6 +3819,7 @@ async fn serve_board_verb<S, E, P>(
             return;
         }
     };
+    let installed = board.agents.view.generation();
     let (_, _, generation) = live.admission();
     let request = build_authz_request(verb, trail.uid, None, lane, None, None, stamp);
     let (verdict, role, rule) =
@@ -3844,7 +3856,7 @@ async fn serve_board_verb<S, E, P>(
             .await;
         return;
     };
-    let still = || store.still_installed(&load, &*board.agents.view);
+    let still = || store.still_installed(&load, installed, &*board.agents.view);
     if !still() {
         let rec = decided("deny", bv::POLICY_CHANGED, "unauthorized");
         trail
@@ -4011,6 +4023,109 @@ async fn serve_board_verb<S, E, P>(
 
     trail
         .unauthorized(stream, &decided("deny", "not a board verb", "unauthorized"))
+        .await;
+}
+
+/// How a client-channel board verb is decided.
+struct Asking<'a, P> {
+    authorizer: &'a Arc<P>,
+    live: &'a Arc<crate::live::LiveConfig>,
+    timeout: Duration,
+    lane: maknae_security::Lane,
+    stamp: &'a Stamp<'a>,
+}
+
+/// A person's listing of their own board: memory only, nothing written.
+async fn serve_board_list<S, E, P>(
+    stream: &mut S,
+    trail: &Trail<'_, E>,
+    verb: &Verb,
+    before: Option<u64>,
+    a: Asking<'_, P>,
+    board: &BoardCtx<'_>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: AuditEmit + Send + Sync + 'static,
+    P: Authorizer + Send + Sync + 'static,
+{
+    use crate::board_verbs as bv;
+    let action = verb_to_action(verb);
+    let listing = |mut rec: AuditRecord| {
+        rec.subject.board_op = Some("list".into());
+        rec
+    };
+    if board.channel_agent.is_some() {
+        let reason = bv::Off::AgentChannel.to_string();
+        let rec = listing(trail.record(action, "deny", &reason, "unavailable"));
+        trail.unauthorized(stream, &rec).await;
+        return;
+    }
+    let key = crate::board_store::BoardKey(trail.uid);
+    let (store, view) = (&board.agents.board, &*board.agents.view);
+    let (load, installed) = (view.load(), view.generation());
+    let (_, _, generation) = a.live.admission();
+    let request = build_authz_request(verb, trail.uid, None, a.lane, None, None, a.stamp);
+    let (verdict, role, rule) =
+        decide_bounded(a.authorizer, a.live, request.clone(), generation, a.timeout).await;
+    let said = |result: &str, reason: &str, posture: &str| {
+        let rec = trail.record(action, result, reason, posture);
+        listing(decision_record(
+            bv::on_board(rec, Some(key)),
+            role,
+            rule.as_ref(),
+        ))
+    };
+    let refused = match finalize(verdict) {
+        Decision::Deny { reason } => Some(reason),
+        Decision::Permit { obligations } => discharge_plan(&obligations)
+            .err()
+            .map(|u| format!("unhonorable obligation: {}", u.0)),
+    };
+    if let Some(reason) = refused {
+        trail
+            .unauthorized(stream, &said("deny", &reason, "unauthorized"))
+            .await;
+        return;
+    }
+    let deciding = bv::Deciding {
+        authorizer: a.authorizer,
+        live: a.live,
+        generation,
+        timeout: a.timeout,
+        request: &request,
+    };
+    let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
+    let Some(page) = bv::list_page(store, key, view, &deciding, before, budget).await else {
+        let rec = said("deny", bv::UNDECIDED, "unavailable");
+        trail
+            .refuse_board(stream, &rec, BoardDefect::TryAgain)
+            .await;
+        return;
+    };
+    let seqs: Vec<u64> = page
+        .listing
+        .entries
+        .iter()
+        .map(|e| e.seq)
+        .chain(page.links.values().copied())
+        .collect();
+    let Some(live_seqs) = store.confirm_listing(key, (&load, installed), view, &seqs) else {
+        let rec = said("deny", bv::POLICY_CHANGED, "unauthorized");
+        trail
+            .refuse_board(stream, &rec, BoardDefect::TryAgain)
+            .await;
+        return;
+    };
+    let page = bv::settle(page, &live_seqs);
+    let reason = match page.listing.older {
+        Some(_) => bv::LISTED_OLDER,
+        None => bv::LISTED,
+    };
+    let mut rec = said("permit", reason, "authorized");
+    rec.board = Some(bv::list_audit(&page));
+    let payload = Payload::BoardListing(page.listing);
+    trail
+        .deliver(stream, &rec, payload, role, rule.as_ref(), action)
         .await;
 }
 
@@ -8437,9 +8552,8 @@ where
             None
         } else {
             let deadline = Instant::now() + self.turn_wait;
-            match crate::composition::HeldLiveTurn::take(Arc::clone(&self.authorizer), deadline)
-                .await
-            {
+            let (pdp, board) = (Arc::clone(&self.authorizer), Arc::clone(&self.board));
+            match crate::composition::HeldLiveTurn::take(pdp, board, deadline).await {
                 Some(held) => Some(held),
                 None => return accept_unavailable(ACCEPT_DECIDING, ACCEPT_DECIDING.into()),
             }
@@ -12569,6 +12683,7 @@ mod record_widths {
     struct Who {
         person: bool,
         uid: u32,
+        role: Option<&'static str>,
         shipped: (
             crate::test_fixtures::DirGuard,
             crate::composition::Composition<HermeticAuthorizer>,
@@ -12594,6 +12709,7 @@ mod record_widths {
             Who {
                 person,
                 uid: nix::unistd::geteuid().as_raw(),
+                role: Some(if person { "admin" } else { "user" }),
                 shipped: crate::test_fixtures::shipped_composition(),
             }
         }
@@ -12602,10 +12718,35 @@ mod record_widths {
             Who {
                 person: true,
                 uid: 0,
+                role: Some("adversary"),
                 shipped: crate::test_fixtures::shipped_composition_with(
                     &Self::destinations(),
                     Some("schema_version: 1\nbindings:\n  adversary:\n    - uid: 0\n"),
                 ),
+            }
+        }
+
+        fn guest() -> Self {
+            let daemon = nix::unistd::User::from_name("daemon")
+                .unwrap()
+                .expect("the daemon system account exists on every supported host");
+            Who {
+                person: true,
+                uid: daemon.uid.as_raw(),
+                role: Some("guest"),
+                shipped: crate::test_fixtures::shipped_composition_with(
+                    "",
+                    Some("schema_version: 1\nbindings:\n  guest: [\"daemon\"]\n"),
+                ),
+            }
+        }
+
+        fn unbound() -> Self {
+            Who {
+                person: true,
+                uid: 4242,
+                role: None,
+                shipped: crate::test_fixtures::shipped_composition(),
             }
         }
 
@@ -12620,6 +12761,7 @@ mod record_widths {
             Who {
                 person,
                 uid: nix::unistd::geteuid().as_raw(),
+                role: Some(if person { "admin" } else { "user" }),
                 shipped: crate::test_fixtures::shipped_composition_with(
                     &Self::destinations(),
                     None,
@@ -12686,6 +12828,36 @@ mod record_widths {
             Option<&'static str>,
             Option<RuleCitation>,
         ) {
+            self.decision_citing(verb, facts, resource, None)
+        }
+
+        /// An agent's decision citing a task whose root is a person's board.
+        fn decided_tasked(&self, verb: &Verb) -> (Option<&'static str>, Option<RuleCitation>) {
+            let task = crate::handler::TaskStamp {
+                id: TASK,
+                tasker: "uid:1000".into(),
+                root: "users/1000".into(),
+                start: 0,
+            };
+            let (verdict, role, rule) = self.decision_citing(verb, None, &[], Some(&task));
+            assert!(
+                matches!(finalize(verdict), Decision::Permit { .. }),
+                "a cited agent request is permitted"
+            );
+            (role, rule)
+        }
+
+        fn decision_citing(
+            &self,
+            verb: &Verb,
+            facts: Option<&crate::conversation::facts::ConversationFacts>,
+            resource: &[(&str, String)],
+            task: Option<&crate::handler::TaskStamp>,
+        ) -> (
+            maknae_security::Verdict,
+            Option<&'static str>,
+            Option<RuleCitation>,
+        ) {
             let agent = AgentId::parse("hobi").expect("hobi is an agent id");
             let (stamp, uid) = if self.person {
                 (Stamp::Client, self.uid)
@@ -12693,7 +12865,7 @@ mod record_widths {
                 (
                     Stamp::Agent {
                         agent: &agent,
-                        task: None,
+                        task,
                     },
                     AGENT_UID,
                 )
@@ -12718,12 +12890,7 @@ mod record_widths {
                 tv::stamp_agent(&mut req, &named);
             }
             let d = self.shipped.1.decide_cited(&req);
-            let held = match (self.person, self.uid) {
-                (true, 0) => "adversary",
-                (true, _) => "admin",
-                (false, _) => "user",
-            };
-            assert_eq!(d.role, Some(held));
+            assert_eq!(d.role, self.role);
             let rule = d.rule.map(|c| RuleCitation {
                 node: u64::MAX,
                 key: c.key,
@@ -13102,7 +13269,10 @@ mod record_widths {
             (result, reason, posture): (&str, &str, &str),
             board: maknae_audit_append::BoardAudit,
         ) -> Case {
-            let (role, rule) = self.decided(verb);
+            let (role, rule) = match self.person {
+                true => self.decided(verb),
+                false => self.decided_tasked(verb),
+            };
             let action = crate::handler::verb_to_action(verb);
             let mut rec = decision_record(
                 crate::board_verbs::on_board(
@@ -13378,13 +13548,11 @@ mod record_widths {
             }
             let (result, reason, posture) = at(&owed);
             all.push(self.manage_case(&clear, (result, &reason, posture), removed(0), ""));
-            for verb in [&write, &clear] {
-                all.push(self.manage_case(
-                    verb,
-                    ("deny", "subject contained: role=adversary", "unauthorized"),
-                    None,
-                    "",
-                ));
+            for who in [Who::contained(), Who::guest(), Who::unbound()] {
+                for verb in [&write, &clear] {
+                    let (reason, _, _) = refused(&who, verb);
+                    all.push(who.manage_case(verb, ("deny", &reason, "unauthorized"), None, ""));
+                }
             }
             all
         }
@@ -13409,10 +13577,203 @@ mod record_widths {
         }
     }
 
+    impl Who {
+        fn list_case(
+            &self,
+            (result, reason, posture): (&str, &str, &str),
+            board: Option<maknae_audit_append::BoardAudit>,
+            (role, rule): (Option<&'static str>, Option<RuleCitation>),
+        ) -> Case {
+            let verb = list_verb();
+            let action = crate::handler::verb_to_action(&verb);
+            let key = self
+                .person
+                .then_some(crate::board_store::BoardKey(u32::MAX));
+            let mut rec = decision_record(
+                crate::board_verbs::on_board(
+                    request_outcome_record(
+                        &host(),
+                        self.socket(),
+                        u32::MAX,
+                        None,
+                        Some(&widest_user()),
+                        None,
+                        None,
+                        u64::MAX,
+                        u64::MAX,
+                        (action, None, None),
+                        (result, reason, posture),
+                        &serde_json::Value::Null,
+                    ),
+                    key,
+                ),
+                role,
+                rule.as_ref(),
+            );
+            rec.subject.board_op = Some("list".into());
+            rec.board = board;
+            self.session().stamp(&mut rec);
+            Case {
+                label: format!("{action} list: {result} {reason}"),
+                rec,
+                tasker: (!self.person).then(held_tasker),
+                task: (!self.person).then(|| TASK.to_string()),
+                parent: None,
+                op: Some("list"),
+            }
+        }
+    }
+
+    fn list_verb() -> Verb {
+        Verb::BoardList {
+            before: Some(u64::MAX),
+        }
+    }
+
+    fn refused(who: &Who, verb: &Verb) -> (String, Option<&'static str>, Option<RuleCitation>) {
+        let (verdict, role, rule) = who.decision(verb, None, &[]);
+        let Decision::Deny { reason } = finalize(verdict) else {
+            panic!("the request is refused");
+        };
+        (reason, role, rule)
+    }
+
+    fn list_cases() -> Vec<Case> {
+        use crate::board_verbs as bv;
+        let (person, agent) = (Who::new(true), Who::new(false));
+        let widest = maknae_audit_append::BoardAudit {
+            first_seq: Some(u64::MAX),
+            last_seq: Some(u64::MAX),
+            returned: Some(u32::MAX),
+            withheld: Some(u32::MAX),
+            ..maknae_audit_append::BoardAudit::default()
+        };
+        let off = bv::Off::AgentChannel.to_string();
+        let permitted = || person.decided(&list_verb());
+        let mut all = vec![
+            person.list_case(
+                ("permit", bv::LISTED_OLDER, "authorized"),
+                Some(widest),
+                permitted(),
+            ),
+            person.list_case(("deny", bv::UNDECIDED, "unavailable"), None, permitted()),
+            person.list_case(
+                ("deny", bv::POLICY_CHANGED, "unauthorized"),
+                None,
+                permitted(),
+            ),
+            agent.list_case(("deny", &off, "unavailable"), None, (None, None)),
+        ];
+        for id in [
+            maknae_security::tool_launch::ID,
+            maknae_security::workspace_mask::ID,
+        ] {
+            let reason = format!("unhonorable obligation: {id}");
+            all.push(person.list_case(("deny", &reason, "unauthorized"), None, permitted()));
+        }
+        for who in [Who::contained(), Who::guest(), Who::unbound()] {
+            let (reason, role, rule) = refused(&who, &list_verb());
+            all.push(who.list_case(("deny", &reason, "unauthorized"), None, (role, rule)));
+        }
+        all
+    }
+
+    #[test]
+    fn a_persons_board_list_records_mirror_as_measured() {
+        let cases = list_cases();
+        let refused = [
+            "board.read list: deny subject contained: role=adversary",
+            "board.read list: deny role guest: no rule for board.read",
+            "board.read list: deny subject resolves to no role",
+        ];
+        assert_each_case_mirrors_as_measured(&cases, &refused);
+        let widest = "board.read list: permit done; older posts remain";
+        assert_eq!(widest_label(&cases), widest);
+        let case = |label: &str| cases.iter().find(|c| c.label == label).expect("a case");
+        let full = |label: &str| macos_mirror(&case(label).rec).full_len;
+        assert_eq!(full(widest), 1200);
+        let narrowest = cases
+            .iter()
+            .map(|c| macos_mirror(&c.rec).full_len)
+            .min()
+            .expect("cases");
+        assert_eq!(narrowest, 945);
+        let roles: Vec<(usize, Option<&str>, bool)> = refused
+            .iter()
+            .map(|l| {
+                let c = case(l);
+                (full(l), c.rec.subject.role.as_deref(), c.rec.rule.is_some())
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                (980, Some("adversary"), false),
+                (969, Some("guest"), false),
+                (945, None, false),
+            ]
+        );
+        let permitted: Vec<(usize, bool)> = [
+            "board.read list: deny board: the decision did not complete",
+            "board.read list: deny board: the policy changed during the request",
+            "board.read list: deny unhonorable obligation: tool.launch",
+            "board.read list: deny unhonorable obligation: workspace.mask",
+        ]
+        .iter()
+        .map(|l| (full(l), case(l).rec.rule.is_some()))
+        .collect();
+        assert_eq!(
+            permitted,
+            [(1088, true), (1097, true), (1088, true), (1091, true)]
+        );
+        let agent = "board.read list: deny board: not served on the agent channel";
+        assert_eq!(full(agent), 1140);
+        let c = case(agent);
+        assert_eq!(
+            (c.rec.object.as_deref(), c.rec.rule.is_none()),
+            (None, true)
+        );
+    }
+
     #[test]
     fn a_persons_board_manage_records_mirror_as_measured() {
         let cases = Who::new(true).manage_cases();
-        assert_each_case_mirrors_as_measured(&cases, &[]);
+        let refused: [(&str, usize, Option<&str>); 6] = [
+            (
+                "settings: deny subject contained: role=adversary",
+                994,
+                Some("adversary"),
+            ),
+            (
+                "clear: deny subject contained: role=adversary",
+                988,
+                Some("adversary"),
+            ),
+            (
+                "settings: deny role guest: no rule for board.manage",
+                985,
+                Some("guest"),
+            ),
+            (
+                "clear: deny role guest: no rule for board.manage",
+                979,
+                Some("guest"),
+            ),
+            ("settings: deny subject resolves to no role", 959, None),
+            ("clear: deny subject resolves to no role", 953, None),
+        ];
+        let labels: Vec<String> = refused
+            .iter()
+            .map(|(l, _, _)| format!("board.manage {l}"))
+            .collect();
+        let in_full: Vec<&str> = labels.iter().map(String::as_str).collect();
+        assert_each_case_mirrors_as_measured(&cases, &in_full);
+        for (label, (_, width, role)) in in_full.iter().zip(refused) {
+            let c = cases.iter().find(|c| c.label == *label).expect("a case");
+            let shape = (macos_mirror(&c.rec).full_len, c.rec.subject.role.as_deref());
+            assert_eq!(shape, (width, role), "{label}");
+            assert!(c.rec.rule.is_none(), "{label}");
+        }
         let widest = format!(
             "board.manage clear: permit {}the board store did not answer in time (32 ids)",
             crate::task::OUTCOME_UNKNOWN
@@ -13425,6 +13786,7 @@ mod record_widths {
         assert_eq!(macos_mirror(&c.rec).full_len, 2263);
         let narrowest = cases
             .iter()
+            .filter(|c| !in_full.contains(&c.label.as_str()))
             .map(|c| macos_mirror(&c.rec).full_len)
             .min()
             .expect("cases");
@@ -13479,6 +13841,10 @@ mod record_widths {
     fn the_board_records_of_the_widest_agent_mirror_as_measured() {
         let cases = Who::new(false).board_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
+        for c in &cases {
+            let shape = (c.rec.subject.role.as_deref(), c.rec.rule.is_some());
+            assert_eq!(shape, (Some("user"), true), "{}", c.label);
+        }
         assert_eq!(
             widest_label(&cases),
             "board.post: permit done",

@@ -76,6 +76,22 @@ pub(crate) struct Cleared {
     pub stopped: Option<BoardRefusal>,
 }
 
+/// A post a listing shows, with every hold on it now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub stored: Arc<Stored>,
+    pub held: BTreeSet<HeldFor>,
+}
+
+/// [`BoardStore::listing`]'s posts, newest first; whether a listable post lies below them;
+/// and the reply targets they name that are not among them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Window {
+    pub posts: Vec<Listed>,
+    pub more: bool,
+    pub targets: Vec<Arc<Stored>>,
+}
+
 /// What [`BoardStore::release`] did with a hold it lifted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lifted {
@@ -148,6 +164,13 @@ impl Held {
     /// Kept from every reader: held back, or past retention at `now`, swept or not.
     fn withheld(&self, key: BoardKey, s: &Stored, now: i64) -> bool {
         self.held_back(key, s) || expired(s, now)
+    }
+
+    /// On a person's listing: not in its expiry's delete, and held, marked for a hold, or not
+    /// past retention at `now`.
+    fn listable(&self, key: BoardKey, s: &Stored, now: i64) -> bool {
+        !self.expiring.contains(&(key, s.seq))
+            && (!s.held.is_empty() || self.marked.contains_key(&(key, s.seq)) || !expired(s, now))
     }
 
     fn live(&self, key: BoardKey, id: PostId, now: i64) -> Option<&Arc<Stored>> {
@@ -465,10 +488,16 @@ impl BoardStore {
         )
     }
 
-    /// Whether `view`'s installed load is still `load`, read under the memory lock.
-    pub(crate) fn still_installed(&self, load: &Load, view: &dyn EnrollmentView) -> bool {
+    /// Whether `view`'s installed load and live generation are still `load` and
+    /// `generation`, read under the memory lock.
+    pub(crate) fn still_installed(
+        &self,
+        load: &Load,
+        generation: u64,
+        view: &dyn EnrollmentView,
+    ) -> bool {
         let _held = self.held();
-        view.load() == *load
+        view.load() == *load && view.generation() == generation
     }
 
     pub fn settings(&self, key: BoardKey) -> Settings {
@@ -759,6 +788,94 @@ impl BoardStore {
             .collect()
     }
 
+    /// Up to `limit` listable posts below `before`, newest first, in one hold of the memory
+    /// lock with one time and one answer from `view`. Changes nothing.
+    pub(crate) fn listing(
+        &self,
+        key: BoardKey,
+        before: Option<u64>,
+        limit: usize,
+        view: &dyn EnrollmentView,
+    ) -> Window {
+        let held = self.held();
+        let now = self.now();
+        let Some(board) = held.boards.get(&key) else {
+            return Window::default();
+        };
+        let below = before.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut listable = board
+            .posts
+            .range((Bound::Unbounded, below))
+            .rev()
+            .map(|(_, s)| s)
+            .filter(|s| held.listable(key, s, now));
+        let window: Vec<&Arc<Stored>> = listable.by_ref().take(limit).collect();
+        let more = listable.next().is_some();
+        let contained = contained_on(view, key, window.iter().map(|s| s.author_uid));
+        let inside: BTreeSet<PostId> = window.iter().map(|s| s.post.id).collect();
+        let named: BTreeSet<PostId> = window
+            .iter()
+            .filter_map(|s| s.post.draft.in_reply_to)
+            .filter(|t| !inside.contains(t))
+            .collect();
+        let targets = named
+            .iter()
+            .filter_map(|t| board.posts.get(board.ids.get(t)?))
+            .filter(|s| held.listable(key, s, now))
+            .cloned()
+            .collect();
+        let posts = window
+            .into_iter()
+            .map(|s| {
+                let mut why = s.held.clone();
+                why.extend(held.marked.get(&(key, s.seq)).into_iter().flatten());
+                why.extend(contained_for(key, s.author_uid, &contained));
+                Listed {
+                    stored: Arc::clone(s),
+                    held: why,
+                }
+            })
+            .collect();
+        Window {
+            posts,
+            more,
+            targets,
+        }
+    }
+
+    /// `None` when `view`'s load or live generation is no longer `installed`; else those of
+    /// `seqs` still listable.
+    pub(crate) fn confirm_listing(
+        &self,
+        key: BoardKey,
+        (load, generation): (&Load, u64),
+        view: &dyn EnrollmentView,
+        seqs: &[u64],
+    ) -> Option<BTreeSet<u64>> {
+        let held = self.held();
+        if view.load() != *load || view.generation() != generation {
+            return None;
+        }
+        let now = self.now();
+        let board = held.boards.get(&key);
+        let listable = |seq: &u64| {
+            board
+                .and_then(|b| b.posts.get(seq))
+                .is_some_and(|s| held.listable(key, s, now))
+        };
+        Some(seqs.iter().copied().filter(listable).collect())
+    }
+
+    #[cfg(any(test, feature = "hermetic-test-seam"))]
+    pub fn sent_to(&self, key: BoardKey, reader: &AgentId) -> BTreeSet<u64> {
+        self.held()
+            .boards
+            .get(&key)
+            .and_then(|b| b.sent.get(reader))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Without the writer and without I/O: marks for a hold each post whose recorded author
     /// uid, or whose board's uid, the view holds contained, dropping any mark it no longer
     /// bears out; and notes each cursor, and forgets each walk, of a reader it no longer
@@ -770,10 +887,15 @@ impl BoardStore {
     /// Runs `install` and then [`Self::mark`] against it, in one hold of the memory lock, so
     /// a check made under that lock sees the install with its marks or neither. `install`
     /// swaps what `view` reads; it must not block, do I/O or take a board lock.
-    pub(crate) fn install_and_mark(&self, install: impl FnOnce(), view: &dyn EnrollmentView) {
+    pub(crate) fn install_and_mark<T>(
+        &self,
+        install: impl FnOnce() -> T,
+        view: &dyn EnrollmentView,
+    ) -> T {
         let mut held = self.held();
-        install();
+        let installed = install();
         held.mark(view);
+        installed
     }
 
     /// What is due, at most `limit`, from memory only: marked holds, then posts past
@@ -4212,6 +4334,239 @@ mod tests {
         assert!(store.held().marked.contains_key(&(BOB, marked.seq)));
         let posts: Vec<_> = (1..=40).map(|i| put_as(&store, BOB, i, 2001)).collect();
         assert_eq!(store.clearable(BOB), (pairs(&posts[..32]), true));
+    }
+
+    fn reply_as(store: &BoardStore, id: u8, to: &Arc<Stored>) -> Arc<Stored> {
+        store
+            .post_with(
+                &mut fixed(vec![[id; 16]]),
+                BOB,
+                (hobi(), Some(2001)),
+                None,
+                PostLabels::default(),
+                reply("sentinel-714-reply", to.post.id),
+                &free(),
+            )
+            .unwrap()
+    }
+
+    fn listed_seqs(w: &Window) -> Vec<u64> {
+        w.posts.iter().map(|l| l.stored.seq).collect()
+    }
+
+    #[test]
+    fn a_listing_is_newest_first_below_before_and_bounded() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        assert_eq!(store.listing(BOB, None, 32, &free()), Window::default());
+        for i in 1..=40 {
+            put_as(&store, BOB, i, 2001);
+        }
+        let top = store.listing(BOB, None, 32, &free());
+        assert_eq!(listed_seqs(&top), (9..=40).rev().collect::<Vec<_>>());
+        assert!(top.more);
+        assert!(top.targets.is_empty());
+        let below = store.listing(BOB, Some(9), 32, &free());
+        assert_eq!(listed_seqs(&below), (1..=8).rev().collect::<Vec<_>>());
+        assert!(!below.more);
+        for before in [Some(1), Some(0)] {
+            assert_eq!(
+                store.listing(BOB, before, 32, &free()),
+                Window::default(),
+                "{before:?}"
+            );
+        }
+        assert_eq!(store.listing(BOB, Some(1000), 32, &free()), top);
+        assert_eq!(
+            store.listing(BoardKey(4242), None, 32, &free()),
+            Window::default()
+        );
+    }
+
+    #[test]
+    fn a_listing_keeps_held_marked_and_contained_posts_with_their_holds() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let written = put_as(&store, BOB, 1, 2010);
+        holding(&store, &[2010]);
+        let marked = put_as(&store, BOB, 2, 2011);
+        let contained = put_as(&store, BOB, 3, 2012);
+        let both = put_as(&store, BOB, 4, 2013);
+        let plain = put_as(&store, BOB, 5, 2001);
+        for s in [&marked, &both] {
+            store
+                .held()
+                .marked
+                .insert((BOB, s.seq), [HeldFor::Person].into());
+        }
+        let w = store.listing(BOB, None, 32, &containing(&[], &[2012, 2013]));
+        let holds: Vec<(u64, BTreeSet<HeldFor>)> = w
+            .posts
+            .iter()
+            .map(|l| (l.stored.seq, l.held.clone()))
+            .collect();
+        assert_eq!(
+            holds,
+            [
+                (plain.seq, BTreeSet::new()),
+                (both.seq, [HeldFor::Author, HeldFor::Person].into()),
+                (contained.seq, [HeldFor::Author].into()),
+                (marked.seq, [HeldFor::Person].into()),
+                (written.seq, [HeldFor::Author].into()),
+            ]
+        );
+        assert_eq!(
+            stored_on_disk(&b, BOB, written.post.id).held,
+            [HeldFor::Author].into()
+        );
+    }
+
+    #[test]
+    fn a_listing_skips_unheld_posts_past_retention_and_posts_in_their_expiry() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = wide(&b);
+        let aged = put_as(&store, BOB, 1, 2001);
+        let aged_held = put_as(&store, BOB, 2, 2010);
+        clock.set(T0 + 1);
+        let to_aged = reply_as(&store, 3, &aged);
+        let to_held = reply_as(&store, 4, &aged_held);
+        let expiring = put_as(&store, BOB, 5, 2001);
+        let to_expiring = reply_as(&store, 6, &expiring);
+        holding(&store, &[2010]);
+        clock.set(T0 + RETAIN);
+        store.held().expiring.insert((BOB, expiring.seq));
+        let all = store.listing(BOB, None, 32, &free());
+        assert_eq!(
+            listed_seqs(&all),
+            [to_expiring.seq, to_held.seq, to_aged.seq, aged_held.seq]
+        );
+        assert_eq!(all.posts[3].held, [HeldFor::Author].into());
+        assert!(!all.more);
+        assert!(all.targets.is_empty());
+        let two = store.listing(BOB, None, 2, &free());
+        assert_eq!(listed_seqs(&two), [to_expiring.seq, to_held.seq]);
+        assert!(two.more);
+        let targets: Vec<u64> = two.targets.iter().map(|s| s.seq).collect();
+        assert_eq!(targets, [aged_held.seq]);
+        let three = store.listing(BOB, None, 3, &free());
+        assert!(three.more);
+        let four = store.listing(BOB, None, 4, &free());
+        assert!(!four.more);
+    }
+
+    #[test]
+    fn a_listing_resolves_reply_targets_outside_the_window_only() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let t1 = put_as(&store, BOB, 1, 2001);
+        let t2 = put_as(&store, BOB, 2, 2001);
+        reply_as(&store, 3, &t1);
+        let r2 = reply_as(&store, 4, &t2);
+        reply_as(&store, 5, &r2);
+        reply_as(&store, 6, &t1);
+        let w = store.listing(BOB, None, 4, &free());
+        assert_eq!(listed_seqs(&w), [6, 5, 4, 3]);
+        let targets: Vec<u64> = w.targets.iter().map(|s| s.seq).collect();
+        assert_eq!(targets, [t1.seq, t2.seq]);
+        let whole = store.listing(BOB, None, 32, &free());
+        assert!(whole.targets.is_empty());
+        let below = store.listing(BOB, Some(5), 2, &free());
+        assert_eq!(listed_seqs(&below), [4, 3]);
+        let targets: Vec<u64> = below.targets.iter().map(|s| s.seq).collect();
+        assert_eq!(targets, [t1.seq, t2.seq]);
+    }
+
+    #[test]
+    fn a_listing_marks_and_records_nothing() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = wide(&b);
+        let suga = reader("suga");
+        let aged = put_as(&store, BOB, 1, 2001);
+        clock.set(T0 + 1);
+        for i in 2..=6 {
+            put_as(&store, BOB, i, 2001);
+        }
+        reply_as(&store, 7, &aged);
+        store.advance(BOB, &suga, 2).unwrap();
+        store.sent(BOB, &suga, &[4, 5]);
+        let enrolled = [("suga", 3001)];
+        store.mark(&containing(&enrolled, &[2001]));
+        clock.set(T0 + RETAIN);
+        store.held().expiring.insert((BOB, 3));
+        type Marks = (
+            BTreeMap<(BoardKey, u64), BTreeSet<HeldFor>>,
+            BTreeSet<Item>,
+            BTreeSet<(BoardKey, u64)>,
+            BTreeSet<(BoardKey, AgentId)>,
+            u64,
+            BTreeSet<u64>,
+        );
+        let marks = |store: &BoardStore| -> Marks {
+            let held = store.held();
+            (
+                held.marked.clone(),
+                held.said.clone(),
+                held.expiring.clone(),
+                held.noted.clone(),
+                held.boards[&BOB].cursors[&suga],
+                held.boards[&BOB].sent[&suga].clone(),
+            )
+        };
+        let (attempts, due, before) = (b.attempts(), store.due(100), marks(&store));
+        for view in [
+            containing(&enrolled, &[]),
+            containing(&enrolled, &[1000, 2001]),
+            free(),
+        ] {
+            let w = store.listing(BOB, None, 32, &view);
+            assert_eq!(listed_seqs(&w).last(), Some(&aged.seq));
+        }
+        assert_eq!(b.attempts(), attempts);
+        assert_eq!(store.due(100), due);
+        assert_eq!(marks(&store), before);
+        assert!(!before.0.is_empty());
+    }
+
+    #[test]
+    fn confirm_listing_refuses_a_changed_load_and_drops_what_left() {
+        let b = MemTaskBlobs::default();
+        let (store, clock) = wide(&b);
+        let aged = put_as(&store, BOB, 1, 2001);
+        let aged_held = put_as(&store, BOB, 6, 2010);
+        clock.set(T0 + 1);
+        let cleared = put_as(&store, BOB, 2, 2001);
+        let expiring = put_as(&store, BOB, 3, 2001);
+        let kept = put_as(&store, BOB, 4, 2001);
+        let held = put_as(&store, BOB, 5, 2010);
+        holding(&store, &[2010]);
+        let seqs = [1, 2, 3, 4, 5, 6, 999];
+        let fixed = crate::enrollment::Load::fixed();
+        assert_eq!(
+            store.confirm_listing(BOB, (&fixed, 0), &free(), &seqs),
+            Some([1, 2, 3, 4, 5, 6].into())
+        );
+        store.clear(BOB, &[(cleared.seq, cleared.post.id)], &free());
+        store.held().expiring.insert((BOB, expiring.seq));
+        clock.set(T0 + RETAIN);
+        assert_eq!(
+            store.confirm_listing(BOB, (&fixed, 0), &free(), &seqs),
+            Some([aged_held.seq, kept.seq, held.seq].into())
+        );
+        assert!(expired(&aged, T0 + RETAIN));
+        assert!(expired(&aged_held, T0 + RETAIN));
+        let installed = crate::enrollment::Load::installed(Arc::new(1_u8));
+        assert_eq!(
+            store.confirm_listing(BOB, (&installed, 0), &free(), &seqs),
+            None
+        );
+        assert_eq!(
+            store.confirm_listing(BOB, (&fixed, 1), &free(), &seqs),
+            None
+        );
+        assert_eq!(
+            store.confirm_listing(BoardKey(4242), (&fixed, 0), &free(), &seqs),
+            Some(BTreeSet::new())
+        );
     }
 
     #[test]

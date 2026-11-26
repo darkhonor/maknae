@@ -1,17 +1,18 @@
 //! The board verbs (#695): the switch gate, the per-post decision and the page walk.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use maknae_audit_append::{AuditRecord, BoardAudit};
 use maknae_config::AgentId;
 use maknae_proto::{
-    Addressee, BoardDefect, BoardPage, PostDraft, PostId, ProtoCodecError, BOARD_READ_PAGE_POSTS,
+    Addressee, BoardDefect, BoardEntry, BoardHold, BoardListing, BoardPage, PostDraft, PostId,
+    ProtoCodecError, BOARD_READ_PAGE_POSTS,
 };
 use maknae_security::{AttrValue, Attributes, Authorizer, Decision, Verdict};
 
 use crate::blocking_guard::{admit_blocking, Offload};
-use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore};
+use crate::board::{BoardDue, BoardDueFor, BoardRefusal, BoardStore, Window};
 use crate::board_store::{BoardKey, HeldFor, LabelValue, Report, Settings, Stored};
 use crate::boot::BootConfig;
 use crate::enrollment::{EnrollmentView, Load};
@@ -69,6 +70,7 @@ impl BoardSwitches for FixedSwitches {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Off {
     ClientChannel,
+    AgentChannel,
     NoTasker,
     Site,
     Agent,
@@ -80,6 +82,7 @@ impl std::fmt::Display for Off {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Off::ClientChannel => "board: not served on the client channel",
+            Off::AgentChannel => "board: not served on the agent channel",
             Off::NoTasker => "board off: the chain has no tasker",
             Off::Site => "board off: site",
             Off::Agent => "board off: agent",
@@ -356,11 +359,7 @@ struct Walked {
 
 /// A post's encoded size, counted without a buffer.
 pub(crate) fn post_size(stored: &Stored) -> usize {
-    let mut size = crate::task_store::Counted(0);
-    match ciborium::into_writer(&stored.post, &mut size) {
-        Ok(()) => size.0,
-        Err(_) => usize::MAX,
-    }
+    encoded_len(&stored.post)
 }
 
 impl Walker {
@@ -691,6 +690,164 @@ pub(crate) async fn read_page<P: Authorizer + Send + Sync + 'static>(
         base_confirmed,
         stalled: true,
     }
+}
+
+pub(crate) const LISTED: &str = "done";
+pub(crate) const LISTED_OLDER: &str = "done; older posts remain";
+
+/// One listing page; `links` maps an entry's sequence to its kept reply target's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Paged {
+    pub listing: BoardListing,
+    pub withheld: u32,
+    pub links: BTreeMap<u64, u64>,
+}
+
+/// The newest released post alone is over the page budget.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Oversize;
+
+fn encoded_len<T: serde::Serialize>(value: &T) -> usize {
+    let mut size = crate::task_store::Counted(0);
+    match ciborium::into_writer(value, &mut size) {
+        Ok(()) => size.0,
+        Err(_) => usize::MAX,
+    }
+}
+
+pub(crate) fn entry_size(e: &BoardEntry) -> usize {
+    encoded_len(e)
+}
+
+/// `verdicts` are `w.posts`' and then `w.targets'`.
+pub(crate) fn paged(w: Window, verdicts: &[PostVerdict], budget: usize) -> Result<Paged, Oversize> {
+    let verdict = |i: usize| verdicts.get(i).copied().unwrap_or(PostVerdict::Undecided);
+    let permitted: BTreeMap<PostId, u64> = w
+        .posts
+        .iter()
+        .map(|l| &l.stored)
+        .chain(&w.targets)
+        .enumerate()
+        .filter(|(i, _)| verdict(*i) == PostVerdict::Permit)
+        .map(|(_, s)| (s.post.id, s.seq))
+        .collect();
+    let mut p = Paged {
+        listing: BoardListing {
+            entries: Vec::new(),
+            older: None,
+        },
+        withheld: 0,
+        links: BTreeMap::new(),
+    };
+    let (mut used, mut cut) = (0usize, false);
+    for (i, l) in w.posts.iter().enumerate() {
+        if verdict(i) != PostVerdict::Permit {
+            p.withheld = p.withheld.saturating_add(1);
+            continue;
+        }
+        if cut {
+            continue;
+        }
+        let mut post = l.stored.post.clone();
+        let link = post.draft.in_reply_to.and_then(|t| permitted.get(&t));
+        if link.is_none() {
+            post.draft.in_reply_to = None;
+        }
+        let held = l
+            .held
+            .iter()
+            .map(|h| match h {
+                HeldFor::Author => BoardHold::Author,
+                HeldFor::Person => BoardHold::Person,
+            })
+            .collect();
+        let entry = BoardEntry {
+            seq: l.stored.seq,
+            post,
+            held,
+        };
+        let size = entry_size(&entry);
+        if used.saturating_add(size) > budget {
+            cut = true;
+            continue;
+        }
+        used = used.saturating_add(size);
+        if let Some(t) = link {
+            p.links.insert(entry.seq, *t);
+        }
+        p.listing.entries.push(entry);
+    }
+    p.listing.older = match p.listing.entries.last() {
+        Some(lowest) => (cut || w.more).then_some(lowest.seq),
+        None if cut => return Err(Oversize),
+        None => w.posts.last().filter(|_| w.more).map(|l| l.stored.seq),
+    };
+    p.listing.entries.reverse();
+    Ok(p)
+}
+
+/// Drops each entry `live` does not hold, and each kept link to a target it does not hold.
+pub(crate) fn settle(mut p: Paged, live: &BTreeSet<u64>) -> Paged {
+    p.listing.entries.retain(|e| live.contains(&e.seq));
+    for e in &mut p.listing.entries {
+        if p.links.get(&e.seq).is_some_and(|t| !live.contains(t)) {
+            e.post.draft.in_reply_to = None;
+        }
+    }
+    p
+}
+
+pub(crate) fn list_audit(p: &Paged) -> BoardAudit {
+    let entries = &p.listing.entries;
+    BoardAudit {
+        first_seq: entries.first().map(|e| e.seq),
+        last_seq: entries.last().map(|e| e.seq),
+        returned: Some(u32::try_from(entries.len()).unwrap_or(u32::MAX)),
+        withheld: Some(p.withheld),
+        ..BoardAudit::default()
+    }
+}
+
+/// One page of `key`'s board below `before`, its window and reply targets decided in one
+/// batch. `None` when the batch did not confirm the request's own decision, or the newest
+/// released post alone is over `budget`.
+pub(crate) async fn list_page<P: Authorizer + Send + Sync + 'static>(
+    store: &BoardStore,
+    key: BoardKey,
+    view: &dyn EnrollmentView,
+    d: &Deciding<'_, P>,
+    before: Option<u64>,
+    budget: usize,
+) -> Option<Paged> {
+    let w = store.listing(key, before, BOARD_READ_PAGE_POSTS, view);
+    let asked: Vec<_> = w
+        .posts
+        .iter()
+        .map(|l| &l.stored)
+        .chain(&w.targets)
+        .map(|s| post_request(d.request, key, s))
+        .collect();
+    let verdicts = if asked.is_empty() {
+        if !base_holds(d.authorizer, d.live, d.generation, d.timeout, d.request).await {
+            return None;
+        }
+        Vec::new()
+    } else {
+        let decided = decide_posts(
+            d.authorizer,
+            d.live,
+            d.generation,
+            d.timeout,
+            d.request,
+            asked,
+        )
+        .await;
+        if !decided.confirmed {
+            return None;
+        }
+        decided.verdicts
+    };
+    paged(w, &verdicts, budget).ok()
 }
 
 /// SHA-256 of the post's canonical content, 64 lowercase hex.
@@ -1125,8 +1282,9 @@ mod tests {
             Load::installed(first),
             "the load the switch was read on"
         );
-        assert!(!swap.board.still_installed(&load, &swap));
-        assert!(swap.board.still_installed(&swap.load(), &swap));
+        assert!(!swap.board.still_installed(&load, 0, &swap));
+        assert!(swap.board.still_installed(&swap.load(), 0, &swap));
+        assert!(!swap.board.still_installed(&swap.load(), 1, &swap));
         assert_ne!(load, swap.load());
     }
 
@@ -1292,6 +1450,7 @@ mod tests {
         assert_eq!(
             [
                 Off::ClientChannel,
+                Off::AgentChannel,
                 Off::NoTasker,
                 Off::Site,
                 Off::Agent,
@@ -1301,6 +1460,7 @@ mod tests {
             .map(|o| o.to_string()),
             [
                 "board: not served on the client channel",
+                "board: not served on the agent channel",
                 "board off: the chain has no tasker",
                 "board off: site",
                 "board off: agent",
@@ -1520,6 +1680,265 @@ mod tests {
         let walk = w.finish(&BTreeSet::new());
         assert_eq!(seqs(&walk), [id(1)]);
         assert!(walk.page.more);
+    }
+
+    fn listed(seq: u64, in_reply_to: Option<u64>, held: &[HeldFor]) -> crate::board::Listed {
+        crate::board::Listed {
+            stored: stored(seq, in_reply_to, PostLabels::default()),
+            held: held.iter().copied().collect(),
+        }
+    }
+
+    fn window(seqs: std::ops::RangeInclusive<u64>, more: bool) -> Window {
+        Window {
+            posts: seqs.rev().map(|s| listed(s, None, &[])).collect(),
+            more,
+            targets: Vec::new(),
+        }
+    }
+
+    fn on_page(p: &Paged) -> Vec<u64> {
+        p.listing.entries.iter().map(|e| e.seq).collect()
+    }
+
+    fn links(p: &Paged) -> Vec<(u64, Option<PostId>)> {
+        p.listing
+            .entries
+            .iter()
+            .map(|e| (e.seq, e.post.draft.in_reply_to))
+            .collect()
+    }
+
+    fn page(w: Window, verdicts: &[PostVerdict], budget: usize) -> Paged {
+        paged(w, verdicts, budget).unwrap_or_else(|_| panic!("oversize"))
+    }
+
+    #[test]
+    fn paged_omits_denied_and_undecided_posts_and_counts_them() {
+        let got = page(window(1..=5, false), &[P, D, P, U, P], BIG);
+        assert_eq!(on_page(&got), [1, 3, 5]);
+        assert_eq!(got.withheld, 2);
+        let mut released = window(1..=5, false);
+        released.posts.retain(|l| l.stored.seq % 2 == 1);
+        let alone = page(released, &[P, P, P], BIG);
+        assert_eq!(got.listing, alone.listing);
+        assert_eq!(got.links, alone.links);
+        assert_eq!(alone.withheld, 0);
+        let short = page(window(1..=3, false), &[P], BIG);
+        assert_eq!(on_page(&short), [3]);
+        assert_eq!(short.withheld, 2);
+    }
+
+    #[test]
+    fn paged_cuts_at_the_budget_and_older_is_the_pages_lowest() {
+        let whole = page(window(1..=5, false), &[P; 5], BIG);
+        assert_eq!(on_page(&whole), [1, 2, 3, 4, 5]);
+        assert_eq!(whole.listing.older, None);
+        let size = entry_size(&whole.listing.entries[0]);
+        assert!(whole.listing.entries.iter().all(|e| entry_size(e) == size));
+        let three = page(window(1..=5, false), &[P; 5], 3 * size);
+        assert_eq!(on_page(&three), [3, 4, 5]);
+        assert_eq!(three.listing.older, Some(3));
+        let short = page(window(1..=5, false), &[P; 5], 3 * size - 1);
+        assert_eq!(on_page(&short), [4, 5]);
+        assert_eq!(short.listing.older, Some(4));
+        let all = page(window(1..=5, false), &[P; 5], 5 * size);
+        assert_eq!(all.listing.older, None);
+        let more = page(window(1..=5, true), &[P; 5], 5 * size);
+        assert_eq!(more.listing.older, Some(1));
+        assert_eq!(
+            paged(window(1..=5, false), &[P; 5], size - 1),
+            Err(Oversize)
+        );
+        let denied_first = page(window(1..=5, false), &[D, P, P, P, P], size);
+        assert_eq!(on_page(&denied_first), [4]);
+        assert_eq!(denied_first.listing.older, Some(4));
+    }
+
+    #[test]
+    fn paged_with_more_and_a_withheld_tail_names_the_pages_lowest_not_the_tail() {
+        let mut verdicts = vec![P; 7];
+        verdicts.extend([D; 3]);
+        let got = page(window(1..=10, true), &verdicts, BIG);
+        assert_eq!(on_page(&got), (4..=10).collect::<Vec<_>>());
+        assert_eq!(got.listing.older, Some(4));
+        assert_eq!(got.withheld, 3);
+    }
+
+    #[test]
+    fn paged_with_a_withheld_tail_and_nothing_below_has_no_older() {
+        let mut verdicts = vec![P; 7];
+        verdicts.extend([D; 3]);
+        let got = page(window(1..=10, false), &verdicts, BIG);
+        assert_eq!(on_page(&got), (4..=10).collect::<Vec<_>>());
+        assert_eq!(got.listing.older, None);
+        assert_eq!(got.withheld, 3);
+    }
+
+    #[test]
+    fn paged_empty_because_none_released_names_the_windows_lowest_only_when_more() {
+        let more = page(window(3..=10, true), &[D, U, D, D, D, D, D, D], BIG);
+        assert!(more.listing.entries.is_empty());
+        assert_eq!(more.listing.older, Some(3));
+        assert_eq!(more.withheld, 8);
+        let last = page(window(3..=10, false), &[D; 8], BIG);
+        assert!(last.listing.entries.is_empty());
+        assert_eq!(last.listing.older, None);
+        let none = page(Window::default(), &[], BIG);
+        assert_eq!(
+            none,
+            Paged {
+                listing: BoardListing {
+                    entries: Vec::new(),
+                    older: None
+                },
+                withheld: 0,
+                links: BTreeMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn paged_keeps_a_reply_link_only_to_a_permitted_target() {
+        let w = || Window {
+            posts: vec![
+                listed(9, Some(1), &[]),
+                listed(8, Some(2), &[]),
+                listed(7, Some(90), &[]),
+                listed(6, Some(91), &[]),
+                listed(5, Some(92), &[]),
+                listed(4, Some(93), &[]),
+                listed(2, None, &[]),
+                listed(1, None, &[]),
+            ],
+            more: false,
+            targets: vec![
+                stored(90, None, PostLabels::default()),
+                stored(91, None, PostLabels::default()),
+                stored(92, None, PostLabels::default()),
+            ],
+        };
+        let verdicts = [P, P, P, P, P, P, D, P, P, D, U];
+        let got = page(w(), &verdicts, BIG);
+        assert_eq!(
+            links(&got),
+            [
+                (1, None),
+                (4, None),
+                (5, None),
+                (6, None),
+                (7, Some(id(90))),
+                (8, None),
+                (9, Some(id(1))),
+            ]
+        );
+        assert_eq!(got.links, [(7, 90), (9, 1)].into());
+        let upper: usize = got.listing.entries[1..].iter().map(entry_size).sum();
+        let cut = page(w(), &verdicts, upper);
+        assert_eq!(on_page(&cut), [4, 5, 6, 7, 8, 9]);
+        assert_eq!(links(&cut)[5], (9, Some(id(1))));
+        assert_eq!(cut.links, [(7, 90), (9, 1)].into());
+        assert_eq!(cut.listing.older, Some(4));
+    }
+
+    #[test]
+    fn settle_drops_stale_entries_and_links_and_keeps_older() {
+        let w = Window {
+            posts: vec![
+                listed(5, Some(1), &[]),
+                listed(4, Some(2), &[]),
+                listed(3, None, &[]),
+                listed(2, None, &[]),
+                listed(1, None, &[]),
+            ],
+            more: true,
+            targets: Vec::new(),
+        };
+        let got = page(w, &[P, P, D, P, P], BIG);
+        assert_eq!(got.links, [(4, 2), (5, 1)].into());
+        assert_eq!(got.listing.older, Some(1));
+        let settled = settle(got.clone(), &[2, 4, 5].into());
+        assert_eq!(links(&settled), [(2, None), (4, Some(id(2))), (5, None)]);
+        assert_eq!(settled.listing.older, Some(1));
+        assert_eq!(settled.withheld, 1);
+        assert_eq!(settled.links, got.links);
+        let unchanged = settle(got.clone(), &[1, 2, 3, 4, 5].into());
+        assert_eq!(unchanged, got);
+        let gone = settle(got.clone(), &BTreeSet::new());
+        assert!(gone.listing.entries.is_empty());
+        assert_eq!(gone.listing.older, Some(1));
+        assert_eq!(gone.withheld, 1);
+    }
+
+    #[test]
+    fn paged_lists_ascending_with_holds_in_order() {
+        let w = Window {
+            posts: vec![
+                listed(4, None, &[HeldFor::Person]),
+                listed(3, None, &[HeldFor::Person, HeldFor::Author]),
+                listed(2, None, &[HeldFor::Author]),
+                listed(1, None, &[]),
+            ],
+            more: false,
+            targets: Vec::new(),
+        };
+        let got = page(w, &[P; 4], BIG);
+        let holds: Vec<(u64, Vec<BoardHold>)> = got
+            .listing
+            .entries
+            .iter()
+            .map(|e| (e.seq, e.held.clone()))
+            .collect();
+        assert_eq!(
+            holds,
+            [
+                (1, vec![]),
+                (2, vec![BoardHold::Author]),
+                (3, vec![BoardHold::Author, BoardHold::Person]),
+                (4, vec![BoardHold::Person]),
+            ]
+        );
+        assert_eq!(
+            got.listing.entries[3].post,
+            stored(4, None, PostLabels::default()).post
+        );
+        let bytes = maknae_proto::encode_response(&maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::BoardListing(got.listing.clone())),
+            None,
+        ));
+        let back = maknae_proto::decode_response(&bytes.unwrap()).unwrap();
+        assert!(matches!(
+            back.result,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::BoardListing(l)) if l == got.listing
+        ));
+    }
+
+    #[test]
+    fn the_listing_audit_holds_counts_and_sequences_only() {
+        let got = page(window(1..=6, true), &[P, D, P, P, D, D], BIG);
+        assert_eq!(
+            list_audit(&got),
+            BoardAudit {
+                first_seq: Some(3),
+                last_seq: Some(6),
+                returned: Some(3),
+                withheld: Some(3),
+                ..BoardAudit::default()
+            }
+        );
+        let empty = page(window(1..=2, false), &[D, D], BIG);
+        assert_eq!(
+            list_audit(&empty),
+            BoardAudit {
+                first_seq: None,
+                last_seq: None,
+                returned: Some(0),
+                withheld: Some(2),
+                ..BoardAudit::default()
+            }
+        );
+        assert_eq!([LISTED, LISTED_OLDER], ["done", "done; older posts remain"]);
     }
 
     #[test]

@@ -273,7 +273,7 @@ enum Command {
         #[command(subcommand)]
         action: SessionCommand,
     },
-    /// Your agent message board: its settings, and clearing it.
+    /// Your agent message board: list its posts, show or change its settings, or clear it.
     Board(BoardArgs),
     /// The agents you may task (`maknae agent list`), and a session with one
     /// (`maknae agent <NAME>`).
@@ -402,10 +402,24 @@ enum PolicyCommand {
 }
 
 #[derive(clap::Args, Debug)]
-#[command(subcommand_required = true, arg_required_else_help = true)]
+#[command(args_conflicts_with_subcommands = true)]
 struct BoardArgs {
     #[command(subcommand)]
-    sub: BoardSub,
+    sub: Option<BoardSub>,
+    /// List the newest n posts.
+    #[arg(
+        long,
+        conflicts_with = "all",
+        value_parser = clap::value_parser!(u16)
+            .range(1..=i64::from(maknae_agent::board::BOARD_LIST_LAST_MAX))
+    )]
+    last: Option<u16>,
+    /// List every post on your board.
+    #[arg(long)]
+    all: bool,
+    /// Print each attachment's content.
+    #[arg(long)]
+    attachments: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -478,6 +492,37 @@ fn print_said(
         crate::stderr::line(err, format_args!("maknae: {line}"));
     }
     said.ok
+}
+
+fn list_want(last: Option<u16>, all: bool) -> maknae_agent::board::ListWant {
+    use maknae_agent::board::ListWant;
+    match (last, all) {
+        (_, true) => ListWant::All,
+        (Some(n), false) => ListWant::Last(n),
+        (None, false) => ListWant::Latest,
+    }
+}
+
+/// The posts, then what follows them; the stop lines are printed even when the posts cannot be.
+fn show_listing(
+    want: maknae_agent::board::ListWant,
+    attachments: bool,
+    listed: &maknae_agent::board::Listed,
+    stop: Option<maknae_agent::board::Said>,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> Result<bool, String> {
+    let said = maknae_agent::board::listing_said(want, listed, stop);
+    if let Err(e) = maknae_agent::board::print_listing(listed, attachments, out) {
+        for line in &said.err {
+            crate::stderr::line(err, format_args!("maknae: {line}"));
+        }
+        return Err(format!(
+            "cannot print the board: {}",
+            terminal_safe(&e.to_string())
+        ));
+    }
+    Ok(print_said(&said, out, err))
 }
 
 /// Asks before a clear is sent; `None` means go on and send it.
@@ -553,6 +598,10 @@ pub(crate) enum Verb {
         change: maknae_agent::board::SettingsChange,
     },
     BoardClear,
+    BoardList {
+        want: maknae_agent::board::ListWant,
+        attachments: bool,
+    },
 }
 
 impl Verb {
@@ -579,6 +628,7 @@ impl Verb {
             Verb::SessionClose { .. } => "session close",
             Verb::BoardSettings { .. } => "board settings",
             Verb::BoardClear => "board clear",
+            Verb::BoardList { .. } => "board",
         }
     }
 
@@ -646,6 +696,7 @@ fn payload_kind(p: &Payload) -> &'static str {
         Payload::BoardPage(_) => "board page",
         Payload::BoardSettings(_) => "board settings",
         Payload::BoardCleared(_) => "board cleared",
+        Payload::BoardListing(_) => "board listing",
     }
 }
 
@@ -726,6 +777,7 @@ impl From<Verb> for maknae_proto::Verb {
             Verb::BoardClear => maknae_proto::Verb::BoardManage {
                 op: maknae_proto::BoardOp::Clear,
             },
+            Verb::BoardList { .. } => maknae_proto::Verb::BoardList { before: None },
         }
     }
 }
@@ -896,6 +948,17 @@ async fn round_trip(
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         ));
+    }
+    if let Verb::BoardList { want, attachments } = &verb {
+        let (listed, stop) = maknae_agent::board::list(*want, board_send).await;
+        return show_listing(
+            *want,
+            *attachments,
+            &listed,
+            stop,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr(),
+        );
     }
     if let Verb::Read { path, page: None } = &verb {
         let mut stdout = std::io::stdout().lock();
@@ -1594,7 +1657,8 @@ pub(crate) fn print_payload_for_verb(verb: Verb, payload: Payload) -> Result<(),
         | (v, p @ Payload::BoardPosted(_))
         | (v, p @ Payload::BoardPage(_))
         | (v, p @ Payload::BoardSettings(_))
-        | (v, p @ Payload::BoardCleared(_)) => Err(format!(
+        | (v, p @ Payload::BoardCleared(_))
+        | (v, p @ Payload::BoardListing(_)) => Err(format!(
             "protocol error: daemon returned a {} payload for a {} request",
             payload_kind(&p),
             v.kind()
@@ -1718,14 +1782,22 @@ pub async fn run_cli() -> ExitCode {
             operand_exit(session_verb(action), &mut std::io::stderr()).await
         }
         Command::Board(args) => match args.sub {
-            BoardSub::Settings { enabled, report } => wire_exit_code(
+            None => wire_exit_code(
+                execute(Verb::BoardList {
+                    want: list_want(args.last, args.all),
+                    attachments: args.attachments,
+                })
+                .await,
+                &mut std::io::stderr(),
+            ),
+            Some(BoardSub::Settings { enabled, report }) => wire_exit_code(
                 execute(Verb::BoardSettings {
                     change: settings_change(enabled, report),
                 })
                 .await,
                 &mut std::io::stderr(),
             ),
-            BoardSub::Clear { yes } => {
+            Some(BoardSub::Clear { yes }) => {
                 if let Some(code) = clear_gate(
                     yes,
                     crate::tty::stdin_is_terminal(),
@@ -1854,7 +1926,14 @@ mod tests {
 
     fn board_sub(args: &[&str]) -> BoardSub {
         match Cli::try_parse_from(args).expect("parses").command.unwrap() {
-            Command::Board(board) => board.sub,
+            Command::Board(board) => board.sub.expect("a subcommand"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn board_args(args: &[&str]) -> BoardArgs {
+        match Cli::try_parse_from(args).expect("parses").command.unwrap() {
+            Command::Board(board) => board,
             other => panic!("{other:?}"),
         }
     }
@@ -1953,13 +2032,93 @@ mod tests {
     }
 
     #[test]
-    fn bare_board_prints_help_and_exits_two() {
-        let e = Cli::try_parse_from(["maknae", "board"]).unwrap_err();
-        assert_eq!(
-            e.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
+    fn bare_board_lists_the_latest_page() {
+        use maknae_agent::board::ListWant;
+        let a = board_args(&["maknae", "board"]);
+        assert!(a.sub.is_none());
+        assert_eq!(list_want(a.last, a.all), ListWant::Latest);
+        assert!(!a.attachments);
+        let a = board_args(&["maknae", "board", "--attachments"]);
+        assert!(a.sub.is_none() && a.attachments);
+        assert_eq!(list_want(a.last, a.all), ListWant::Latest);
+        let a = board_args(&["maknae", "board", "--all", "--attachments"]);
+        assert_eq!(list_want(a.last, a.all), ListWant::All);
+        assert!(a.attachments);
+        let a = board_args(&["maknae", "board", "--last", "7"]);
+        assert_eq!(list_want(a.last, a.all), ListWant::Last(7));
+    }
+
+    #[test]
+    fn board_last_takes_1_to_1024() {
+        use maknae_agent::board::ListWant;
+        for n in ["1", "1024"] {
+            let a = board_args(&["maknae", "board", "--last", n]);
+            assert_eq!(list_want(a.last, a.all), ListWant::Last(n.parse().unwrap()));
+        }
+        for n in ["0", "1025", "-1", "x"] {
+            let e = Cli::try_parse_from(["maknae", "board", "--last", n]).unwrap_err();
+            assert!(
+                matches!(
+                    e.kind(),
+                    clap::error::ErrorKind::ValueValidation
+                        | clap::error::ErrorKind::UnknownArgument
+                ),
+                "{n}: {e}"
+            );
+            assert_eq!(e.exit_code(), 2);
+        }
+        for n in ["0", "1025"] {
+            let e = Cli::try_parse_from(["maknae", "board", "--last", n]).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{n}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn board_last_and_all_conflict() {
+        let e = Cli::try_parse_from(["maknae", "board", "--last", "3", "--all"]).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict, "{e}");
         assert_eq!(e.exit_code(), 2);
+    }
+
+    #[test]
+    fn board_flags_do_not_combine_with_a_subcommand() {
+        use clap::error::ErrorKind::{ArgumentConflict, UnknownArgument};
+        for (args, kind) in [
+            (
+                &["maknae", "board", "--all", "settings"][..],
+                ArgumentConflict,
+            ),
+            (
+                &["maknae", "board", "--last", "3", "clear"],
+                ArgumentConflict,
+            ),
+            (
+                &["maknae", "board", "--attachments", "settings"],
+                ArgumentConflict,
+            ),
+            (&["maknae", "board", "settings", "--all"], UnknownArgument),
+        ] {
+            let e = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(e.kind(), kind, "{args:?}: {e}");
+            assert_eq!(e.exit_code(), 2, "{args:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_board_listing_is_sent_as_board_list_from_the_top() {
+        let v = Verb::BoardList {
+            want: maknae_agent::board::ListWant::All,
+            attachments: true,
+        };
+        assert_eq!(v.kind(), "board");
+        assert_eq!(
+            maknae_proto::Verb::from(v),
+            maknae_proto::Verb::BoardList { before: None }
+        );
     }
 
     #[test]
@@ -2021,6 +2180,75 @@ mod tests {
             &mut ClosedStderr,
             &mut ClosedStderr
         ));
+    }
+
+    fn one_post() -> maknae_agent::board::Listed {
+        let entry = maknae_proto::BoardEntry {
+            seq: 3,
+            post: maknae_proto::Post {
+                id: maknae_proto::PostId([3; 16]),
+                author: maknae_proto::Author::Agent("hobi".into()),
+                task: None,
+                at_secs: 0,
+                labels: maknae_proto::Labels {},
+                draft: maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to: maknae_proto::Addressee::Board,
+                    in_reply_to: None,
+                    body: maknae_proto::SecretText(zeroize::Zeroizing::new("hi".into())),
+                    attachments: vec![],
+                },
+            },
+            held: vec![],
+        };
+        maknae_agent::board::Listed {
+            entries: vec![entry],
+            older: true,
+        }
+    }
+
+    #[test]
+    fn a_listing_that_cannot_be_printed_still_says_why_the_walk_stopped() {
+        use maknae_agent::board::ListWant;
+        let stop = said(
+            &[],
+            &["stopped after 64 requests and 1 post; older posts remain"],
+            false,
+        );
+        let mut err = vec![];
+        let got = show_listing(
+            ListWant::All,
+            false,
+            &one_post(),
+            Some(stop),
+            &mut ClosedStderr,
+            &mut err,
+        );
+        assert_eq!(
+            got.unwrap_err().split(':').next(),
+            Some("cannot print the board")
+        );
+        assert_eq!(
+            err,
+            b"maknae: stopped after 64 requests and 1 post; older posts remain\n"
+        );
+        let (mut out, mut err) = (vec![], vec![]);
+        assert_eq!(
+            show_listing(
+                ListWant::Latest,
+                false,
+                &one_post(),
+                None,
+                &mut out,
+                &mut err
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "#3  1970-01-01T00:00:00.000Z  hobi  to board  note\n    hi\nolder posts remain; run maknae board --all to see them\n"
+        );
+        assert!(err.is_empty());
     }
 
     struct BrokenInput;
@@ -3183,6 +3411,13 @@ mod tests {
                     more: true,
                 }),
                 "board cleared",
+            ),
+            (
+                Payload::BoardListing(maknae_proto::BoardListing {
+                    entries: Vec::new(),
+                    older: None,
+                }),
+                "board listing",
             ),
         ] {
             assert_eq!(

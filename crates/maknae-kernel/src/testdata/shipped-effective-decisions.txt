@@ -966,3 +966,8 @@ agent jimin tasked board.manage Some("clear") board=Some(Str("users/1002")) -> D
 agent jimin board.manage Some("settings") board=None -> Deny { reason: "agent jimin: board.manage is never permitted to an agent" } Some("user") None => Deny { reason: "agent jimin: board.manage is never permitted to an agent" }
 agent jimin board.manage Some("settings") board=None -> Deny { reason: "agent jimin: board.manage is never permitted to an agent" } Some("user") None => Deny { reason: "agent jimin: board.manage is never permitted to an agent" }
 agent jimin board.manage Some("clear") board=None -> Deny { reason: "agent jimin: board.manage is never permitted to an agent" } Some("user") None => Deny { reason: "agent jimin: board.manage is never permitted to an agent" }
+# a person's board listing through the Composition: board.read on the client channel, the caller's own board (shown as own); the partition operand abstains.
+principal board.read None board=own -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("admin") Some("rule:roles.admin:allow:13 in #roles.admin") => Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] }
+unbound board.read None board=own -> NotApplicable { note: Some("subject resolves to no role") } None None => Deny { reason: "subject resolves to no role" }
+guest board.read None board=own -> NotApplicable { note: Some("role guest: no rule for board.read") } Some("guest") None => Deny { reason: "role guest: no rule for board.read" }
+user board.read None board=own -> Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] } Some("user") Some("rule:roles.user:allow:8 in #roles.user") => Permit { obligations: [Obligation { id: "audit", params: Attributes({}) }] }

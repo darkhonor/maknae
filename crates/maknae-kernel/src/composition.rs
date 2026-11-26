@@ -429,6 +429,7 @@ impl HeldLiveTurn {
     /// `None` when decisions in flight held the turn past `deadline`.
     pub(crate) async fn take<B: Baseline>(
         pdp: Arc<Composition<B>>,
+        board: Arc<crate::board::BoardStore>,
         deadline: Instant,
     ) -> Option<Self> {
         let (taken_tx, taken) = tokio::sync::oneshot::channel();
@@ -442,7 +443,9 @@ impl HeldLiveTurn {
                 return;
             }
             if let Ok(v) = values_rx.recv() {
-                let _ = installed_tx.send(pdp.install_in(&turn, v));
+                let view = crate::enrollment::SnapshotEnrollment(Arc::clone(&pdp));
+                let installed = board.install_and_mark(|| pdp.install_in(&turn, v), &view);
+                let _ = installed_tx.send(installed);
             }
         });
         taken.await.ok().map(|()| Self { values, installed })
@@ -1236,6 +1239,43 @@ mod tests {
                     maknae_security::finalize(d.verdict.clone())
                 ));
             }
+        }
+        out.push_str(
+            "# a person's board listing through the Composition: board.read on the client channel, the caller's own board (shown as own); the partition operand abstains.\n",
+        );
+        for (who, uid, stamp, _) in rows.iter().filter(|r| matches!(r.2, Stamp::Client)) {
+            let c = match who.as_str() {
+                "guest" => &guests,
+                "user" => &users,
+                _ => &shipped,
+            };
+            let verb = maknae_proto::Verb::BoardList { before: None };
+            let r = build_authz_request(
+                &verb,
+                *uid,
+                None,
+                maknae_security::Lane::Local,
+                None,
+                None,
+                stamp,
+            );
+            let d = c.decide_cited(&r);
+            let rule = d.rule.map(|c| {
+                let section = c.section.rsplit('#').next().unwrap_or_default().to_owned();
+                format!("{} in #{section}", c.key)
+            });
+            let board = match r.resource.0.get(maknae_security::RESOURCE_BOARD) {
+                Some(AttrValue::Str(b)) if *b == format!("users/{uid}") => "own".to_owned(),
+                other => format!("{other:?}"),
+            };
+            let op = r.context.0.str(maknae_security::CONTEXT_BOARD_OP);
+            out.push_str(&format!(
+                "{who} {} {op:?} board={board} -> {:?} {:?} {rule:?} => {:?}\n",
+                r.action.0,
+                d.verdict,
+                d.role,
+                maknae_security::finalize(d.verdict.clone())
+            ));
         }
         out
     }
@@ -2738,6 +2778,44 @@ mod tests {
         assert_eq!(c.baseline().principal(), before);
         assert_eq!(c.ceiling().ceiling().classification, US.unmarked());
         assert_eq!(c.live().generation(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_held_turns_install_lands_in_one_hold_of_the_boards_memory_lock() {
+        use crate::task_store::{ManualClock, MemTaskBlobs};
+        let (_g, basic) = fixture("live-board-lock", READ_POLICY, None);
+        let c = std::sync::Arc::new(Composition::new(basic, ceiling(Ceiling::baseline_for(US))));
+        let board = std::sync::Arc::new(
+            crate::board::BoardStore::open(
+                Box::new(MemTaskBlobs::default()),
+                std::sync::Arc::new(ManualClock::at(0)),
+            )
+            .unwrap(),
+        );
+        let held = HeldLiveTurn::take(
+            std::sync::Arc::clone(&c),
+            std::sync::Arc::clone(&board),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("the turn");
+        let now = || (c.baseline().principal(), c.live().generation());
+        let before = now();
+        let ((install, during), _) = board.enabled_with(crate::board_store::BoardKey(1), || {
+            let install = tokio::spawn(held.install(crate::live::LiveValues {
+                principal: enrolled(other_uid()),
+                view: Default::default(),
+                providers: None,
+            }));
+            std::thread::sleep(Duration::from_millis(300));
+            (install, now())
+        });
+        assert_eq!(
+            during, before,
+            "the install waits for the board's memory lock"
+        );
+        install.await.unwrap().unwrap();
+        assert_eq!(now(), (enrolled(other_uid()), before.1 + 1));
     }
 
     #[test]

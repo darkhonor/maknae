@@ -3,8 +3,9 @@ use crate::render::display_piece;
 use crate::render::DISPLAY_PIECE_MAX;
 use crate::screen::MenuItem;
 use maknae_proto::{
-    AgentEntry, AgentStanding, Binding, BoardDefect, BoardReport, BoardSettings, EmptyReason,
-    ForgeOp, ForgeOps, ReachSummary, TaskClose, TaskState,
+    Addressee, AgentEntry, AgentStanding, Attachment, Author, Binding, BoardDefect, BoardEntry,
+    BoardHold, BoardReport, BoardSettings, EmptyReason, ForgeOp, ForgeOps, Media, ReachSummary,
+    TaskClose, TaskState,
 };
 
 pub const NO_AGENTS: &str = "no agents can be tasked by you";
@@ -140,6 +141,11 @@ pub fn safe(s: &str) -> String {
         .collect()
 }
 
+/// `s` on one line: a line break or carriage return becomes a space, then [`safe`].
+pub fn one_line(s: &str) -> String {
+    safe(&s.replace(['\n', '\r'], " "))
+}
+
 /// One `maknae agent list` line per entry, then the incomplete-list line.
 pub fn agent_list_lines(entries: &[AgentEntry], undecided: u32) -> Vec<String> {
     let mut lines: Vec<String> = entries
@@ -211,14 +217,99 @@ pub fn board_stopped_line(removed: u64) -> String {
     format!("cleared {} before stopping", posts(removed))
 }
 
+pub const BOARD_NO_POSTS: &str = "no posts";
+pub const BOARD_OLDER: &str = "older posts remain; run maknae board --all to see them";
+const BOARD_LIST_NOT_READ: &str = "the board could not be read; try again";
+
+pub fn board_list_stopped_line(listed: u64) -> String {
+    format!(
+        "stopped after {} requests and {}; older posts remain",
+        crate::board::BOARD_LIST_REQUESTS_MAX,
+        posts(listed)
+    )
+}
+
+/// One line: no body text, and every field the kernel sent through [`one_line`].
+/// `reply_seq` is the sequence of the post `in_reply_to` names, when it is among those fetched.
+pub fn board_entry_header(e: &BoardEntry, reply_seq: Option<u64>) -> String {
+    let maknae_proto::Labels {} = &e.post.labels;
+    let Author::Agent(author) = &e.post.author;
+    let to = match &e.post.draft.to {
+        Addressee::Board => "board".to_owned(),
+        Addressee::Agents(ids) => format!(
+            "agents: {}",
+            ids.iter()
+                .map(|id| one_line(id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let at = maknae_proto::epoch_to_rfc3339(u64::try_from(e.post.at_secs).unwrap_or(0), 0);
+    let mut line = format!(
+        "#{}  {at}  {}  to {to}  {}",
+        e.seq,
+        one_line(author),
+        one_line(e.post.draft.kind.as_str())
+    );
+    if let Some(task) = e.post.task {
+        line.push_str(&format!("  task {}", one_line(&task.to_string())));
+    }
+    match (e.post.draft.in_reply_to, reply_seq) {
+        (Some(_), Some(seq)) => line.push_str(&format!("  reply to #{seq}")),
+        (Some(id), None) => line.push_str(&format!("  reply to {}", one_line(&id.to_string()))),
+        (None, _) => {}
+    }
+    for hold in &e.held {
+        line.push_str(match hold {
+            BoardHold::Author => "  HELD (author contained)",
+            BoardHold::Person => "  HELD (you were contained)",
+        });
+    }
+    line
+}
+
+/// The attachment's label, media and size; never its content.
+pub fn board_attachment_line(a: &Attachment) -> String {
+    let media = match a.media {
+        Media::TextPlain => "text/plain",
+        Media::TextMarkdown => "text/markdown",
+        Media::TextDiff => "text/x-diff",
+    };
+    format!(
+        "  attachment {}  {media}  {} bytes",
+        one_line(&a.label),
+        a.content.0.len()
+    )
+}
+
+/// `text` one line per `\n`-separated piece, each after `indent` and escaped by
+/// [`display_piece`] character by character, so no copy of `text` is made.
+pub fn write_board_text(
+    out: &mut dyn std::io::Write,
+    indent: &str,
+    text: &str,
+) -> std::io::Result<()> {
+    let mut buf = zeroize::Zeroizing::new([0; DISPLAY_PIECE_MAX]);
+    for piece in text.split('\n') {
+        out.write_all(indent.as_bytes())?;
+        for c in piece.chars() {
+            out.write_all(display_piece(c, &mut buf).as_bytes())?;
+        }
+        out.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoardCommand {
+    List,
     Settings,
     Clear,
 }
 
 pub fn board_unknown_line(command: BoardCommand) -> &'static str {
     match command {
+        BoardCommand::List => BOARD_LIST_NOT_READ,
         BoardCommand::Settings => {
             "the outcome is unknown; run maknae board settings to see what is in force"
         }
@@ -229,6 +320,7 @@ pub fn board_unknown_line(command: BoardCommand) -> &'static str {
 pub fn board_refused_line(defect: BoardDefect, command: BoardCommand) -> String {
     match defect {
         BoardDefect::TryAgain => match command {
+            BoardCommand::List => BOARD_LIST_NOT_READ.into(),
             BoardCommand::Settings => "the board store did not do it; try again".into(),
             BoardCommand::Clear => "the clear stopped; run maknae board clear again".into(),
         },
@@ -486,6 +578,191 @@ mod tests {
         assert_eq!(
             board_unknown_line(BoardCommand::Clear),
             "the outcome is unknown; run maknae board clear again"
+        );
+    }
+
+    fn secret(s: &str) -> maknae_proto::SecretText {
+        maknae_proto::SecretText(zeroize::Zeroizing::new(s.into()))
+    }
+
+    fn board_entry(seq: u64, author: &str, to: Addressee) -> BoardEntry {
+        BoardEntry {
+            seq,
+            post: maknae_proto::Post {
+                id: maknae_proto::PostId([u8::try_from(seq).unwrap_or(0xff); 16]),
+                author: Author::Agent(author.into()),
+                task: None,
+                at_secs: 1_795_654_923,
+                labels: maknae_proto::Labels {},
+                draft: maknae_proto::PostDraft {
+                    kind: maknae_proto::PostKind::Note,
+                    to,
+                    in_reply_to: None,
+                    body: secret("hello"),
+                    attachments: vec![],
+                },
+            },
+            held: vec![],
+        }
+    }
+
+    fn written(indent: &str, text: &str) -> Vec<u8> {
+        let mut out = vec![];
+        write_board_text(&mut out, indent, text).unwrap();
+        out
+    }
+
+    #[test]
+    fn one_line_turns_breaks_into_spaces_then_escapes() {
+        assert_eq!(one_line("a\nb\r\nc\u{1b}d"), "a b  c\\u{001b}d");
+        assert_eq!(one_line("plain"), "plain");
+    }
+
+    #[test]
+    fn board_text_escapes_every_control_and_splits_lines() {
+        assert_eq!(
+            written("    ", "a\u{1b}[31mb\r\n\tc\u{2028}d\u{202e}\u{200b}\u{0}"),
+            b"    a\\u{001b}[31mb\\u{000d}\n    \\u{0009}c\\u{2028}d\\u{202e}\\u{200b}\\u{0000}\n"
+        );
+        assert_eq!(written("  ", "one"), b"  one\n");
+        assert_eq!(written("  ", "a\n\nb\n"), b"  a\n  \n  b\n  \n");
+    }
+
+    #[test]
+    fn a_32_kib_line_prints_whole_and_escaped() {
+        let mut line = "x".repeat(32 * 1024 - 1);
+        line.push('\u{7}');
+        let mut want = b"    ".to_vec();
+        want.extend_from_slice("x".repeat(32 * 1024 - 1).as_bytes());
+        want.extend_from_slice(b"\\u{0007}\n");
+        assert_eq!(written("    ", &line), want);
+    }
+
+    #[test]
+    fn the_entry_header_names_every_field() {
+        let mut e = board_entry(
+            7,
+            "hobi",
+            Addressee::Agents(vec!["jin".into(), "suga".into()]),
+        );
+        e.post.draft.kind = maknae_proto::PostKind::Question;
+        e.post.task = Some(maknae_proto::TaskId([0xab; 16]));
+        e.post.draft.in_reply_to = Some(maknae_proto::PostId([5; 16]));
+        e.held = vec![BoardHold::Author, BoardHold::Person];
+        let task = "ab".repeat(16);
+        assert_eq!(
+            board_entry_header(&e, Some(5)),
+            format!(
+                "#7  2026-11-26T01:02:03.000Z  hobi  to agents: jin, suga  question  task {task}  reply to #5  HELD (author contained)  HELD (you were contained)"
+            )
+        );
+        assert_eq!(
+            board_entry_header(&e, None),
+            format!(
+                "#7  2026-11-26T01:02:03.000Z  hobi  to agents: jin, suga  question  task {task}  reply to {}  HELD (author contained)  HELD (you were contained)",
+                "05".repeat(16)
+            )
+        );
+        e.held = vec![BoardHold::Person];
+        assert!(board_entry_header(&e, Some(5)).ends_with("reply to #5  HELD (you were contained)"));
+        e.held = vec![BoardHold::Author];
+        assert!(board_entry_header(&e, Some(5)).ends_with("reply to #5  HELD (author contained)"));
+        let mut plain = board_entry(9, "jin", Addressee::Board);
+        assert_eq!(
+            board_entry_header(&plain, None),
+            "#9  2026-11-26T01:02:03.000Z  jin  to board  note"
+        );
+        assert_eq!(
+            board_entry_header(&plain, Some(3)),
+            "#9  2026-11-26T01:02:03.000Z  jin  to board  note"
+        );
+        plain.post.at_secs = -5;
+        plain.post.draft.kind = maknae_proto::PostKind::Answer;
+        assert_eq!(
+            board_entry_header(&plain, None),
+            "#9  1970-01-01T00:00:00.000Z  jin  to board  answer"
+        );
+        plain.post.draft.kind = maknae_proto::PostKind::Intent;
+        assert!(board_entry_header(&plain, None).ends_with("  intent"));
+    }
+
+    #[test]
+    fn a_hostile_author_or_label_is_escaped_in_the_header() {
+        let mut e = board_entry(
+            3,
+            "ev\u{1b}[2Jil\nmaknae: x\r",
+            Addressee::Agents(vec!["j\u{1b}in\r\nx".into(), "suga".into()]),
+        );
+        e.post.draft.attachments = vec![Attachment {
+            label: "la\u{1b}]0;t\u{7}b\nc\rd".into(),
+            media: Media::TextPlain,
+            content: secret("c"),
+        }];
+        assert_eq!(
+            board_entry_header(&e, None),
+            "#3  2026-11-26T01:02:03.000Z  ev\\u{001b}[2Jil maknae: x   to agents: j\\u{001b}in  x, suga  note"
+        );
+        assert_eq!(
+            board_attachment_line(&e.post.draft.attachments[0]),
+            "  attachment la\\u{001b}]0;t\\u{0007}b c d  text/plain  1 bytes"
+        );
+    }
+
+    #[test]
+    fn the_attachment_line_names_label_media_and_size() {
+        let a = |media, content: &str| Attachment {
+            label: "fix.diff".into(),
+            media,
+            content: secret(content),
+        };
+        assert_eq!(
+            board_attachment_line(&a(Media::TextDiff, "0123456789")),
+            "  attachment fix.diff  text/x-diff  10 bytes"
+        );
+        assert_eq!(
+            board_attachment_line(&a(Media::TextPlain, "")),
+            "  attachment fix.diff  text/plain  0 bytes"
+        );
+        assert_eq!(
+            board_attachment_line(&a(Media::TextMarkdown, "# é")),
+            "  attachment fix.diff  text/markdown  4 bytes"
+        );
+    }
+
+    #[test]
+    fn the_list_refusals_say_read_not_manage() {
+        use BoardDefect::*;
+        assert_eq!(
+            board_refused_line(TryAgain, BoardCommand::List),
+            "the board could not be read; try again"
+        );
+        assert_eq!(
+            board_refused_line(OutcomeUnknown, BoardCommand::List),
+            "the board could not be read; try again"
+        );
+        assert_eq!(
+            board_unknown_line(BoardCommand::List),
+            "the board could not be read; try again"
+        );
+        assert_eq!(
+            board_refused_line(Full, BoardCommand::List),
+            "the kernel refused: board full"
+        );
+    }
+
+    #[test]
+    fn board_list_stopped_line_counts() {
+        assert_eq!(
+            board_list_stopped_line(64),
+            "stopped after 64 requests and 64 posts; older posts remain"
+        );
+        assert_eq!(
+            board_list_stopped_line(1),
+            "stopped after 64 requests and 1 post; older posts remain"
+        );
+        assert_eq!(
+            board_list_stopped_line(0),
+            "stopped after 64 requests and 0 posts; older posts remain"
         );
     }
 

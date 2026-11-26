@@ -331,6 +331,104 @@ impl std::fmt::Debug for BoardPage {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum BoardHold {
+    Author,
+    Person,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "BoardEntryWire")]
+pub struct BoardEntry {
+    pub seq: u64,
+    pub post: Post,
+    pub held: Vec<BoardHold>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardEntryWire {
+    seq: u64,
+    post: Post,
+    #[serde(deserialize_with = "bounded_holds")]
+    held: Vec<BoardHold>,
+}
+
+const BOARD_ENTRY_HOLDS_MAX: usize = 2;
+
+fn bounded_holds<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<BoardHold>, D::Error> {
+    bounded(d, BOARD_ENTRY_HOLDS_MAX, |n| {
+        format!("board entry has {n} holds, over {BOARD_ENTRY_HOLDS_MAX}")
+    })
+}
+
+impl TryFrom<BoardEntryWire> for BoardEntry {
+    type Error = String;
+    fn try_from(w: BoardEntryWire) -> Result<Self, String> {
+        if !w.held.windows(2).all(|p| p[0] < p[1]) {
+            return Err("board entry holds are not in order or repeat".into());
+        }
+        Ok(BoardEntry {
+            seq: w.seq,
+            post: w.post,
+            held: w.held,
+        })
+    }
+}
+
+impl std::fmt::Debug for BoardEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoardEntry")
+            .field("seq", &self.seq)
+            .field("post", &self.post)
+            .field("held", &self.held)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "BoardListingWire")]
+pub struct BoardListing {
+    pub entries: Vec<BoardEntry>,
+    pub older: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardListingWire {
+    #[serde(deserialize_with = "bounded_entries")]
+    entries: Vec<BoardEntry>,
+    older: Option<u64>,
+}
+
+fn bounded_entries<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<BoardEntry>, D::Error> {
+    bounded(d, BOARD_READ_PAGE_POSTS, |n| {
+        format!("board listing has {n} entries, over {BOARD_READ_PAGE_POSTS}")
+    })
+}
+
+impl TryFrom<BoardListingWire> for BoardListing {
+    type Error = String;
+    fn try_from(w: BoardListingWire) -> Result<Self, String> {
+        if !w.entries.windows(2).all(|p| p[0].seq < p[1].seq) {
+            return Err("board listing entries are not in ascending sequence order".into());
+        }
+        Ok(BoardListing {
+            entries: w.entries,
+            older: w.older,
+        })
+    }
+}
+
+impl std::fmt::Debug for BoardListing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoardListing")
+            .field("entries", &self.entries)
+            .field("older", &self.older)
+            .finish()
+    }
+}
+
 /// Why a permitted board request was not carried out; availability, never policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -972,6 +1070,138 @@ mod tests {
         assert_eq!(*a, *b);
         assert_eq!(a.capacity(), a.len());
         assert_eq!(*a, enc(&(&d.body, &d.attachments)));
+    }
+
+    fn entry(seq: u64, held: Vec<BoardHold>) -> BoardEntry {
+        BoardEntry {
+            seq,
+            post: post_to(Addressee::Board),
+            held,
+        }
+    }
+
+    fn listing_value(entries: Vec<ciborium::Value>) -> Vec<u8> {
+        use ciborium::Value;
+        enc(&Value::Map(vec![
+            (Value::Text("entries".into()), Value::Array(entries)),
+            (Value::Text("older".into()), Value::Null),
+        ]))
+    }
+
+    #[test]
+    fn a_board_listing_round_trips_with_holds_and_older() {
+        let listing = BoardListing {
+            entries: vec![
+                entry(1, vec![BoardHold::Author, BoardHold::Person]),
+                entry(2, vec![]),
+            ],
+            older: Some(3),
+        };
+        assert_eq!(dec::<BoardListing>(&enc(&listing)), Ok(listing));
+        let empty = BoardListing {
+            entries: vec![],
+            older: None,
+        };
+        assert_eq!(dec::<BoardListing>(&enc(&empty)), Ok(empty));
+    }
+
+    #[test]
+    fn a_board_entry_refuses_misordered_repeated_or_extra_holds() {
+        use BoardHold::{Author, Person};
+        for held in [vec![Person, Author], vec![Author, Author]] {
+            let err = dec::<BoardEntry>(&enc(&entry(1, held))).unwrap_err();
+            assert!(
+                err.contains("board entry holds are not in order or repeat"),
+                "{err}"
+            );
+        }
+        let err = dec::<BoardEntry>(&enc(&entry(1, vec![Author, Person, Person]))).unwrap_err();
+        assert!(err.contains("board entry has 3 holds, over 2"), "{err}");
+        for held in [vec![], vec![Author], vec![Person], vec![Author, Person]] {
+            let e = entry(1, held);
+            assert_eq!(dec::<BoardEntry>(&enc(&e)), Ok(e));
+        }
+    }
+
+    #[test]
+    fn a_listing_refuses_a_33rd_entry_before_decoding_it() {
+        let mut entries: Vec<ciborium::Value> = (0..BOARD_READ_PAGE_POSTS)
+            .map(|i| {
+                ciborium::Value::serialized(&entry(u64::try_from(i).unwrap(), vec![])).unwrap()
+            })
+            .collect();
+        let under = dec::<BoardListing>(&listing_value(entries.clone())).unwrap();
+        assert_eq!(under.entries.len(), BOARD_READ_PAGE_POSTS);
+        entries.push(ciborium::Value::Integer(7.into()));
+        let err = dec::<BoardListing>(&listing_value(entries)).unwrap_err();
+        assert!(
+            err.contains("board listing has 33 entries, over 32"),
+            "{err}"
+        );
+        let err = dec::<BoardListing>(&listing_value(vec![ciborium::Value::Integer(7.into())]))
+            .unwrap_err();
+        assert!(!err.contains("entries, over"), "{err}");
+    }
+
+    #[test]
+    fn a_listing_refuses_entries_out_of_sequence_order() {
+        for seqs in [[2, 2], [3, 1]] {
+            let listing = BoardListing {
+                entries: seqs.iter().map(|s| entry(*s, vec![])).collect(),
+                older: None,
+            };
+            let err = dec::<BoardListing>(&enc(&listing)).unwrap_err();
+            assert!(
+                err.contains("board listing entries are not in ascending sequence order"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listing_refuses_an_unknown_field() {
+        use ciborium::Value;
+        let mut v = Value::serialized(&BoardListing {
+            entries: vec![],
+            older: None,
+        })
+        .unwrap();
+        let Value::Map(fields) = &mut v else {
+            panic!("a listing encodes as a map")
+        };
+        fields.push((Value::Text("x".into()), Value::Bool(true)));
+        assert_eq!(
+            dec::<BoardListing>(&enc(&v)).unwrap_err(),
+            "Semantic(None, \"unknown field `x`, expected `entries` or `older`\")"
+        );
+        let mut v = Value::serialized(&entry(1, vec![])).unwrap();
+        let Value::Map(fields) = &mut v else {
+            panic!("an entry encodes as a map")
+        };
+        fields.push((Value::Text("x".into()), Value::Bool(true)));
+        assert_eq!(
+            dec::<BoardEntry>(&enc(&v)).unwrap_err(),
+            "Semantic(None, \"unknown field `x`, expected one of `seq`, `post`, `held`\")"
+        );
+    }
+
+    #[test]
+    fn a_listing_debugs_without_content() {
+        let mut e = entry(4, vec![BoardHold::Person]);
+        e.post.draft.body = text("sentinel-714-body");
+        let listing = BoardListing {
+            entries: vec![e.clone()],
+            older: Some(2),
+        };
+        for shown in [format!("{e:?}"), format!("{listing:?}")] {
+            assert!(!shown.contains("sentinel-714-body"), "{shown}");
+            assert!(shown.contains("<17 bytes>"), "{shown}");
+            assert!(
+                shown.contains("seq: 4") && shown.contains("[Person]"),
+                "{shown}"
+            );
+        }
+        assert!(format!("{listing:?}").contains("older: Some(2)"));
     }
 
     #[test]

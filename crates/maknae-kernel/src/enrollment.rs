@@ -31,6 +31,11 @@ pub trait EnrollmentView: Send + Sync {
     fn load(&self) -> Load {
         Load::fixed()
     }
+    /// The install generation of the live values, the principal among them, these answers
+    /// are read with.
+    fn generation(&self) -> u64 {
+        0
+    }
 }
 
 /// One installed policy load, held so that a later reading can be compared with it. A
@@ -135,6 +140,10 @@ impl<B: Baseline> EnrollmentView for SnapshotEnrollment<B> {
 
     fn load(&self) -> Load {
         Load::installed(self.0.baseline().snapshot())
+    }
+
+    fn generation(&self) -> u64 {
+        self.0.live().generation()
     }
 }
 

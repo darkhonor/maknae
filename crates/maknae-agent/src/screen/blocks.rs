@@ -13,7 +13,7 @@ const TAB_SPACES: &str = "        ";
 /// Calls `f` with each piece `text` is stored as: its display piece, or for a
 /// tab the spaces to the next stop, counted from the start of its line.
 fn stored_pieces(text: &str, mut f: impl FnMut(&str) -> Result<(), Full>) -> Result<(), Full> {
-    let mut buf = [0; DISPLAY_PIECE_MAX];
+    let mut buf = zeroize::Zeroizing::new([0; DISPLAY_PIECE_MAX]);
     let mut col = 0;
     for c in text.chars() {
         match c {
