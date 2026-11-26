@@ -423,7 +423,19 @@ def order_rows(rows: dict, deps: dict, sweeps: int = 12) -> dict:
 
 # --- SVG primitives -------------------------------------------------------
 
+_XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
+def load_toml(name: str) -> dict:
+    try:
+        return tomllib.loads((OUT / name).read_text())
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"{name}: is not valid TOML: {e}")
+
+
 def esc(s: str) -> str:
+    if _XML_BAD.search(s):
+        sys.exit(f"text holds a character XML cannot carry: {s!r}")
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -648,7 +660,7 @@ def stdv1(prov: str) -> str:
     and a profile that blurs them is a wish list. The `evidence` column is the
     part most StdV-1s lack — every row names a file, gate or ADR a reader can open.
     """
-    rows = tomllib.load((OUT / "standards-profile.toml").open("rb"))["standard"]
+    rows = load_toml("standards-profile.toml")["standard"]
     check_evidence(rows, "evidence", "standards-profile.toml")
     rows.sort(key=lambda r: (STATUS_ORDER.index(r["status"]), r["name"].lower()))
 
@@ -906,7 +918,7 @@ def sequence(name: str) -> str:
     Geometry fails closed: overlapping boxes, a boundary on an unknown or first
     participant, an unknown kind and a fourth subtitle line all exit.
     """
-    doc = tomllib.loads((OUT / name).read_text())
+    doc = load_toml(name)
     parts, steps = doc["participant"], doc["step"]
     sid_index = {}
     for n, s in enumerate(steps, 1):
@@ -921,12 +933,15 @@ def sequence(name: str) -> str:
                     sys.exit(f"{name}: step {n}: {key} must be a str")
             if s["target"] not in PRODUCT_NAMES:
                 sys.exit(f"{name}: step {n}: ref target {s['target']!r} is not a generated product")
-            for key in ("from", "to"):
-                if s[key] not in {pa["id"] for pa in parts}:
-                    sys.exit(f"{name}: step {n}: ref spans unknown participant {s[key]!r}")
             for key in ("sees", "decide"):
                 if key in s:
                     sys.exit(f"{name}: step {n}: a ref step takes no {key}")
+        for key in ("label", "from", "to"):
+            if not isinstance(s.get(key), str):
+                sys.exit(f"{name}: step {n}: {key} must be a str")
+        for key in ("from", "to"):
+            if s[key] not in {pa["id"] for pa in parts}:
+                sys.exit(f"{name}: step {n}: spans unknown participant {s[key]!r}")
         if "id" in s:
             sid = s["id"]
             if not (isinstance(sid, str) and _STEP_ID.fullmatch(sid)):
@@ -1034,6 +1049,9 @@ def sequence(name: str) -> str:
         a, b = sorted((xs[idx[steps[i]["from"]]], xs[idx[steps[i]["to"]]]))
         return (a - REF_MARGIN, b + REF_MARGIN) if steps[i]["kind"] == "ref" else (a, b)
 
+    def tag_w(n):
+        return len("open decision " + ", ".join(dtag[n])) * 4.8 if n in dtag else 0
+
     def place(n):
         s, lab = steps[n], lines[n]
         a, b = xs[idx[s["from"]]], xs[idx[s["to"]]]
@@ -1053,15 +1071,16 @@ def sequence(name: str) -> str:
                        len(s.get("evidence", "")) * 4.6,
                        len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
                        len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0)
+            wide = max(need, tag_w(n))
             if a + 40 + need > W - 24:
-                return a - 40, "end", a - 40 - need, a
-            return a + 40, "start", a, a + 40 + need
+                return a - 40, "end", a - 40 - wide, a
+            return a + 40, "start", a, a + 40 + wide
         half = max(max(len(ln) for ln in lab) * 5.6,
                    len(s.get("evidence", "")) * 4.6,
                    len(f'sees: {s["sees"]}') * 4.8 if s.get("sees") else 0,
                    len(f'test: {s["test"]}') * 4.6 if s.get("test") else 0) / 2
         lx = W / 2 if 2 * half > W - 24 else min(max((a + b) / 2, half + 12), W - 12 - half)
-        drawn = max(half, len(f'{n+1}. {lab[0]}') * 5.6 / 2)
+        drawn = max(half, len(f'{n+1}. {lab[0]}') * 5.6 / 2, tag_w(n) / 2)
         return lx, "middle", min(lx - drawn, a, b), max(lx + drawn, a, b)
 
     maxdepth, fx = max(depth, default=0), []
@@ -1249,7 +1268,7 @@ def matrix(name: str) -> str:
     Fails closed on a pair with no cell or two cells: a blank cell reads as
     "no access", which is exactly the claim a gap must never make silently.
     """
-    doc = tomllib.loads((OUT / name).read_text())
+    doc = load_toml(name)
     subs, objs, rights, cells = doc["subject"], doc["object"], doc["right"], doc["cell"]
     for kind, rows in (("subject", subs), ("object", objs), ("right", rights)):
         ids = [r["id"] for r in rows]
@@ -1365,7 +1384,7 @@ def d6_decision(prov: str) -> str:
     RECONCILED (an ordered ladder, ADR-0008). UML 2.5.1 activity semantics for
     the ladder -- a decision node per rung, first match wins.
     """
-    doc = tomllib.loads((OUT / "decision-cycle.toml").read_text())
+    doc = load_toml("decision-cycle.toml")
     ops, rungs = doc["operand"], doc["rung"]
     check_evidence(ops, "evidence", "decision-cycle.toml")
     check_evidence(rungs, "evidence", "decision-cycle.toml")
@@ -1482,7 +1501,7 @@ def d7_datamodel(prov: str) -> str:
     them as separate entities is a normalization judgement, not a transcription
     -- which is why every entity cites the type it was drawn from.
     """
-    doc = tomllib.loads((OUT / "data-model.toml").read_text())
+    doc = load_toml("data-model.toml")
     secs, ents, rels = doc["section"], doc["entity"], doc["rel"]
     check_evidence(ents, "evidence", "data-model.toml")
     by_id = {e["id"]: e for e in ents}
@@ -1584,7 +1603,7 @@ def d8_interfaces(prov: str) -> str:
     sends an assessor to test surfaces that are not there, and lets the ones
     that ARE there pass without notice.
     """
-    doc = tomllib.loads((OUT / "system-interfaces.toml").read_text())
+    doc = load_toml("system-interfaces.toml")
     nodes, ifaces, negs = doc["node"], doc["iface"], doc["negative"]
     check_evidence(ifaces, "evidence", "system-interfaces.toml")
     check_evidence(negs, "evidence", "system-interfaces.toml")
@@ -1728,7 +1747,7 @@ def d9_opconcept(prov: str) -> str:
     An OV-1 that omits that reads as a description of a working system, and
     this catalog's whole discipline is saying which is which.
     """
-    d = tomllib.loads((OUT / "operational-concept.toml").read_text())
+    d = load_toml("operational-concept.toml")
     steps, envs = d["step"], d["env"]
     check_evidence([d["delta"], d["spectrum"], d["delivery"]], "evidence",
                    "operational-concept.toml")
@@ -1913,7 +1932,7 @@ def service_architecture(prov: str) -> str:
     a communication path. Every element carries a status and its line style is
     that status, so nothing unbuilt is drawn as built.
     """
-    d = tomllib.loads((OUT / "service-architecture.toml").read_text())
+    d = load_toml("service-architecture.toml")
     sc, planes, arts, flows = d["scope"], d["plane"], d["artifact"], d["flow"]
     check_evidence([sc, d["built"]], "evidence", "service-architecture.toml")
 
@@ -2143,7 +2162,7 @@ def d11_patterns(prov: str) -> str:
     The crossing count is a cost model: each is a PDP evaluation, an audit
     append and a socket round trip.
     """
-    doc = tomllib.loads((OUT / "agentic-patterns.toml").read_text())
+    doc = load_toml("agentic-patterns.toml")
     pats = doc["pattern"]
     check_evidence(pats, "evidence", "agentic-patterns.toml")
 

@@ -128,6 +128,20 @@ class StepIds(unittest.TestCase):
         self.assertNotIn("zzq-marker", render(on_step(BASE, 1, 'id = "zzq-marker"')))
 
 
+class MalformedInput(unittest.TestCase):
+    def test_toml_syntax_error_exits_naming_the_file(self):
+        exits(self, "precondition =\n" + BASE, "is not valid TOML")
+
+    def test_step_without_label_exits(self):
+        exits(self, BASE.replace('label = "first"\n', ""), "step 1: label must be a str")
+
+    def test_call_to_unknown_participant_exits(self):
+        exits(self, BASE.replace('to = "b"', 'to = "zz"', 1), "spans unknown participant 'zz'")
+
+    def test_control_character_exits(self):
+        exits(self, 'precondition = "\\u0001"\n' + BASE, "a character XML cannot carry")
+
+
 class Precondition(unittest.TestCase):
     def test_precondition_not_a_string_exits(self):
         exits(self, "precondition = 5\n" + BASE, "precondition must be a str")
@@ -272,6 +286,16 @@ class FragmentRendering(unittest.TestCase):
         self.assertLessEqual(r[0], x - half)
         self.assertGreaterEqual(r[0] + r[2], x + half)
 
+    def test_box_encloses_the_open_decision_tag(self):
+        t = ids(BASE).replace('label = "first"\nkind = "call"\nfrom = "a"\nto = "b"\n'
+                              'evidence = "crates/maknae-kernel/src/task.rs"',
+                              'label = "first"\nkind = "self"\nfrom = "a"\nto = "a"\n'
+                              'evidence = "short"\ndecide = ["question?"]')
+        svg = render(t + frag(last="s1", first="s1"))
+        x = float(re.search(r'<text x="([-\d.]+)"[^>]*>open decision D1<', svg).group(1))
+        r = frag_rects(svg)[1]
+        self.assertGreaterEqual(r[0] + r[2], x + len("open decision D1") * 4.8)
+
     def test_loop_fill_is_drawn_behind_the_trust_boundary(self):
         bound = '\n[[boundary]]\nbefore = "b"\nleft = ""\nright = "trusted"\n'
         svg = render(ids(BASE).replace("[[participant]]", bound + "\n[[participant]]", 1) + frag())
@@ -327,7 +351,7 @@ class RefSteps(unittest.TestCase):
         exits(self, with_ref(ids(THREE), ref_step(decide='["x"]')), "a ref step takes no decide")
 
     def test_ref_from_or_to_unknown_exits(self):
-        exits(self, with_ref(ids(THREE), ref_step(frm="zz")), "ref spans unknown participant 'zz'")
+        exits(self, with_ref(ids(THREE), ref_step(frm="zz")), "spans unknown participant 'zz'")
 
     def test_ref_draws_tag_label_and_target(self):
         svg = render(with_ref(ids(THREE), ref_step()))
