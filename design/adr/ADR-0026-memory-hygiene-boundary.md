@@ -91,13 +91,31 @@ Option B (own the codec and the body) and Option C (B for the kernel↔deputy CB
 - **Accepted:** the residual is real, and it is larger than "the codec": a memory read, a core dump or swap yields recent prompt text, file content the subject reads, write content and, in the deputy, the provider key — and, outside this ADR's scope, the Vault authentication material the planes and `maknae enroll` hold. This was already true for prompt text since the prompt leg shipped (#172, #240, #264); the ADR names it rather than narrows it.
 - **Obligation on later work:** a change that touches a decision-1 site converts it and removes the row; a change that adds or removes a third-party path on a secret-class route updates decision 2 in the same PR.
 
+## Amendment 2026-11-27 — delivered credentials and core dumps (#751)
+
+A credential a front end, or later the launch helper (#755), holds to deliver to a tool is secret-class. It is held only as `maknae_io::credential::DeliveredCredential`, and it travels to the helper only inside `LaunchCredentials`. Both meet decision 1: the value lives in a `Zeroizing` buffer, the encoded frame is allocated once at its exact length and zeroized, and the receive buffer is zeroized from allocation. Neither type has `Display`, `Clone`, `PartialEq` or serde, and `Debug` prints a fixed marker. Compile-fail doctests pin each of those.
+
+Decision 3's core-dump exposure narrows for those processes, and only for them:
+
+- `maknae_io::deny_core_dumps` lowers the soft `RLIMIT_CORE` to 0 and, on Linux, sets the process non-dumpable (`PR_SET_DUMPABLE` 0). It runs once per process, and a failure is sticky. Constructing a `DeliveredCredential` calls it, and a holder calls it before fetching a credential. It moves only the soft limit, so it needs no `setrlimit` permission under a confined domain.
+- The agent daemon's unit (`maknae-agent@.service`) sets `LimitCORE=0`, which `packaging/isolation-contract.md` pins.
+- `maknaed`'s and `maknae-egress`'s units are unchanged. Decision 3's sentence about them still holds, and decision 4's `LimitCORE=0` on both units stays unfiled.
+
+No front end holds a tool credential yet (the tool path is #479 and #168), so no production process calls `deny_core_dumps` today. The narrowing takes effect when the first holder is built.
+
+Residuals, added to decision 2's list:
+
+- A piped core handler (`core_pattern` beginning with `|`) that does not honour the soft limit (`%c`) still stores the dump. With `suid_dumpable=2`, a non-dumpable process is still dumped, as root, to such a handler.
+- The window between fetching a value and constructing the `DeliveredCredential`, when the value sits in the fetching client's own buffers. A holder shortens it by calling `deny_core_dumps` before the fetch.
+- Non-dumpable is Linux-only. On macOS only the soft core limit applies; nothing equivalent to `PR_SET_DUMPABLE` is set.
+
 ## Security control mapping (informative; per ADR-0001)
 
 | Property | Control | Status |
 |---|---|---|
 | Secret-class bytes wiped from Maknae-owned buffers on free; no growth copies | NIST SP 800-53 SC-4 (information in shared system resources) | **Partial** — met on the kernel↔deputy frame buffers (encode and read) and the provider request's Maknae-owned types (#241); the three Maknae-owned sites listed in decision 1, the `from_reader` scratch among them, do not meet it (amended 2026-11-13, #629: the count said six, which was stale after #512 removed two rows and #629 one; amended 2026-10-02, #153 PR 4: the count said eight, which was stale after #372 removed a row; the `kv_io.rs` row is removed too); the decision-2 residual is inside dependencies; Vault authentication material is out of scope and not inventoried here (its holding types zeroize; plain copies exist around them — see Context), except the wrapping token and the CLI's user-token client copy, which decision 2 lists (amended 2026-10-02, #153 PR 4) |
 | Memory readers bounded by process isolation and custody | AC-6 (least privilege — separate service uids), SC-39 (process isolation) | Implemented on packaged Linux (`_maknae`, `_maknae-egress`); built on macOS (#287, #394), pending the macOS acceptance run (#76) (2026-09-28, #76: `maknaed` ran as `_maknae` and the deputy as its own launchd job, uid not recorded; the bound itself not measured, and no issue tracks measuring it); the custody assertion is unbuilt (#242) |
-| Post-mortem memory (core dumps) | SC-4 | **Not implemented** — Maknae pins nothing on either platform (no `LimitCORE`, no `PR_SET_DUMPABLE`, no launchd limit); the host's policy decides; accepted under decision 3, candidate follow-up |
+| Post-mortem memory (core dumps) | SC-4 | **Partial** — a process that holds a delivered credential lowers its soft core limit to 0 and, on Linux, is non-dumpable, and the agent daemon's unit sets `LimitCORE=0` (amended 2026-11-27, #751; no front end holds one yet, and the residuals are in that amendment); `maknaed` and `maknae-egress` still pin nothing on either platform, so the host's policy decides for them, accepted under decision 3 |
 
 ## References
 

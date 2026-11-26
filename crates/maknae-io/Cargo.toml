@@ -34,8 +34,9 @@ nix = { version = "0.32", default-features = false, features = ["fs", "dir", "ui
 #       forbids it (ADR-0027 confines `unsafe` to maknae-sys), or holding bare RawFds with
 #       hand-rolled close-on-drop — the exact leak-on-the-refusal-path hazard ADR-0009
 #       names. It also parses SCM_CREDENTIALS into `UCred` (#115).
-# `default-features = false` keeps it to "std" + "net"; the fs/process/thread/event
-# APIs are not compiled in.
+# `default-features = false` keeps it to "std", "net" and "process" (`getrlimit`,
+# `setrlimit` and `set_dumpable_behavior` for `deny_core_dumps`, #751); the fs, thread
+# and event APIs are not compiled in.
 # EXACT PIN: rustix holds the `unsafe` ancillary-data parsing this crate trusts for
 # delegated descriptors and sender credentials, so `cargo update` must not move it
 # without a reviewed bump. 1.1.6 is the floor: 1.1.5 does not compile with "net"
