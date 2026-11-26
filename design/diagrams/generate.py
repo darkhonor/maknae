@@ -868,6 +868,9 @@ SEQ_STYLE = {"actor":    (PLAIN_FILL, PLAIN_LINE, INK),
              "external": (PLAIN_FILL, MUTED, INK)}
 SEQ_KINDS = ("call", "reply", "self", "ref")
 _STEP_ID = re.compile(r"[a-z][a-z0-9-]*")
+FRAG_HEAD, FRAG_PAD, FRAG_INSET = 32, 10, 8
+FRAG_KEYS = ("operator", "guard", "first", "last")
+LOOP_FILL = "#FAEFD2"
 
 
 def sequence(name: str) -> str:
@@ -908,6 +911,48 @@ def sequence(name: str) -> str:
     check_tests(steps, "test", name)
     check_status(steps, name)
     marked = any("status" in s for s in steps)
+    frags = doc.get("fragment", [])
+    if not (isinstance(frags, list) and all(isinstance(f, dict) for f in frags)):
+        sys.exit(f"{name}: fragment must be an array of tables")
+    if not marked and any("status" in f for f in frags):
+        sys.exit(f"{name}: a fragment status needs the steps marked")
+    spans = []
+    for k, f in enumerate(frags, 1):
+        for key in f:
+            if key not in FRAG_KEYS + ("status", "evidence"):
+                sys.exit(f"{name}: fragment {k}: unknown key {key!r}")
+        for key in FRAG_KEYS:
+            if not isinstance(f.get(key), str):
+                sys.exit(f"{name}: fragment {k}: {key} is missing or not a string")
+        for key in ("status", "evidence"):
+            if key in f and not isinstance(f[key], str):
+                sys.exit(f"{name}: fragment {k}: {key} must be a str")
+        if f["operator"] not in ("loop", "opt"):
+            sys.exit(f"{name}: fragment {k}: operator {f['operator']!r} is not loop or opt")
+        if not f["guard"].strip():
+            sys.exit(f"{name}: fragment {k}: guard must be a non-empty string")
+        for end in ("first", "last"):
+            if f[end] not in sid_index:
+                sys.exit(f"{name}: fragment {k}: {end} {f[end]!r} names no step")
+        i0, i1 = sid_index[f["first"]], sid_index[f["last"]]
+        if i0 > i1:
+            sys.exit(f"{name}: fragment {k}: first {f['first']!r} comes after last {f['last']!r}")
+        spans.append((i0, i1))
+        row = {"label": f"[{f['guard']}]"} | {key: f[key] for key in ("status", "evidence") if key in f}
+        if "evidence" in f:
+            check_evidence([row], "evidence", name)
+        if "status" in f:
+            check_status([row], name)
+    for j, (a0, a1) in enumerate(spans):
+        for k in range(j + 1, len(spans)):
+            b0, b1 = spans[k]
+            if (a0, a1) == (b0, b1):
+                sys.exit(f"{name}: fragments {j + 1} and {k + 1} cover the same steps; "
+                         f"merge them or nest one inside a wider range")
+            if a1 < b0 or b1 < a0 or (a0 <= b0 and b1 <= a1) or (b0 <= a0 and a1 <= b1):
+                continue
+            sys.exit(f"{name}: fragments {j + 1} and {k + 1} overlap without nesting")
+    depth = [sum(o != sp and o[0] <= sp[0] and sp[1] <= o[1] for o in spans) for sp in spans]
     decisions, dtag = [], {}
     for n, s in enumerate(steps):
         qs = s.get("decide", [])
@@ -937,14 +982,31 @@ def sequence(name: str) -> str:
 
     lines, ys, cur = [], [], HEAD + 34
     shown = [f'«{s["status"]}» {s["label"]}' if marked else s["label"] for s in steps]
-    for s, label in zip(steps, shown):
+    heads, fbot = {}, {}
+    for i, (s, label) in enumerate(zip(steps, shown)):
+        for k in sorted((k for k, sp in enumerate(spans) if sp[0] == i), key=lambda k: depth[k]):
+            heads[k] = cur
+            cur += FRAG_HEAD
         lab = (_wrap_words(label, wrap)
                if wrap and s["kind"] != "self" and len(label) > wrap else [label])
         lines.append(lab)
         up = len(lab) - 1
         ys.append(cur + 12 * up)
         cur += ROW + 12 * (up + bool(s.get("sees")) + bool(s.get("test")) + bool(s.get("decide")))
+        for k in sorted((k for k, sp in enumerate(spans) if sp[1] == i), key=lambda k: -depth[k]):
+            cur += FRAG_PAD
+            fbot[k] = cur
     body_h = cur - 34 + 26
+    maxdepth, fx = max(depth, default=0), []
+    for k, ((i0, i1), f) in enumerate(zip(spans, frags), 1):
+        lx = [xs[idx[steps[i][e]]] for i in range(i0, i1 + 1) for e in ("from", "to")]
+        X0 = max(LEFT - 52, min(lx) - 70 - FRAG_INSET * maxdepth)
+        X1 = min(W - 12, max(lx) + 70 + FRAG_INSET * maxdepth)
+        x0, x1 = X0 + FRAG_INSET * depth[k - 1], X1 - FRAG_INSET * depth[k - 1]
+        drawn = f"«{f['status']}» [{f['guard']}]" if "status" in f else f"[{f['guard']}]"
+        if (len(f["operator"]) * 6 + 14) + len(drawn) * 5.4 + 16 > x1 - x0:
+            sys.exit(f"{name}: fragment {k}: guard does not fit its box; shorten it")
+        fx.append((x0, x1, drawn))
     notes = [(i + 1, s["note"]) for i, s in enumerate(steps) if s.get("note")]
     DCOLS = int((W - 2 * (LEFT - 52)) / 5.6)
     dlines = [_wrap_words(f"D{d} (step {st}). {q}", DCOLS) for d, st, q in decisions]
@@ -987,6 +1049,12 @@ def sequence(name: str) -> str:
             p.append(text(bx - 8, HEAD - 40, bd["left"], 10, "600", fill=WARN, anchor="end"))
         p.append(text(bx + 8, HEAD - 40, bd["right"], 10, "600", fill=WARN))
 
+    for k, f in enumerate(frags):
+        if f["operator"] == "loop":
+            x0, x1, _ = fx[k]
+            p.append(f'<rect data-frag-fill="{k + 1}" x="{x0}" y="{heads[k] + 2}" width="{x1 - x0}" '
+                     f'height="{fbot[k] - heads[k] - 2}" fill="{LOOP_FILL}" fill-opacity="0.6"/>')
+
     # lifelines
     for i, pa in enumerate(parts):
         fill, line, ink = SEQ_STYLE[pa["kind"]]
@@ -996,6 +1064,16 @@ def sequence(name: str) -> str:
         p.append(text(x, HEAD - 3, pa["stereo"], 8, fill=line, anchor="middle"))
         p.append(f'<line x1="{x}" y1="{HEAD+6}" x2="{x}" y2="{body_h}" stroke="{MUTED}" '
                  f'stroke-width="0.7" stroke-dasharray="3 4"/>')
+
+    for k, f in enumerate(frags):
+        (x0, x1, drawn), top, op = fx[k], heads[k] + 2, f["operator"]
+        tw = len(op) * 6 + 14
+        p.append(f'<rect data-frag="{k + 1}" x="{x0}" y="{top}" width="{x1 - x0}" '
+                 f'height="{fbot[k] - top}" fill="none" stroke="{INK}" stroke-width="0.9"/>')
+        p.append(f'<path d="M {x0} {top} h {tw} v 9 l -5 5 h {5 - tw} z" fill="#FFFFFF" '
+                 f'stroke="{INK}" stroke-width="0.9"/>')
+        p.append(text(x0 + 6, top + 10.5, op, 9, "600"))
+        p.append(text(x0 + tw + 8, top + 10.5, drawn, 9, halo="#FFFFFF"))
 
     # messages
     for n, s in enumerate(steps):
