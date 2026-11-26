@@ -420,4 +420,23 @@ mod tests {
         drain.join().unwrap();
         assert_eq!(got.unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
+    #[test]
+    fn a_budget_past_the_clock_is_refused() {
+        assert_eq!(
+            deadline(Duration::MAX).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_peer_that_resets_the_connection_is_an_io_error() {
+        let (a, mut b) = pair();
+        b.write_all(b"unread").unwrap();
+        drop(a);
+        match LaunchCredentials::receive(&mut b) {
+            Err(ReceiveError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::ConnectionReset),
+            other => panic!("expected a reset, got {other:?}"),
+        }
+    }
 }

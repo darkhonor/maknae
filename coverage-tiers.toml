@@ -1432,6 +1432,12 @@ path = "crates/maknae-io/src/write.rs"
 anchor = "append_raw(&fd, bytes).map_err"
 why = "a write to an fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test; a pure errno passthrough. The ENXIO-at-the-open case beside it IS covered, by append_to_a_fifo_is_enxio_at_the_open"
 
+[[exception]]
+path = "crates/maknae-io/src/credential_io.rs"
+anchor = "if let Some(code) = CORE_DUMPS_DENIED_FAILED.get() {"
+end_anchor = "io::Error::from_raw_os_error(*CORE_DUMPS_DENIED_FAILED.get_or_init(|| e.raw_os_error()))"
+why = "deny_core_dumps' sticky-failure path: lowering only the soft core limit to 0 under the current hard limit, and PR_SET_DUMPABLE 0, cannot fail for an unprivileged process, so no unit test can provoke the first failure the path records; the success path and its reapply are tested"
+
 [[t3]]
 path = "crates/maknae-proto/src/mutation.rs"
 why = "Mutation exchange serde data declarations and bounds only; report validation is kernel mutation_exchange.rs (T1)."
