@@ -189,6 +189,8 @@ Three approaches were surveyed: a host fence (bubblewrap or systemd sandboxing o
 
     **Amended 2026-11-19 by [ADR-0038](ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md) (#168):** `minting: trust-plane` is the Egress Daemon.
 
+    **Amended 2026-11-26 ([#746](https://github.com/darkhonor/maknae/issues/746), [ADR-0037](ADR-0037-task-bindings-labels-and-tool-authorization.md) decision 7, amendment 2026-11-26):** in the amendment of 2026-11-19, "observed at submission" holds for every side but a stored-token one, which is observed through `forge_auth` before the task is claimable. The Egress Daemon computes the intersection.
+
 14. **Secrets go to tools; the model gets redacted output.** Redaction prevents accidental disclosure; it is not a barrier against code that holds the credential (below).
     - A credential reaches a container only through its class's delivery, and is never placed in arguments the model writes.
     - What the model gets back is set per entry: `full`, `redacted` or `status_only`. **The default is `redacted`.** The front end strips every credential value it delivered for the invocation (the minted token, the child token, a lease's secret values, and the per-invocation proxy identity), and their HTTP Basic encodings, computed from the exact strings tools encode (`maknae:<identity>` for the proxy, and `x-access-token:<token>` for a GitHub token used by git), from stdout and stderr before the output is released, and replaces each with a marker saying a Maknae-managed credential was redacted. The model therefore knows a credential was provided and used, and does not keep asking whether the user supplied one.
