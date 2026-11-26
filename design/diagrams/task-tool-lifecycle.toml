@@ -157,10 +157,10 @@ id = "unanswered"
 from = "kernel"
 to = "tasker"
 kind = "reply"
-label = "refused: agent did not answer. Retry, or task another agent?"
+label = "refused: AgentUnanswered, naming the agent"
 status = "#168"
 evidence = "#168 · ADR-0033"
-note = "After 10 s, or less when the reach deadline is short. Nothing is stored."
+note = "Only after the full 10 s; a shorter wait gives the reach refusal. Nothing is stored. The CLI offers retry or another agent; for an /add, retry."
 
 [[step]]
 id = "reach-frame"
@@ -231,7 +231,7 @@ kind = "call"
 label = "agent side: GET /repos/{base} and the head, as the machine user"
 status = "#168"
 evidence = "#168 · ADR-0037 decision 7"
-note = "404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403 or 5xx refuses the submission."
+note = "404, or 403 without rate-limit headers: empty, AgentNotCovered. 401, 429, a rate-limited 403, 5xx, a redirect or the deadline refuses."
 
 [[step]]
 id = "observations"
