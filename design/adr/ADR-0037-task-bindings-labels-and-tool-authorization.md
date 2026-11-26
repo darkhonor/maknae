@@ -91,7 +91,7 @@ The maintainer's direction, 2026-11-19, changes the approach. Models take differ
    - **Why stored-token agents matter.** An agent that pushes commits must produce GitHub-Verified commits, and a GitHub App cannot register signing keys for `git push` commits. Such an agent therefore uses a machine user ([#748](https://github.com/darkhonor/maknae/issues/748)), whose agent side is a stored token (`github-machine-user`).
    - **Which sides.**
      - The target agent's side, when its credential is a stored token.
-     - For an own-initiative task, also the submitting agent's side when it is a stored token. That side is the task's tasker side, observed as a person's is (base, change and head), and a tasker side's outcome rules apply to it: every answer but 200 refuses. When an agent tasks itself, its token is observed once and the result serves both sides.
+     - For an own-initiative task, also the submitting agent's side when it is a stored token. That side is the task's tasker side, observed as a person's is (base, change and head), and a tasker side's outcome rules apply to it: every answer but 200 refuses, and so does `no-token`, since a submitter with no token for the server cannot be the tasker of a bound task. When an agent tasks itself, its token is observed once and the result serves both sides.
      - A sub-task's tasker side still comes from its parent's sealed reach.
      - A binding's sealed reach keeps exactly one agent side. An agent holding both an App and a stored-token credential on one server keeps today's outcome: its App side is observed and its stored token is not (`classify` observes first), until #168 PR C designs per-credential reach.
    - **The flow.**
@@ -110,7 +110,7 @@ The maintainer's direction, 2026-11-19, changes the approach. Models take differ
      - A 404, or a 403 without rate-limit headers, as the machine user gives `AgentNotCovered`, which is empty.
      - `no-token`, or no stored token for the server, gives `NoForgeCredential`.
      - A 401, a 429, a rate-limited 403, a 5xx, a redirect, a malformed body, `read-refused` or the deadline refuses the submission with the existing reach refusal.
-     - No answer in time refuses it with `AgentUnanswered` (ADR-0033, amendment 2026-11-26, statement 3). The tasker is told the agent did not answer and may retry or task another agent.
+     - No answer within the full 10 s wait refuses it with `AgentUnanswered` (ADR-0033, amendment 2026-11-26, statement 3). A wait the deadline shortened gives the existing reach refusal instead. The tasker is told the agent did not answer and may retry or task another agent.
    - **Addenda.** A `TaskAdd` with a new binding to a task whose agent's side is a stored token waits the same way. No answer refuses the add with `AgentUnanswered`, and the tasker may retry.
    - **Rejected alternatives.**
      - *A Vault KV read for the Egress Daemon over agents' tokens.* It would reverse [ADR-0028](ADR-0028-per-user-model-providers-and-kernel-blind-credentials.md) decision 6 and [ADR-0038](ADR-0038-the-egress-daemon-mints-trust-plane-credentials.md) decision 5: no process acting for many users holds a standing grant over their credentials.
