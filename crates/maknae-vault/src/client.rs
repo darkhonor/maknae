@@ -6,7 +6,6 @@
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::agent_enroll::AgentId;
 use crate::auth::AppRoleAuth;
-use crate::error::secret_error;
 use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, AgentSecret, CredentialSourceKind};
@@ -765,7 +764,7 @@ impl PlaneClient {
             let held = client.settings.token.as_str();
             let mut copy = Zeroizing::new(String::with_capacity(held.len()));
             copy.push_str(held);
-            MaknaeSecret::vault_token(copy).map_err(|e| secret_error("user token", e))?
+            crate::user_token(copy)?
         };
         VaultApi::new(&self.vault_addr, &self.vault_ca)?
             .read_wrapped(&token, kv_mount, secret_path, wrap_ttl)

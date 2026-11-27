@@ -58,6 +58,13 @@ fn parse_expiry(digits: &[u8]) -> Option<u64> {
     })
 }
 
+fn record_token_error(e: VaultError) -> VaultError {
+    match e {
+        VaultError::InvalidSecret { .. } => VaultError::TokenRecord("malformed token"),
+        other => other,
+    }
+}
+
 impl StoredToken {
     pub fn from_login(
         login: UserLogin,
@@ -128,8 +135,8 @@ impl StoredToken {
         let token = std::str::from_utf8(&rest[at + 1..])
             .map_err(|_| VaultError::TokenRecord("the token is not UTF-8"))?;
         Ok(Self {
-            token: MaknaeSecret::vault_token(Zeroizing::new(token.to_owned()))
-                .map_err(|_| VaultError::TokenRecord("malformed token"))?,
+            token: crate::user_token(Zeroizing::new(token.to_owned()))
+                .map_err(record_token_error)?,
             expires_at,
             vault_addr: String::from_utf8_lossy(addr).into_owned(),
         })
@@ -346,6 +353,23 @@ pub(crate) fn read_record(mut r: impl Read, cap: usize) -> Result<Zeroizing<Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_token_the_core_dump_denial_refused_keeps_its_cause() {
+        let denied = crate::error::secret_error(
+            "user token",
+            maknae_io::SecretError::CoreDumps(std::io::Error::other("rlimit")),
+        );
+        assert!(matches!(
+            super::record_token_error(denied),
+            VaultError::CoreDumps(_)
+        ));
+        let shape = crate::user_token(Zeroizing::new("hvs.a b".into())).unwrap_err();
+        assert!(matches!(
+            super::record_token_error(shape),
+            VaultError::TokenRecord("malformed token")
+        ));
+    }
+
     use super::*;
 
     fn token(s: &str) -> MaknaeSecret {

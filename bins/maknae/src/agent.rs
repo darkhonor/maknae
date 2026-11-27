@@ -125,7 +125,7 @@ fn seal_key_from(pem: &str) -> Result<SealPublicKey, String> {
 pub(crate) fn token_copy(token: &MaknaeSecret) -> Result<MaknaeSecret, String> {
     let mut copy = zeroize::Zeroizing::new(String::with_capacity(token.expose().len()));
     copy.push_str(token.expose());
-    MaknaeSecret::vault_token(copy).map_err(|e| e.to_string())
+    maknae_vault::user_token(copy).map_err(|e| e.to_string())
 }
 
 pub fn forge_read_failure(server: &str, e: &VaultError) -> String {

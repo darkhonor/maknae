@@ -20,6 +20,10 @@ pub fn password(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
     MaknaeSecret::new(secret).map_err(|e| secret_error("password", e))
 }
 
+pub fn user_token(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::vault_token(secret).map_err(|e| secret_error("user token", e))
+}
+
 #[derive(Debug)]
 pub struct UserLogin {
     pub token: MaknaeSecret,
@@ -97,8 +101,7 @@ pub(crate) fn parse_login(body: &[u8], username: &str) -> Result<UserLogin, Vaul
         ));
     }
     Ok(UserLogin {
-        token: MaknaeSecret::vault_token(auth.client_token)
-            .map_err(|e| secret_error("user token", e))?,
+        token: user_token(auth.client_token)?,
         lease: Duration::from_secs(auth.lease_duration),
         renewable: auth.renewable,
     })
