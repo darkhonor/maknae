@@ -12892,6 +12892,32 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_past_the_agents_bound_is_recorded_and_not_queued() {
+        let (_blobs, store) = mem();
+        let tasks: Vec<TaskId> = (0..9u32)
+            .map(|n| {
+                let me = Tasker::Uid(1000 + n);
+                let task = held_by(&store, me.clone());
+                store.start_for_test(&task);
+                store.stop(&task, &me).unwrap();
+                task
+            })
+            .collect();
+        assert_eq!(
+            store.notices_for(&id("hobi")).len(),
+            maknae_proto::NOTICES_MAX
+        );
+        assert_eq!(
+            unqueued(&store.take_notices()),
+            [(
+                tasks[8],
+                id("hobi"),
+                "the agent has 8 notices outstanding".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn notices_are_not_kept_across_a_store_reopen() {
         let (blobs, store) = mem();
         let me = Tasker::Uid(1000);

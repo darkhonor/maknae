@@ -72,6 +72,9 @@ impl<B: NoticeBody> NoticeQueue<B> {
     pub fn retire(&mut self, agent: &AgentId, retired: impl Fn(&Notice<B>) -> bool) {
         if let Some(queue) = self.queues.get_mut(agent) {
             queue.retain(|(_, n)| !retired(n));
+            if queue.is_empty() {
+                self.queues.remove(agent);
+            }
         }
     }
 
@@ -111,6 +114,7 @@ mod tests {
 
     #[test]
     fn each_refusal_reads_as_its_bound() {
+        assert_eq!((NOTICES_MAX, NOTICES_PER_TASKER), (8, 2));
         assert_eq!(
             Unqueued::AgentFull.as_str(),
             "the agent has 8 notices outstanding"
@@ -238,6 +242,13 @@ mod tests {
             q.offer(&hobi, &by(1), stop(3)),
             Ok(()),
             "a retired notice frees its tasker's room"
+        );
+        assert_eq!(q.agents().collect::<Vec<_>>(), [&hobi, &jin]);
+        q.retire(&jin, |_| true);
+        assert_eq!(
+            q.agents().collect::<Vec<_>>(),
+            [&hobi],
+            "an agent with no notice left is not listed"
         );
     }
 
