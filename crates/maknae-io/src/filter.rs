@@ -1425,4 +1425,17 @@ mod tests {
             assert!(work <= 2 * n as u64, "n={n} work={work}");
         }
     }
+
+    #[test]
+    fn the_tail_rule_applies_to_every_raw_form_and_no_other() {
+        let second = b"ghp_Qw3rTy8UiOpAsDfGhJkLzXcVbNm1234";
+        let f = filter_of(&[TOKEN, second]);
+        let (out, found) = masked(&f, b"out: ghp_Qw3");
+        assert_eq!(out, b"out: *******");
+        assert_eq!(found, vec![Source::Label("v1")]);
+        let hex_prefix = [&b"x: "[..], &hex(TOKEN, false)[..12]].concat();
+        assert_eq!(masked(&f, &hex_prefix), (hex_prefix.clone(), vec![]));
+        let b64_prefix = [&b"x: "[..], &trimmed_base64(TOKEN, false, 0)[..8]].concat();
+        assert_eq!(masked(&f, &b64_prefix), (b64_prefix.clone(), vec![]));
+    }
 }
