@@ -85,11 +85,13 @@ impl NoticeBody for AgentNotice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ControlVerb {
     NoticePoll {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlRequest {
     pub protocol_version: u16,
     pub verb: ControlVerb,
@@ -252,6 +254,36 @@ mod tests {
     }
 
     #[test]
+    fn a_poll_carrying_an_extra_key_is_refused() {
+        use ciborium::Value::{Map, Text};
+        let verb = |inner: Vec<(ciborium::Value, ciborium::Value)>| {
+            Map(vec![(Text("NoticePoll".into()), Map(inner))])
+        };
+        let req = |verb, extra: bool| {
+            let mut m = vec![
+                (Text("protocol_version".into()), 1u16.into()),
+                (Text("verb".into()), verb),
+            ];
+            if extra {
+                m.push((Text("task".into()), Text("x".into())));
+            }
+            let mut b = Vec::new();
+            ciborium::into_writer(&Map(m), &mut b).unwrap();
+            decode_control_request(&b)
+        };
+        assert!(req(verb(vec![]), false).is_ok());
+        assert!(matches!(
+            req(verb(vec![]), true),
+            Err(ProtoCodecError::Decode(_))
+        ));
+        let inner = vec![(Text("task".into()), Text("x".into()))];
+        assert!(matches!(
+            req(verb(inner), false),
+            Err(ProtoCodecError::Decode(_))
+        ));
+    }
+
+    #[test]
     fn a_control_request_of_another_version_is_refused() {
         let mut r = poll();
         r.protocol_version = 2;
@@ -300,21 +332,6 @@ mod tests {
     #[test]
     fn the_reply_cap_is_within_the_control_response_cap() {
         assert!(control_reply_cap::<AgentNotice>() <= CONTROL_RESPONSE_MAX);
-    }
-
-    #[test]
-    fn a_reply_over_the_cap_is_refused_on_encode() {
-        let r = ControlResponse::<AgentNotice> {
-            protocol_version: PROTOCOL_VERSION,
-            result: Err(ProtoError {
-                code: ProtoErrCode::Unauthorized,
-                message: "x".repeat(control_reply_cap::<AgentNotice>()),
-            }),
-        };
-        assert!(matches!(
-            encode_control_response(&r),
-            Err(ProtoCodecError::Encode(_))
-        ));
     }
 
     #[test]
@@ -374,7 +391,7 @@ mod tests {
     #[test]
     fn a_notice_id_of_another_length_does_not_decode() {
         let mut b = Vec::new();
-        ciborium::into_writer(&serde_bytes_like(&[1u8; 15]), &mut b).unwrap();
+        ciborium::into_writer(&ciborium::Value::Bytes(vec![1u8; 15]), &mut b).unwrap();
         let e = ciborium::from_reader::<NoticeId, _>(b.as_slice()).unwrap_err();
         assert!(e.to_string().contains("16-byte"));
     }
@@ -394,13 +411,11 @@ mod tests {
             ciborium::into_writer(&sized(m), &mut b).unwrap();
             b.len()
         };
-        let m = (0..cap).find(|m| raw(*m) == cap).unwrap();
+        let m = (0..cap)
+            .find(|m| raw(*m) == cap)
+            .expect("a message length hits the cap exactly");
         assert_eq!(encode_control_response(&sized(m)).unwrap().len(), cap);
         assert!(encode_control_response(&sized(m + 1)).is_err());
-    }
-
-    fn serde_bytes_like(v: &[u8]) -> ciborium::Value {
-        ciborium::Value::Bytes(v.to_vec())
     }
 
     #[test]
