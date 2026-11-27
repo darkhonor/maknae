@@ -142,6 +142,8 @@ files = [
   # #751: DeliveredCredential and the launch-credential framing; a lost redaction or a decode that admits a malformed frame leaks or forges a credential.
   "crates/maknae-io/src/credential.rs",
   "crates/maknae-io/src/secret.rs",
+  # #752: the value filter's forms and index; a missed encoding or alignment lets a known credential through unmasked.
+  "crates/maknae-io/src/filter.rs",
   "crates/maknae-io/src/normalize.rs",
   "crates/maknae-io/src/page.rs",
   # Raw T1 syscall coverage, with no exceptions.

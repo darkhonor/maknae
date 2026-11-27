@@ -184,6 +184,10 @@ impl<B: SecretBuf> MaknaeSecret<B> {
         value.len_ok()?;
         Ok(Self(value))
     }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        sealed::Sealed::bytes(&*self.0)
+    }
 }
 
 impl MaknaeSecret<String> {

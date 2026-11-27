@@ -1238,6 +1238,7 @@ version = "0.0.0"
 name = "maknae-io"
 version = "0.0.0"
 dependencies = [
+ "base64 0.23.1",
  "maknae-sys",
  "nix",
  "rustix",

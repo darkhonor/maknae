@@ -56,6 +56,7 @@ pub use credential_io::deny_core_dumps;
 pub mod delegated;
 mod dir;
 pub mod error;
+pub mod filter;
 mod home;
 mod host_facts;
 pub mod mutation;
@@ -63,6 +64,7 @@ pub mod normalize;
 mod page;
 pub mod program;
 pub mod secret;
+pub use filter::{FilterError, LeakHook, Screened, Source, ValueFilter, ValueFilterBuilder};
 pub use secret::{
     check_vault_token, MaknaeSecret, MaknaeSecretBytes, SecretBuf, SecretError, MAX_SECRET_BYTES,
     MAX_VAULT_TOKEN_BYTES,

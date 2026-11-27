@@ -12,7 +12,8 @@ use crate::stderr::errln;
 use clap::{Args, ValueEnum};
 use maknae_config::{AgentClientConfig, AgentProvider, AgentRole, PersonaMode, Value};
 use maknae_io::{
-    AnchorRequired, FileOwner, IoError, IoKind, MaknaeSecret, Mode, StrategyPref, TargetRequired,
+    AnchorRequired, FileOwner, FilterError, IoError, IoKind, MaknaeSecret, Mode, StrategyPref,
+    TargetRequired, ValueFilter,
 };
 use maknae_msgs::{msg, Locale, MsgId};
 use maknae_vault::agent_enroll::{AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT};
@@ -720,10 +721,6 @@ fn utf8(path: &Path, bytes: &[u8]) -> Result<String, EnrollError> {
         .map_err(|_| EnrollError::State(format!("{} is not UTF-8", path.display())))
 }
 
-fn redact(raw: Zeroizing<String>, secret: &str) -> String {
-    raw.replace(secret, "<redacted>")
-}
-
 fn render(args: std::fmt::Arguments<'_>) -> Zeroizing<String> {
     struct Count(usize);
     impl std::fmt::Write for Count {
@@ -739,12 +736,28 @@ fn render(args: std::fmt::Arguments<'_>) -> Zeroizing<String> {
     out
 }
 
-pub(crate) fn scrub_secret(e: EnrollError, secret: &MaknaeSecret) -> EnrollError {
-    let secret = secret.expose();
-    if secret.is_empty() {
-        return e;
-    }
-    let r = |t: String| redact(Zeroizing::new(t), secret);
+const WITHHELD: &str =
+    "<redacted>: sealing the SecretID failed; the error text is withheld because the value filter cannot cover the SecretID";
+
+pub(crate) fn secret_filter(secret: &MaknaeSecret) -> Result<ValueFilter, FilterError> {
+    ValueFilter::builder().secret("secret_id", secret).build()
+}
+
+fn covering(filter: &Result<ValueFilter, FilterError>) -> Option<&ValueFilter> {
+    filter
+        .as_ref()
+        .ok()
+        .filter(|f| !f.is_empty() && f.skipped() == 0)
+}
+
+pub(crate) fn redact_error(
+    e: EnrollError,
+    filter: &Result<ValueFilter, FilterError>,
+) -> EnrollError {
+    let Some(filter) = covering(filter) else {
+        return EnrollError::State(WITHHELD.to_string());
+    };
+    let r = |t: String| filter.redact_text(&Zeroizing::new(t));
     let e = match e {
         EnrollError::Command { program, detail } => EnrollError::Command {
             program: r(program),
@@ -776,10 +789,14 @@ pub(crate) fn scrub_secret(e: EnrollError, secret: &MaknaeSecret) -> EnrollError
         },
         other => other,
     };
-    if render(format_args!("{e} {e:?}")).contains(secret) {
-        EnrollError::State(redact(render(format_args!("{e}")), secret))
+    if !filter.matches(render(format_args!("{e} {e:?}")).as_bytes()) {
+        return e;
+    }
+    let collapsed = EnrollError::State(filter.redact_text(&render(format_args!("{e}"))));
+    if filter.matches(render(format_args!("{collapsed} {collapsed:?}")).as_bytes()) {
+        EnrollError::State(WITHHELD.to_string())
     } else {
-        e
+        collapsed
     }
 }
 
@@ -926,7 +943,7 @@ impl AgentOps for RealAgentOps {
     ) -> Result<SecretSource, EnrollError> {
         self.seal_platform(agent, secret.expose())
             .await
-            .map_err(|e| scrub_secret(e, secret))
+            .map_err(|e| redact_error(e, &secret_filter(secret)))
     }
 
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError> {
@@ -3626,39 +3643,130 @@ pub(crate) mod tests {
     #[test]
     fn a_seal_error_never_carries_the_secret() {
         let secret = MaknaeSecret::new(Zeroizing::new(SENTINEL.to_string())).unwrap();
-        let leaked = [
-            EnrollError::Command {
-                program: "systemd-creds encrypt".into(),
-                detail: format!("bad input: {SENTINEL} echoed"),
-            },
-            EnrollError::Owner(format!("x{SENTINEL}x")),
-            EnrollError::State(SENTINEL.into()),
-            EnrollError::Io {
-                path: std::path::PathBuf::from("/p"),
-                source: format!("{SENTINEL} {SENTINEL}"),
-            },
-            EnrollError::HrotUnavailable {
-                detail: SENTINEL.into(),
-            },
-            EnrollError::Vault(maknae_vault::VaultError::Operator(format!("op {SENTINEL}"))),
+        type Keeps = fn(&EnrollError) -> bool;
+        #[allow(unused_mut)]
+        let mut leaked: Vec<(EnrollError, Keeps)> = vec![
+            (
+                EnrollError::Command {
+                    program: "systemd-creds encrypt".into(),
+                    detail: format!("bad input: {SENTINEL} echoed"),
+                },
+                |e| matches!(e, EnrollError::Command { .. }),
+            ),
+            (
+                EnrollError::Command {
+                    program: format!("run {SENTINEL}"),
+                    detail: "exit 1".into(),
+                },
+                |e| matches!(e, EnrollError::Command { .. }),
+            ),
+            (EnrollError::Owner(format!("x{SENTINEL}x")), |e| {
+                matches!(e, EnrollError::Owner(_))
+            }),
+            (EnrollError::State(SENTINEL.into()), |e| {
+                matches!(e, EnrollError::State(_))
+            }),
+            (
+                EnrollError::Io {
+                    path: std::path::PathBuf::from("/p"),
+                    source: format!("{SENTINEL} {SENTINEL}"),
+                },
+                |e| matches!(e, EnrollError::Io { .. }),
+            ),
+            (
+                EnrollError::HrotUnavailable {
+                    detail: SENTINEL.into(),
+                },
+                |e| matches!(e, EnrollError::HrotUnavailable { .. }),
+            ),
+            (
+                EnrollError::Vault(maknae_vault::VaultError::Operator(format!("op {SENTINEL}"))),
+                |e| matches!(e, EnrollError::State(_)),
+            ),
         ];
-        for e in leaked {
-            let scrubbed = scrub_secret(e, &secret);
+        #[cfg(target_os = "macos")]
+        leaked.extend([
+            (
+                EnrollError::Keychain {
+                    op: "add",
+                    detail: SENTINEL.into(),
+                },
+                (|e| matches!(e, EnrollError::Keychain { .. })) as Keeps,
+            ),
+            (
+                EnrollError::NotDeveloperIdSigned {
+                    binary: "/b".into(),
+                    reason: SENTINEL.into(),
+                },
+                |e| matches!(e, EnrollError::NotDeveloperIdSigned { .. }),
+            ),
+            (
+                EnrollError::NotRootInstalled {
+                    path: "/p".into(),
+                    detail: SENTINEL.into(),
+                },
+                |e| matches!(e, EnrollError::NotRootInstalled { .. }),
+            ),
+        ]);
+        let filter = secret_filter(&secret);
+        for (e, keeps) in leaked {
+            let scrubbed = redact_error(e, &filter);
             let shown = format!("{scrubbed} {scrubbed:?}");
             assert!(!shown.contains(SENTINEL), "{shown}");
             assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(keeps(&scrubbed), "{scrubbed:?}");
         }
-        let clean = scrub_secret(
+        let clean = redact_error(
             EnrollError::Command {
                 program: "security".into(),
                 detail: "exit 1".into(),
             },
-            &secret,
+            &filter,
         );
         assert!(matches!(
             clean,
             EnrollError::Command { ref detail, .. } if detail == "exit 1"
         ));
+    }
+
+    #[test]
+    fn a_filter_that_cannot_cover_the_secret_withholds_the_whole_error() {
+        let mk = || EnrollError::Command {
+            program: "security".into(),
+            detail: format!("echoed {SENTINEL}"),
+        };
+        let withheld = |f: &Result<ValueFilter, FilterError>| matches!(redact_error(mk(), f), EnrollError::State(m) if m == WITHHELD);
+        let secret = MaknaeSecret::new(Zeroizing::new(SENTINEL.to_string())).unwrap();
+        assert!(!withheld(&secret_filter(&secret)));
+        assert!(withheld(&Err(FilterError::TooManyValues)));
+        assert!(withheld(&ValueFilter::builder().build()));
+        let short = MaknaeSecret::new(Zeroizing::new("short".to_string())).unwrap();
+        let skipped = ValueFilter::builder()
+            .secret("a", &secret)
+            .secret("b", &short)
+            .build();
+        assert!(skipped
+            .as_ref()
+            .is_ok_and(|f| !f.is_empty() && f.skipped() == 1));
+        assert!(withheld(&skipped));
+    }
+
+    #[test]
+    fn a_collapsed_error_whose_debug_rebuilds_the_secret_is_withheld() {
+        let value = r#"xxxxxxxx\"yyyyyyyy"#;
+        let secret = MaknaeSecret::new(Zeroizing::new(value.to_string())).unwrap();
+        let filter = secret_filter(&secret);
+        let e = redact_error(EnrollError::Owner("xxxxxxxx\"yyyyyyyy".into()), &filter);
+        let shown = format!("{e} {e:?}");
+        assert!(!shown.contains(value), "{shown}");
+        assert!(matches!(e, EnrollError::State(m) if m == WITHHELD));
+    }
+
+    #[test]
+    fn a_short_secret_id_withholds_the_error() {
+        let short = MaknaeSecret::new(Zeroizing::new("tiny".to_string())).unwrap();
+        let e = redact_error(EnrollError::Owner("tiny".into()), &secret_filter(&short));
+        assert!(matches!(e, EnrollError::State(m) if m == WITHHELD));
     }
 
     pub(crate) struct Scratch(PathBuf);
