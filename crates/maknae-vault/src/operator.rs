@@ -164,7 +164,7 @@ impl OperatorClient {
     /// held in a `MaknaeSecret` and MUST NOT be cloned into a bare `String` or logged; the
     /// accessor is non-secret and is what `destroy_accessor` needs to roll the
     /// SecretID back if the rest of enrollment fails. A SecretID `MaknaeSecret` refuses
-    /// is destroyed by its accessor before the error returns.
+    /// is destroyed by its accessor before the error returns; a failed destroy is logged.
     pub async fn mint_secret_id(
         &self,
         mount: &str,
@@ -344,6 +344,10 @@ fn join_ca_chain(chain: Vec<String>) -> Result<String, VaultError> {
         .join("\n"))
 }
 
+fn undestroyed_line(accessor: &str, e: &VaultError) -> String {
+    format!("maknae-vault: the minted SecretID (accessor {accessor}) could not be destroyed: {e}")
+}
+
 async fn hold_minted<F, Fut>(
     secret_id: String,
     accessor: String,
@@ -357,12 +361,10 @@ where
         Ok(secret) => return Ok((secret, accessor)),
         Err(e) => secret_error("SecretID", e),
     };
-    match destroy(accessor.clone()).await {
-        Ok(()) => Err(refused),
-        Err(e) => Err(VaultError::Operator(format!(
-            "{refused}; the minted SecretID (accessor {accessor}) could not be destroyed: {e}"
-        ))),
+    if let Err(e) = destroy(accessor.clone()).await {
+        eprintln!("{}", undestroyed_line(&accessor, &e));
     }
+    Err(refused)
 }
 
 #[cfg(test)]
@@ -528,16 +530,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_destroy_names_the_accessor_and_both_causes() {
+    async fn a_failed_destroy_keeps_the_constructor_error_and_logs_the_accessor() {
         let destroy = |_: String| async { Err(VaultError::Operator("vault down".into())) };
-        match hold_minted(String::new(), "acc-3".into(), destroy).await {
-            Err(VaultError::Operator(m)) => {
-                for part in ["SecretID", "is empty", "acc-3", "vault down"] {
-                    assert!(m.contains(part), "{m}");
-                }
-            }
-            other => panic!("{:?}", other.err()),
-        }
+        let got = hold_minted(String::new(), "acc-3".into(), destroy).await;
+        assert!(
+            matches!(
+                got,
+                Err(VaultError::InvalidSecret {
+                    what: "SecretID",
+                    why: "is empty"
+                })
+            ),
+            "{:?}",
+            got.err()
+        );
+        assert_eq!(
+            undestroyed_line("acc-3", &VaultError::Operator("vault down".into())),
+            "maknae-vault: the minted SecretID (accessor acc-3) could not be destroyed: \
+             operator Vault operation failed: vault down"
+        );
     }
 
     #[test]
