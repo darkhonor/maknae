@@ -1682,6 +1682,7 @@ mod tests {
         replies: Vec<Result<WireOutcome, String>>,
     ) -> Watched {
         let mut replies: VecDeque<_> = replies.into();
+        let script = replies.len();
         let mut sent = vec![];
         let mut err = vec![];
         let mut slept = vec![];
@@ -1697,6 +1698,10 @@ mod tests {
                 async move { r }
             },
             |d| {
+                assert!(
+                    slept.len() < script,
+                    "the watch slept more often than its {script}-reply script lets it send"
+                );
                 slept.push(d);
                 now.set(now.get() + d);
                 async {}
