@@ -163,7 +163,8 @@ impl OperatorClient {
     /// Mint a new SecretID for `role`, returning `(secret, accessor)`. The secret is
     /// held in a `MaknaeSecret` and MUST NOT be cloned into a bare `String` or logged; the
     /// accessor is non-secret and is what `destroy_accessor` needs to roll the
-    /// SecretID back if the rest of enrollment fails.
+    /// SecretID back if the rest of enrollment fails. A SecretID `MaknaeSecret` refuses
+    /// is destroyed by its accessor before the error returns.
     pub async fn mint_secret_id(
         &self,
         mount: &str,
@@ -172,9 +173,10 @@ impl OperatorClient {
         let resp = vaultrs::auth::approle::role::secret::generate(&self.inner, mount, role, None)
             .await
             .map_err(|e| VaultError::Operator(e.to_string()))?;
-        let secret = MaknaeSecret::new(Zeroizing::new(resp.secret_id))
-            .map_err(|e| secret_error("SecretID", e))?;
-        Ok((secret, resp.secret_id_accessor))
+        hold_minted(resp.secret_id, resp.secret_id_accessor, |acc| async move {
+            self.destroy_accessor(mount, role, &acc).await
+        })
+        .await
     }
 
     /// Destroy a previously-minted SecretID by its accessor (rotate/failure
@@ -207,9 +209,10 @@ impl OperatorClient {
         )
         .await
         .map_err(|e| VaultError::Operator(e.to_string()))?;
-        let secret = MaknaeSecret::new(Zeroizing::new(resp.secret_id))
-            .map_err(|e| secret_error("SecretID", e))?;
-        Ok((secret, resp.secret_id_accessor))
+        hold_minted(resp.secret_id, resp.secret_id_accessor, |acc| async move {
+            self.destroy_accessor(mount, role, &acc).await
+        })
+        .await
     }
 
     /// `destroy_accessor` that treats an already-absent accessor as success.
@@ -341,6 +344,27 @@ fn join_ca_chain(chain: Vec<String>) -> Result<String, VaultError> {
         .join("\n"))
 }
 
+async fn hold_minted<F, Fut>(
+    secret_id: String,
+    accessor: String,
+    destroy: F,
+) -> Result<(MaknaeSecret, String), VaultError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), VaultError>>,
+{
+    let refused = match MaknaeSecret::new(Zeroizing::new(secret_id)) {
+        Ok(secret) => return Ok((secret, accessor)),
+        Err(e) => secret_error("SecretID", e),
+    };
+    match destroy(accessor.clone()).await {
+        Ok(()) => Err(refused),
+        Err(e) => Err(VaultError::Operator(format!(
+            "{refused}; the minted SecretID (accessor {accessor}) could not be destroyed: {e}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +486,58 @@ mod tests {
             join_ca_chain(chain).unwrap(),
             "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----"
         );
+    }
+
+    #[tokio::test]
+    async fn a_minted_secret_id_the_constructor_refuses_is_destroyed_by_its_accessor() {
+        let destroyed = std::cell::RefCell::new(Vec::new());
+        let destroy = |acc: String| {
+            destroyed.borrow_mut().push(acc);
+            async { Ok(()) }
+        };
+        let got = hold_minted(String::new(), "acc-1".into(), destroy).await;
+        assert!(
+            matches!(
+                got,
+                Err(VaultError::InvalidSecret {
+                    what: "SecretID",
+                    why: "is empty"
+                })
+            ),
+            "{:?}",
+            got.err()
+        );
+        assert_eq!(*destroyed.borrow(), ["acc-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_held_secret_id_is_not_destroyed() {
+        let destroyed = std::cell::RefCell::new(Vec::new());
+        let destroy = |acc: String| {
+            destroyed.borrow_mut().push(acc);
+            async { Ok(()) }
+        };
+        let (secret, accessor) = hold_minted("sid-SENTINEL".into(), "acc-2".into(), destroy)
+            .await
+            .unwrap();
+        assert_eq!(
+            (secret.expose(), accessor.as_str()),
+            ("sid-SENTINEL", "acc-2")
+        );
+        assert!(destroyed.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_destroy_names_the_accessor_and_both_causes() {
+        let destroy = |_: String| async { Err(VaultError::Operator("vault down".into())) };
+        match hold_minted(String::new(), "acc-3".into(), destroy).await {
+            Err(VaultError::Operator(m)) => {
+                for part in ["SecretID", "is empty", "acc-3", "vault down"] {
+                    assert!(m.contains(part), "{m}");
+                }
+            }
+            other => panic!("{:?}", other.err()),
+        }
     }
 
     #[test]
