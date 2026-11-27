@@ -310,7 +310,7 @@ impl<O: MintingOps> SecretSlot for EgressSlot<'_, O> {
         self.ops
             .seal(secret, &self.files.custody_path())
             .await
-            .map_err(|e| super::agent::scrub_secret(e, secret))
+            .map_err(|e| super::agent::redact_error(e, &super::agent::secret_filter(secret)))
     }
 
     async fn destroy(&self, accessor: &str) -> Result<(), EnrollError> {
