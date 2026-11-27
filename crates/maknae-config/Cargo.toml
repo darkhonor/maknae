@@ -12,7 +12,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-yaml-rust2 = "=0.13.0"
+yaml-rust2 = "=0.13.2"
 # float_roundtrip: the default parse can miss a long decimal by one ulp, so a
 # persisted baseline float would no longer re-encode to its own text and be refused.
 serde_json = { version = "1", features = ["float_roundtrip"] }
