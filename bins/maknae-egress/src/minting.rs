@@ -12,9 +12,10 @@ use maknae_deputy::mint::admit::AdmittedMint;
 use maknae_deputy::mint::github::GithubClient;
 use maknae_deputy::mint::minter::{self, LiveTokens, MintDeps};
 use maknae_deputy::mint::signer::{ServiceSigner, SignError, VaultLogin, VaultSignError};
+use maknae_io::MaknaeSecret;
 use maknae_proto::{MintRefusal, MintReply, RevokeReply, RevokeRequest};
 use maknae_seal::SealPrivateKey;
-use maknae_vault::{ServiceToken, VaultApi, VaultError};
+use maknae_vault::{VaultApi, VaultError};
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,9 +49,9 @@ impl std::fmt::Debug for ApproleLogin {
 }
 
 impl VaultLogin for ApproleLogin {
-    type Token = ServiceToken;
+    type Token = MaknaeSecret;
 
-    async fn login(&self) -> Result<(ServiceToken, Duration), SignError> {
+    async fn login(&self) -> Result<(MaknaeSecret, Duration), SignError> {
         match self
             .api
             .approle_login(&self.mount, &self.role_id, &self.secret_id)
@@ -66,7 +67,7 @@ impl VaultLogin for ApproleLogin {
 
     async fn sign(
         &self,
-        token: &ServiceToken,
+        token: &MaknaeSecret,
         mount: &str,
         key: &str,
         input: &[u8],

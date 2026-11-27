@@ -1,7 +1,6 @@
 use crate::api_shape::{addr_refusal, VaultOp};
 use crate::transit::{
-    approle_credential, approle_login_path, transit_sign_path, ServiceToken,
-    TRANSIT_SIGN_INPUT_MAX_BYTES,
+    approle_credential, approle_login_path, transit_sign_path, TRANSIT_SIGN_INPUT_MAX_BYTES,
 };
 use crate::user_login::{login_path, Password, UserToken};
 use crate::wrap::{
@@ -11,6 +10,7 @@ use crate::wrap::{
 use crate::{UserAuth, VaultError};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use maknae_io::MaknaeSecret;
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use reqwest::{Body, Client, Method, Request, RequestBuilder};
 use serde::ser::SerializeMap;
@@ -304,7 +304,7 @@ pub(crate) fn approle_login_request(
 pub(crate) fn transit_sign_request(
     http: &Client,
     base: &ApiBase,
-    token: &ServiceToken,
+    token: &MaknaeSecret,
     mount: &str,
     key: &str,
     body: Zeroizing<Vec<u8>>,
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn the_transit_sign_request_pins_the_hash_in_the_path_and_pkcs1v15_in_the_body() {
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let body = transit_sign_body(b"eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxIn0").unwrap();
         let req = transit_sign_request(
             &http(),
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn a_malformed_transit_mount_or_key_is_refused_before_any_request() {
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         for (mount, key) in [("../x", "k"), ("t", "a/b"), ("t", "..")] {
             let body = transit_sign_body(b"x").unwrap();
             assert!(
@@ -731,7 +731,7 @@ mod tests {
         let passed = (body.as_ptr(), body.len());
         let req = approle_login_request(&http(), &base(), "approle", body).unwrap();
         assert_eq!(sent(&req), passed);
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let body = transit_sign_body(b"x.y").unwrap();
         let passed = (body.as_ptr(), body.len());
         let req = transit_sign_request(&http(), &base(), &service, "t", "k", body).unwrap();

@@ -4,7 +4,7 @@ use crate::api_request::{
     transit_sign_request, unwrap_request, wrapped_read_request, wrapped_write_request, ApiBase,
 };
 use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
-use crate::transit::{parse_service_login, parse_sign_reply, ServiceLogin, ServiceToken};
+use crate::transit::{parse_service_login, parse_sign_reply, ServiceLogin};
 use crate::user_login::{parse_login, Password, UserLogin, UserToken};
 use crate::wrap::{
     kv_data_path, kv_metadata_path, parse_lookup, parse_wrapped_read, parse_wrapped_write,
@@ -13,6 +13,7 @@ use crate::wrap::{
 };
 use crate::{UserAuth, UserAuthMethod, VaultError};
 use maknae_crypto::assert_fips_provider;
+use maknae_io::MaknaeSecret;
 use std::path::Path;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -133,7 +134,7 @@ impl VaultApi {
 
     pub async fn transit_sign_rs256(
         &self,
-        token: &ServiceToken,
+        token: &MaknaeSecret,
         mount: &str,
         key: &str,
         input: &[u8],
@@ -300,7 +301,7 @@ mod tests {
                 ..
             })
         ));
-        let service = ServiceToken::new(Zeroizing::new("hvs.s".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.s".into())).unwrap();
         assert!(matches!(
             rt.block_on(api.transit_sign_rs256(&service, "transit", "github-app", b"a.b")),
             Err(VaultError::VaultTransport {

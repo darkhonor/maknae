@@ -2,9 +2,9 @@ use crate::api_shape::{
     de_secret, json_refusal, token_is_acceptable, url_path_is_safe, SecretStr, VaultOp,
     WrapMismatch,
 };
-use crate::transit::ServiceToken;
 use crate::user_login::UserToken;
 use crate::VaultError;
+use maknae_io::MaknaeSecret;
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::Deserialize;
 use std::fmt;
@@ -166,7 +166,7 @@ pub(crate) fn client_token<'a>(
     op: VaultOp,
     user: Option<&'a UserToken>,
     wrapping: Option<&'a WrappingToken>,
-    service: Option<&'a ServiceToken>,
+    service: Option<&'a MaknaeSecret>,
 ) -> Result<Option<&'a str>, VaultError> {
     match op {
         VaultOp::UserpassLogin | VaultOp::WrapLookup | VaultOp::AppRoleLogin => Ok(None),
@@ -742,7 +742,7 @@ mod tests {
     fn client_token_requires_the_service_token_for_transit_sign() {
         let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
         let wrap = wrapping("hvs.wrap");
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let (u, w, s) = (Some(&user), Some(&wrap), Some(&service));
         assert!(client_token(VaultOp::TransitSign, u, w, s).unwrap() == Some("hvs.service"));
         assert_eq!(client_token(VaultOp::AppRoleLogin, u, w, s).unwrap(), None);

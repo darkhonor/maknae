@@ -1,7 +1,7 @@
 //! The seam through which the App JWT's signing input is signed by Vault Transit.
 
 use std::future::Future;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -29,7 +29,7 @@ pub enum VaultSignError {
 }
 
 pub trait VaultLogin: Send + Sync {
-    type Token: Clone + Send + Sync;
+    type Token: Send + Sync;
 
     fn login(&self) -> impl Future<Output = Result<(Self::Token, Duration), SignError>> + Send;
 
@@ -52,7 +52,7 @@ pub type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
 pub struct ServiceSigner<L: VaultLogin> {
     login: L,
     now: Clock,
-    slot: Mutex<Slot<L::Token>>,
+    slot: Mutex<Slot<Arc<L::Token>>>,
     refresh: tokio::sync::Mutex<()>,
 }
 
@@ -86,13 +86,13 @@ impl<L: VaultLogin> ServiceSigner<L> {
 }
 
 impl<L: VaultLogin> ServiceSigner<L> {
-    fn cached(&self) -> Option<(L::Token, u64)> {
+    fn cached(&self) -> Option<(Arc<L::Token>, u64)> {
         let usable_until = (self.now)() + TOKEN_EXPIRY_MARGIN;
         // The slot is only ever replaced whole, so a poisoned one still holds a valid value.
         let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
         match &slot.entry {
             Some((token, expiry)) if usable_until < *expiry => {
-                Some((token.clone(), slot.generation))
+                Some((Arc::clone(token), slot.generation))
             }
             _ => None,
         }
@@ -107,7 +107,7 @@ impl<L: VaultLogin> ServiceSigner<L> {
 
     /// A token newer than `stale` (the generation just refused, or none), from
     /// the cache if another sign refreshed it meanwhile, else from one login.
-    async fn fresh(&self, stale: Option<u64>) -> Result<L::Token, SignError> {
+    async fn fresh(&self, stale: Option<u64>) -> Result<Arc<L::Token>, SignError> {
         let _single_flight = self.refresh.lock().await;
         if let Some((token, generation)) = self.cached() {
             if Some(generation) != stale {
@@ -116,7 +116,8 @@ impl<L: VaultLogin> ServiceSigner<L> {
         }
         let started = (self.now)();
         let (token, ttl) = self.login.login().await?;
-        let entry = started.checked_add(ttl).map(|e| (token.clone(), e));
+        let token = Arc::new(token);
+        let entry = started.checked_add(ttl).map(|e| (Arc::clone(&token), e));
         let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
         slot.entry = entry;
         slot.generation = slot.generation.wrapping_add(1);
@@ -213,9 +214,7 @@ impl Signer for FakeSigner {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::Arc;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
     struct Tok(u32);
 
     struct FakeLogin {
@@ -225,7 +224,7 @@ mod tests {
         logins: Mutex<Vec<Result<(), ()>>>,
         login_calls: Mutex<u32>,
         sign_script: Mutex<VecDeque<Result<(), VaultSignError>>>,
-        signed_with: Mutex<Vec<Tok>>,
+        signed_with: Mutex<Vec<u32>>,
         refused_fresh: Mutex<u32>,
     }
 
@@ -274,7 +273,7 @@ mod tests {
             input: &[u8],
         ) -> Result<Zeroizing<Vec<u8>>, VaultSignError> {
             assert_eq!((mount, key, input), ("transit", "app", &b"in"[..]));
-            self.signed_with.lock().unwrap().push(token.clone());
+            self.signed_with.lock().unwrap().push(token.0);
             let next = self
                 .sign_script
                 .lock()
@@ -324,7 +323,7 @@ mod tests {
             *self.fake.login_calls.lock().unwrap()
         }
 
-        fn signed_with(&self) -> Vec<Tok> {
+        fn signed_with(&self) -> Vec<u32> {
             self.fake.signed_with.lock().unwrap().clone()
         }
 
@@ -361,7 +360,7 @@ mod tests {
         let (a, b) = tokio::join!(r.sign(), r.sign());
         assert_eq!([a, b], [Ok(vec![2]), Ok(vec![2])]);
         assert_eq!(r.logins(), 2);
-        assert_eq!(r.signed_with(), [Tok(1), Tok(1), Tok(1), Tok(2), Tok(2)]);
+        assert_eq!(r.signed_with(), [1, 1, 1, 2, 2]);
         assert_eq!(r.sign().await, Ok(vec![2]), "the newer token stays cached");
     }
 
@@ -378,7 +377,7 @@ mod tests {
         assert_eq!(r.sign().await, Ok(vec![2]), "inside the margin: replaced");
         assert_eq!(r.sign().await, Ok(vec![2]));
         assert_eq!(r.logins(), 2);
-        assert_eq!(r.signed_with(), [Tok(1), Tok(1), Tok(1), Tok(2), Tok(2)]);
+        assert_eq!(r.signed_with(), [1, 1, 1, 2, 2]);
         assert_eq!(TOKEN_EXPIRY_MARGIN, Duration::from_secs(30));
     }
 
@@ -401,14 +400,14 @@ mod tests {
         let fresh = rig(FakeLogin::new(TTL, vec![refused, refused, refused]));
         assert_eq!(fresh.sign().await, Err(SignError), "a fresh token refused");
         assert_eq!(fresh.logins(), 1);
-        assert_eq!(fresh.signed_with(), [Tok(1)]);
+        assert_eq!(fresh.signed_with(), [1]);
         assert_eq!(fresh.refused_fresh(), 1);
 
         let cached = rig(FakeLogin::new(TTL, vec![Ok(()), refused, refused, refused]));
         assert_eq!(cached.sign().await, Ok(vec![1]));
         assert_eq!(cached.sign().await, Err(SignError));
         assert_eq!(cached.logins(), 2, "one re-login, then the refusal stands");
-        assert_eq!(cached.signed_with(), [Tok(1), Tok(1), Tok(2)]);
+        assert_eq!(cached.signed_with(), [1, 1, 2]);
         assert_eq!(
             cached.refused_fresh(),
             1,
@@ -426,7 +425,7 @@ mod tests {
         assert_eq!(r.sign().await, Ok(vec![2]));
         assert_eq!(r.sign().await, Ok(vec![2]));
         assert_eq!(r.logins(), 2);
-        assert_eq!(r.signed_with(), [Tok(1), Tok(1), Tok(2), Tok(2)]);
+        assert_eq!(r.signed_with(), [1, 1, 2, 2]);
         assert_eq!(r.refused_fresh(), 0);
     }
 
@@ -439,7 +438,7 @@ mod tests {
         assert_eq!(r.sign().await, Ok(vec![1]));
         assert_eq!(r.sign().await, Err(SignError));
         assert_eq!(r.logins(), 1);
-        assert_eq!(r.signed_with(), [Tok(1), Tok(1)]);
+        assert_eq!(r.signed_with(), [1, 1]);
         assert_eq!(r.sign().await, Ok(vec![1]), "the token is still cached");
         assert_eq!(r.refused_fresh(), 0);
     }
@@ -478,7 +477,7 @@ mod tests {
         r.fake.logins.lock().unwrap().push(Err(()));
         assert_eq!(r.sign().await, Err(SignError));
         assert_eq!(r.logins(), 2);
-        assert_eq!(r.signed_with(), [Tok(1), Tok(1)]);
+        assert_eq!(r.signed_with(), [1, 1]);
     }
 
     #[tokio::test]

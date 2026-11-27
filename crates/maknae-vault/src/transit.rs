@@ -1,8 +1,10 @@
-use crate::api_shape::{de_secret, json_refusal, token_is_acceptable, url_path_is_safe, VaultOp};
+use crate::api_shape::{json_refusal, token_is_acceptable, url_path_is_safe, VaultOp};
+use crate::error::secret_error;
 use crate::user_login::parse_auth;
 use crate::VaultError;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use maknae_io::MaknaeSecret;
 use serde::Deserialize;
 use std::fmt;
 use std::time::Duration;
@@ -13,36 +15,8 @@ const SIGNATURE_PREFIX: &str = "vault:v";
 pub const TRANSIT_SIGN_INPUT_MAX_BYTES: usize = 8192;
 const RSA_SIGNATURE_BYTES: [usize; 3] = [256, 384, 512];
 
-pub struct ServiceToken(Zeroizing<String>);
-
-impl ServiceToken {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
-            what: "service token",
-            why,
-        })?;
-        Ok(Self(secret))
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Clone for ServiceToken {
-    fn clone(&self) -> Self {
-        Self(Zeroizing::new(self.0.as_str().to_owned()))
-    }
-}
-
-impl fmt::Debug for ServiceToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ServiceToken(<redacted>)")
-    }
-}
-
 pub struct ServiceLogin {
-    pub token: ServiceToken,
+    pub token: MaknaeSecret,
     pub ttl: Duration,
 }
 
@@ -98,7 +72,8 @@ pub(crate) fn parse_service_login(body: &[u8]) -> Result<ServiceLogin, VaultErro
         });
     }
     Ok(ServiceLogin {
-        token: ServiceToken::new(auth.client_token)?,
+        token: MaknaeSecret::vault_token(auth.client_token)
+            .map_err(|e| secret_error("service token", e))?,
         ttl: Duration::from_secs(auth.lease_duration),
     })
 }
@@ -110,7 +85,7 @@ struct SignDto {
 
 #[derive(Deserialize)]
 struct SignDataDto {
-    #[serde(deserialize_with = "de_secret")]
+    #[serde(deserialize_with = "maknae_io::secret::de_zeroizing_string")]
     signature: Zeroizing<String>,
 }
 
@@ -161,23 +136,20 @@ pub fn parse_transit_signature(s: &str) -> Result<Zeroizing<Vec<u8>>, VaultError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_io::SecretError;
 
     const LOGIN: &str = r#"{"request_id":"r","lease_id":"","renewable":false,"lease_duration":0,"data":null,"wrap_info":null,"auth":{"client_token":"hvs.SERVICETOKEN","accessor":"a","policies":["maknae-egress"],"metadata":{"role_name":"maknae-egress"},"lease_duration":1200,"renewable":true,"entity_id":"e","token_type":"service","orphan":true}}"#;
 
-    #[test]
-    fn a_service_token_is_shape_checked_and_redacted() {
-        assert!(ServiceToken::new(Zeroizing::new("hvs.a b".into())).is_err());
-        let t = ServiceToken::new(Zeroizing::new("hvs.SENTINEL".into())).unwrap();
-        assert!(t.expose() == "hvs.SENTINEL");
-        assert_eq!(format!("{t:?}"), "ServiceToken(<redacted>)");
+    fn service_token(s: &str) -> Result<MaknaeSecret, SecretError> {
+        MaknaeSecret::vault_token(Zeroizing::new(s.into()))
     }
 
     #[test]
-    fn a_cloned_service_token_is_its_own_copy_of_the_same_secret() {
-        let t = ServiceToken::new(Zeroizing::new("hvs.SENTINEL".into())).unwrap();
-        let c = t.clone();
-        drop(t);
-        assert_eq!(c.expose(), "hvs.SENTINEL");
+    fn a_service_token_is_shape_checked_and_redacted() {
+        assert!(service_token("hvs.a b").is_err());
+        let t = service_token("hvs.SENTINEL").unwrap();
+        assert!(t.expose() == "hvs.SENTINEL");
+        assert_eq!(format!("{t:?}"), "MaknaeSecret(<redacted>)");
     }
 
     #[test]
