@@ -404,6 +404,8 @@ pub(crate) fn audit_obligation() -> Obligation {
     }
 }
 
+pub(crate) const CONTAINED: &str = "subject contained: role=adversary";
+
 fn permit_with_audit() -> Verdict {
     Verdict::Permit {
         obligations: vec![audit_obligation()],
@@ -895,7 +897,7 @@ pub(crate) fn decide_loaded_cited(
     let (verdict, cited) = match role {
         Role::Adversary => (
             Verdict::Deny {
-                reason: "subject contained: role=adversary".into(),
+                reason: CONTAINED.into(),
             },
             None,
         ),
@@ -1116,7 +1118,7 @@ fn control_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Op
     };
     match role {
         Role::Admin => return deny(format!("agent {id}: an agent never holds admin")),
-        Role::Adversary => return deny("subject contained: role=adversary".into()),
+        Role::Adversary => return deny(CONTAINED.into()),
         Role::User | Role::Guest => {}
     }
     match req.context.0.get(maknae_security::CONTEXT_CONTROL_OP) {
@@ -1181,7 +1183,7 @@ fn holding_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Op
     };
     match role {
         Role::Admin => return deny(format!("agent {id}: an agent never holds admin")),
-        Role::Adversary => return deny("subject contained: role=adversary".into()),
+        Role::Adversary => return deny(CONTAINED.into()),
         Role::User | Role::Guest => {}
     }
     if op == "claim" {
@@ -1202,7 +1204,7 @@ fn agent_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Opti
     let deny = |reason: String| Some(Verdict::Deny { reason });
     match role {
         Role::Admin => return deny(format!("agent {id}: an agent never holds admin")),
-        Role::Adversary => return deny("subject contained: role=adversary".into()),
+        Role::Adversary => return deny(CONTAINED.into()),
         Role::User | Role::Guest => {}
     }
     match class_of(action) {
@@ -8082,16 +8084,17 @@ mod tests {
             "board.read",
             "session.prompt",
         ] {
-            let mut r = on_plane(as_hobi(action), control_plane());
+            let mut off = as_hobi(action);
             if action == "session.task" {
-                r.context.0.insert(
+                off.context.0.insert(
                     maknae_security::CONTEXT_TASK_OP,
                     AttrValue::Str("claim".into()),
                 );
             }
+            let r = on_plane(off.clone(), control_plane());
             assert!(
                 !matches!(
-                    decide_loaded_cited(&lp, &principal(), &as_hobi(action)).verdict,
+                    decide_loaded_cited(&lp, &principal(), &off).verdict,
                     Verdict::Deny { ref reason } if reason == "plane control: only agent.control"
                 ),
                 "{action}"

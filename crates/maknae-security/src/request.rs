@@ -41,7 +41,7 @@ pub const SUBJECT_CHANNEL: &str = "channel";
 pub const CHANNEL_CLIENT: &str = "client";
 pub const CHANNEL_AGENT: &str = "agent";
 
-/// The plane a request arrived on; absent is the data plane, [`PLANE_CONTROL`] the control socket. Kernel-stamped.
+/// The plane a request arrived on, absent (data) or [`PLANE_CONTROL`]; kernel-stamped.
 pub const SUBJECT_PLANE: &str = "plane";
 pub const PLANE_CONTROL: &str = "control";
 
