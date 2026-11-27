@@ -202,6 +202,10 @@ impl MaknaeSecret<String> {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn into_utf8_bytes(mut self) -> MaknaeSecretBytes {
+        MaknaeSecret(Zeroizing::new(std::mem::take(&mut *self.0).into_bytes()))
+    }
 }
 
 impl MaknaeSecret<Vec<u8>> {

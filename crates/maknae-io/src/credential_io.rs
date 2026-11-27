@@ -175,7 +175,7 @@ mod tests {
         );
     }
 
-    use crate::credential::{CredentialSlot, DeliveredCredential};
+    use crate::credential::CredentialSlot;
 
     fn pair() -> (UnixStream, UnixStream) {
         let (a, b) = UnixStream::pair().unwrap();
@@ -191,8 +191,9 @@ mod tests {
     fn big() -> LaunchCredentials {
         let mut lc = LaunchCredentials::new([4; 16]);
         for i in 0..crate::credential::MAX_CREDENTIALS {
-            DeliveredCredential::new(Zeroizing::new(vec![b'v'; crate::credential::MAX_VALUE]))
+            crate::MaknaeSecretBytes::new(Zeroizing::new(vec![b'v'; crate::MAX_SECRET_BYTES]))
                 .unwrap()
+                .into_delivered()
                 .deliver_to(&mut lc, CredentialSlot::env_var(&format!("T{i}")).unwrap())
                 .unwrap();
         }
@@ -201,8 +202,9 @@ mod tests {
 
     fn one() -> LaunchCredentials {
         let mut lc = LaunchCredentials::new([9; 16]);
-        DeliveredCredential::new(Zeroizing::new(b"secret-751".to_vec()))
+        crate::MaknaeSecretBytes::new(Zeroizing::new(b"secret-751".to_vec()))
             .unwrap()
+            .into_delivered()
             .deliver_to(&mut lc, CredentialSlot::env_var("GH_TOKEN").unwrap())
             .unwrap();
         lc
