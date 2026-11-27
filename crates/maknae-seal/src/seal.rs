@@ -123,7 +123,7 @@ pub fn seal(
 
 fn key_secret_error(e: maknae_io::SecretError) -> SealError {
     match e {
-        maknae_io::SecretError::CoreDumps(io) => SealError::CoreDumps(io.kind()),
+        maknae_io::SecretError::CoreDumps(io) => SealError::CoreDumps(io.raw_os_error()),
         _ => SealError::PrivateKey,
     }
 }
@@ -438,10 +438,7 @@ mod tests {
     #[test]
     fn each_secret_error_maps_to_its_named_key_error() {
         let denied = maknae_io::SecretError::CoreDumps(std::io::Error::from_raw_os_error(1));
-        assert_eq!(
-            key_secret_error(denied),
-            SealError::CoreDumps(std::io::ErrorKind::PermissionDenied)
-        );
+        assert_eq!(key_secret_error(denied), SealError::CoreDumps(Some(1)));
         for e in [
             maknae_io::SecretError::Empty,
             maknae_io::SecretError::TooLong,

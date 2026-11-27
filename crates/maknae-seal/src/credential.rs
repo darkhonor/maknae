@@ -30,7 +30,7 @@ pub fn open_credential(
 
 fn seal_secret_error(e: SecretError) -> SealError {
     match e {
-        SecretError::CoreDumps(io) => SealError::CoreDumps(io.kind()),
+        SecretError::CoreDumps(io) => SealError::CoreDumps(io.raw_os_error()),
         SecretError::Empty | SecretError::TooLong => SealError::PlaintextLength,
         _ => SealError::Open,
     }
@@ -58,10 +58,7 @@ mod tests {
     #[test]
     fn each_secret_error_maps_to_its_named_seal_error() {
         let denied = SecretError::CoreDumps(std::io::Error::from_raw_os_error(1));
-        assert_eq!(
-            seal_secret_error(denied),
-            SealError::CoreDumps(std::io::ErrorKind::PermissionDenied)
-        );
+        assert_eq!(seal_secret_error(denied), SealError::CoreDumps(Some(1)));
         for (e, want) in [
             (SecretError::Empty, SealError::PlaintextLength),
             (SecretError::TooLong, SealError::PlaintextLength),

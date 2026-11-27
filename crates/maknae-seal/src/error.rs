@@ -12,7 +12,7 @@ pub enum SealError {
     PrivateKey,
     Open,
     Crypto,
-    CoreDumps(std::io::ErrorKind),
+    CoreDumps(Option<i32>),
 }
 
 impl fmt::Display for SealError {
@@ -32,9 +32,14 @@ impl fmt::Display for SealError {
             SealError::PrivateKey => "the sealing private key is not a P-384 PKCS#8 key",
             SealError::Open => "the seal does not match this request",
             SealError::Crypto => "a cryptographic primitive failed",
-            SealError::CoreDumps(kind) => {
-                return write!(f, "core dumps could not be denied: {kind}")
+            SealError::CoreDumps(Some(code)) => {
+                return write!(
+                    f,
+                    "core dumps could not be denied: {}",
+                    std::io::Error::from_raw_os_error(*code)
+                )
             }
+            SealError::CoreDumps(None) => "core dumps could not be denied",
         })
     }
 }
@@ -62,6 +67,20 @@ impl From<maknae_crypto::CryptoError> for SealError {
 mod tests {
     use super::*;
     use maknae_crypto::CryptoError as C;
+
+    #[test]
+    fn a_core_dump_refusal_keeps_its_os_error() {
+        let code = std::io::Error::from_raw_os_error(1).to_string();
+        assert_eq!(
+            SealError::CoreDumps(Some(1)).to_string(),
+            format!("core dumps could not be denied: {code}")
+        );
+        assert!(code.contains("os error 1"), "{code}");
+        assert_eq!(
+            SealError::CoreDumps(None).to_string(),
+            "core dumps could not be denied"
+        );
+    }
 
     #[test]
     fn each_crypto_refusal_maps_to_its_seal_error_and_message() {

@@ -39,8 +39,13 @@ pub fn vault_diagnostic(e: &VaultError) -> Option<String> {
             WrapMismatch::CreationPath | WrapMismatch::CreationTtl { .. } | WrapMismatch::Invalid,
         )
         | VaultError::KvField { .. } => None,
+        VaultError::CoreDumps(io) => Some(core_dumps_line(io)),
         other => Some(format!("maknae-egress: the Vault unwrap failed: {other}")),
     }
+}
+
+fn core_dumps_line(io: &std::io::Error) -> String {
+    format!("maknae-egress: core dumps could not be denied: {io}")
 }
 
 pub fn vault_failure(e: VaultError) -> OpenFailure {
@@ -60,7 +65,7 @@ pub fn vault_failure(e: VaultError) -> OpenFailure {
 pub fn token_failure(e: SecretError) -> OpenFailure {
     match e {
         SecretError::CoreDumps(io) => {
-            eprintln!("maknae-egress: core dumps could not be denied: {io}");
+            eprintln!("{}", core_dumps_line(&io));
             OpenFailure::CoreDumps
         }
         _ => OpenFailure::Token,
@@ -470,6 +475,21 @@ ampbv97Rcx9j
         ] {
             assert_eq!(vault_diagnostic(&mapped), None, "{mapped:?}");
         }
+    }
+
+    #[test]
+    fn a_core_dump_failure_from_vault_logs_its_cause_not_an_unwrap_failure() {
+        assert_eq!(
+            vault_diagnostic(&VaultError::CoreDumps(std::io::Error::other(
+                "setrlimit refused"
+            )))
+            .as_deref(),
+            Some("maknae-egress: core dumps could not be denied: setrlimit refused")
+        );
+        assert_eq!(
+            core_dumps_line(&std::io::Error::other("setrlimit refused")),
+            "maknae-egress: core dumps could not be denied: setrlimit refused"
+        );
     }
 
     #[test]
