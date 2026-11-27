@@ -403,15 +403,15 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-profile"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c84759a8ed54da0dc717f4739598fbbd144d7073102c1a1505ef2aa12cd6de"
+checksum = "edcb86b3c8fd639b0ad212f1c4eda0f4971070be1748fc80db6f42f5e7504998"
 
 [[package]]
 name = "crypto-profile-awslc4"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bebc15397e0296e2d9e1af70fcc493445d506cbdedb1e299ca17f286a701a9e0"
+checksum = "225a0ae537d4904e9e7cb43e9d94a783f1285f7eb70ea2c004aa4c739edbe939"
 dependencies = [
  "aws-lc-rs",
  "crypto-profile",
