@@ -79,9 +79,9 @@ pub use account_facts::{
     MAKNAE_GROUP,
 };
 pub use anchor::{
-    open_anchor, open_anchor_resolved, read_absolute, read_kernel_attribute, resolve_dir, Anchor,
-    AnchorLock, EnabledMember, Entry, EntryId, FileOwner, Kind, MemberState, Mode, Outcome,
-    Strategy, StrategyPref,
+    open_anchor, open_anchor_resolved, read_absolute, read_kernel_attribute, read_operator_input,
+    resolve_dir, Anchor, AnchorLock, EnabledMember, Entry, EntryId, FileOwner, Kind, MemberState,
+    Mode, Outcome, Strategy, StrategyPref,
 };
 pub use audit_append::{open_audit_append, open_existing_audit_append};
 pub use checks::{AnchorRequired, DescendantRequired, TargetRequired};

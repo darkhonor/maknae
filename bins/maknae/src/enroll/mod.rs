@@ -1358,11 +1358,15 @@ fn intake_token_from(
     locale: Locale,
 ) -> Result<MaknaeSecret, EnrollError> {
     if let Some(path) = token_file {
-        let raw = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
+        let io_err = |source: String| EnrollError::Io {
             path: path.to_path_buf(),
-            source: e.to_string(),
-        })?);
-        let trimmed = raw.trim();
+            source,
+        };
+        let raw = maknae_io::read_operator_input(path, maknae_io::MAX_SECRET_BYTES)
+            .map_err(|e| io_err(e.to_string()))?;
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| io_err("stream did not contain valid UTF-8".to_owned()))?;
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             return Err(EnrollError::MissingToken);
         }
@@ -3078,6 +3082,64 @@ pub async fn run_enroll_helper(args: HelperArgs) -> ExitCode {
 mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::*;
+
+    fn token_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("maknae-token-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_token_file_is_trimmed_and_read_through_a_symlink_or_a_pipe() {
+        let d = token_dir("read");
+        let file = d.join("token");
+        std::fs::write(&file, "  hvs.SENTINEL-752\n").unwrap();
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        for p in [&file, &link] {
+            let got = intake_token_from(Some(p), Locale::EnUs).unwrap();
+            assert_eq!(got.expose(), "hvs.SENTINEL-752");
+        }
+        let fifo = d.join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let writer = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || std::fs::write(fifo, "hvs.piped\n").unwrap())
+        };
+        let got = intake_token_from(Some(&fifo), Locale::EnUs).unwrap();
+        assert_eq!(got.expose(), "hvs.piped");
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_token_file_that_is_blank_not_utf8_or_over_the_cap_is_refused() {
+        let d = token_dir("refuse");
+        let file = d.join("token");
+        std::fs::write(&file, " \n").unwrap();
+        assert!(matches!(
+            intake_token_from(Some(&file), Locale::EnUs),
+            Err(EnrollError::MissingToken)
+        ));
+        std::fs::write(&file, b"hvs.\xff").unwrap();
+        match intake_token_from(Some(&file), Locale::EnUs) {
+            Err(EnrollError::Io { path, source }) => {
+                assert_eq!(path, file);
+                assert_eq!(source, "stream did not contain valid UTF-8");
+            }
+            other => panic!("got {other:?}"),
+        }
+        std::fs::write(&file, "a".repeat(maknae_io::MAX_SECRET_BYTES + 1)).unwrap();
+        assert!(
+            matches!(
+                intake_token_from(Some(&file), Locale::EnUs),
+                Err(EnrollError::Io { ref path, .. }) if path == &file
+            ),
+            "a token file over the cap is refused at the read"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     // ---- #93 daemon TPM-detection mechanism (regression guard) -------------
     // The `systemd-analyze has-tpm2` verb is v253+ and errors on RHEL 9's

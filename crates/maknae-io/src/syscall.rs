@@ -203,6 +203,10 @@ pub(crate) fn open_dir_at<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<OwnedFd
 
 /// Open a read target relative to a pinned dirfd. O_NONBLOCK because a planted FIFO
 /// blocks forever otherwise (measured: killed at 2s without it).
+pub(crate) fn open_read_following(p: &Path) -> nix::Result<OwnedFd> {
+    nix::fcntl::open(p, OFlag::O_RDONLY | OFlag::O_CLOEXEC, NixMode::empty())
+}
+
 pub(crate) fn open_read_target<F: AsFd>(dirfd: &F, name: &str) -> nix::Result<OwnedFd> {
     nix::fcntl::openat(
         dirfd,
