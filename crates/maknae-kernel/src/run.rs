@@ -1330,6 +1330,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq,
             au3_1: &au3_1,
+            unseen: std::sync::Mutex::new(unseen_count(
+                &request.verb,
+                &session,
+                &agents,
+                Asking {
+                    authorizer: &authorizer,
+                    live: &live,
+                    timeout: authz_decide_timeout,
+                    lane,
+                    stamp: &stamp,
+                },
+            )),
         };
         serve_conversation_verb(
             &mut stream,
@@ -1362,6 +1374,18 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq,
             au3_1: &au3_1,
+            unseen: std::sync::Mutex::new(unseen_count(
+                &request.verb,
+                &session,
+                &agents,
+                Asking {
+                    authorizer: &authorizer,
+                    live: &live,
+                    timeout: authz_decide_timeout,
+                    lane,
+                    stamp: &stamp,
+                },
+            )),
         };
         let tasks = TaskCtx {
             agents: &agents,
@@ -1400,6 +1424,7 @@ pub async fn handle_with_attempt_caps<S, E, P>(
             session_id,
             seq,
             au3_1: &au3_1,
+            unseen: std::sync::Mutex::new(None),
         };
         serve_board_verb(
             &mut stream,
@@ -3127,6 +3152,42 @@ struct Trail<'a, E> {
     session_id: u64,
     seq: &'a Seq,
     au3_1: &'a serde_json::Value,
+    unseen: std::sync::Mutex<Option<Pending<'a>>>,
+}
+
+type Pending<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<maknae_proto::BoardUnseen>> + Send + 'a>,
+>;
+
+/// The caller's unseen count for a reply to `verb`, computed only when awaited.
+fn unseen_count<'a, P: Authorizer + Send + Sync + 'static>(
+    verb: &Verb,
+    session: &SessionRecord,
+    agents: &'a AgentAdmission,
+    a: Asking<'a, P>,
+) -> Option<Pending<'a>> {
+    use crate::board_verbs as bv;
+    if !bv::counts(verb, session.agent()) {
+        return None;
+    }
+    let uid = session.uid;
+    let listing = Verb::BoardList {
+        before: None,
+        new: true,
+    };
+    let read = build_authz_request(&listing, uid, None, a.lane, None, None, a.stamp);
+    let (authorizer, live, timeout) = (a.authorizer, a.live, a.timeout);
+    Some(Box::pin(async move {
+        let d = bv::Deciding {
+            authorizer,
+            live,
+            generation: live.generation(),
+            timeout,
+            request: &read,
+        };
+        let key = crate::board_store::BoardKey(uid);
+        bv::unseen(&agents.board, key, &*agents.view, &agents.count_breaker, &d).await
+    }))
 }
 
 impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
@@ -3264,7 +3325,11 @@ impl<E: AuditEmit + Send + Sync> Trail<'_, E> {
         if !may_respond(self.record_bounded(outcome).await) {
             return false;
         }
-        let response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), catalog_digest);
+        let mut response = Response::new(PROTOCOL_VERSION, RespResult::Ok(payload), catalog_digest);
+        let pending = self.unseen.lock().ok().and_then(|mut p| p.take());
+        if let Some(count) = pending {
+            response.board_unseen = count.await;
+        }
         match encode_reply(&response) {
             Ok(bytes) => {
                 write_frame_bounded(
@@ -3740,7 +3805,7 @@ async fn serve_board_verb<S, E, P>(
 {
     use crate::board_verbs as bv;
     let action = verb_to_action(verb);
-    if let Verb::BoardList { before } = verb {
+    if let Verb::BoardList { before, new } = verb {
         let asking = Asking {
             authorizer,
             live,
@@ -3748,7 +3813,7 @@ async fn serve_board_verb<S, E, P>(
             lane,
             stamp,
         };
-        serve_board_list(stream, trail, verb, *before, asking, &board).await;
+        serve_board_list(stream, trail, verb, (*before, *new), asking, &board).await;
         return;
     }
     if let Verb::BoardManage { op } = verb {
@@ -4040,7 +4105,7 @@ async fn serve_board_list<S, E, P>(
     stream: &mut S,
     trail: &Trail<'_, E>,
     verb: &Verb,
-    before: Option<u64>,
+    (before, new): (Option<u64>, bool),
     a: Asking<'_, P>,
     board: &BoardCtx<'_>,
 ) where
@@ -4095,7 +4160,7 @@ async fn serve_board_list<S, E, P>(
         request: &request,
     };
     let budget = maknae_proto::board_page_budget(trail.cfg.prompt_max_bytes);
-    let Some(page) = bv::list_page(store, key, view, &deciding, before, budget).await else {
+    let Some(page) = bv::list_page(store, key, view, &deciding, before, new, budget).await else {
         let rec = said("deny", bv::UNDECIDED, "unavailable");
         trail
             .refuse_board(stream, &rec, BoardDefect::TryAgain)
@@ -4228,6 +4293,37 @@ where
                 settings_after: Some(bv::settings_text(now)),
                 ..BoardAudit::default()
             });
+            trail
+                .refuse_board(stream, &outcome, bv::defect_of(&r))
+                .await;
+        }
+        BoardOp::Seen { through } => {
+            let intent = permitted("intent recorded", bv::cursor_audit(store.seen_through(key)));
+            if !trail.record_bounded(&intent).await {
+                return;
+            }
+            let s = Arc::clone(store);
+            let done = bv::offload(trail.uid, deadline, move || {
+                Ok(s.write_seen_through(key, through))
+            })
+            .await;
+            let (now, r) = match done {
+                Ok(crate::board::Moved { now, refused: None }) => {
+                    let mut outcome = trail.outcome(&intent, "done", "authorized");
+                    outcome.board = Some(bv::cursor_audit(now));
+                    trail
+                        .deliver(stream, &outcome, Payload::BoardSeen, m.role, m.rule, action)
+                        .await;
+                    return;
+                }
+                Ok(crate::board::Moved {
+                    now,
+                    refused: Some(r),
+                }) => (now, r),
+                Err(r) => (store.seen_through(key), r),
+            };
+            let mut outcome = trail.outcome(&intent, &r.to_string(), bv::posture(&r));
+            outcome.board = Some(bv::cursor_audit(now));
             trail
                 .refuse_board(stream, &outcome, bv::defect_of(&r))
                 .await;
@@ -6042,6 +6138,8 @@ pub struct AgentAdmission {
     pub reach: Arc<dyn crate::egress_socket::ReachEgress>,
     pub board: Arc<crate::board::BoardStore>,
     pub switches: Arc<dyn crate::board_verbs::BoardSwitches>,
+    /// Admits the unseen count's decisions; the daemon's one, never the request path's.
+    pub count_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
 }
 
 /// The operator's banner: loaded at start, replaced by each applied reload.
@@ -6058,6 +6156,7 @@ impl AgentAdmission {
             reach: crate::egress_socket::no_reach("no egress socket in this test"),
             board: Arc::new(crate::board::BoardStore::new()),
             switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
+            count_breaker: Arc::default(),
         }
     }
 }
@@ -7846,6 +7945,7 @@ struct Reloader<B: maknae_authz_basic::Baseline, E> {
     tasks: Arc<crate::task::TaskStore>,
     board: Arc<crate::board::BoardStore>,
     switches: Arc<dyn crate::board_verbs::BoardSwitches>,
+    count_breaker: Arc<tokio::sync::Mutex<BlockingBreaker>>,
     banner: Banner,
     banner_load: BannerLoader,
     #[cfg(test)]
@@ -7976,6 +8076,7 @@ where
             reach,
             board: Arc::clone(&self.board),
             switches: Arc::clone(&self.switches),
+            count_breaker: Arc::clone(&self.count_breaker),
         }
     }
 
@@ -11807,6 +11908,7 @@ async fn boot_after_sink(
                 &authorizer,
             ))),
         )),
+        count_breaker: Arc::default(),
         banner: Arc::new(std::sync::RwLock::new(banner)),
         banner_load: seams.banner_load,
         #[cfg(test)]
@@ -13627,6 +13729,7 @@ mod record_widths {
     fn list_verb() -> Verb {
         Verb::BoardList {
             before: Some(u64::MAX),
+            new: false,
         }
     }
 
@@ -13733,6 +13836,104 @@ mod record_widths {
             (c.rec.object.as_deref(), c.rec.rule.is_none()),
             (None, true)
         );
+    }
+
+    fn seen_cases() -> Vec<Case> {
+        use crate::board::BoardRefusal as R;
+        use crate::board_verbs as bv;
+        let (person, agent) = (Who::new(true), Who::new(false));
+        let seen = Verb::BoardManage {
+            op: maknae_proto::BoardOp::Seen { through: u64::MAX },
+        };
+        let at = || Some(bv::cursor_audit(u64::MAX));
+        let mut all = vec![
+            person.manage_case(&seen, ("permit", "intent recorded", "authorized"), at(), ""),
+            person.manage_case(&seen, ("permit", "done", "authorized"), at(), ""),
+        ];
+        for r in [
+            R::Store("not done: the board store was busy".into()),
+            R::Unavailable(format!(
+                "{}the board store did not answer in time",
+                crate::task::OUTCOME_UNKNOWN
+            )),
+        ] {
+            let reason = r.to_string();
+            all.push(person.manage_case(&seen, ("permit", &reason, bv::posture(&r)), at(), ""));
+        }
+        for who in [Who::contained(), Who::guest(), Who::unbound()] {
+            let (reason, _, _) = refused(&who, &seen);
+            all.push(who.manage_case(&seen, ("deny", &reason, "unauthorized"), None, ""));
+        }
+        let never = format!(
+            "agent {}: board.manage is never permitted to an agent",
+            widest_agent_id()
+        );
+        all.push(agent.manage_case(&seen, ("deny", &never, "unauthorized"), None, ""));
+        all
+    }
+
+    #[test]
+    fn a_persons_seen_records_mirror_as_measured() {
+        let cases = seen_cases();
+        let in_full: [(&str, usize, Option<&str>); 3] = [
+            (
+                "board.manage seen: deny subject contained: role=adversary",
+                986,
+                Some("adversary"),
+            ),
+            (
+                "board.manage seen: deny role guest: no rule for board.manage",
+                977,
+                Some("guest"),
+            ),
+            (
+                "board.manage seen: deny subject resolves to no role",
+                951,
+                None,
+            ),
+        ];
+        let labels: Vec<&str> = in_full.iter().map(|(l, _, _)| *l).collect();
+        assert_each_case_mirrors_as_measured(&cases, &labels);
+        let shape = |label: &str| {
+            let c = cases.iter().find(|c| c.label == label).expect("a case");
+            (
+                macos_mirror(&c.rec).full_len,
+                c.rec.subject.role.as_deref(),
+                c.rec.rule.is_some(),
+            )
+        };
+        for (label, width, role) in in_full {
+            assert_eq!(shape(label), (width, role, false), "{label}");
+        }
+        let permitted: Vec<_> = [
+            "board.manage seen: permit intent recorded",
+            "board.manage seen: permit done",
+            "board.manage seen: permit store: not done: the board store was busy",
+        ]
+        .iter()
+        .map(|l| shape(l))
+        .collect();
+        assert_eq!(
+            permitted,
+            [
+                (1118, Some("admin"), true),
+                (1107, Some("admin"), true),
+                (1146, Some("admin"), true),
+            ]
+        );
+        let unknown = format!(
+            "board.manage seen: permit {}the board store did not answer in time",
+            crate::task::OUTCOME_UNKNOWN
+        );
+        assert_eq!(shape(&unknown), (1159, Some("admin"), true));
+        let agent = format!(
+            "board.manage seen: deny agent {}: board.manage is never permitted to an agent",
+            widest_agent_id()
+        );
+        assert_eq!(widest_label(&cases), agent);
+        assert_eq!(shape(&agent), (1206, Some("user"), false));
+        let c = cases.iter().find(|c| c.label == agent).expect("the agent");
+        assert_eq!(c.rec.object, None);
     }
 
     #[test]
@@ -21955,6 +22156,7 @@ mod reload_fixture {
                 None => crate::board::BoardStore::new(),
             }),
             switches: Arc::new(crate::board_verbs::FixedSwitches::default()),
+            count_breaker: Arc::default(),
             banner: Banner::default(),
             banner_load: super::boot_gate_tests::owned_banner,
             load_gate: opts.load_gate.map(|g| Arc::new(std::sync::Mutex::new(g))),
@@ -30668,6 +30870,14 @@ mod task_sweep_tests {
             maknae_config::AGENT_LIST_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
         );
         assert!(2 * AUTHZ_DECIDE_TIMEOUT + AUDIT_APPEND_TIMEOUT <= stages);
+    }
+
+    #[test]
+    fn the_clients_wait_covers_the_unseen_count() {
+        let stages = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
+        assert!(AUTHZ_DECIDE_TIMEOUT <= stages);
     }
 
     #[test]

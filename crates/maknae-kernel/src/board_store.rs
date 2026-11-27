@@ -115,6 +115,12 @@ pub(crate) struct BoardRecord {
     pub board: u32,
     pub next_seq: u64,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub seen_through: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +170,7 @@ pub(crate) struct Board {
     pub cursors: BTreeMap<AgentId, u64>,
     /// Per reader, the sequences sent in a written reply and not yet acknowledged past.
     pub sent: BTreeMap<AgentId, BTreeSet<u64>>,
+    pub seen_through: u64,
 }
 
 impl Default for Board {
@@ -175,6 +182,7 @@ impl Default for Board {
             ids: BTreeMap::new(),
             cursors: BTreeMap::new(),
             sent: BTreeMap::new(),
+            seen_through: 0,
         }
     }
 }
@@ -185,6 +193,7 @@ impl Board {
             board: key.0,
             next_seq: self.next_seq,
             settings: self.settings,
+            seen_through: self.seen_through,
         }
     }
 }
@@ -218,6 +227,7 @@ pub(crate) fn load(blobs: &dyn TaskBlobs) -> Result<Loaded, StoreError> {
                 let board = boards.entry(key).or_default();
                 board.next_seq = rec.next_seq;
                 board.settings = rec.settings;
+                board.seen_through = rec.seen_through;
                 Ok(())
             }),
             Some(Name::Post(key, id)) => {

@@ -2,7 +2,7 @@
 //! live daemon, Vault and certificates, so it is T3; every decision it feeds
 //! is T1 in `maknae_agent::wire`.
 use crate::keys::{AgentKeys, KeySupply};
-use crate::send::{send_located, send_stamped, send_via, write_request, SendFailure, Sent, Wire};
+use crate::send::{send_stamped, send_via, write_request, SendFailure, Sent, Wire};
 use maknae_agent::plane::{
     DeleteOutcome, ListOutcome, MkdirOutcome, Plane, PlaneError, ReadBasis, ReadOutcome,
     StatOutcome, WriteOutcome,
@@ -117,23 +117,27 @@ impl<D: Dial> Link<D> {
         &self.dial
     }
 
-    pub(crate) async fn send_located(
-        &self,
-        verb: Verb,
-    ) -> Result<crate::outcome::SentOutcome, SendFailure> {
-        send_located(
-            self.dial.dial(),
-            cite_for(&verb, self.cited()),
-            verb,
-            None,
-            crate::mutation::WriteCheck::Unchecked,
-            &self.transport,
-            &mut |_| {},
-        )
-        .await
+    pub(crate) async fn send_located(&self, verb: Verb) -> Result<Sent, SendFailure> {
+        self.send_diagnosed(verb, &mut |_| {}).await
     }
 
     pub(crate) async fn send_stamped(&self, verb: Verb) -> Result<Sent, String> {
+        self.send_located(verb).await.map_err(|f| f.why)
+    }
+
+    pub(crate) async fn send_counted(
+        &self,
+        verb: Verb,
+        diag: &mut (dyn FnMut(String) + Send),
+    ) -> Result<Sent, String> {
+        self.send_diagnosed(verb, diag).await.map_err(|f| f.why)
+    }
+
+    async fn send_diagnosed(
+        &self,
+        verb: Verb,
+        diag: &mut (dyn FnMut(String) + Send),
+    ) -> Result<Sent, SendFailure> {
         send_stamped(
             self.dial.dial(),
             cite_for(&verb, self.cited()),
@@ -141,10 +145,9 @@ impl<D: Dial> Link<D> {
             None,
             crate::mutation::WriteCheck::Unchecked,
             &self.transport,
-            &mut |_| {},
+            diag,
         )
         .await
-        .map_err(|f| f.why)
     }
 
     pub(crate) async fn send(
@@ -175,6 +178,7 @@ pub struct LoopPlane<K: KeySupply, D: Dial = PlaneDial> {
     keys: K,
     spare: Option<Spare>,
     diagnostics: Vec<String>,
+    board_unseen: Option<maknae_proto::BoardUnseen>,
 }
 
 impl<K: KeySupply> LoopPlane<K, PlaneDial> {
@@ -291,6 +295,7 @@ impl<K: KeySupply, D: Dial> LoopPlane<K, D> {
             keys,
             spare: None,
             diagnostics: vec![],
+            board_unseen: None,
         }
     }
 
@@ -393,20 +398,23 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
             PlaneError::Transport("the working directory is not valid UTF-8".into())
         })?;
         let diagnostics = &mut self.diagnostics;
-        open_outcome(
-            self.link
-                .send(
-                    Verb::SessionNew {
-                        cwd: cwd.into(),
-                        sensitive: sensitive.to_vec(),
-                    },
-                    None,
-                    crate::mutation::WriteCheck::Unchecked,
-                    &mut |l| diagnostics.push(l),
-                )
-                .await
-                .map(WireOutcome::from),
-        )
+        let sent = self
+            .link
+            .send_counted(
+                Verb::SessionNew {
+                    cwd: cwd.into(),
+                    sensitive: sensitive.to_vec(),
+                },
+                &mut |l| diagnostics.push(l),
+            )
+            .await;
+        self.board_unseen = match &sent {
+            Ok(sent) if matches!(sent.outcome, crate::outcome::SentOutcome::Payload(_)) => {
+                sent.board_unseen
+            }
+            _ => None,
+        };
+        open_outcome(sent.map(|sent| WireOutcome::from(sent.outcome)))
     }
     async fn close(
         &mut self,
@@ -586,6 +594,9 @@ impl<K: KeySupply, D: Dial> Plane for LoopPlane<K, D> {
     fn take_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.diagnostics)
     }
+    fn take_board_unseen(&mut self) -> Option<maknae_proto::BoardUnseen> {
+        self.board_unseen.take()
+    }
 }
 
 #[cfg(test)]
@@ -610,6 +621,7 @@ pub(crate) mod fake {
 
     pub enum Scripted {
         Answer(Box<Answer>),
+        Response(Box<Response>),
         HangUp,
         /// A complete frame whose body is not a response.
         Garbage,
@@ -683,6 +695,9 @@ pub(crate) mod fake {
                                 catalog_digest,
                             ))
                             .unwrap()
+                        }
+                        Some(Scripted::Response(response)) => {
+                            maknae_proto::encode_response(&response).unwrap()
                         }
                     };
                     let _ = maknae_proto::write_frame(&mut server, class, &reply).await;
@@ -769,6 +784,58 @@ mod tests {
                 None,
             )
             .await;
+    }
+
+    #[tokio::test]
+    async fn the_open_keeps_the_count_its_reply_carried() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conversation = ConversationId::parse(&"a".repeat(32)).unwrap();
+        let mut response = maknae_proto::Response::new(
+            maknae_proto::PROTOCOL_VERSION,
+            maknae_proto::RespResult::Ok(maknae_proto::Payload::ConversationOpened(
+                ConversationView {
+                    conversation: conversation.clone(),
+                    cwd: dir.path().to_str().unwrap().into(),
+                    opened_at: 0,
+                    last_active: 0,
+                    turns: 0,
+                    bytes: 0,
+                    chain_head: String::new(),
+                },
+            )),
+            None,
+        );
+        response.board_unseen = Some(maknae_proto::BoardUnseen::Over);
+        let mut plane = LoopPlane::with_dial(
+            fake::FakeKernel::scripted(vec![fake::Scripted::Response(Box::new(response))]),
+            TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        assert_eq!(plane.open(dir.path(), &[]).await, Ok(conversation));
+        assert_eq!(
+            plane.take_board_unseen(),
+            Some(maknae_proto::BoardUnseen::Over)
+        );
+        assert_eq!(plane.take_board_unseen(), None);
+    }
+
+    #[tokio::test]
+    async fn a_count_on_a_refused_open_is_never_kept() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut response =
+            maknae_proto::Response::new(maknae_proto::PROTOCOL_VERSION, fake::refused(), None);
+        response.board_unseen = Some(maknae_proto::BoardUnseen::Exact(7));
+        let mut plane = LoopPlane::with_dial(
+            fake::FakeKernel::scripted(vec![fake::Scripted::Response(Box::new(response))]),
+            TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        assert!(plane.open(dir.path(), &[]).await.is_err());
+        assert_eq!(plane.take_board_unseen(), None);
     }
 
     #[tokio::test]

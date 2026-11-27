@@ -468,12 +468,47 @@ pub struct BoardSettings {
     pub report: BoardReport,
 }
 
-/// A `board.manage` operation on the caller's own board; `set: None` reads the settings.
+/// A `board.manage` operation on the caller's own board; `set: None` reads the settings, and
+/// `Seen` moves the caller's seen mark forward to `through`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum BoardOp {
     Settings { set: Option<BoardSettings> },
     Clear,
+    Seen { through: u64 },
+}
+
+/// The most posts above a person's seen mark one count considers.
+pub const BOARD_UNSEEN_MAX: u8 = 32;
+const _: () = assert!(BOARD_UNSEEN_MAX as usize == BOARD_READ_PAGE_POSTS);
+
+/// How many posts above a person's seen mark they may see: exactly `n`, at most
+/// [`BOARD_UNSEEN_MAX`], or `Over` when more posts lie beyond the ones counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", try_from = "BoardUnseenWire")]
+pub enum BoardUnseen {
+    Exact(u8),
+    Over,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum BoardUnseenWire {
+    Exact(u8),
+    Over,
+}
+
+impl TryFrom<BoardUnseenWire> for BoardUnseen {
+    type Error = String;
+    fn try_from(w: BoardUnseenWire) -> Result<Self, String> {
+        match w {
+            BoardUnseenWire::Exact(n) if n > BOARD_UNSEEN_MAX => Err(format!(
+                "board_unseen exact count {n} is over {BOARD_UNSEEN_MAX}"
+            )),
+            BoardUnseenWire::Exact(n) => Ok(BoardUnseen::Exact(n)),
+            BoardUnseenWire::Over => Ok(BoardUnseen::Over),
+        }
+    }
 }
 
 /// What one `board.manage` clear removed, and whether posts that are not held remain.
@@ -638,6 +673,69 @@ mod tests {
         extra.push((text("ids"), Value::Array(vec![])));
         let refused = dec::<BoardCleared>(&enc(&Value::Map(extra))).unwrap_err();
         assert!(refused.contains("unknown field `ids`"), "{refused}");
+    }
+
+    #[test]
+    fn board_unseen_refuses_an_exact_count_over_32() {
+        use ciborium::Value;
+        let exact = |n: u8| {
+            Value::Map(vec![(
+                Value::Text("exact".into()),
+                Value::Integer(n.into()),
+            )])
+        };
+        let refused = dec::<BoardUnseen>(&enc(&exact(33))).unwrap_err();
+        assert!(
+            refused.contains("board_unseen exact count 33 is over 32"),
+            "{refused}"
+        );
+        assert!(dec::<BoardUnseen>(&enc(&exact(u8::MAX))).is_err());
+        for unseen in [
+            BoardUnseen::Exact(0),
+            BoardUnseen::Exact(32),
+            BoardUnseen::Over,
+        ] {
+            assert_eq!(dec::<BoardUnseen>(&enc(&unseen)), Ok(unseen));
+        }
+        assert_eq!(
+            ciborium::from_reader::<Value, _>(enc(&BoardUnseen::Exact(32)).as_slice()).unwrap(),
+            exact(32)
+        );
+        assert_eq!(
+            ciborium::from_reader::<Value, _>(enc(&BoardUnseen::Over).as_slice()).unwrap(),
+            Value::Text("over".into())
+        );
+    }
+
+    #[test]
+    fn a_seen_op_round_trips_and_is_kebab_cased() {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let spelled = |through: u64| {
+            Value::Map(vec![(
+                text("seen"),
+                Value::Map(vec![(text("through"), Value::Integer(through.into()))]),
+            )])
+        };
+        for through in [0, 7, u64::MAX] {
+            let op = BoardOp::Seen { through };
+            assert_eq!(
+                ciborium::from_reader::<Value, _>(enc(&op).as_slice()).unwrap(),
+                spelled(through)
+            );
+            assert_eq!(dec::<BoardOp>(&enc(&op)), Ok(op));
+        }
+        let extra = Value::Map(vec![(
+            text("seen"),
+            Value::Map(vec![
+                (text("through"), Value::Integer(7.into())),
+                (text("board"), Value::Integer(31_337.into())),
+            ]),
+        )]);
+        let refused = dec::<BoardOp>(&enc(&extra)).unwrap_err();
+        assert!(refused.contains("unknown field `board`"), "{refused}");
+        let missing = Value::Map(vec![(text("seen"), Value::Map(vec![]))]);
+        assert!(dec::<BoardOp>(&enc(&missing)).is_err());
     }
 
     #[test]

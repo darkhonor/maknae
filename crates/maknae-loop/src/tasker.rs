@@ -4,12 +4,12 @@ use crate::plane::{Dial, Link, PlaneDial};
 use maknae_agent::hints::Forge;
 use maknae_config::AgentId;
 use maknae_proto::{
-    AgentEntry, AgentPage, Ask, BannerSpec, BindingRequest, ForgeTokens, Labels, Payload,
-    SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskSubmission, TaskView, Verb,
-    TASK_SCHEMA, TASK_VERSION,
+    AgentEntry, AgentPage, Ask, BannerSpec, BindingRequest, BoardUnseen, ForgeTokens, Labels,
+    Payload, SecretText, TaskCursor, TaskPage, TaskRef, TaskReportPage, TaskSubmission, TaskView,
+    Verb, TASK_SCHEMA, TASK_VERSION,
 };
 use maknae_vault::{PlaneClient, TrustBundle};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskerError {
@@ -28,6 +28,8 @@ pub struct AgentRoster {
 
 pub struct TaskerClient<D: Dial = PlaneDial> {
     link: Arc<Link<D>>,
+    /// A poisoned guard still holds a whole value: it is only ever assigned or taken.
+    unseen: Mutex<Option<BoardUnseen>>,
 }
 
 impl TaskerClient<PlaneDial> {
@@ -43,13 +45,21 @@ impl TaskerClient<PlaneDial> {
 
 impl<D: Dial> TaskerClient<D> {
     pub(crate) fn over(dial: D, transport: maknae_config::TransportConfig) -> Self {
-        Self {
-            link: Arc::new(Link::new(dial, transport)),
-        }
+        Self::on(Arc::new(Link::new(dial, transport)))
     }
 
     pub(crate) fn on(link: Arc<Link<D>>) -> Self {
-        Self { link }
+        Self {
+            link,
+            unseen: Mutex::new(None),
+        }
+    }
+
+    pub fn take_board_unseen(&self) -> Option<BoardUnseen> {
+        self.unseen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     pub async fn agents(&self, after: Option<String>) -> Result<AgentPage, TaskerError> {
@@ -230,7 +240,15 @@ impl<D: Dial> TaskerClient<D> {
     }
 
     async fn call(&self, verb: Verb, outcome_unknown: bool) -> Result<Payload, TaskerError> {
-        match self.link.send_located(verb).await {
+        let counted = maknae_proto::carries_board_unseen(&verb);
+        let sent = self.link.send_located(verb).await;
+        *self.unseen.lock().unwrap_or_else(PoisonError::into_inner) = match &sent {
+            Ok(sent) if counted && matches!(sent.outcome, SentOutcome::Payload(_)) => {
+                sent.board_unseen
+            }
+            _ => None,
+        };
+        match sent.map(|sent| sent.outcome) {
             Ok(SentOutcome::Payload(payload)) => Ok(payload),
             Ok(SentOutcome::Refused { .. }) => Err(TaskerError::Refused { outcome_unknown }),
             Ok(other) => Err(TaskerError::Protocol(format!(
@@ -251,8 +269,8 @@ fn unexpected(verb: &str, got: &Payload) -> TaskerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plane::fake::{refused, FakeKernel};
-    use maknae_proto::{RespResult, TaskId, TaskReportView, TaskState};
+    use crate::plane::fake::{refused, FakeKernel, Scripted};
+    use maknae_proto::{RespResult, Response, TaskId, TaskReportView, TaskState};
 
     fn client(
         transport: maknae_config::TransportConfig,
@@ -305,6 +323,91 @@ mod tests {
             base: base.into(),
             change,
         })
+    }
+
+    fn counted(result: RespResult, unseen: Option<BoardUnseen>) -> Scripted {
+        let mut response = Response::new(maknae_proto::PROTOCOL_VERSION, result, None);
+        response.board_unseen = unseen;
+        Scripted::Response(Box::new(response))
+    }
+
+    #[tokio::test]
+    async fn the_tasker_keeps_the_count_of_its_last_reply() {
+        let state = || RespResult::Ok(Payload::TaskState(view(1)));
+        let c = TaskerClient::over(
+            FakeKernel::scripted(vec![
+                counted(state(), Some(BoardUnseen::Exact(4))),
+                counted(state(), None),
+            ]),
+            Default::default(),
+        );
+        c.status(&task_ref()).await.unwrap();
+        assert_eq!(c.take_board_unseen(), Some(BoardUnseen::Exact(4)));
+        assert_eq!(c.take_board_unseen(), None);
+        c.status(&task_ref()).await.unwrap();
+        assert_eq!(c.take_board_unseen(), None);
+    }
+
+    #[tokio::test]
+    async fn a_count_on_a_reply_the_person_did_not_type_is_dropped() {
+        let page = RespResult::Ok(Payload::TaskList(TaskPage {
+            entries: vec![],
+            next: None,
+        }));
+        let reports = RespResult::Ok(Payload::TaskReports(TaskReportPage {
+            entries: vec![],
+            next: None,
+        }));
+        let c = TaskerClient::over(
+            FakeKernel::scripted(vec![
+                counted(
+                    RespResult::Ok(Payload::TaskState(view(1))),
+                    Some(BoardUnseen::Exact(4)),
+                ),
+                counted(page, Some(BoardUnseen::Exact(5))),
+                counted(reports, Some(BoardUnseen::Over)),
+            ]),
+            Default::default(),
+        );
+        c.status(&task_ref()).await.unwrap();
+        c.list_page(&agent(), None).await.unwrap();
+        assert_eq!(c.take_board_unseen(), None);
+        c.collect(&agent(), None).await.unwrap();
+        assert_eq!(c.take_board_unseen(), None);
+    }
+
+    #[tokio::test]
+    async fn a_count_on_a_refusal_is_never_kept() {
+        let c = TaskerClient::over(
+            FakeKernel::scripted(vec![
+                counted(
+                    RespResult::Ok(Payload::TaskState(view(1))),
+                    Some(BoardUnseen::Exact(4)),
+                ),
+                counted(refused(), Some(BoardUnseen::Exact(7))),
+            ]),
+            Default::default(),
+        );
+        c.status(&task_ref()).await.unwrap();
+        assert!(c.status(&task_ref()).await.is_err());
+        assert_eq!(c.take_board_unseen(), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_call_keeps_no_count() {
+        let c = TaskerClient::over(
+            FakeKernel::scripted(vec![
+                counted(
+                    RespResult::Ok(Payload::TaskState(view(1))),
+                    Some(BoardUnseen::Exact(4)),
+                ),
+                Scripted::HangUp,
+            ]),
+            Default::default(),
+        );
+        c.status(&task_ref()).await.unwrap();
+        assert!(c.status(&task_ref()).await.is_err());
+        assert_eq!(c.take_board_unseen(), None);
     }
 
     #[tokio::test]

@@ -2331,6 +2331,77 @@ mod tests {
         }
     }
 
+    const BOARD_UNSEEN_ENCODED_MAX: usize = 22;
+
+    fn counted(payload: crate::Payload, unseen: Option<crate::BoardUnseen>) -> crate::Response {
+        crate::Response {
+            board_unseen: unseen,
+            ..crate::Response::new(
+                crate::PROTOCOL_VERSION,
+                crate::RespResult::Ok(payload),
+                Some(crate::CatalogDigest([0xff; 32])),
+            )
+        }
+    }
+
+    #[test]
+    fn a_stamped_reply_grows_by_the_unseen_room() {
+        let state = || crate::Payload::TaskState(maximal_view(TaskState::Working));
+        let bare = crate::encode_response(&counted(state(), None))
+            .unwrap()
+            .len();
+        let grown: Vec<usize> = [crate::BoardUnseen::Exact(32), crate::BoardUnseen::Over]
+            .into_iter()
+            .map(|u| {
+                crate::encode_response(&counted(state(), Some(u)))
+                    .unwrap()
+                    .len()
+                    - bare
+            })
+            .collect();
+        assert_eq!(
+            grown.iter().max(),
+            Some(&BOARD_UNSEEN_ENCODED_MAX),
+            "{grown:?}"
+        );
+    }
+
+    #[test]
+    fn a_counted_reply_fits_its_frame_with_both_stamps() {
+        const PROMPT_MAX_BYTES_FLOOR: usize = 65_536;
+        let opened = crate::Payload::ConversationOpened(crate::ConversationView {
+            conversation: crate::ConversationId::parse(&"0123456789abcdef".repeat(2)).unwrap(),
+            cwd: "a".repeat(crate::MAX_MUTATION_PATH_BYTES),
+            opened_at: u64::MAX,
+            last_active: u64::MAX,
+            turns: u64::MAX,
+            bytes: u64::MAX,
+            chain_head: "f".repeat(64),
+        });
+        for unseen in [crate::BoardUnseen::Exact(32), crate::BoardUnseen::Over] {
+            for (payload, cap) in [
+                (
+                    crate::Payload::TaskState(maximal_view(TaskState::Working)),
+                    crate::CONTROL_RESPONSE_MAX,
+                ),
+                (
+                    crate::Payload::TaskAcknowledged(maximal_view(TaskState::Closed)),
+                    crate::CONTROL_RESPONSE_MAX,
+                ),
+                (
+                    crate::Payload::TaskAccepted(maximal_view(TaskState::Queued)),
+                    prompt_response_cap(PROMPT_MAX_BYTES_FLOOR),
+                ),
+                (opened.clone(), crate::ATTEMPT_RESPONSE_MAX),
+            ] {
+                let resp = counted(payload, Some(unseen));
+                let bytes = crate::encode_response(&resp).unwrap();
+                assert!(bytes.len() <= cap, "{} > {cap}: {resp:?}", bytes.len());
+                assert_eq!(crate::decode_response(&bytes).unwrap(), resp);
+            }
+        }
+    }
+
     #[test]
     fn a_maximal_held_page_with_heads_and_reach_fits_a_control_frame() {
         let entry = HeldView {

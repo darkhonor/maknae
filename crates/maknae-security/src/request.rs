@@ -57,7 +57,7 @@ pub const RESOURCE_AGENT: &str = "agent";
 /// Which `session.task` operation the verb is, stamped by the kernel from the verb.
 pub const CONTEXT_TASK_OP: &str = "task_op";
 
-/// Which `board.manage` operation the verb is (`settings` or `clear`), stamped by the kernel.
+/// Which `board.manage` operation the verb is, stamped by the kernel.
 pub const CONTEXT_BOARD_OP: &str = "board_op";
 
 /// True only when the caller is the cited task's tasker; a foreign or unknown task is false.

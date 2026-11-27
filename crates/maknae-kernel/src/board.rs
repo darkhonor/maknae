@@ -69,6 +69,14 @@ pub(crate) struct Written {
     pub refused: Option<BoardRefusal>,
 }
 
+/// The seen mark memory holds after one [`BoardStore::write_seen_through`], and why it did not
+/// move, if the write failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Moved {
+    pub now: u64,
+    pub refused: Option<BoardRefusal>,
+}
+
 /// What [`BoardStore::clear`] removed, and why it stopped early, if it did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Cleared {
@@ -98,6 +106,21 @@ pub enum Lifted {
     Done,
     /// The subject was found contained after the write; the hold is written back.
     Remarked,
+}
+
+/// The sequences a listing walks: above `floor` and below `before`; `None` when there are none.
+fn listed_range(floor: u64, before: Option<u64>) -> Option<(Bound<u64>, Bound<u64>)> {
+    match before {
+        Some(b) if b <= floor => None,
+        Some(b) => Some((Bound::Excluded(floor), Bound::Excluded(b))),
+        None => Some((Bound::Excluded(floor), Bound::Unbounded)),
+    }
+}
+
+/// Where `through` moves a mark at `before` on a board whose next sequence is `next_seq`:
+/// clamped to the highest sequence issued; `None` when that is not forward.
+fn seen_moved_to(before: u64, through: u64, next_seq: u64) -> Option<u64> {
+    Some(through.min(next_seq.saturating_sub(1))).filter(|to| *to > before)
 }
 
 fn store(e: StoreError) -> BoardRefusal {
@@ -557,6 +580,39 @@ impl BoardStore {
         }
     }
 
+    /// The person's seen mark; 0 for a board never written.
+    pub fn seen_through(&self, key: BoardKey) -> u64 {
+        self.held().boards.get(&key).map_or(0, |b| b.seen_through)
+    }
+
+    /// A write that does not sync leaves memory with the old mark.
+    pub(crate) fn write_seen_through(&self, key: BoardKey, through: u64) -> Moved {
+        let _w = self.writing();
+        let mut rec = self.board_record(key);
+        let before = rec.seen_through;
+        let Some(to) = seen_moved_to(before, through, rec.next_seq) else {
+            return Moved {
+                now: before,
+                refused: None,
+            };
+        };
+        rec.seen_through = to;
+        match self.save_board(key, rec) {
+            Ok(()) => Moved {
+                now: to,
+                refused: None,
+            },
+            Err(StoreError::NotDurable(why)) => Moved {
+                now: before,
+                refused: Some(BoardRefusal::Unavailable(format!("{OUTCOME_UNKNOWN}{why}"))),
+            },
+            Err(e @ (StoreError::Io(_) | StoreError::Counters(_))) => Moved {
+                now: before,
+                refused: Some(store(e)),
+            },
+        }
+    }
+
     /// [`Self::write_settings`], answering the settings before it.
     #[cfg(any(test, feature = "hermetic-test-seam"))]
     pub(crate) fn set_settings(
@@ -788,24 +844,29 @@ impl BoardStore {
             .collect()
     }
 
-    /// Up to `limit` listable posts below `before`, newest first, in one hold of the memory
-    /// lock with one time and one answer from `view`. Changes nothing.
+    /// Up to `limit` listable posts below `before`, and with `new` above the seen mark, newest
+    /// first, in one hold of the memory lock with one time and one answer from `view`. Changes
+    /// nothing.
     pub(crate) fn listing(
         &self,
         key: BoardKey,
         before: Option<u64>,
         limit: usize,
         view: &dyn EnrollmentView,
+        new: bool,
     ) -> Window {
         let held = self.held();
         let now = self.now();
         let Some(board) = held.boards.get(&key) else {
             return Window::default();
         };
-        let below = before.map_or(Bound::Unbounded, Bound::Excluded);
+        let floor = if new { board.seen_through } else { 0 };
+        let Some(range) = listed_range(floor, before) else {
+            return Window::default();
+        };
         let mut listable = board
             .posts
-            .range((Bound::Unbounded, below))
+            .range(range)
             .rev()
             .map(|(_, s)| s)
             .filter(|s| held.listable(key, s, now));
@@ -1494,6 +1555,7 @@ impl BoardStore {
         let board = held.boards.entry(key).or_default();
         board.next_seq = rec.next_seq;
         board.settings = rec.settings;
+        board.seen_through = rec.seen_through;
         Ok(())
     }
 
@@ -1863,6 +1925,7 @@ mod tests {
                 board: 1000,
                 next_seq: u64::MAX,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -2074,6 +2137,7 @@ mod tests {
                 board: 1000,
                 next_seq: 2,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -2105,6 +2169,7 @@ mod tests {
                 board: 1000,
                 next_seq: 2,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -2136,6 +2201,7 @@ mod tests {
                 board: 1000,
                 next_seq: 2,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -2482,6 +2548,7 @@ mod tests {
                     board: 1000,
                     next_seq,
                     settings: Settings::default(),
+                    seen_through: 0,
                 })
                 .unwrap(),
             );
@@ -2500,6 +2567,7 @@ mod tests {
                 board: 1001,
                 next_seq: other.seq + 1,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -2629,6 +2697,7 @@ mod tests {
                 board: 1000,
                 next_seq: held.seq + 1,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -3135,6 +3204,7 @@ mod tests {
                 board: 1000,
                 next_seq: held.seq + 1,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -4038,6 +4108,7 @@ mod tests {
                 board: 1000,
                 next_seq: held.seq + 1,
                 settings: Settings::default(),
+                seen_through: 0,
             })
             .unwrap(),
         );
@@ -4351,31 +4422,265 @@ mod tests {
         w.posts.iter().map(|l| l.stored.seq).collect()
     }
 
+    fn seen_record(next_seq: u64, seen_through: Option<u64>) -> Zeroizing<Vec<u8>> {
+        use ciborium::Value;
+        let text = |s: &str| Value::Text(s.into());
+        let mut fields = vec![
+            (text("board"), Value::Integer(1000.into())),
+            (text("next_seq"), Value::Integer(next_seq.into())),
+            (
+                text("settings"),
+                Value::Map(vec![
+                    (text("enabled"), Value::Bool(true)),
+                    (text("report"), text("Every")),
+                ]),
+            ),
+        ];
+        fields.extend(seen_through.map(|s| (text("seen_through"), Value::Integer(s.into()))));
+        encode(&Value::Map(fields)).unwrap()
+    }
+
+    fn moved(now: u64) -> Moved {
+        Moved { now, refused: None }
+    }
+
+    #[test]
+    fn an_unmoved_mark_encodes_the_record_as_before_and_a_moved_one_carries_it() {
+        use crate::board_store::BoardRecord;
+        let rec = |seen_through| BoardRecord {
+            board: 1000,
+            next_seq: 4,
+            settings: Settings {
+                enabled: true,
+                report: Report::Every,
+            },
+            seen_through,
+        };
+        assert_eq!(encode(&rec(0)).unwrap(), seen_record(4, None));
+        assert_eq!(encode(&rec(3)).unwrap(), seen_record(4, Some(3)));
+        let decoded = |b: &[u8]| ciborium::from_reader::<BoardRecord, _>(b).unwrap();
+        assert_eq!(decoded(&seen_record(4, None)), rec(0));
+        assert_eq!(decoded(&seen_record(4, Some(3))), rec(3));
+    }
+
+    #[test]
+    fn a_board_record_written_before_the_mark_loads_with_mark_zero() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        let posts: Vec<_> = (1..=3).map(|i| put_as(&store, BOB, i, 2001)).collect();
+        assert_eq!(posts[2].seq, 3);
+        drop(store);
+        b.put("board.1000", &seen_record(4, None));
+        let (store, _) = wide(&b);
+        assert!(store.take_boot_findings().is_empty());
+        assert_eq!(store.seen_through(BOB), 0);
+        assert_eq!(
+            store.settings(BOB),
+            Settings {
+                enabled: true,
+                report: Report::Every
+            }
+        );
+        assert_eq!(
+            listed_seqs(&store.listing(BOB, None, 32, &free(), true)),
+            [3, 2, 1]
+        );
+        assert_eq!(put_as(&store, BOB, 4, 2001).seq, 4);
+    }
+
+    #[test]
+    fn the_mark_moves_forward_only_and_is_clamped() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        for i in 1..=5 {
+            put_as(&store, BOB, i, 2001);
+        }
+        assert_eq!(store.seen_through(BOB), 0);
+        assert_eq!(store.write_seen_through(BOB, 3), moved(3));
+        assert_eq!(store.seen_through(BOB), 3);
+        let attempts = b.attempts();
+        assert_eq!(store.write_seen_through(BOB, 2), moved(3));
+        assert_eq!(store.write_seen_through(BOB, 3), moved(3));
+        assert_eq!(b.attempts(), attempts, "nothing is written");
+        assert_eq!(store.write_seen_through(BOB, 1000), moved(5));
+        assert_eq!(store.write_seen_through(BOB, u64::MAX), moved(5));
+        assert_eq!(store.seen_through(BOB), 5);
+        let attempts = b.attempts();
+        assert_eq!(store.write_seen_through(ALICE, 9), moved(0));
+        assert_eq!(b.attempts(), attempts);
+        assert!(!b.has("board.1001"), "no record is created");
+        assert_eq!(store.seen_through(ALICE), 0);
+    }
+
+    #[test]
+    fn the_mark_survives_a_reopen_a_later_post_and_a_settings_write() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        for i in 1..=3 {
+            put_as(&store, BOB, i, 2001);
+        }
+        assert_eq!(store.write_seen_through(BOB, 2), moved(2));
+        put_as(&store, BOB, 4, 2001);
+        let on = Settings {
+            enabled: true,
+            report: Report::Summary,
+        };
+        store.set_settings(BOB, on).unwrap();
+        assert_eq!(store.seen_through(BOB), 2);
+        drop(store);
+        let (store, _) = wide(&b);
+        assert!(store.take_boot_findings().is_empty());
+        assert_eq!(store.seen_through(BOB), 2);
+        assert_eq!(store.settings(BOB), on);
+        assert_eq!(
+            listed_seqs(&store.listing(BOB, None, 32, &free(), true)),
+            [4, 3]
+        );
+    }
+
+    #[test]
+    fn a_mark_above_the_highest_sequence_loads_as_is() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        for i in 1..=3 {
+            put_as(&store, BOB, i, 2001);
+        }
+        drop(store);
+        b.put("board.1000", &seen_record(4, Some(99)));
+        let (store, _) = wide(&b);
+        assert!(store.take_boot_findings().is_empty());
+        assert_eq!(store.seen_through(BOB), 99);
+        assert_eq!(
+            store.listing(BOB, None, 32, &free(), true),
+            Window::default()
+        );
+        let attempts = b.attempts();
+        assert_eq!(store.write_seen_through(BOB, 3), moved(99));
+        assert_eq!(b.attempts(), attempts);
+    }
+
+    #[test]
+    fn a_seen_write_that_does_not_sync_keeps_the_old_mark() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        for i in 1..=3 {
+            put_as(&store, BOB, i, 2001);
+        }
+        assert_eq!(store.write_seen_through(BOB, 1), moved(1));
+        b.fail(Some(Fail::Unsynced));
+        let unknown = store.write_seen_through(BOB, 3);
+        b.fail(None);
+        let Some(BoardRefusal::Unavailable(why)) = &unknown.refused else {
+            panic!("{unknown:?}");
+        };
+        assert!(why.starts_with(OUTCOME_UNKNOWN), "{why}");
+        assert_eq!(unknown.now, 1);
+        assert_eq!(store.seen_through(BOB), 1);
+        b.fail(Some(Fail::Every));
+        let failed = store.write_seen_through(BOB, 3);
+        b.fail(None);
+        assert!(
+            matches!(failed.refused, Some(BoardRefusal::Store(_))),
+            "{failed:?}"
+        );
+        assert_eq!(failed.now, 1);
+        assert_eq!(store.seen_through(BOB), 1);
+        assert_eq!(store.write_seen_through(BOB, 3), moved(3));
+    }
+
+    #[test]
+    fn a_listing_above_the_mark_stops_at_it() {
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        for i in 1..=40 {
+            put_as(&store, BOB, i, 2001);
+        }
+        assert_eq!(store.write_seen_through(BOB, 30), moved(30));
+        let near = store.listing(BOB, None, 32, &free(), true);
+        assert_eq!(listed_seqs(&near), (31..=40).rev().collect::<Vec<_>>());
+        assert!(!near.more);
+        assert_eq!(
+            listed_seqs(&store.listing(BOB, None, 32, &free(), false)),
+            (9..=40).rev().collect::<Vec<_>>()
+        );
+        let b = MemTaskBlobs::default();
+        let (store, _) = wide(&b);
+        for i in 1..=40 {
+            put_as(&store, BOB, i, 2001);
+        }
+        assert_eq!(store.write_seen_through(BOB, 5), moved(5));
+        let top = store.listing(BOB, None, 32, &free(), true);
+        assert_eq!(listed_seqs(&top), (9..=40).rev().collect::<Vec<_>>());
+        assert!(top.more);
+        let rest = store.listing(BOB, Some(9), 32, &free(), true);
+        assert_eq!(listed_seqs(&rest), [8, 7, 6]);
+        assert!(!rest.more);
+        for before in [6, 5, 4, 0] {
+            assert_eq!(
+                store.listing(BOB, Some(before), 32, &free(), true),
+                Window::default(),
+                "{before}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listing_walks_above_the_floor_and_below_before_and_nothing_when_they_meet() {
+        use Bound::{Excluded, Unbounded};
+        assert_eq!(listed_range(0, None), Some((Excluded(0), Unbounded)));
+        assert_eq!(listed_range(5, None), Some((Excluded(5), Unbounded)));
+        assert_eq!(listed_range(5, Some(6)), Some((Excluded(5), Excluded(6))));
+        assert_eq!(listed_range(0, Some(1)), Some((Excluded(0), Excluded(1))));
+        assert_eq!(
+            listed_range(u64::MAX, None),
+            Some((Excluded(u64::MAX), Unbounded))
+        );
+        for (floor, before) in [(5, 5), (5, 4), (0, 0), (u64::MAX, 7)] {
+            assert_eq!(listed_range(floor, Some(before)), None, "{floor} {before}");
+        }
+    }
+
+    #[test]
+    fn a_mark_moves_only_forward_and_never_past_the_highest_sequence_issued() {
+        assert_eq!(seen_moved_to(0, 3, 6), Some(3));
+        assert_eq!(seen_moved_to(3, 4, 6), Some(4));
+        assert_eq!(seen_moved_to(3, 3, 6), None);
+        assert_eq!(seen_moved_to(3, 2, 6), None);
+        assert_eq!(seen_moved_to(3, 1000, 6), Some(5));
+        assert_eq!(seen_moved_to(5, u64::MAX, 6), None);
+        assert_eq!(seen_moved_to(0, 9, FIRST_SEQ), None);
+        assert_eq!(seen_moved_to(99, 3, 4), None);
+        assert_eq!(seen_moved_to(0, u64::MAX, 0), None);
+    }
+
     #[test]
     fn a_listing_is_newest_first_below_before_and_bounded() {
         let b = MemTaskBlobs::default();
         let (store, _) = wide(&b);
-        assert_eq!(store.listing(BOB, None, 32, &free()), Window::default());
+        assert_eq!(
+            store.listing(BOB, None, 32, &free(), false),
+            Window::default()
+        );
         for i in 1..=40 {
             put_as(&store, BOB, i, 2001);
         }
-        let top = store.listing(BOB, None, 32, &free());
+        let top = store.listing(BOB, None, 32, &free(), false);
         assert_eq!(listed_seqs(&top), (9..=40).rev().collect::<Vec<_>>());
         assert!(top.more);
         assert!(top.targets.is_empty());
-        let below = store.listing(BOB, Some(9), 32, &free());
+        let below = store.listing(BOB, Some(9), 32, &free(), false);
         assert_eq!(listed_seqs(&below), (1..=8).rev().collect::<Vec<_>>());
         assert!(!below.more);
         for before in [Some(1), Some(0)] {
             assert_eq!(
-                store.listing(BOB, before, 32, &free()),
+                store.listing(BOB, before, 32, &free(), false),
                 Window::default(),
                 "{before:?}"
             );
         }
-        assert_eq!(store.listing(BOB, Some(1000), 32, &free()), top);
+        assert_eq!(store.listing(BOB, Some(1000), 32, &free(), false), top);
         assert_eq!(
-            store.listing(BoardKey(4242), None, 32, &free()),
+            store.listing(BoardKey(4242), None, 32, &free(), false),
             Window::default()
         );
     }
@@ -4396,7 +4701,7 @@ mod tests {
                 .marked
                 .insert((BOB, s.seq), [HeldFor::Person].into());
         }
-        let w = store.listing(BOB, None, 32, &containing(&[], &[2012, 2013]));
+        let w = store.listing(BOB, None, 32, &containing(&[], &[2012, 2013]), false);
         let holds: Vec<(u64, BTreeSet<HeldFor>)> = w
             .posts
             .iter()
@@ -4432,7 +4737,7 @@ mod tests {
         holding(&store, &[2010]);
         clock.set(T0 + RETAIN);
         store.held().expiring.insert((BOB, expiring.seq));
-        let all = store.listing(BOB, None, 32, &free());
+        let all = store.listing(BOB, None, 32, &free(), false);
         assert_eq!(
             listed_seqs(&all),
             [to_expiring.seq, to_held.seq, to_aged.seq, aged_held.seq]
@@ -4440,14 +4745,14 @@ mod tests {
         assert_eq!(all.posts[3].held, [HeldFor::Author].into());
         assert!(!all.more);
         assert!(all.targets.is_empty());
-        let two = store.listing(BOB, None, 2, &free());
+        let two = store.listing(BOB, None, 2, &free(), false);
         assert_eq!(listed_seqs(&two), [to_expiring.seq, to_held.seq]);
         assert!(two.more);
         let targets: Vec<u64> = two.targets.iter().map(|s| s.seq).collect();
         assert_eq!(targets, [aged_held.seq]);
-        let three = store.listing(BOB, None, 3, &free());
+        let three = store.listing(BOB, None, 3, &free(), false);
         assert!(three.more);
-        let four = store.listing(BOB, None, 4, &free());
+        let four = store.listing(BOB, None, 4, &free(), false);
         assert!(!four.more);
     }
 
@@ -4461,13 +4766,13 @@ mod tests {
         let r2 = reply_as(&store, 4, &t2);
         reply_as(&store, 5, &r2);
         reply_as(&store, 6, &t1);
-        let w = store.listing(BOB, None, 4, &free());
+        let w = store.listing(BOB, None, 4, &free(), false);
         assert_eq!(listed_seqs(&w), [6, 5, 4, 3]);
         let targets: Vec<u64> = w.targets.iter().map(|s| s.seq).collect();
         assert_eq!(targets, [t1.seq, t2.seq]);
-        let whole = store.listing(BOB, None, 32, &free());
+        let whole = store.listing(BOB, None, 32, &free(), false);
         assert!(whole.targets.is_empty());
-        let below = store.listing(BOB, Some(5), 2, &free());
+        let below = store.listing(BOB, Some(5), 2, &free(), false);
         assert_eq!(listed_seqs(&below), [4, 3]);
         let targets: Vec<u64> = below.targets.iter().map(|s| s.seq).collect();
         assert_eq!(targets, [t1.seq, t2.seq]);
@@ -4515,7 +4820,7 @@ mod tests {
             containing(&enrolled, &[1000, 2001]),
             free(),
         ] {
-            let w = store.listing(BOB, None, 32, &view);
+            let w = store.listing(BOB, None, 32, &view, false);
             assert_eq!(listed_seqs(&w).last(), Some(&aged.seq));
         }
         assert_eq!(b.attempts(), attempts);
@@ -5030,6 +5335,7 @@ mod tests {
         calls: Mutex<usize>,
         installer: Mutex<Option<std::thread::JoinHandle<()>>>,
         landed: Arc<std::sync::atomic::AtomicBool>,
+        landed_in_check: std::sync::atomic::AtomicBool,
     }
 
     impl EnrollmentView for InstallDuringTheRecheck {
@@ -5073,6 +5379,10 @@ mod tests {
                     let _ = done.send(());
                 }));
                 let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
+                self.landed_in_check.store(
+                    self.landed.load(std::sync::atomic::Ordering::SeqCst),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
             }
             answer
         }
@@ -5098,9 +5408,12 @@ mod tests {
             calls: Mutex::new(0),
             installer: Mutex::new(None),
             landed: Arc::default(),
+            landed_in_check: Default::default(),
         };
         let got = store.clear(BOB, &pairs([&post]), &view);
-        let landed = view.landed.load(std::sync::atomic::Ordering::SeqCst);
+        let landed = view
+            .landed_in_check
+            .load(std::sync::atomic::Ordering::SeqCst);
         view.installer
             .lock()
             .unwrap()

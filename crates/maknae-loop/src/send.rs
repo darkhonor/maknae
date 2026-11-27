@@ -80,6 +80,18 @@ fn reply_wait(
     verb: &maknae_proto::Verb,
     transport: &maknae_config::TransportConfig,
 ) -> std::time::Duration {
+    let counted = if maknae_proto::carries_board_unseen(verb) {
+        maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS
+    } else {
+        0
+    };
+    verb_wait(verb, transport) + std::time::Duration::from_millis(counted)
+}
+
+fn verb_wait(
+    verb: &maknae_proto::Verb,
+    transport: &maknae_config::TransportConfig,
+) -> std::time::Duration {
     let stages = match verb {
         maknae_proto::Verb::AdminContain { .. } | maknae_proto::Verb::AdminRelease { .. } => {
             maknae_config::CONTAINMENT_REPLY_STAGES
@@ -281,11 +293,12 @@ pub(crate) async fn send_via<S: Wire>(
         .map_err(|f| f.why)
 }
 
-/// What one verb came back as, with the catalog stamp the reply carried.
+/// What one verb came back as, with the stamps the reply carried.
 #[derive(Debug)]
 pub(crate) struct Sent {
     pub(crate) outcome: SentOutcome,
     pub(crate) catalog_digest: Option<maknae_proto::CatalogDigest>,
+    pub(crate) board_unseen: Option<maknae_proto::BoardUnseen>,
 }
 
 /// [`send_via`], with the failure saying whether it came after the request was written.
@@ -303,7 +316,7 @@ pub(crate) async fn send_located<S: Wire>(
         .map(|sent| sent.outcome)
 }
 
-/// [`send_located`], keeping the catalog stamp of the reply.
+/// [`send_located`], keeping the stamps of the reply.
 pub(crate) async fn send_stamped<S: Wire>(
     connect: impl std::future::Future<Output = Result<S, maknae_vault::VaultError>>,
     task: Option<maknae_proto::TaskId>,
@@ -319,6 +332,7 @@ pub(crate) async fn send_stamped<S: Wire>(
         Err(failed) => settle_located(mutating, Err(failed)).map(|outcome| Sent {
             outcome,
             catalog_digest: None,
+            board_unseen: None,
         }),
     }
 }
@@ -393,6 +407,7 @@ async fn exchange<S: Wire>(
     let unstamped = |outcome| Sent {
         outcome,
         catalog_digest: None,
+        board_unseen: None,
     };
     let unsent = Failed::Unsent;
     // Bound the client-side TLS handshake by the configured `handshake_timeout_ms`: a
@@ -457,12 +472,13 @@ async fn exchange<S: Wire>(
     .map_err(before)?;
     let response = decode_response(&resp_body).map_err(|e| Failed::Malformed(e.to_string()))?;
 
-    let catalog_digest = response.catalog_digest;
+    let (catalog_digest, board_unseen) = (response.catalog_digest, response.board_unseen);
     let (prepared, grant) = match first_answer(mutating, prepared, response.result, armed)? {
         FirstAnswer::Done(outcome) => {
             return Ok(Sent {
                 outcome,
                 catalog_digest,
+                board_unseen,
             })
         }
         FirstAnswer::Grant(prepared, grant) => (prepared, grant),
@@ -720,6 +736,9 @@ mod tests {
     fn every_tasker_verb_waits_the_control_reply() {
         let transport = maknae_config::TransportConfig::default();
         let control = class_wait(maknae_proto::FrameClass::Control, &transport);
+        let counted = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
         for verb in tasker_verbs() {
             if matches!(
                 verb,
@@ -728,10 +747,48 @@ mod tests {
                     | maknae_proto::Verb::TaskAdd { .. }
             ) {
                 assert!(reply_wait(&verb, &transport) > control);
+            } else if matches!(
+                verb,
+                maknae_proto::Verb::TaskStatus { .. }
+                    | maknae_proto::Verb::TaskStop { .. }
+                    | maknae_proto::Verb::TaskDrop { .. }
+            ) {
+                assert_eq!(reply_wait(&verb, &transport), control + counted, "{verb:?}");
             } else {
                 assert_eq!(reply_wait(&verb, &transport), control, "{verb:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_counted_verb_waits_one_stage_longer() {
+        let transport = maknae_config::TransportConfig {
+            read_timeout_ms: READ_TIMEOUT_MS,
+            ..Default::default()
+        };
+        let stage = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
+        let task = maknae_proto::TaskRef::from_id(&maknae_proto::TaskId([3; 16]));
+        let list = reply_wait(
+            &maknae_proto::Verb::TaskList {
+                agent: "hobi".into(),
+                after: None,
+            },
+            &transport,
+        );
+        assert_eq!(
+            reply_wait(&maknae_proto::Verb::TaskStatus { task }, &transport),
+            list + stage
+        );
+        let session = maknae_proto::Verb::SessionNew {
+            cwd: "/p".into(),
+            sensitive: vec![],
+        };
+        assert_eq!(
+            reply_wait(&session, &transport),
+            class_wait(maknae_proto::FrameClass::Attempt, &transport) + stage
+        );
     }
 
     #[test]
@@ -745,13 +802,20 @@ mod tests {
             maknae_config::REACH_DEADLINE_MS_MAX,
         ));
         assert_eq!(reach, std::time::Duration::from_secs(460));
+        let counted = std::time::Duration::from_millis(
+            maknae_config::BOARD_UNSEEN_REPLY_STAGES * maknae_config::BLOCKING_STAGE_TIMEOUT_MS,
+        );
         let mut reached = 0;
         for verb in tasker_verbs() {
             if matches!(
                 verb,
                 maknae_proto::Verb::TaskSubmit { .. } | maknae_proto::Verb::TaskAdd { .. }
             ) {
-                assert_eq!(reply_wait(&verb, &transport), control + reach, "{verb:?}");
+                assert_eq!(
+                    reply_wait(&verb, &transport),
+                    control + reach + counted,
+                    "{verb:?}"
+                );
                 reached += 1;
             }
         }
@@ -795,7 +859,10 @@ mod tests {
                 },
             },
             maknae_proto::Verb::BoardRead { seen_through: None },
-            maknae_proto::Verb::BoardList { before: None },
+            maknae_proto::Verb::BoardList {
+                before: None,
+                new: false,
+            },
         ] {
             assert_eq!(reply_caps(&verb, &transport).prompt, ceiling, "{verb:?}");
         }

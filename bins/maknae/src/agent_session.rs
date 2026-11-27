@@ -7,6 +7,7 @@ use crate::screen::run::{Caller, Driver, Ending, Exit, Pace, Step};
 use crate::screen::term::{both_terminals, Session, TermError};
 use crate::stderr::errln;
 use maknae_agent::hints::{choose, token_servers, Forge, Links, RemoteUrl, Remotes};
+use maknae_agent::plane::{leaf_step, LeafStep};
 use maknae_agent::screen::blocks::{Conversation, EntryId, EntryKind};
 use maknae_agent::screen::{Commands, HeaderLine, MenuItem};
 use maknae_agent::tasking::book::{joined, Alloc, Answer, Book, Entered, Failure, Op, Standing};
@@ -15,7 +16,7 @@ use maknae_config::AgentId;
 use maknae_loop::tasker::{AgentRoster, TaskerClient, TaskerError};
 use maknae_loop::workdir::Unreadable;
 use maknae_proto::{
-    Binding, BindingRequest, ForgeTokens, SecretText, TaskCursor, TaskPage, TaskRef,
+    Binding, BindingRequest, BoardUnseen, ForgeTokens, SecretText, TaskCursor, TaskPage, TaskRef,
     TaskReportPage, TaskView,
 };
 use maknae_vault::PlaneClient;
@@ -27,8 +28,6 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
-/// A leaf this close to its NotAfter is minted again before the next verb.
-const REMINT_WITHIN_SECS: u64 = 60;
 const PLAIN_TICK: Duration = Duration::from_millis(250);
 const CUT_OFF: &str =
     "a request was still being sent when the session ended; its outcome is unknown";
@@ -65,6 +64,9 @@ pub(crate) trait Tasker {
         agent: &AgentId,
         after: Option<TaskCursor>,
     ) -> Result<TaskReportPage, TaskerError>;
+    fn board_unseen(&self) -> Option<BoardUnseen> {
+        None
+    }
 }
 
 impl Tasker for TaskerClient {
@@ -118,6 +120,9 @@ impl Tasker for TaskerClient {
     ) -> Result<TaskReportPage, TaskerError> {
         TaskerClient::collect(self, agent, after).await
     }
+    fn board_unseen(&self) -> Option<BoardUnseen> {
+        self.take_board_unseen()
+    }
 }
 
 /// The tasker's forge tokens for the servers a request binds, so tests can stand in for Vault.
@@ -140,18 +145,27 @@ pub(crate) trait Leaf {
 
 struct PlaneLeaf(Arc<PlaneClient>);
 
-impl Leaf for PlaneLeaf {
+impl Leaf for PlaneClient {
     fn not_after(&self) -> Option<u64> {
-        self.0.leaf_not_after_secs()
+        self.leaf_not_after_secs()
     }
     async fn remint(&self) -> Result<(), String> {
-        self.0.mint().await.map(|_| ()).map_err(|e| e.to_string())
+        self.mint().await.map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
+impl Leaf for PlaneLeaf {
+    fn not_after(&self) -> Option<u64> {
+        self.0.as_ref().not_after()
+    }
+    async fn remint(&self) -> Result<(), String> {
+        self.0.as_ref().remint().await
     }
 }
 
 #[derive(Debug)]
 pub(crate) enum Event {
-    Done(Result<Answer, Failure>),
+    Done(Result<Answer, Failure>, Option<BoardUnseen>),
     LoginExpired,
 }
 
@@ -205,18 +219,18 @@ impl Workdir {
 
 impl<T: Tasker, L: Leaf, S: TokenSupply> Kernel<T, L, S> {
     async fn send(&self, op: Op, now: u64) -> Event {
-        let not_after = self.leaf.not_after();
-        let fresh = not_after.is_some_and(|at| now.saturating_add(REMINT_WITHIN_SECS) < at);
-        if !fresh {
-            if crate::agent::login_expired(self.login_expires_at, now) {
-                return Event::LoginExpired;
-            }
-            let valid = not_after.is_some_and(|at| now < at);
-            if self.leaf.remint().await.is_err() && !valid {
-                return Event::Done(Err(Failure::NoIdentity));
+        let login_expired = crate::agent::login_expired(self.login_expires_at, now);
+        match leaf_step(self.leaf.not_after(), now, login_expired) {
+            LeafStep::Fresh => {}
+            LeafStep::LoginExpired => return Event::LoginExpired,
+            LeafStep::Remint { valid } => {
+                if self.leaf.remint().await.is_err() && !valid {
+                    return Event::Done(Err(Failure::NoIdentity), None);
+                }
             }
         }
-        Event::Done(self.perform(op, now).await)
+        let answer = self.perform(op, now).await;
+        Event::Done(answer, self.tasker.board_unseen())
     }
 
     async fn tokens(&self, bindings: &[BindingRequest], now: u64) -> Result<ForgeTokens, Failure> {
@@ -277,7 +291,7 @@ impl<T: Tasker, L: Leaf, S: TokenSupply> Kernel<T, L, S> {
         while let Some(op) = ops.recv().await {
             let event = match maknae_io::now_unix() {
                 Ok(now) => self.send(op, now).await,
-                Err(_) => Event::Done(Err(Failure::Clock)),
+                Err(_) => Event::Done(Err(Failure::Clock), None),
             };
             if events.send(event).await.is_err() {
                 return;
@@ -590,7 +604,12 @@ fn pump(book: &mut Book, ops: &mpsc::UnboundedSender<Op>, now: u64, conv: &mut C
 
 fn apply(book: &mut Book, event: Event, now: u64, conv: &mut Conversation) {
     match event {
-        Event::Done(answer) => book.done(answer, now, conv),
+        Event::Done(answer, unseen) => {
+            book.done(answer, now, conv);
+            if let Some(unseen) = unseen {
+                book.unseen(unseen, conv);
+            }
+        }
         Event::LoginExpired => book.stop(crate::agent::LOGIN_EXPIRED, conv),
     }
 }
@@ -889,6 +908,8 @@ mod tests {
         hold: bool,
         holding: bool,
         unreachable: bool,
+        count: Option<BoardUnseen>,
+        kept: Option<BoardUnseen>,
     }
 
     #[derive(Clone)]
@@ -1041,9 +1062,14 @@ mod tests {
             v.task = task.clone();
             Ok(v)
         }
-        async fn status(&self, _: &TaskRef) -> Result<TaskView, TaskerError> {
-            self.note("status");
-            Err(TaskerError::Protocol("unused".into()))
+        async fn status(&self, task: &TaskRef) -> Result<TaskView, TaskerError> {
+            let mut s = self.call("status");
+            let Some(count) = s.count else {
+                return Err(TaskerError::Protocol("unused".into()));
+            };
+            s.kept = Some(count);
+            let v = s.tasks.iter().find(|t| t.task == *task).cloned();
+            v.ok_or(TaskerError::Protocol("no such task".into()))
         }
         async fn stop(&self, _: &TaskRef) -> Result<TaskView, TaskerError> {
             self.note("stop");
@@ -1111,6 +1137,9 @@ mod tests {
                 entries: s.reports.clone(),
                 next: None,
             })
+        }
+        fn board_unseen(&self) -> Option<BoardUnseen> {
+            self.state.lock().unwrap().kept.take()
         }
     }
 
@@ -1854,7 +1883,7 @@ mod tests {
         };
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
-            Event::Done(Ok(Answer::Reports(_)))
+            Event::Done(Ok(Answer::Reports(_)), _)
         ));
         assert_eq!(
             kernel.leaf.mints.load(Ordering::SeqCst),
@@ -1862,10 +1891,11 @@ mod tests {
             "a fresh leaf is reused"
         );
 
-        *kernel.leaf.not_after.lock().unwrap() = Some(now + REMINT_WITHIN_SECS);
+        *kernel.leaf.not_after.lock().unwrap() =
+            Some(now + maknae_agent::plane::REMINT_WITHIN_SECS);
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
-            Event::Done(Ok(_))
+            Event::Done(Ok(_), _)
         ));
         assert_eq!(
             kernel.leaf.mints.load(Ordering::SeqCst),
@@ -2182,6 +2212,24 @@ mod tests {
     }
 
     #[test]
+    fn a_status_reply_with_a_count_says_the_line() {
+        let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
+        fake.set(|s| s.count = Some(BoardUnseen::Exact(2)));
+        let mut io = pipes("tidy my downloads\n/status 1\n");
+        let (end, _) = in_turn(&fake, fresh_leaf(), u64::MAX, false, io.lines());
+        assert_eq!(end, End::Left);
+        let out = io.output();
+        let lines: Vec<&str> = out.lines().collect();
+        let status = lines.iter().position(|l| l.starts_with("#1 working"));
+        let unseen = lines
+            .iter()
+            .position(|l| *l == "board: 2 unseen posts; run maknae board --new");
+        assert!(status.is_some(), "{out}");
+        assert_eq!(unseen, status.map(|at| at + 1), "{out}");
+        assert_eq!(out.matches("unseen").count(), 1, "{out}");
+    }
+
+    #[test]
     fn wait_ends_once_a_dropped_task_is_closed() {
         let fake = Fake::new(&[("hobi", AgentStanding::Enrolled)], 0);
         let mut io = pipes("tidy my downloads\n/drop\n");
@@ -2229,12 +2277,12 @@ mod tests {
         };
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
-            Event::Done(Ok(_))
+            Event::Done(Ok(_), _)
         ));
         assert_eq!(kernel.tasker.calls(), ["collect"], "the valid leaf is used");
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
-            Event::Done(Ok(_))
+            Event::Done(Ok(_), _)
         ));
         assert_eq!(
             kernel.leaf.1.load(Ordering::SeqCst),
@@ -2244,7 +2292,7 @@ mod tests {
         *kernel.leaf.0.lock().unwrap() = Some(now);
         assert!(matches!(
             kernel.send(Op::Collect { after: None }, now).await,
-            Event::Done(Err(Failure::NoIdentity))
+            Event::Done(Err(Failure::NoIdentity), None)
         ));
         assert_eq!(
             kernel.tasker.calls().len(),

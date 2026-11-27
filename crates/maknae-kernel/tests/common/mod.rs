@@ -1917,6 +1917,28 @@ impl<P> DeniesLabel<P> {
 
 board_double!(DeniesLabel);
 
+/// Sleeps `delay` in each batch of more than one request that holds `label`, as a post whose
+/// decision is slow.
+pub struct SlowOn<P> {
+    pub inner: Arc<P>,
+    pub label: &'static str,
+    pub delay: Duration,
+}
+
+impl<P> SlowOn<P> {
+    fn adjust(&self, _: &Request, verdict: Verdict) -> Verdict {
+        verdict
+    }
+
+    fn before_all(&self, reqs: &[Request]) {
+        if reqs.len() > 1 && reqs.iter().any(|r| holds(r, self.label)) {
+            std::thread::sleep(self.delay);
+        }
+    }
+}
+
+board_double!(SlowOn);
+
 /// Denies a request holding `label` whose subject is `uid`.
 pub struct DeniesLabelTo<P> {
     pub inner: Arc<P>,

@@ -256,6 +256,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         reach: maknae_kernel::no_reach("no egress socket in this test"),
         board: Arc::new(board),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
+        count_breaker: Default::default(),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -560,6 +561,7 @@ impl World {
                     .expect("the board reopens"),
                 ),
                 switches: self.agents.switches.clone(),
+                count_breaker: Default::default(),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),
@@ -693,6 +695,15 @@ impl World {
 
     async fn ask(&self, verb: Verb) -> RespResult {
         self.ask_with(verb, &Records::new(0)).await
+    }
+
+    async fn response_with(&self, verb: Verb, records: &Arc<Records>) -> Response {
+        let raw = self.raw(verb, records).await;
+        let mut cursor = &raw[..];
+        let frame = common::read_frame(&mut cursor, 1 << 20)
+            .await
+            .expect("one frame");
+        maknae_proto::decode_response(&frame).unwrap()
     }
 
     async fn submit(&self, agent: &str, prompt: &str) -> TaskId {
@@ -4846,11 +4857,29 @@ mod board {
                 + Sync
                 + 'static,
         {
+            self.listing_as(authorizer, Verb::BoardList { before, new: false })
+                .await
+        }
+
+        /// A person's listing request `verb`, decided by `authorizer`, and its board records.
+        async fn listing_as<P>(
+            &self,
+            authorizer: &Arc<P>,
+            verb: Verb,
+        ) -> (RespResult, Vec<AuditRecord>)
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+        {
             let records = Records::new(0);
             let raw = {
                 let _shared = STORE.read().await;
                 let (session, gate) = self.person_session();
-                let body = request_body(Verb::BoardList { before }, None);
+                let body = request_body(verb, None);
                 self.serve_as(
                     Arc::clone(authorizer),
                     session,
@@ -8261,6 +8290,478 @@ mod board {
         }
     }
 
+    mod seen {
+        use super::*;
+        use maknae_audit_append::BoardAudit;
+        use maknae_proto::{BoardListing, BoardOp};
+
+        const SEEN_ROLES: &str = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\", \"board.read\", \"board.manage\"]\n";
+
+        fn seen_world(tag: &str, role: &str, roles: &str) -> World {
+            let mut w = world_of(
+                tag,
+                role,
+                roles,
+                &[
+                    ("hobi", HOBI_UID, PLAIN),
+                    ("suga", SUGA_UID, PLAIN),
+                    ("jin", JIN_UID, PLAIN),
+                ],
+            );
+            w.switch(true, &["hobi", "suga", "jin"]);
+            w.enable(w.me, true);
+            w
+        }
+
+        fn seen(through: u64) -> Verb {
+            Verb::BoardManage {
+                op: BoardOp::Seen { through },
+            }
+        }
+
+        type Said = (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<BoardAudit>,
+        );
+
+        fn trail(records: &[AuditRecord]) -> Vec<Said> {
+            records
+                .iter()
+                .map(|r| {
+                    (
+                        r.action.clone(),
+                        r.subject.board_op.clone(),
+                        r.outcome.result.clone(),
+                        r.outcome.reason.clone(),
+                        r.outcome.posture.clone(),
+                        r.object.clone(),
+                        r.board.clone(),
+                    )
+                })
+                .collect()
+        }
+
+        fn at(cursor: u64) -> Option<BoardAudit> {
+            Some(BoardAudit {
+                cursor: Some(cursor),
+                ..BoardAudit::default()
+            })
+        }
+
+        fn marked(
+            (result, reason, posture): (&str, &str, &str),
+            object: Option<String>,
+            board: Option<BoardAudit>,
+        ) -> Said {
+            (
+                "board.manage".into(),
+                Some("seen".into()),
+                result.into(),
+                reason.into(),
+                posture.into(),
+                object,
+                board,
+            )
+        }
+
+        const INTENT: (&str, &str, &str) = ("permit", "intent recorded", "authorized");
+        const DONE: (&str, &str, &str) = ("permit", "done", "authorized");
+
+        impl World {
+            async fn seen_ask(&self, verb: Verb) -> (RespResult, Vec<AuditRecord>) {
+                let records = Records::new(0);
+                let answer = self.ask_with(verb, &records).await;
+                (answer, board_records(&records))
+            }
+
+            async fn seen_list(
+                &self,
+                before: Option<u64>,
+                new: bool,
+            ) -> (RespResult, Vec<AuditRecord>) {
+                let pdp = Arc::clone(&self.pdp);
+                self.listing_as(&pdp, Verb::BoardList { before, new }).await
+            }
+
+            fn mark_of(&self, uid: u32) -> u64 {
+                self.agents.board.seen_through(BoardKey(uid))
+            }
+
+            fn seen_posts(&self, author: &str, n: u64) -> Vec<PostId> {
+                (1..=n)
+                    .map(|i| {
+                        self.stored(author, &format!("sentinel-715-{i}"), PostLabels::default())
+                    })
+                    .collect()
+            }
+
+            fn own_mark_board(&self) -> Option<String> {
+                Some(format!("board:users/{}", self.me))
+            }
+        }
+
+        fn listing_of(r: RespResult) -> BoardListing {
+            match r {
+                RespResult::Ok(Payload::BoardListing(l)) => l,
+                other => panic!("not a listing: {other:?}"),
+            }
+        }
+
+        fn seqs(l: &BoardListing) -> Vec<u64> {
+            l.entries.iter().map(|e| e.seq).collect()
+        }
+
+        fn is_seen(r: &RespResult) -> bool {
+            matches!(r, RespResult::Ok(Payload::BoardSeen))
+        }
+
+        fn widened(verb: Verb, variant: &str) -> Vec<u8> {
+            use ciborium::Value;
+            fn widen(v: &mut Value, variant: &str) -> bool {
+                match v {
+                    Value::Map(entries) => entries.iter_mut().any(|(k, val)| {
+                        if *k == Value::Text(variant.into()) {
+                            if let Value::Map(fields) = val {
+                                fields.push((
+                                    Value::Text("board".into()),
+                                    Value::Integer(OTHER.into()),
+                                ));
+                            }
+                            true
+                        } else {
+                            widen(val, variant)
+                        }
+                    }),
+                    _ => false,
+                }
+            }
+            let mut request: Value =
+                ciborium::from_reader(request_body(verb, None).as_slice()).unwrap();
+            assert!(widen(&mut request, variant));
+            let mut body = Vec::new();
+            ciborium::into_writer(&request, &mut body).unwrap();
+            body
+        }
+
+        #[tokio::test]
+        async fn seen_moves_the_mark_to_the_newest_post_and_records_it() {
+            let w = seen_world("seen-moves", "user", SEEN_ROLES);
+            w.seen_posts("hobi", 3);
+            let (answer, records) = w.seen_ask(seen(u64::MAX)).await;
+            assert!(is_seen(&answer), "{answer:?}");
+            assert_eq!(w.mark_of(w.me), 3);
+            assert_eq!(
+                trail(&records),
+                [
+                    marked(INTENT, w.own_mark_board(), at(0)),
+                    marked(DONE, w.own_mark_board(), at(3)),
+                ]
+            );
+            for r in &records {
+                assert_eq!(r.subject.role.as_deref(), Some("user"));
+                let rule = r.rule.as_ref().expect("the rule that permitted it");
+                assert!(rule.section.ends_with("#roles.user"), "{rule:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_seen_at_or_below_the_mark_changes_nothing_and_is_not_an_error() {
+            let w = seen_world("seen-below", "user", SEEN_ROLES);
+            w.seen_posts("hobi", 3);
+            assert!(is_seen(&w.seen_ask(seen(u64::MAX)).await.0));
+            let attempts = w.board_blobs.attempts();
+            for through in [3, 2, 0] {
+                let (answer, records) = w.seen_ask(seen(through)).await;
+                assert!(is_seen(&answer), "{through}: {answer:?}");
+                assert_eq!(
+                    trail(&records),
+                    [
+                        marked(INTENT, w.own_mark_board(), at(3)),
+                        marked(DONE, w.own_mark_board(), at(3)),
+                    ]
+                );
+            }
+            assert_eq!(w.mark_of(w.me), 3);
+            assert_eq!(w.board_blobs.attempts(), attempts, "nothing is written");
+        }
+
+        #[tokio::test]
+        async fn a_seen_reaches_only_the_callers_own_board() {
+            let w = seen_world("seen-own-board", "user", SEEN_ROLES);
+            w.enable(OTHER, true);
+            for i in 1..=2 {
+                w.stored_on(
+                    BoardKey(OTHER),
+                    "hobi",
+                    note(&format!("sentinel-715-other-{i}")),
+                    PostLabels::default(),
+                );
+            }
+            w.seen_posts("hobi", 3);
+            let records = Records::new(0);
+            let raw = w
+                .raw_body(widened(seen(u64::MAX), "BoardManage"), &records)
+                .await;
+            assert!(is_seen(&answer_of(&raw).await));
+            assert_eq!(w.mark_of(w.me), 3);
+            assert_eq!(w.mark_of(OTHER), 0);
+            let records = board_records(&records);
+            assert!(!records.is_empty());
+            for r in &records {
+                assert_eq!(r.object, w.own_mark_board());
+            }
+        }
+
+        #[tokio::test]
+        async fn a_seen_from_the_agent_channel_is_refused() {
+            let w = seen_world("seen-agent", "user", SEEN_ROLES);
+            let h = w.at_work("hobi");
+            w.seen_posts("suga", 3);
+            let attempts = w.board_blobs.attempts();
+            let (answer, records) = w.board("hobi", seen(u64::MAX), h).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [marked(
+                    (
+                        "deny",
+                        "agent hobi: board.manage is never permitted to an agent",
+                        "unauthorized"
+                    ),
+                    None,
+                    None
+                )]
+            );
+            assert_eq!(w.mark_of(w.me), 0);
+            assert_eq!(w.mark_of(HOBI_UID), 0);
+            assert_eq!(w.board_blobs.attempts(), attempts);
+        }
+
+        #[tokio::test]
+        async fn a_contained_person_may_not_mark_seen() {
+            let w = seen_world("seen-contained", "adversary", SEEN_ROLES);
+            w.seen_posts("hobi", 3);
+            let attempts = w.board_blobs.attempts();
+            let (answer, records) = w.seen_ask(seen(u64::MAX)).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [marked(
+                    ("deny", "subject contained: role=adversary", "unauthorized"),
+                    w.own_mark_board(),
+                    None
+                )]
+            );
+            assert_eq!(w.mark_of(w.me), 0);
+            assert_eq!(w.board_blobs.attempts(), attempts);
+        }
+
+        #[tokio::test]
+        async fn a_role_without_board_manage_may_not_mark_seen() {
+            let w = seen_world("seen-ungranted", "user", BOARD_ROLES);
+            w.seen_posts("hobi", 3);
+            let attempts = w.board_blobs.attempts();
+            let (answer, records) = w.seen_ask(seen(u64::MAX)).await;
+            assert!(unauthorized(&answer), "{answer:?}");
+            assert_eq!(
+                trail(&records),
+                [marked(
+                    (
+                        "deny",
+                        "role user: no rule for board.manage",
+                        "unauthorized"
+                    ),
+                    w.own_mark_board(),
+                    None
+                )]
+            );
+            assert_eq!(w.mark_of(w.me), 0);
+            assert_eq!(w.board_blobs.attempts(), attempts);
+        }
+
+        #[tokio::test]
+        async fn a_new_listing_lists_only_posts_above_the_mark() {
+            let w = seen_world("seen-new-list", "user", SEEN_ROLES);
+            w.seen_posts("hobi", 5);
+            assert!(is_seen(&w.seen_ask(seen(3)).await.0));
+            let (answer, records) = w.seen_list(None, true).await;
+            let l = listing_of(answer);
+            assert_eq!(seqs(&l), [4, 5]);
+            assert_eq!(l.older, None);
+            let got: Vec<_> = records
+                .iter()
+                .map(|r| {
+                    (
+                        r.action.as_str(),
+                        r.subject.board_op.as_deref(),
+                        r.outcome.result.as_str(),
+                        r.outcome.reason.as_str(),
+                        r.object.clone(),
+                        r.board.clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                got,
+                [(
+                    "board.read",
+                    Some("list"),
+                    "permit",
+                    "done",
+                    w.own_mark_board(),
+                    Some(BoardAudit {
+                        first_seq: Some(4),
+                        last_seq: Some(5),
+                        returned: Some(2),
+                        withheld: Some(0),
+                        ..BoardAudit::default()
+                    })
+                )]
+            );
+            assert_eq!(
+                seqs(&listing_of(w.seen_list(None, false).await.0)),
+                [1, 2, 3, 4, 5]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_new_listing_pages_down_to_the_mark() {
+            let w = seen_world("seen-new-pages", "user", SEEN_ROLES);
+            w.seen_posts("hobi", 40);
+            assert!(is_seen(&w.seen_ask(seen(5)).await.0));
+            let top = listing_of(w.seen_list(None, true).await.0);
+            assert_eq!(seqs(&top), (9..=40).collect::<Vec<_>>());
+            assert_eq!(top.older, Some(9));
+            let rest = listing_of(w.seen_list(Some(9), true).await.0);
+            assert_eq!(seqs(&rest), [6, 7, 8]);
+            assert_eq!(rest.older, None);
+            for before in [6, 5, 1] {
+                let none = listing_of(w.seen_list(Some(before), true).await.0);
+                assert!(none.entries.is_empty(), "{before}");
+                assert_eq!(none.older, None);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_new_listing_writes_nothing_and_moves_no_mark() {
+            let w = seen_world("seen-new-writes-nothing", "user", SEEN_ROLES);
+            let h = w.at_work("hobi");
+            w.seen_posts("suga", 5);
+            assert!(is_seen(&w.seen_ask(seen(2)).await.0));
+            let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+            page_of(w.board("hobi", read(None), h).await.0);
+            let sent = w.agents.board.sent_to(w.key(), &hobi);
+            assert!(!sent.is_empty());
+            let cursor = w.cursor("hobi");
+            let attempts = w.board_blobs.attempts();
+            for (before, new) in [(None, true), (Some(5), true), (Some(4), false)] {
+                let (answer, records) = w.seen_list(before, new).await;
+                listing_of(answer);
+                let actions: Vec<_> = records
+                    .iter()
+                    .map(|r| (r.action.as_str(), r.subject.board_op.as_deref()))
+                    .collect();
+                assert_eq!(actions, [("board.read", Some("list"))], "{before:?} {new}");
+            }
+            assert_eq!(w.board_blobs.attempts(), attempts, "nothing is written");
+            assert_eq!(w.mark_of(w.me), 2);
+            assert_eq!(w.cursor("hobi"), cursor);
+            assert_eq!(w.agents.board.sent_to(w.key(), &hobi), sent);
+        }
+
+        #[tokio::test]
+        async fn a_new_listing_reaches_only_the_callers_own_board() {
+            let w = seen_world("seen-new-own-board", "user", SEEN_ROLES);
+            for i in 1..=3 {
+                w.stored_on(
+                    BoardKey(OTHER),
+                    "hobi",
+                    note(&format!("sentinel-715-other-{i}")),
+                    PostLabels::default(),
+                );
+            }
+            w.seen_posts("hobi", 3);
+            assert!(is_seen(&w.seen_ask(seen(2)).await.0));
+            let listing = Verb::BoardList {
+                before: None,
+                new: true,
+            };
+            let records = Records::new(0);
+            let raw = w.raw_body(widened(listing, "BoardList"), &records).await;
+            let l = listing_of(answer_of(&raw).await);
+            let bodies: Vec<String> = l
+                .entries
+                .iter()
+                .map(|e| e.post.draft.body.expose().to_string())
+                .collect();
+            assert_eq!(bodies, ["sentinel-715-3"]);
+            assert_eq!(board_records(&records)[0].object, w.own_mark_board());
+        }
+
+        /// Three posts; hobi has read them unacknowledged, jin has acknowledged the first and
+        /// holds the rest unacknowledged.
+        async fn two_readers(w: &World) -> (TaskId, TaskId) {
+            let (h, j) = (w.at_work("hobi"), w.at_work("jin"));
+            let posts = w.seen_posts("suga", 3);
+            assert_eq!(
+                bodies(&page_of(w.board("jin", read(None), j).await.0)),
+                ["sentinel-715-1", "sentinel-715-2", "sentinel-715-3"]
+            );
+            page_of(w.board("jin", read(Some(posts[0])), j).await.0);
+            page_of(w.board("hobi", read(None), h).await.0);
+            (h, j)
+        }
+
+        type Reading = Vec<(u64, std::collections::BTreeSet<u64>)>;
+
+        fn reading(w: &World) -> Reading {
+            ["hobi", "jin"]
+                .iter()
+                .map(|a| {
+                    let agent = maknae_config::AgentId::parse(a).unwrap();
+                    (w.cursor(a), w.agents.board.sent_to(w.key(), &agent))
+                })
+                .collect()
+        }
+
+        async fn next_reads(w: &World, (h, j): (TaskId, TaskId)) -> Vec<Vec<String>> {
+            vec![
+                bodies(&page_of(w.board("hobi", read(None), h).await.0)),
+                bodies(&page_of(w.board("jin", read(None), j).await.0)),
+            ]
+        }
+
+        #[tokio::test]
+        async fn seen_leaves_every_agents_read_unchanged() {
+            let w = seen_world("seen-agents-unchanged", "user", SEEN_ROLES);
+            let tasks = two_readers(&w).await;
+            let before = reading(&w);
+            assert!(
+                before.iter().all(|(_, sent)| !sent.is_empty()),
+                "{before:?}"
+            );
+            assert!(before[1].0 > 0, "jin holds an acknowledged cursor");
+            for through in [u64::MAX, 2] {
+                assert!(is_seen(&w.seen_ask(seen(through)).await.0));
+                assert_eq!(reading(&w), before, "{through}");
+            }
+            assert_eq!(w.mark_of(w.me), 3);
+
+            let twin = seen_world("seen-agents-unchanged-twin", "user", SEEN_ROLES);
+            let twin_tasks = two_readers(&twin).await;
+            assert_eq!(reading(&twin), before);
+            assert_eq!(
+                next_reads(&w, tasks).await,
+                next_reads(&twin, twin_tasks).await
+            );
+        }
+    }
+
     mod list {
         use super::*;
         use maknae_audit_append::BoardAudit;
@@ -8667,7 +9168,14 @@ mod board {
             assert_eq!(records[0].object, w.own());
 
             let mut request: Value = ciborium::from_reader(
-                request_body(Verb::BoardList { before: None }, None).as_slice(),
+                request_body(
+                    Verb::BoardList {
+                        before: None,
+                        new: false,
+                    },
+                    None,
+                )
+                .as_slice(),
             )
             .unwrap();
             fn widen(v: &mut Value) -> bool {
@@ -8768,7 +9276,11 @@ mod board {
             w.enable(w.me, true);
             let h = w.at_work("hobi");
             w.stored("jin", "sentinel-714-agent", PostLabels::default());
-            let (answer, records) = w.board("hobi", Verb::BoardList { before: None }, h).await;
+            let listing = Verb::BoardList {
+                before: None,
+                new: false,
+            };
+            let (answer, records) = w.board("hobi", listing, h).await;
             assert!(unauthorized(&answer), "{answer:?}");
             assert_eq!(
                 trail(&records),
@@ -8834,6 +9346,438 @@ mod board {
                 trail(&records),
                 [rec(done(LISTED), w.own(), counted(Some((1, 3)), 2, 0))]
             );
+        }
+
+        mod unseen {
+            use super::*;
+            use maknae_kernel::Report;
+            use maknae_proto::{BoardOp, BoardUnseen};
+            use std::time::Instant;
+
+            const UNSEEN_ROLES: &str = "roles:\n  user:\n    allow: [\"session.task\", \"board.post\", \"board.read\", \"board.manage\"]\n";
+            const RETAIN: i64 = 7 * 24 * 60 * 60;
+
+            fn unseen_world(tag: &str, roles: &str) -> World {
+                let mut w = world_of(
+                    tag,
+                    "user",
+                    roles,
+                    &[
+                        ("hobi", HOBI_UID, PLAIN),
+                        ("suga", SUGA_UID, PLAIN),
+                        ("jin", JIN_UID, PLAIN),
+                    ],
+                );
+                w.switch(true, &["hobi", "suga", "jin"]);
+                w.report_to(w.me, Report::Summary);
+                w
+            }
+
+            impl World {
+                fn report_to(&self, uid: u32, report: Report) {
+                    BoardSeam::set_settings(
+                        &*self.agents.board,
+                        BoardKey(uid),
+                        Settings {
+                            enabled: true,
+                            report,
+                        },
+                    )
+                    .unwrap();
+                }
+
+                fn plain(&self, author: &str, n: u64) {
+                    for i in 1..=n {
+                        self.stored(
+                            author,
+                            &format!("sentinel-715-{author}-{i}"),
+                            PostLabels::default(),
+                        );
+                    }
+                }
+
+                fn status(&self) -> Verb {
+                    Verb::TaskStatus {
+                        task: r(&self.mine("hobi")),
+                    }
+                }
+
+                /// A person's request `verb`, decided by `authorizer`, and the whole reply.
+                async fn counted_as<P>(&self, authorizer: &Arc<P>, verb: Verb) -> Response
+                where
+                    P: maknae_security::Authorizer
+                        + maknae_kernel::SensitiveNow
+                        + maknae_kernel::CatalogNow
+                        + Send
+                        + Sync
+                        + 'static,
+                {
+                    let raw = {
+                        let _shared = STORE.read().await;
+                        let (session, gate) = self.person_session();
+                        self.serve_as(
+                            Arc::clone(authorizer),
+                            session,
+                            gate,
+                            request_body(verb, None),
+                            &Records::new(0),
+                            None,
+                            self.wiring(),
+                        )
+                        .await
+                    };
+                    let mut cursor = &raw[..];
+                    let frame = common::read_frame(&mut cursor, 1 << 20)
+                        .await
+                        .expect("one frame");
+                    maknae_proto::decode_response(&frame).unwrap()
+                }
+
+                async fn counted(&self, verb: Verb) -> Response {
+                    self.response_with(verb, &Records::new(0)).await
+                }
+            }
+
+            /// The count on a permitted reply.
+            fn unseen_of(resp: &Response) -> Option<BoardUnseen> {
+                assert!(matches!(resp.result, RespResult::Ok(_)), "{resp:?}");
+                resp.board_unseen
+            }
+
+            fn slow(w: &World) -> Arc<common::SlowOn<Pdp>> {
+                Arc::new(common::SlowOn {
+                    inner: Arc::clone(&w.pdp),
+                    label: LABEL,
+                    delay: Duration::from_millis(2500),
+                })
+            }
+
+            fn has_field(raw: &[u8]) -> bool {
+                raw.windows(b"board_unseen".len())
+                    .any(|w| w == b"board_unseen")
+            }
+
+            #[tokio::test]
+            async fn a_task_reply_carries_the_count_of_posts_above_the_mark() {
+                let w = unseen_world("unseen-carried", UNSEEN_ROLES);
+                w.plain("hobi", 3);
+                let status = w.counted(w.status()).await;
+                assert!(matches!(
+                    status.result,
+                    RespResult::Ok(Payload::TaskState(_))
+                ));
+                assert_eq!(unseen_of(&status), Some(BoardUnseen::Exact(3)));
+                let submitted = w.counted(submit("hobi", "sentinel-715-ask")).await;
+                assert!(matches!(
+                    submitted.result,
+                    RespResult::Ok(Payload::TaskAccepted(_))
+                ));
+                assert_eq!(unseen_of(&submitted), Some(BoardUnseen::Exact(3)));
+            }
+
+            #[tokio::test]
+            async fn report_off_carries_no_count() {
+                let w = unseen_world("unseen-off", UNSEEN_ROLES);
+                w.plain("hobi", 3);
+                w.report_to(w.me, Report::Off);
+                let raw = w.raw(w.status(), &Records::new(0)).await;
+                assert!(!has_field(&raw));
+                assert_eq!(unseen_of(&w.counted(w.status()).await), None);
+                w.report_to(w.me, Report::Every);
+                let raw = w.raw(w.status(), &Records::new(0)).await;
+                assert!(has_field(&raw));
+            }
+
+            #[tokio::test]
+            async fn over_is_sent_whenever_more_remain_whatever_was_released() {
+                let w = unseen_world("unseen-over", UNSEEN_ROLES);
+                w.plain("hobi", 40);
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Over)
+                );
+                let w = unseen_world("unseen-over-withheld", UNSEEN_ROLES);
+                w.plain("hobi", 8);
+                for i in 9..=40 {
+                    w.stored("jin", &format!("sentinel-715-held-{i}"), labelled());
+                }
+                let status = w.status();
+                assert_eq!(
+                    unseen_of(&w.counted_as(&denier(&w), status).await),
+                    Some(BoardUnseen::Over)
+                );
+            }
+
+            #[tokio::test]
+            async fn seen_makes_the_next_count_zero() {
+                let w = unseen_world("unseen-seen", UNSEEN_ROLES);
+                w.plain("hobi", 3);
+                let seen = Verb::BoardManage {
+                    op: BoardOp::Seen { through: u64::MAX },
+                };
+                assert!(matches!(
+                    w.ask(seen).await,
+                    RespResult::Ok(Payload::BoardSeen)
+                ));
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(0))
+                );
+                w.plain("suga", 2);
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(2))
+                );
+            }
+
+            #[tokio::test]
+            async fn the_count_omits_a_post_an_operand_withholds_from_the_person() {
+                let w = unseen_world("unseen-withheld", UNSEEN_ROLES);
+                w.plain("hobi", 3);
+                for i in 1..=2 {
+                    w.stored("jin", &format!("sentinel-715-labelled-{i}"), labelled());
+                }
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(5))
+                );
+                let status = w.status();
+                assert_eq!(
+                    unseen_of(&w.counted_as(&denier(&w), status).await),
+                    Some(BoardUnseen::Exact(3))
+                );
+            }
+
+            #[tokio::test]
+            async fn held_and_expired_posts_count_as_the_listing_lists_them() {
+                let w = unseen_world("unseen-retention", UNSEEN_ROLES);
+                w.stored("hobi", "sentinel-715-aged-held", PostLabels::default());
+                w.stored("jin", "sentinel-715-aged", PostLabels::default());
+                w.clock.set(T0 + 1);
+                w.plain("jin", 2);
+                w.hold_for(HOBI_UID);
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(4))
+                );
+                w.clock.set(T0 + RETAIN);
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(3))
+                );
+                let (answer, _) = w
+                    .listing_as(
+                        &Arc::clone(&w.pdp),
+                        Verb::BoardList {
+                            before: None,
+                            new: true,
+                        },
+                    )
+                    .await;
+                assert_eq!(listing_of(answer).entries.len(), 3);
+            }
+
+            #[tokio::test]
+            async fn a_role_without_board_read_gets_no_count() {
+                let roles = "roles:\n  user:\n    allow: [\"session.task\"]\n";
+                let w = unseen_world("unseen-no-read", roles);
+                w.plain("hobi", 3);
+                let records = Records::new(0);
+                let resp = w.response_with(w.status(), &records).await;
+                assert_eq!(unseen_of(&resp), None);
+                assert!(board_records(&records).is_empty());
+                assert!(records
+                    .snapshot()
+                    .iter()
+                    .all(|r| r.outcome.result == "permit"));
+            }
+
+            #[tokio::test]
+            async fn the_count_drops_a_post_that_leaves_before_the_reply() {
+                let w = unseen_world("unseen-leaves", UNSEEN_ROLES);
+                w.stored("hobi", "sentinel-715-leaves", PostLabels::default());
+                w.clock.set(T0 + 1);
+                w.plain("jin", 2);
+                let pdp = Arc::new(common::AdvancesClockDuringBatch {
+                    inner: Arc::clone(&w.pdp),
+                    clock: Arc::clone(&w.clock),
+                    at: T0 + RETAIN,
+                    armed: std::sync::atomic::AtomicBool::new(true),
+                });
+                let status = w.status();
+                assert_eq!(
+                    unseen_of(&w.counted_as(&pdp, status).await),
+                    Some(BoardUnseen::Exact(2))
+                );
+                assert!(!pdp.armed.load(std::sync::atomic::Ordering::SeqCst));
+            }
+
+            #[tokio::test]
+            async fn a_count_whose_batch_times_out_is_omitted_and_the_task_answers() {
+                let w = unseen_world("unseen-timeout", UNSEEN_ROLES);
+                w.plain("hobi", 2);
+                w.stored("jin", "sentinel-715-slow", labelled());
+                let status = w.status();
+                let resp = w.counted_as(&slow(&w), status).await;
+                assert!(matches!(resp.result, RespResult::Ok(Payload::TaskState(_))));
+                assert_eq!(resp.board_unseen, None);
+            }
+
+            #[tokio::test]
+            async fn a_refused_task_request_computes_no_count() {
+                let w = unseen_world("unseen-refused", UNSEEN_ROLES);
+                w.stored("jin", "sentinel-715-slow", labelled());
+                let theirs = Verb::TaskStatus {
+                    task: r(&w.theirs("hobi")),
+                };
+                let started = Instant::now();
+                let resp = w.counted_as(&slow(&w), theirs).await;
+                assert!(matches!(resp.result, RespResult::Err(_)), "{resp:?}");
+                assert_eq!(resp.board_unseen, None);
+                assert!(
+                    started.elapsed() < Duration::from_secs(1),
+                    "{:?}",
+                    started.elapsed()
+                );
+            }
+
+            #[tokio::test]
+            async fn a_slow_post_trips_only_the_counts_breaker() {
+                let w = unseen_world("unseen-breaker", UNSEEN_ROLES);
+                w.plain("hobi", 2);
+                w.stored("jin", "sentinel-715-slow", labelled());
+                let slow = slow(&w);
+                for _ in 0..3 {
+                    let resp = w.counted_as(&slow, w.status()).await;
+                    assert!(matches!(resp.result, RespResult::Ok(Payload::TaskState(_))));
+                    assert_eq!(resp.board_unseen, None);
+                }
+                let started = Instant::now();
+                let resp = w.counted_as(&slow, w.status()).await;
+                let waited = started.elapsed();
+                assert!(matches!(resp.result, RespResult::Ok(Payload::TaskState(_))));
+                assert_eq!(resp.board_unseen, None);
+                assert!(waited < Duration::from_secs(1), "{waited:?}");
+                let settings = Verb::BoardManage {
+                    op: BoardOp::Settings { set: None },
+                };
+                let resp = w.counted_as(&slow, settings).await;
+                assert!(
+                    matches!(resp.result, RespResult::Ok(Payload::BoardSettings(_))),
+                    "{resp:?}"
+                );
+            }
+
+            #[tokio::test]
+            async fn the_count_is_of_the_callers_own_board_only() {
+                let w = unseen_world("unseen-own", UNSEEN_ROLES);
+                w.report_to(OTHER, Report::Every);
+                for i in 1..=5 {
+                    w.stored_on(
+                        BoardKey(OTHER),
+                        "hobi",
+                        note(&format!("sentinel-715-other-{i}")),
+                        PostLabels::default(),
+                    );
+                }
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(0))
+                );
+            }
+
+            #[tokio::test]
+            async fn an_agent_channel_reply_carries_no_count() {
+                let w = unseen_world("unseen-agent", UNSEEN_ROLES);
+                w.report_to(w.me, Report::Every);
+                w.plain("suga", 3);
+                let resp = w.agent_response("hobi", CLAIM).await;
+                assert!(matches!(resp.result, RespResult::Ok(_)), "{resp:?}");
+                assert_eq!(resp.board_unseen, None);
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(3))
+                );
+            }
+
+            #[tokio::test]
+            async fn an_agents_counted_verb_carries_no_count() {
+                const READS: &str =
+                    "schema_version: 1\nactions:\n  allow: [\"session.task\", \"board.read\"]\n";
+                let mut w = world_of(
+                    "unseen-agent-status",
+                    "user",
+                    UNSEEN_ROLES,
+                    &[
+                        ("hobi", HOBI_UID, READS),
+                        ("suga", SUGA_UID, TASKED_BY_HOBI),
+                    ],
+                );
+                w.switch(true, &["hobi", "suga"]);
+                w.report_to(w.me, Report::Every);
+                w.report_to(HOBI_UID, Report::Every);
+                let parent = w.submit("hobi", "sentinel-715-parent").await;
+                assert_eq!(w.claimed("hobi").await, parent);
+                let sub = match w
+                    .agent("hobi", submit("suga", "sentinel-715-sub"), Some(parent))
+                    .await
+                {
+                    RespResult::Ok(Payload::TaskAccepted(v)) => v.task.to_id(),
+                    other => panic!("{other:?}"),
+                };
+                w.plain("suga", 3);
+                for i in 1..=3 {
+                    w.stored_on(
+                        BoardKey(HOBI_UID),
+                        "suga",
+                        note(&format!("sentinel-715-hobi-{i}")),
+                        PostLabels::default(),
+                    );
+                }
+                let raw = w
+                    .agent_raw(
+                        "hobi",
+                        Verb::TaskStatus { task: r(&sub) },
+                        Some(parent),
+                        &Records::new(0),
+                    )
+                    .await;
+                let mut cursor = &raw[..];
+                let frame = common::read_frame(&mut cursor, 1 << 20).await.unwrap();
+                let resp = maknae_proto::decode_response(&frame).unwrap();
+                assert!(
+                    matches!(resp.result, RespResult::Ok(Payload::TaskState(_))),
+                    "{resp:?}"
+                );
+                assert_eq!(resp.board_unseen, None);
+                assert!(!has_field(&raw));
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(3))
+                );
+            }
+
+            #[tokio::test]
+            async fn a_list_or_collect_reply_carries_no_count() {
+                let w = unseen_world("unseen-list", UNSEEN_ROLES);
+                w.plain("hobi", 3);
+                for verb in [
+                    list("hobi", None),
+                    collect("hobi", None),
+                    Verb::AgentList { after: None },
+                ] {
+                    let resp = w.counted(verb.clone()).await;
+                    assert!(
+                        matches!(resp.result, RespResult::Ok(_)),
+                        "{verb:?}: {resp:?}"
+                    );
+                    assert_eq!(resp.board_unseen, None, "{verb:?}");
+                }
+                assert_eq!(
+                    unseen_of(&w.counted(w.status()).await),
+                    Some(BoardUnseen::Exact(3))
+                );
+            }
         }
     }
 }
