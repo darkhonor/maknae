@@ -457,6 +457,54 @@ mod tests {
     }
 
     #[test]
+    fn every_offset_of_every_windowed_form_is_indexed() {
+        let lettered: Vec<u8> = (0xau8..=0xf)
+            .flat_map(|hi| (0xau8..=0xf).map(move |lo| hi << 4 | lo))
+            .collect();
+        let twenty = lettered[..20].to_vec();
+        for v in [lettered, twenty] {
+            let idx = build_index(&[&v]);
+            for (t, &w) in WINDOWS.iter().enumerate() {
+                let mut all: Vec<&[u8]> = idx
+                    .forms
+                    .iter()
+                    .filter(|f| f.window == w)
+                    .flat_map(|f| f.bytes.windows(w))
+                    .collect();
+                all.sort();
+                all.dedup();
+                let mut held: Vec<&[u8]> = entries(&idx, t).into_iter().map(|(b, _)| b).collect();
+                held.sort();
+                assert_eq!(held, all, "w={w}");
+                let mut checked = 0;
+                for (i, f) in idx.forms.iter().enumerate() {
+                    if f.window != w {
+                        continue;
+                    }
+                    let shared = f.bytes.windows(w).any(|x| {
+                        idx.forms.iter().enumerate().any(|(j, g)| {
+                            j != i && g.window == w && g.bytes.windows(w).any(|y| y == x)
+                        })
+                    });
+                    if shared {
+                        continue;
+                    }
+                    checked += 1;
+                    let mut offsets: Vec<u32> = idx.tables[t]
+                        .iter()
+                        .filter(|e| e.0 as usize == i)
+                        .map(|e| e.1)
+                        .collect();
+                    offsets.sort_unstable();
+                    let want: Vec<u32> = (0..=(f.bytes.len() - w) as u32).collect();
+                    assert_eq!(offsets, want, "form {i} w={w}");
+                }
+                assert!(checked > 0, "w={w}");
+            }
+        }
+    }
+
+    #[test]
     fn the_index_holds_one_entry_per_distinct_window_and_source() {
         let a64 = vec![b'a'; 64];
         let idx = build_index(&[&a64]);
