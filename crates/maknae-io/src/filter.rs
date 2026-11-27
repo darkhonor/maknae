@@ -202,10 +202,18 @@ pub trait LeakHook {
     fn leaked(&mut self, sources: &[Source]);
 }
 
-#[derive(Debug, PartialEq, Eq)]
 pub enum Screened {
     Clean(Zeroizing<Vec<u8>>),
     Withheld { len: usize },
+}
+
+impl fmt::Debug for Screened {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Screened::Clean(output) => write!(f, "Clean({} bytes)", output.len()),
+            Screened::Withheld { len } => write!(f, "Withheld {{ len: {len} }}"),
+        }
+    }
 }
 
 pub struct ValueFilter {
@@ -315,10 +323,23 @@ impl ValueFilter {
     }
 
     pub fn screen(&self, output: Zeroizing<Vec<u8>>, hook: &mut dyn LeakHook) -> Screened {
+        self.screen_counted(output, hook, &mut 0)
+    }
+
+    fn screen_counted(
+        &self,
+        output: Zeroizing<Vec<u8>>,
+        hook: &mut dyn LeakHook,
+        work: &mut u64,
+    ) -> Screened {
         let mut found = Found::new(self.sources.len());
-        let _ = self.scan(&output, &mut 0, |_, _, source| {
+        let _ = self.scan(&output, work, |_, _, source| {
             found.add(source);
-            ControlFlow::Continue(())
+            if found.order.len() == self.values {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
         });
         if found.order.is_empty() {
             return Screened::Clean(output);
@@ -330,6 +351,17 @@ impl ValueFilter {
             .collect();
         hook.leaked(&sources);
         Screened::Withheld { len: output.len() }
+    }
+
+    #[cfg(test)]
+    fn screen_with_work(
+        &self,
+        output: Zeroizing<Vec<u8>>,
+        hook: &mut dyn LeakHook,
+    ) -> (Screened, u64) {
+        let mut work = 0;
+        let screened = self.screen_counted(output, hook, &mut work);
+        (screened, work)
     }
 
     pub fn mask_in_place(&self, buf: &mut [u8]) -> Vec<Source> {
@@ -1269,6 +1301,43 @@ mod tests {
         assert_eq!(out, embed(&stars(18)));
         assert_eq!(found, vec![Source::Label("pw")]);
         assert_eq!(masked(&f, &embed(TOKEN)).1, vec![Source::Label("tok")]);
+    }
+
+    #[test]
+    fn screened_debug_shows_only_the_length() {
+        let clean = Screened::Clean(Zeroizing::new(b"sentinel-screened-0001".to_vec()));
+        let shown = format!("{clean:?}");
+        assert!(!shown.contains("sentinel"), "{shown}");
+        assert_eq!(shown, "Clean(22 bytes)");
+        assert_eq!(
+            format!("{:?}", Screened::Withheld { len: 7 }),
+            "Withheld { len: 7 }"
+        );
+    }
+
+    struct Calls(usize);
+
+    impl LeakHook for Calls {
+        fn leaked(&mut self, _: &[Source]) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn screen_stops_once_every_source_is_found() {
+        let v = token();
+        let f = filter_of(&[&v, b"tiny"]);
+        assert_eq!(f.skipped(), 1);
+        let mut calls = Calls(0);
+        let (alone, w_alone) = f.screen_with_work(Zeroizing::new(v.clone()), &mut calls);
+        let mut long = v.clone();
+        long.extend(std::iter::repeat_n(b'x', 4096));
+        let (padded, w_padded) = f.screen_with_work(Zeroizing::new(long), &mut calls);
+        assert!(matches!(alone, Screened::Withheld { len } if len == v.len()));
+        assert!(matches!(padded, Screened::Withheld { len } if len == v.len() + 4096));
+        assert_eq!(calls.0, 2);
+        assert!(w_alone > 0);
+        assert_eq!(w_padded, w_alone);
     }
 
     #[test]

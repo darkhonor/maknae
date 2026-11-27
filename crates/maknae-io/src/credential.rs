@@ -576,7 +576,10 @@ mod tests {
             let out = output(&[b"token is ", value, b"\n"]);
             let len = out.len();
             let (s, rec) = screened(&lc, out);
-            assert_eq!(s, Screened::Withheld { len });
+            assert!(
+                matches!(s, Screened::Withheld { len: l } if l == len),
+                "{s:?}"
+            );
             assert_eq!(rec.calls, 1);
             assert_eq!(rec.seen, [Source::Slot(slot_env(name))]);
             let shown = format!("{:?}", rec.seen);
@@ -587,11 +590,10 @@ mod tests {
     #[test]
     fn two_credentials_in_one_output_are_reported_once_in_one_call() {
         let (s, rec) = screened(&two_env(), output(&[NPM, b" ", GH, b" ", NPM, GH]));
-        assert_eq!(
-            s,
-            Screened::Withheld {
-                len: 2 * (GH.len() + NPM.len()) + 2
-            }
+        let len = 2 * (GH.len() + NPM.len()) + 2;
+        assert!(
+            matches!(s, Screened::Withheld { len: l } if l == len),
+            "{s:?}"
         );
         assert_eq!(rec.calls, 1);
         assert_eq!(
@@ -676,7 +678,10 @@ mod tests {
     fn an_empty_set_screens_everything_clean() {
         let lc = LaunchCredentials::new([0; 16]);
         let (s, rec) = screened(&lc, output(&[GH]));
-        assert_eq!(s, Screened::Clean(output(&[GH])));
+        let Screened::Clean(back) = s else {
+            panic!("withheld with no credentials");
+        };
+        assert_eq!(*back, GH);
         assert_eq!(rec.calls, 0);
     }
 
