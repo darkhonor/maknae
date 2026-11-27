@@ -72,11 +72,7 @@ impl<const N: usize> sealed::Sealed for [u8; N] {
     }
 
     fn len_ok(&self) -> Result<(), SecretError> {
-        if N == 0 {
-            Err(SecretError::Empty)
-        } else {
-            Ok(())
-        }
+        within_limit(N)
     }
 }
 
@@ -315,6 +311,20 @@ mod tests {
         let over = 65_537;
         assert!(matches!(text(&"a".repeat(over)), Err(SecretError::TooLong)));
         assert!(matches!(bytes(&vec![1u8; over]), Err(SecretError::TooLong)));
+    }
+
+    #[test]
+    fn the_array_form_takes_one_and_the_maximum_and_refuses_zero_and_one_over() {
+        assert!(MaknaeSecret::new(Zeroizing::new([1u8; 1])).is_ok());
+        assert!(MaknaeSecret::new(Zeroizing::new([1u8; 65_536])).is_ok());
+        assert!(matches!(
+            MaknaeSecret::new(Zeroizing::new([0u8; 0])),
+            Err(SecretError::Empty)
+        ));
+        assert!(matches!(
+            MaknaeSecret::new(Zeroizing::new([1u8; 65_537])),
+            Err(SecretError::TooLong)
+        ));
     }
 
     #[test]
