@@ -169,6 +169,7 @@ fn table(forms: &[Form], sources: &[u32], w: usize) -> Zeroizing<Vec<(u32, u32)>
 }
 
 pub(crate) const MAX_VALUES: usize = 1024;
+const MARKER: &str = "<redacted>";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -395,6 +396,9 @@ impl ValueFilter {
                 *b = b'*';
             }
         }
+        if self.matches(buf) {
+            buf.fill(b'*');
+        }
         found
             .order
             .iter()
@@ -415,15 +419,26 @@ impl ValueFilter {
             ControlFlow::Continue(())
         });
         widen(s, &mut coverage);
-        let mut out = String::with_capacity(len);
-        for (covered, r) in runs(&coverage) {
+        let runs = runs(&coverage);
+        let size = runs
+            .iter()
+            .map(|(covered, r)| if *covered { MARKER.len() } else { r.len() })
+            .sum();
+        let mut out = Zeroizing::new(String::with_capacity(size));
+        for (covered, r) in runs {
             if covered {
-                out.push_str("<redacted>");
+                out.push_str(MARKER);
             } else {
                 out.push_str(&s[r]);
             }
         }
-        out
+        if !self.matches(out.as_bytes()) {
+            out.as_str().to_owned()
+        } else if !self.matches(MARKER.as_bytes()) {
+            MARKER.to_owned()
+        } else {
+            String::new()
+        }
     }
 
     pub fn skipped(&self) -> usize {
@@ -1607,5 +1622,57 @@ mod tests {
         assert_eq!(found, v0());
         assert_eq!(buf, stars(16));
         assert_eq!(work, 1 + 16 + 16 + 15 + 16);
+    }
+
+    #[test]
+    fn a_redaction_that_rebuilds_the_value_is_withheld_whole() {
+        let secret = "abc<redacted>xyz!";
+        let f = filter_of(&[secret.as_bytes()]);
+        let triple = "abcabcabc<redacted>xyz!xyz!xyz!";
+        let once = f.redact_text(triple);
+        assert_eq!(once, "<redacted>");
+        assert!(!f.matches(once.as_bytes()));
+        let twice = f.redact_text(&once);
+        assert_eq!(twice, "<redacted>");
+        assert!(!twice.contains(secret));
+    }
+
+    #[test]
+    fn a_value_that_starts_with_the_marker_is_withheld_whole() {
+        let f = filter_of(&[b"<redacted>abcdef"]);
+        let out = f.redact_text("<redacted>abcdefabcdef");
+        assert_eq!(out, "<redacted>");
+        assert!(!f.matches(out.as_bytes()));
+        assert_eq!(f.redact_text("x <redacted>abcdef y"), "x <redacted> y");
+    }
+
+    #[test]
+    fn a_value_equal_to_the_marker_leaves_nothing() {
+        let f = filter_of(&[b"<redacted>"]);
+        let out = f.redact_text("a <redacted> b");
+        assert_eq!(out, "");
+        assert!(!f.matches(out.as_bytes()));
+    }
+
+    #[test]
+    fn a_mask_that_rebuilds_the_value_masks_the_whole_buffer() {
+        let v = [&b"ab"[..], &[b'*'; 14]].concat();
+        let f = filter_of(&[&v]);
+        let buf = [&b"zzabab"[..], &[b'*'; 14], b"\n"].concat();
+        let (out, found) = masked(&f, &buf);
+        assert_eq!(out, stars(buf.len()));
+        assert_eq!(found, v0());
+        assert!(!f.matches(&out));
+    }
+
+    #[test]
+    fn a_value_made_only_of_the_mask_byte_still_matches() {
+        let v = [b'*'; 16];
+        let f = filter_of(&[&v]);
+        let buf = [&b"ab "[..], &v, b" cd\n"].concat();
+        let (out, found) = masked(&f, &buf);
+        assert_eq!(out, stars(buf.len()));
+        assert_eq!(found, v0());
+        assert!(f.matches(&out));
     }
 }
