@@ -6,6 +6,7 @@
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::agent_enroll::AGENT_CREDENTIAL_NAME;
 use crate::VaultError;
+use maknae_io::MaknaeSecret;
 use std::env::VarError;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -311,41 +312,20 @@ fn nibble(c: u8) -> Result<u8, VaultError> {
 
 pub const MAX_AGENT_SECRET_BYTES: u64 = 1024;
 
-pub struct AgentSecret(Zeroizing<String>);
-
-impl AgentSecret {
-    pub fn new(secret: Zeroizing<String>) -> Self {
-        Self(secret)
+pub(crate) fn agent_secret_from_trimmed(text: &str) -> Result<MaknaeSecret, SecretSourceError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(SecretSourceError::Empty);
     }
-
-    pub fn expose(&self) -> &str {
-        &self.0
+    if text.len() as u64 > MAX_AGENT_SECRET_BYTES {
+        return Err(SecretSourceError::TooLarge {
+            max: MAX_AGENT_SECRET_BYTES,
+        });
     }
-
-    pub(crate) fn into_inner(self) -> Zeroizing<String> {
-        self.0
-    }
-
-    pub(crate) fn from_trimmed(text: &str) -> Result<Self, SecretSourceError> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(SecretSourceError::Empty);
-        }
-        if text.len() as u64 > MAX_AGENT_SECRET_BYTES {
-            return Err(SecretSourceError::TooLarge {
-                max: MAX_AGENT_SECRET_BYTES,
-            });
-        }
-        let mut secret = Zeroizing::new(String::with_capacity(text.len()));
-        secret.push_str(text);
-        Ok(Self(secret))
-    }
-}
-
-impl fmt::Debug for AgentSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AgentSecret(<redacted>)")
-    }
+    let mut secret = Zeroizing::new(String::with_capacity(text.len()));
+    secret.push_str(text);
+    MaknaeSecret::new(secret)
+        .map_err(|e| SecretSourceError::Read(crate::error::secret_error("agent SecretID", e)))
 }
 
 #[derive(Debug)]
@@ -459,12 +439,11 @@ mod tests {
             PathBuf::from("/run/credentials/maknae-agent@hobi.service/maknae-agent-secret-id")
         );
         assert!(matches!(
-            AgentSecret::from_trimmed(" \t\n"),
+            agent_secret_from_trimmed(" \t\n"),
             Err(SecretSourceError::Empty)
         ));
-        let s = AgentSecret::from_trimmed("\n sid \n").unwrap();
+        let s = agent_secret_from_trimmed("\n sid \n").unwrap();
         assert_eq!(s.expose(), "sid");
-        assert_eq!(s.0.capacity(), 3);
     }
 
     #[test]

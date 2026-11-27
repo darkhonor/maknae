@@ -1,4 +1,4 @@
-use crate::api_shape::{json_refusal, url_path_is_safe, SecretStr, VaultOp, WrapMismatch};
+use crate::api_shape::{json_refusal, url_path_is_safe, VaultOp, WrapMismatch};
 use crate::error::secret_error;
 use crate::VaultError;
 use maknae_io::MaknaeSecret;
@@ -338,6 +338,11 @@ struct Level<'f> {
     depth: u8,
 }
 
+#[derive(Deserialize)]
+struct KvLeaf(
+    #[serde(deserialize_with = "maknae_io::secret::de_zeroizing_string")] Zeroizing<String>,
+);
+
 impl<'de> DeserializeSeed<'de> for Level<'_> {
     type Value = Option<Zeroizing<String>>;
 
@@ -369,7 +374,7 @@ impl<'de> Visitor<'de> for Level<'_> {
                 return Err(<A::Error as serde::de::Error>::custom("duplicate key"));
             }
             found = Some(if self.depth == LEAF_DEPTH {
-                Some(map.next_value::<SecretStr>()?.0)
+                Some(map.next_value::<KvLeaf>()?.0)
             } else {
                 map.next_value_seed(Level {
                     field: self.field,
@@ -1035,7 +1040,7 @@ mod tests {
         assert_eq!(v.capacity(), 17);
         let escaped =
             select_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k").unwrap();
-        assert!(escaped.as_str() == "sk-X");
+        assert!(escaped.as_str() == "sk-X" && escaped.capacity() == 4);
         let named_data = select_kv_field(br#"{"data":{"data":{"data":"d"}}}"#, "data").unwrap();
         assert!(named_data.as_str() == "d");
     }

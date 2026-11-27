@@ -152,8 +152,9 @@ pub(crate) fn lookup_body(token: &MaknaeSecret) -> Result<Zeroizing<Vec<u8>>, Va
 
 pub(crate) fn approle_login_body(
     role_id: &str,
-    secret_id: &Zeroizing<String>,
+    secret_id: &MaknaeSecret,
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let secret_id = secret_id.expose();
     approle_credential("AppRole role_id", role_id)?;
     approle_credential("AppRole SecretID", secret_id)?;
     json_body(
@@ -628,8 +629,11 @@ mod tests {
         assert!(req.body().is_none());
     }
 
-    fn secret_id() -> Zeroizing<String> {
-        Zeroizing::new("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into())
+    fn secret_id() -> MaknaeSecret {
+        MaknaeSecret::new(Zeroizing::new(
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into(),
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -657,22 +661,28 @@ mod tests {
     fn a_malformed_approle_credential_or_mount_is_refused_before_any_request() {
         for (role, secret) in [
             ("", "s"),
-            ("r", ""),
             ("r\"", "s"),
+            ("r", "s\""),
             ("r", "s\nx"),
             ("r", "s x"),
         ] {
             assert!(
                 matches!(
-                    approle_login_body(role, &Zeroizing::new(secret.into())),
+                    approle_login_body(
+                        role,
+                        &MaknaeSecret::new(Zeroizing::new(secret.into())).unwrap()
+                    ),
                     Err(VaultError::InvalidSecret { .. })
                 ),
                 "{role:?} {secret:?}"
             );
         }
-        let e = approle_login_body("r", &Zeroizing::new("SENTINEL x".into()))
-            .unwrap_err()
-            .to_string();
+        let e = approle_login_body(
+            "r",
+            &MaknaeSecret::new(Zeroizing::new("SENTINEL x".into())).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(!e.contains("SENTINEL"), "{e}");
         let body = approle_login_body("r", &secret_id()).unwrap();
         assert!(matches!(
@@ -746,7 +756,7 @@ mod tests {
 
     #[test]
     fn the_service_request_bodies_are_sized_once_and_never_grow() {
-        let secret = Zeroizing::new("s".repeat(MAX_TOKEN_BYTES));
+        let secret = MaknaeSecret::new(Zeroizing::new("s".repeat(MAX_TOKEN_BYTES))).unwrap();
         let body = approle_login_body(&"r".repeat(MAX_TOKEN_BYTES), &secret).unwrap();
         let want = APPROLE_BODY_OVERHEAD + 2 * MAX_TOKEN_BYTES;
         assert_eq!((body.len(), body.capacity()), (want, want));

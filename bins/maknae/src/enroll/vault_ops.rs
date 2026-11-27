@@ -2,8 +2,8 @@
 //! `maknae enroll` needs (spec §4.1 step 3). No ordering/rollback/rotate
 //! decision logic of its own — `mod.rs` owns that; this module names the one
 //! role enroll provisions and wraps the client's ops for enroll's shape.
+use maknae_io::MaknaeSecret;
 use maknae_vault::{OperatorClient, VaultError};
-use zeroize::Zeroizing;
 
 /// The daemon's AppRole.
 pub const DAEMON_ROLE: &str = "maknaed";
@@ -14,7 +14,7 @@ pub const ROLES: [&str; 1] = [DAEMON_ROLE];
 /// `enroll-state.yaml` records and rollback/rotate destroy by.
 pub struct MintedSecret {
     pub role: &'static str,
-    pub secret: Zeroizing<String>,
+    pub secret: MaknaeSecret,
     pub accessor: String,
 }
 

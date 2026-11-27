@@ -1,5 +1,4 @@
 use crate::VaultError;
-use serde::de::{Deserialize, Deserializer, Visitor};
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -160,28 +159,6 @@ pub(crate) fn token_is_acceptable(s: &str) -> Result<(), &'static str> {
         return Err("has a character outside [A-Za-z0-9._-]");
     }
     Ok(())
-}
-
-pub(crate) struct SecretStr(pub(crate) Zeroizing<String>);
-
-struct SecretStrVisitor;
-
-impl Visitor<'_> for SecretStrVisitor {
-    type Value = Zeroizing<String>;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a string")
-    }
-
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(Zeroizing::new(v.to_owned()))
-    }
-}
-
-impl<'de> Deserialize<'de> for SecretStr {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        d.deserialize_str(SecretStrVisitor).map(SecretStr)
-    }
 }
 
 pub(crate) fn json_refusal(op: VaultOp, e: &serde_json::Error) -> VaultError {
@@ -439,25 +416,8 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_string_deserializes_plain_and_escaped_at_exact_size() {
-        let s: SecretStr = serde_json::from_slice(br#""plain""#).unwrap();
-        assert!(s.0.as_str() == "plain" && s.0.capacity() == 5);
-        let s: SecretStr = serde_json::from_slice(br#""sk\u002dA""#).unwrap();
-        assert!(s.0.as_str() == "sk-A" && s.0.capacity() == 4);
-        assert!(serde_json::from_slice::<SecretStr>(b"12").is_err());
-    }
-
-    #[test]
-    fn the_secret_visitor_names_what_it_expects() {
-        let expected: &dyn serde::de::Expected = &SecretStrVisitor;
-        assert_eq!(expected.to_string(), "a string");
-    }
-
-    #[test]
     fn a_json_refusal_never_echoes_the_body() {
-        let e = serde_json::from_slice::<SecretStr>(b"12345678")
-            .err()
-            .unwrap();
+        let e = serde_json::from_slice::<String>(b"12345678").err().unwrap();
         let msg = json_refusal(VaultOp::Unwrap, &e).to_string();
         assert!(!msg.contains("12345678"), "{msg}");
         assert!(msg.contains("Data error at line 1"), "{msg}");

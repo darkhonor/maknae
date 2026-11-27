@@ -272,4 +272,22 @@ mod tests {
             "{e}"
         );
     }
+
+    #[test]
+    fn a_vault_login_reply_whose_token_is_not_a_string_is_refused() {
+        for bad in ["12345678", "null", "true", r#"{"a":"b"}"#, r#"["hvs.x"]"#] {
+            let body = OK.replace(r#""hvs.USERTOKEN""#, bad);
+            let e = parse_login(body.as_bytes(), "alice").unwrap_err();
+            assert!(matches!(&e, VaultError::VaultBody { .. }), "{bad}: {e}");
+            assert!(!e.to_string().contains("12345678"), "{e}");
+        }
+        let empty = OK.replace(r#""hvs.USERTOKEN""#, r#""""#);
+        assert!(matches!(
+            parse_login(empty.as_bytes(), "alice"),
+            Err(VaultError::InvalidSecret {
+                what: "user token",
+                why: "is empty"
+            })
+        ));
+    }
 }

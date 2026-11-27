@@ -1,7 +1,8 @@
 use crate::agent_enroll::{AgentId, AGENT_SIGNING_IDENTIFIER};
-use crate::secret_source::{AgentSecret, SecretSourceError};
+use crate::secret_source::{agent_secret_from_trimmed, SecretSourceError};
 use crate::VaultError;
 use maknae_config::Value;
+use maknae_io::MaknaeSecret;
 use zeroize::Zeroizing;
 
 pub const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
@@ -147,7 +148,7 @@ pub fn read_agent_gated<K>(
     enrolled_uid: u32,
     id: &AgentId,
     read_item: K,
-) -> Result<AgentSecret, SecretSourceError>
+) -> Result<MaknaeSecret, SecretSourceError>
 where
     K: FnOnce(&str, &str) -> Result<Zeroizing<String>, VaultError>,
 {
@@ -159,7 +160,7 @@ where
     }
     let (service, account) = agent_keychain_item(id);
     let secret = read_item(service, &account).map_err(SecretSourceError::Read)?;
-    AgentSecret::from_trimmed(&secret)
+    agent_secret_from_trimmed(&secret)
 }
 
 #[cfg(test)]

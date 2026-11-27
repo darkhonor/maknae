@@ -39,6 +39,7 @@ use crate::stderr::errln;
 pub(crate) use agent_access::{Host, Platform, Ran, Run};
 use clap::{ArgGroup, Args, Subcommand};
 use maknae_io::program::{command, Program};
+use maknae_io::MaknaeSecret;
 use maknae_msgs::{detect_locale, msg, Locale, MsgId};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1348,14 +1349,14 @@ async fn run_helper(
 // Token intake (spec §4.1 step 2)
 // ============================================================================
 
-fn intake_token(args: &EnrollArgs, locale: Locale) -> Result<Zeroizing<String>, EnrollError> {
+fn intake_token(args: &EnrollArgs, locale: Locale) -> Result<MaknaeSecret, EnrollError> {
     intake_token_from(args.token_file.as_deref(), locale)
 }
 
 fn intake_token_from(
     token_file: Option<&Path>,
     locale: Locale,
-) -> Result<Zeroizing<String>, EnrollError> {
+) -> Result<MaknaeSecret, EnrollError> {
     if let Some(path) = token_file {
         let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
             path: path.to_path_buf(),
@@ -1365,7 +1366,9 @@ fn intake_token_from(
         if trimmed.is_empty() {
             return Err(EnrollError::MissingToken);
         }
-        return Ok(Zeroizing::new(trimmed.to_string()));
+        return Ok(maknae_vault::operator_token(Zeroizing::new(
+            trimmed.to_string(),
+        ))?);
     }
     let prompt = msg(locale, MsgId::EnrollTokenPrompt);
     let raw = rpassword::prompt_password(prompt).map_err(|e| EnrollError::Io {
@@ -1375,7 +1378,7 @@ fn intake_token_from(
     if raw.trim().is_empty() {
         return Err(EnrollError::MissingToken);
     }
-    Ok(Zeroizing::new(raw))
+    Ok(maknae_vault::operator_token(Zeroizing::new(raw))?)
 }
 
 // ============================================================================
@@ -2813,7 +2816,7 @@ async fn finish_enrollment(
     #[cfg(target_os = "macos")] release_team: &str,
     seal_home: maknae_vault::SealPubHome,
     daemon_role_id: &str,
-    daemon_secret: &Zeroizing<String>,
+    daemon_secret: &MaknaeSecret,
     vault_ca_pem: &[u8],
     root_ca_pem: &str,
     int_ca_pem: &str,
@@ -2902,7 +2905,7 @@ async fn finish_enrollment(
     if args.insecure_plaintext_secret {
         contents.insert(
             etc.join("private/maknae-secret-id"),
-            daemon_secret.as_bytes().to_vec(),
+            daemon_secret.expose().as_bytes().to_vec(),
         );
     }
 
@@ -2928,7 +2931,7 @@ async fn finish_enrollment(
         #[cfg(target_os = "macos")]
         {
             keychain_write::seal_secret_macos(
-                daemon_secret,
+                daemon_secret.expose(),
                 maknae_vault::KeychainPlane::Daemon,
                 keychain_write::DAEMON_BINARY,
                 release_team,
@@ -2942,7 +2945,7 @@ async fn finish_enrollment(
         }
     } else {
         seal_linux(
-            daemon_secret.as_bytes(),
+            daemon_secret.expose().as_bytes(),
             &sealed_row.path,
             maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             args.verbose,
@@ -4231,7 +4234,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         let client = maknae_vault::OperatorClient::new(
             addr,
             &ca_path,
-            Zeroizing::new("test-token".to_string()),
+            MaknaeSecret::new(Zeroizing::new("test-token".to_string())).unwrap(),
         )
         .expect("OperatorClient::new performs no network I/O — settings-only");
         let _ = std::fs::remove_file(&ca_path);

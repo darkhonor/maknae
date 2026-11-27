@@ -123,7 +123,7 @@ impl VaultApi {
         &self,
         mount: &str,
         role_id: &str,
-        secret_id: &Zeroizing<String>,
+        secret_id: &MaknaeSecret,
     ) -> Result<ServiceLogin, VaultError> {
         let body = approle_login_body(role_id, secret_id)?;
         let req = approle_login_request(&self.http, &self.base, mount, body)?;
@@ -292,7 +292,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let secret = Zeroizing::new("0f1e2d3c".to_string());
+        let secret = MaknaeSecret::new(Zeroizing::new("0f1e2d3c".to_string())).unwrap();
         assert!(matches!(
             rt.block_on(api.approle_login("approle", "role", &secret)),
             Err(VaultError::VaultTransport {
@@ -313,7 +313,11 @@ mod tests {
             Err(VaultError::InvalidMount(_))
         ));
         assert!(matches!(
-            rt.block_on(api.approle_login("approle", "role", &Zeroizing::new(String::new()))),
+            rt.block_on(api.approle_login(
+                "approle",
+                "role",
+                &MaknaeSecret::new(Zeroizing::new("a b".to_string())).unwrap()
+            )),
             Err(VaultError::InvalidSecret { .. })
         ));
     }

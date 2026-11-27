@@ -2,13 +2,13 @@
 //! recorded and sealed before any earlier one is destroyed.
 use super::agent::{dedup, AgentState};
 use super::EnrollError;
-use zeroize::Zeroizing;
+use maknae_io::MaknaeSecret;
 
 pub(crate) trait SecretSlot {
     type Sealed;
-    async fn mint(&self) -> Result<(Zeroizing<String>, String), EnrollError>;
+    async fn mint(&self) -> Result<(MaknaeSecret, String), EnrollError>;
     fn write_state(&self, state: &AgentState) -> Result<(), EnrollError>;
-    async fn seal(&self, secret: &Zeroizing<String>) -> Result<Self::Sealed, EnrollError>;
+    async fn seal(&self, secret: &MaknaeSecret) -> Result<Self::Sealed, EnrollError>;
     async fn destroy(&self, accessor: &str) -> Result<(), EnrollError>;
     fn orphaned(&self, accessor: String, cause: EnrollError, recorded: bool) -> EnrollError;
 }

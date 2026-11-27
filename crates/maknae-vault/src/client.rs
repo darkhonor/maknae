@@ -8,7 +8,7 @@ use crate::agent_enroll::AgentId;
 use crate::auth::AppRoleAuth;
 use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
-use crate::secret_source::{resolve_daemon_secret_source, AgentSecret, CredentialSourceKind};
+use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
     generate_plane_csr, load_ca_pin, peer_auth::SanRule, sign_refusal_detail,
     validate_deployment_id, validate_vault_addr, vault_config_from_document, vault_error_text,
@@ -463,7 +463,7 @@ impl PlaneClient {
         doc: &Document,
         dir: &Path,
         plane: Plane,
-        secret_id: Zeroizing<String>,
+        secret_id: MaknaeSecret,
     ) -> Result<Self, VaultError> {
         Self::build(doc, dir, plane, |cfg| {
             // RoleID is non-secret (an identifier), still read from disk here.
@@ -481,7 +481,7 @@ impl PlaneClient {
         Self::build(doc, dir, Plane::Cli, |_| Ok(PlaneAuth::UserToken(token)))
     }
 
-    pub fn for_agent(login: &AgentLogin, secret: AgentSecret) -> Result<Self, VaultError> {
+    pub fn for_agent(login: &AgentLogin, secret_id: MaknaeSecret) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         validate_vault_addr(&login.addr)?;
         validate_deployment_id(&login.trust_domain)?;
@@ -507,7 +507,7 @@ impl PlaneClient {
         let _ca = load_ca_pin(&login.config_dir)?;
         let auth = PlaneAuth::AgentAppRole(AppRoleAuth {
             role_id: login.role_id.clone(),
-            secret_id: secret.into_inner(),
+            secret_id,
             approle_mount: login.approle_mount.clone(),
         });
         Self::assemble(
@@ -641,7 +641,7 @@ impl PlaneClient {
         match &self.auth {
             PlaneAuth::AppRole(auth) | PlaneAuth::AgentAppRole(auth) => {
                 let token = auth.authenticate(&client).await?;
-                client.set_token(&token.client_token);
+                client.set_token(token.client_token.expose());
                 // Record the actual lease so the supervisor loop (spawn_supervisor) renews on
                 // the real TTL; surface a non-renewable token (a role misconfig) rather than
                 // silently failing later.
@@ -1351,7 +1351,7 @@ mod tests {
             &doc,
             &fx.0,
             Plane::Cli,
-            Zeroizing::new("cli-secret-value".into()),
+            MaknaeSecret::new(Zeroizing::new("cli-secret-value".into())).unwrap(),
         );
         std::env::remove_var("CREDENTIALS_DIRECTORY");
         let _ = std::fs::remove_dir_all(&creds_dir);
@@ -1647,7 +1647,7 @@ mod tests {
             &doc,
             &fx.0,
             Plane::Kernel,
-            Zeroizing::new("secret-id-sentinel".into()),
+            MaknaeSecret::new(Zeroizing::new("secret-id-sentinel".into())).unwrap(),
         )
         .unwrap();
         assert_eq!(approle.auth.token_source(), PlaneTokenSource::AppRoleLogin);
@@ -1677,7 +1677,7 @@ mod tests {
             &doc,
             &fx.0,
             Plane::Kernel,
-            Zeroizing::new("secret-id-sentinel".into()),
+            MaknaeSecret::new(Zeroizing::new("secret-id-sentinel".into())).unwrap(),
         )
         .unwrap();
         let rt = current_thread(true);
@@ -1711,13 +1711,13 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-login", DEAD_VAULT, "");
         std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
-        let secret = AgentSecret::new(Zeroizing::new("agent-secret-sentinel".into()));
+        let secret = MaknaeSecret::new(Zeroizing::new("agent-secret-sentinel".into())).unwrap();
         let client = PlaneClient::for_agent(&agent_login(&fx.0, DEAD_VAULT), secret).unwrap();
         match &client.auth {
             PlaneAuth::AgentAppRole(auth) => {
                 assert_eq!(auth.approle_mount, "agents-approle-sentinel");
                 assert_eq!(auth.role_id, "agent-role-id-sentinel");
-                assert_eq!(auth.secret_id.as_str(), "agent-secret-sentinel");
+                assert_eq!(auth.secret_id.expose(), "agent-secret-sentinel");
             }
             PlaneAuth::AppRole(_) => panic!("an agent logged in on the kernel's AppRole"),
             PlaneAuth::UserToken(_) => panic!("an agent logged in with a user token"),
@@ -1745,7 +1745,7 @@ mod tests {
     fn a_wrapped_read_as_self_carries_the_clients_own_login_or_nothing() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-wrapped-read", DEAD_VAULT, "");
-        let secret = AgentSecret::new(Zeroizing::new("s".into()));
+        let secret = MaknaeSecret::new(Zeroizing::new("s".into())).unwrap();
         let client = PlaneClient::for_agent(&agent_login(&fx.0, DEAD_VAULT), secret).unwrap();
         assert_eq!(
             client.subject(),
@@ -1793,7 +1793,7 @@ mod tests {
             .unwrap();
         let addr = format!("https://{}", listener.local_addr().unwrap());
         let fx = DispatchFixture::with_addr("agent-wrapped-unlocked", &addr, "");
-        let secret = AgentSecret::new(Zeroizing::new("s".into()));
+        let secret = MaknaeSecret::new(Zeroizing::new("s".into())).unwrap();
         let client = Arc::new(PlaneClient::for_agent(&agent_login(&fx.0, &addr), secret).unwrap());
         rt.block_on(async {
             client.client.lock().await.set_token("hvs.sentinel-629");
@@ -1820,7 +1820,7 @@ mod tests {
     fn an_agent_login_refuses_a_plaintext_vault_or_a_bad_trust_domain() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-login-bad", DEAD_VAULT, "");
-        let secret = || AgentSecret::new(Zeroizing::new("s".into()));
+        let secret = || MaknaeSecret::new(Zeroizing::new("s".into())).unwrap();
         let plain = agent_login(&fx.0, "http://127.0.0.1:1");
         assert!(matches!(
             PlaneClient::for_agent(&plain, secret()),

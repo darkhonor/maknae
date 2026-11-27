@@ -347,4 +347,17 @@ mod tests {
             "{e}"
         );
     }
+
+    #[test]
+    fn a_transit_signature_still_decodes_and_is_not_length_capped_by_the_secret_rule() {
+        let sig = vec![0xc3u8; 512];
+        let body = format!(
+            r#"{{"data":{{"signature":"vault:v1:{}"}}}}"#,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sig)
+        );
+        assert!(body.len() > 700);
+        assert_eq!(parse_sign_reply(body.as_bytes()).unwrap().as_slice(), sig);
+        let e = parse_sign_reply(br#"{"data":{"signature":""}}"#).unwrap_err();
+        assert!(e.to_string().contains("vault:v<N>:<base64>"), "{e}");
+    }
 }

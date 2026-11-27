@@ -36,7 +36,7 @@ pub(crate) struct ApproleLogin {
     api: Arc<VaultApi>,
     mount: String,
     role_id: String,
-    secret_id: Zeroizing<String>,
+    secret_id: MaknaeSecret,
     journal: Journal,
 }
 
@@ -100,7 +100,7 @@ fn sign_failure(e: &VaultError) -> VaultSignError {
 pub(crate) trait MintingReads {
     fn minting(&self, path: &Path) -> Result<Option<MintingFile>, ConfigError>;
     fn role_id(&self, path: &Path) -> Result<String, ConfigError>;
-    fn secret_id(&self, credentials_dir: Option<&Path>) -> Result<Zeroizing<String>, VaultError>;
+    fn secret_id(&self, credentials_dir: Option<&Path>) -> Result<MaknaeSecret, VaultError>;
 }
 
 pub(crate) struct FileReads;
@@ -114,7 +114,7 @@ impl MintingReads for FileReads {
         maknae_config::load_mint_role_id(path)
     }
 
-    fn secret_id(&self, credentials_dir: Option<&Path>) -> Result<Zeroizing<String>, VaultError> {
+    fn secret_id(&self, credentials_dir: Option<&Path>) -> Result<MaknaeSecret, VaultError> {
         maknae_vault::read_egress_secret_id(credentials_dir)
     }
 }
@@ -472,16 +472,13 @@ mod tests {
                 .map_err(|()| ConfigError::InvalidMintRoleId("SENTINEL"))
         }
 
-        fn secret_id(
-            &self,
-            credentials_dir: Option<&Path>,
-        ) -> Result<Zeroizing<String>, VaultError> {
+        fn secret_id(&self, credentials_dir: Option<&Path>) -> Result<MaknaeSecret, VaultError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(("secret-id", credentials_dir.map(Path::to_owned)));
             self.secret
-                .map(|s| Zeroizing::new(s.to_owned()))
+                .map(|s| MaknaeSecret::new(Zeroizing::new(s.to_owned())).unwrap())
                 .map_err(|()| VaultError::CredentialSource("SENTINEL".into()))
         }
     }
@@ -865,7 +862,7 @@ mod tests {
             api,
             mount: "approle-mint".into(),
             role_id: "role".into(),
-            secret_id: Zeroizing::new("SECRET-SENTINEL".into()),
+            secret_id: MaknaeSecret::new(Zeroizing::new("SECRET-SENTINEL".into())).unwrap(),
             journal: record,
         };
         recorded();
@@ -886,7 +883,7 @@ mod tests {
             api,
             mount: "approle-mint".into(),
             role_id: "role".into(),
-            secret_id: Zeroizing::new("SECRET-SENTINEL".into()),
+            secret_id: MaknaeSecret::new(Zeroizing::new("SECRET-SENTINEL".into())).unwrap(),
             journal: record,
         });
         recorded();
@@ -943,7 +940,7 @@ mod tests {
             api,
             mount: "approle-mint".into(),
             role_id: "ROLE-SENTINEL".into(),
-            secret_id: Zeroizing::new("SECRET-SENTINEL".into()),
+            secret_id: MaknaeSecret::new(Zeroizing::new("SECRET-SENTINEL".into())).unwrap(),
             journal: record,
         };
         let shown = format!("{login:?}");

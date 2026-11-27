@@ -18,11 +18,15 @@
 //! uid doesn't "own" by our check).
 use crate::agent_enroll::AgentId;
 use crate::client::read_secret_credential;
+use crate::error::secret_error;
 use crate::keychain::read_plane_secret;
 #[cfg(any(test, not(target_os = "macos")))]
+use crate::secret_source::agent_secret_from_trimmed;
+#[cfg(any(test, not(target_os = "macos")))]
 use crate::secret_source::{resolve_agent_secret_source, MAX_AGENT_SECRET_BYTES};
-use crate::secret_source::{AgentSecret, DaemonSecretSource, SecretSourceError};
+use crate::secret_source::{DaemonSecretSource, SecretSourceError};
 use crate::{KeychainPlane, VaultError};
+use maknae_io::MaknaeSecret;
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -43,20 +47,19 @@ fn read_sealed_trimmed(path: &Path) -> Result<Zeroizing<String>, VaultError> {
 
 /// Read the daemon's SecretID from an already-resolved source. Exactly one source in,
 /// exactly one `Result` out — no fallthrough to a different source on failure.
-pub(crate) fn read_daemon_secret(
-    src: &DaemonSecretSource,
-) -> Result<Zeroizing<String>, VaultError> {
-    match src {
-        DaemonSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path),
-        DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon),
-        DaemonSecretSource::PlaintextPath(path) => read_secret_credential(path).map(Zeroizing::new),
-    }
+pub(crate) fn read_daemon_secret(src: &DaemonSecretSource) -> Result<MaknaeSecret, VaultError> {
+    let text = match src {
+        DaemonSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path)?,
+        DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon)?,
+        DaemonSecretSource::PlaintextPath(path) => Zeroizing::new(read_secret_credential(path)?),
+    };
+    MaknaeSecret::new(text).map_err(|e| secret_error("daemon SecretID", e))
 }
 
 #[cfg(any(test, not(target_os = "macos")))]
 pub(crate) fn read_agent_secret_in(
     credentials_dir_env: Option<&str>,
-) -> Result<AgentSecret, SecretSourceError> {
+) -> Result<MaknaeSecret, SecretSourceError> {
     let path = resolve_agent_secret_source(credentials_dir_env)?;
     let target = maknae_io::TargetRequired {
         owner: None,
@@ -88,7 +91,7 @@ pub(crate) fn read_agent_secret_in(
             source: std::io::Error::other(e.to_string()),
         })
     })?;
-    AgentSecret::from_trimmed(text)
+    agent_secret_from_trimmed(text)
 }
 
 /// The agent's standing SecretID. On Linux it is read only from
@@ -98,7 +101,7 @@ pub(crate) fn read_agent_secret_in(
 pub fn read_agent_secret(
     _id: &AgentId,
     _enrolled_uid: u32,
-) -> Result<AgentSecret, SecretSourceError> {
+) -> Result<MaknaeSecret, SecretSourceError> {
     let env = crate::secret_source::credentials_directory_env().map_err(SecretSourceError::Read)?;
     read_agent_secret_in(env.as_deref())
 }
@@ -107,7 +110,7 @@ pub fn read_agent_secret(
 pub fn read_agent_secret(
     id: &AgentId,
     enrolled_uid: u32,
-) -> Result<AgentSecret, SecretSourceError> {
+) -> Result<MaknaeSecret, SecretSourceError> {
     crate::keychain::read_agent_secret(id, enrolled_uid)
 }
 
@@ -131,7 +134,7 @@ mod tests {
         // branch must NOT apply that gate (systemd owns the trust boundary here).
         let p = tmpfile("cd-open", "sealed-value", 0o644);
         let src = DaemonSecretSource::CredentialsDirectory(p.clone());
-        assert_eq!(read_daemon_secret(&src).unwrap().as_str(), "sealed-value");
+        assert_eq!(read_daemon_secret(&src).unwrap().expose(), "sealed-value");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -253,7 +256,7 @@ mod tests {
 
     #[test]
     fn the_agent_secret_prints_nothing_of_the_secret() {
-        let s = AgentSecret::new(Zeroizing::new("agent-sid-sentinel".into()));
+        let s = MaknaeSecret::new(Zeroizing::new("agent-sid-sentinel".to_string())).unwrap();
         assert!(!format!("{s:?}").contains("sentinel"));
     }
 
@@ -274,7 +277,7 @@ mod tests {
     fn daemon_plaintext_branch_accepts_owner_only() {
         let p = tmpfile("plain-secure", "secret-value", 0o600);
         let src = DaemonSecretSource::PlaintextPath(p.clone());
-        assert_eq!(read_daemon_secret(&src).unwrap().as_str(), "secret-value");
+        assert_eq!(read_daemon_secret(&src).unwrap().expose(), "secret-value");
         let _ = std::fs::remove_file(&p);
     }
 }

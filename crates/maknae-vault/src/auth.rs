@@ -5,7 +5,9 @@
 //! retired — spec §4.4). `auth/<mount>/login` is called directly against `role_id` +
 //! `secret_id`. A future `KubernetesAuth` slots in behind this trait without touching
 //! the mint core.
+use crate::error::secret_error;
 use crate::VaultError;
+use maknae_io::MaknaeSecret;
 use vaultrs::client::VaultClient;
 use zeroize::Zeroizing;
 
@@ -17,7 +19,7 @@ pub enum AuthMethod {
 
 /// A renewable Vault token from a successful authentication.
 pub struct VaultToken {
-    pub client_token: String,
+    pub client_token: MaknaeSecret,
     pub renewable: bool,
     pub lease_duration: u64,
 }
@@ -27,7 +29,7 @@ pub struct AppRoleAuth {
     pub role_id: String,
     /// The on-disk artifact: a standing, plaintext SecretID (owner-only file
     /// permissions enforced by the reader — see `client::read_secret_credential`).
-    pub secret_id: Zeroizing<String>,
+    pub secret_id: MaknaeSecret,
     pub approle_mount: String,
 }
 
@@ -42,12 +44,14 @@ impl AppRoleAuth {
             client,
             &self.approle_mount,
             &self.role_id,
-            self.secret_id.as_str(),
+            self.secret_id.expose(),
         )
         .await
         .map_err(|e| VaultError::Auth(e.to_string()))?;
+        let client_token = MaknaeSecret::new(Zeroizing::new(auth.client_token))
+            .map_err(|e| secret_error("client token", e))?;
         Ok(VaultToken {
-            client_token: auth.client_token,
+            client_token,
             renewable: auth.renewable,
             lease_duration: auth.lease_duration,
         })
