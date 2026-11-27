@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_credential_is_read_into_a_zeroizing_string() {
+    fn read_secret_credential_returns_zeroizing_string_at_compile_time() {
         let _: fn(&std::path::Path) -> Result<Zeroizing<String>, VaultError> =
             read_secret_credential;
     }
