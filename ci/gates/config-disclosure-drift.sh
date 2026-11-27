@@ -203,7 +203,7 @@ LEAF_SECRETS=(
 
 secret_decl() { # <type>
   case "$1" in
-    SecretText) echo "crates/maknae-proto/src/wire.rs|pub struct SecretText(pub zeroize::Zeroizing<String>);" ;;
+    SecretText) echo "crates/maknae-proto/src/wire.rs|pub struct SecretText(zeroize::Zeroizing<String>);" ;;
     Bytes) echo "crates/maknae-proto/src/bytes.rs|pub struct Bytes(pub Zeroizing<Vec<u8>>);" ;;
     *) return 1 ;;
   esac
