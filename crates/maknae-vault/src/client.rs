@@ -764,9 +764,7 @@ impl PlaneClient {
         let token = {
             let client = self.client.lock().await;
             let held = client.settings.token.as_str();
-            let mut copy = Zeroizing::new(String::with_capacity(held.len()));
-            copy.push_str(held);
-            crate::user_token(copy)?
+            crate::user_token(crate::secret_source::exact_text(held))?
         };
         VaultApi::new(&self.vault_addr, &self.vault_ca)?
             .read_wrapped(&token, kv_mount, secret_path, wrap_ttl)
