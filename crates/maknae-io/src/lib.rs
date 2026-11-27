@@ -56,6 +56,8 @@ pub use credential_io::deny_core_dumps;
 pub mod delegated;
 mod dir;
 pub mod error;
+#[cfg_attr(not(test), expect(dead_code))]
+mod filter;
 mod home;
 mod host_facts;
 pub mod mutation;
