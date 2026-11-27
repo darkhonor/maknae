@@ -1604,7 +1604,7 @@ async fn store_seal_key(
     release_team: &str,
 ) -> Result<(), EnrollError> {
     keychain_write::seal_secret_macos(
-        maknae_vault::seal_key_to_hex(der).expose(),
+        maknae_vault::seal_key_to_hex(der)?.expose(),
         maknae_vault::KeychainPlane::Egress,
         keychain_write::EGRESS_BINARY,
         release_team,
@@ -1772,14 +1772,14 @@ async fn graph_key_present(custody: &Path) -> Result<bool, EnrollError> {
 
 #[cfg(target_os = "macos")]
 async fn store_graph_key(
-    key: maknae_vault::GraphKey,
+    key: maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
     _custody: &artifact_table::Artifact,
     _verbose: bool,
     _resolver: &artifact_write::RealOwnerResolver,
     release_team: &str,
 ) -> Result<(), EnrollError> {
     keychain_write::add_secret_macos(
-        maknae_vault::seal_key_to_hex(&key.into_bytes()[..]).expose(),
+        maknae_vault::seal_key_to_hex(&key.into_zeroizing()[..])?.expose(),
         maknae_vault::KeychainPlane::Graph,
         keychain_write::DAEMON_BINARY,
         release_team,
@@ -1789,13 +1789,13 @@ async fn store_graph_key(
 
 #[cfg(not(target_os = "macos"))]
 async fn store_graph_key(
-    key: maknae_vault::GraphKey,
+    key: maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
     custody: &artifact_table::Artifact,
     verbose: bool,
     resolver: &artifact_write::RealOwnerResolver,
 ) -> Result<(), EnrollError> {
     seal_linux(
-        &key.into_bytes()[..],
+        &key.into_zeroizing()[..],
         &custody.path,
         maknae_vault::GRAPH_KEY_CRED_NAME,
         verbose,
@@ -1824,7 +1824,7 @@ async fn place_graph_key(
     match action {
         GraphKeyAction::Create => {
             store_graph_key(
-                maknae_vault::GraphKey::generate()?,
+                maknae_vault::generate_graph_key()?,
                 custody,
                 args.verbose,
                 resolver,

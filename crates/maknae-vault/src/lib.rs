@@ -99,10 +99,10 @@ pub use seal_pub_store::{
 };
 pub use secret_io::read_agent_secret;
 pub use secret_source::{
-    credentials_directory_env, daemon_sealed_credential, graph_key_from_bytes, graph_key_from_hex,
-    resolve_agent_secret_source, resolve_daemon_secret_source, resolve_egress_seal_key_source,
-    resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex, CredentialSourceKind,
-    DaemonSecretSource, EgressSealKeySource, GraphKey, GraphKeySource, SealKeyDer, SealKeyHex,
+    credentials_directory_env, daemon_sealed_credential, generate_graph_key, graph_key_from_bytes,
+    graph_key_from_hex, resolve_agent_secret_source, resolve_daemon_secret_source,
+    resolve_egress_seal_key_source, resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex,
+    CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, GraphKeySource,
     SecretSourceError, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME,
     EGRESS_SECRET_ID_CRED_NAME, GRAPH_KEY_BYTES, GRAPH_KEY_CRED_NAME, MAX_AGENT_SECRET_BYTES,
     MAX_SEAL_KEY_BYTES,

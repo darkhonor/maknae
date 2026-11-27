@@ -6,6 +6,7 @@
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::agent_enroll::AgentId;
 use crate::auth::AppRoleAuth;
+use crate::error::secret_error;
 use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
@@ -20,7 +21,7 @@ use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rustls::sign::CertifiedKey;
-use maknae_io::MaknaeSecret;
+use maknae_io::{MaknaeSecret, MaknaeSecretBytes};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -33,7 +34,7 @@ use zeroize::Zeroizing;
 struct IdentityInner {
     plane_key: PlaneKey,
     leaf_pem: String,
-    key_der: Zeroizing<Vec<u8>>,
+    key_der: MaknaeSecretBytes,
     chain_pem: Vec<String>,
 }
 
@@ -53,7 +54,7 @@ impl PlaneIdentity {
     /// The private key in DER (crate-internal only — used to build the rustls
     /// `CertifiedKey` in `tls.rs`; never handed to a caller).
     pub(crate) fn key_der(&self) -> &[u8] {
-        &self.0.key_der
+        self.0.key_der.expose()
     }
     pub(crate) fn plane_key(&self) -> PlaneKey {
         self.0.plane_key
@@ -71,7 +72,7 @@ impl PlaneIdentity {
         plane_key: PlaneKey,
         leaf_pem: String,
         chain_pem: Vec<String>,
-        key_der: Zeroizing<Vec<u8>>,
+        key_der: MaknaeSecretBytes,
     ) -> Self {
         PlaneIdentity(Arc::new(IdentityInner {
             plane_key,
@@ -305,8 +306,9 @@ async fn sign_leaf_for(
     pki_int_mount: &str,
     plane_key: PlaneKey,
     client: &VaultClient,
-) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
+) -> Result<(MaknaeSecretBytes, String, Vec<String>), VaultError> {
     let (key_der, csr_pem) = generate_plane_csr(subject, deployment_id, plane_key)?;
+    let key_der = MaknaeSecretBytes::new(key_der).map_err(|e| secret_error("plane key", e))?;
     let resp = vaultrs::pki::cert::ca::sign(
         client,
         pki_int_mount,
@@ -726,7 +728,7 @@ impl PlaneClient {
     async fn sign_leaf(
         &self,
         client: &VaultClient,
-    ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
+    ) -> Result<(MaknaeSecretBytes, String, Vec<String>), VaultError> {
         sign_leaf_for(
             &self.subject,
             &self.deployment_id,

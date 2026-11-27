@@ -1,16 +1,15 @@
 use crate::keychain::{observe_pointer, read_plane_secret};
 use crate::secret_source::{
-    check_seal_key_len, resolve_egress_seal_key_source, seal_key_from_hex, EgressSealKeySource,
-    SealKeyDer,
+    resolve_egress_seal_key_source, seal_key_der, seal_key_from_hex, EgressSealKeySource,
 };
 use crate::{KeychainPlane, VaultError, MAX_SEAL_KEY_BYTES};
-use maknae_io::MaknaeSecret;
+use maknae_io::{MaknaeSecret, MaknaeSecretBytes};
 use std::path::Path;
 
 pub fn read_egress_seal_key(
     credentials_dir: Option<&str>,
     egress_dir: &Path,
-) -> Result<SealKeyDer, VaultError> {
+) -> Result<MaknaeSecretBytes, VaultError> {
     let pointer = match credentials_dir {
         None => observe_pointer(egress_dir, KeychainPlane::Egress)?,
         Some(_) => None,
@@ -18,8 +17,7 @@ pub fn read_egress_seal_key(
     match resolve_egress_seal_key_source(credentials_dir, pointer.as_deref())? {
         EgressSealKeySource::CredentialsDirectory(path) => {
             let der = crate::read_storage_within(&path, Some(MAX_SEAL_KEY_BYTES as u64))?;
-            check_seal_key_len(der.len())?;
-            Ok(SealKeyDer::new(der))
+            seal_key_der(der)
         }
         EgressSealKeySource::Keychain(pointer) => {
             seal_key_from_hex(&read_plane_secret(&pointer, KeychainPlane::Egress)?)

@@ -25,15 +25,22 @@ pub(crate) fn validate_secret_id(s: &str) -> Result<(), EnrollError> {
     }
 }
 
+fn item_shape_error(e: maknae_vault::VaultError, shape: EnrollError) -> EnrollError {
+    match e {
+        maknae_vault::VaultError::CoreDumps(_) => EnrollError::Vault(e),
+        _ => shape,
+    }
+}
+
 pub(crate) fn validate_item_content(plane: KeychainPlane, s: &str) -> Result<(), EnrollError> {
     match plane {
         KeychainPlane::Daemon => validate_secret_id(s),
         KeychainPlane::Egress => maknae_vault::seal_key_from_hex(s)
             .map(drop)
-            .map_err(|_| EnrollError::SealKeyShape),
+            .map_err(|e| item_shape_error(e, EnrollError::SealKeyShape)),
         KeychainPlane::Graph => maknae_vault::graph_key_from_hex(s)
             .map(drop)
-            .map_err(|_| EnrollError::GraphKeyShape),
+            .map_err(|e| item_shape_error(e, EnrollError::GraphKeyShape)),
     }
 }
 
@@ -706,12 +713,28 @@ mod tests {
     }
 
     #[test]
+    fn a_core_dump_refusal_is_not_read_as_a_shape_failure() {
+        let denied = maknae_vault::VaultError::CoreDumps(std::io::Error::other("denied"));
+        assert!(matches!(
+            item_shape_error(denied, EnrollError::SealKeyShape),
+            EnrollError::Vault(maknae_vault::VaultError::CoreDumps(_))
+        ));
+        assert!(matches!(
+            item_shape_error(
+                maknae_vault::VaultError::SealKey("x"),
+                EnrollError::SealKeyShape
+            ),
+            EnrollError::SealKeyShape
+        ));
+    }
+
+    #[test]
     fn each_plane_item_has_its_own_content_shape() {
         let der = maknae_seal::SealPrivateKey::generate()
             .unwrap()
             .to_pkcs8_der()
             .unwrap();
-        let hex = maknae_vault::seal_key_to_hex(&der);
+        let hex = maknae_vault::seal_key_to_hex(&der).unwrap();
         assert!(validate_item_content(KeychainPlane::Daemon, UUID).is_ok());
         assert!(matches!(
             validate_item_content(KeychainPlane::Daemon, hex.expose()),

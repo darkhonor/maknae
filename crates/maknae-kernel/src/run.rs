@@ -10048,7 +10048,12 @@ fn classify_marker_load(
 
 /// Where the kernel graph key comes from. Production reads the enrolled credential;
 /// the boot tests inject a fixed key.
-type GraphKeyReader = fn(&Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError>;
+type GraphKeyReader = fn(
+    &Path,
+) -> Result<
+    maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+    maknae_vault::VaultError,
+>;
 type FileReader = fn(&Path) -> Result<maknae_config::Document, maknae_config::ConfigError>;
 type TrailOpener = fn(
     &maknae_config::AuditConfig,
@@ -10130,7 +10135,7 @@ async fn open_tasks(
         ))
     };
     let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
-    let store = (seams.tasks_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+    let store = (seams.tasks_open)(&dir, owner, WrappingKey::new(key.into_zeroizing()))
         .map_err(|e| refused(e.to_string()))?;
     for finding in store.take_boot_findings() {
         sink.emit_within(&task_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
@@ -10177,7 +10182,7 @@ async fn open_board<E: AuditEmit>(
         ))
     };
     let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
-    let store = (seams.board_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+    let store = (seams.board_open)(&dir, owner, WrappingKey::new(key.into_zeroizing()))
         .map_err(|e| refused(e.to_string()))?;
     for finding in store.take_boot_findings() {
         sink.emit_within(&board_finding_record(ctx, &finding), AUDIT_APPEND_TIMEOUT)
@@ -10894,13 +10899,14 @@ fn open_conversations(
         ))
     };
     let key = (seams.graph_key)(config_dir).map_err(|e| refused(e.to_string()))?;
-    (seams.conversations_open)(&dir, owner, WrappingKey::new(key.into_bytes()))
+    (seams.conversations_open)(&dir, owner, WrappingKey::new(key.into_zeroizing()))
         .map_err(|e| refused(e.to_string()))
 }
 
 fn production_graph_key(
     config_dir: &Path,
-) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
+) -> Result<maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>, maknae_vault::VaultError>
+{
     let creds = maknae_vault::credentials_directory_env()?;
     maknae_vault::read_graph_key(creds.as_deref(), config_dir)
 }
@@ -10924,7 +10930,7 @@ async fn run_inner(
     };
 
     // The accepted baseline is read before anything is appended; the store is booted later.
-    let key = (seams.graph_key)(config_dir).map(|k| WrappingKey::new(k.into_bytes()));
+    let key = (seams.graph_key)(config_dir).map(|k| WrappingKey::new(k.into_zeroizing()));
     let dir = (seams.state_dir_open)(state_dir, euid);
     let reseeding = matches!(&dir, Ok(d) if d.reseed_authorized());
     let peeked = match (&dir, &key) {
@@ -15039,12 +15045,15 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     /// nothing to record; with none, the given one is seeded.
     pub(super) async fn boot_graph_at(
         state_dir: &Path,
-        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        key: Result<
+            maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+            maknae_vault::VaultError,
+        >,
         sink: &Arc<maknae_audit_append::AuditSink>,
         ctx: &BootCtx<'_>,
         inputs: &BootInputs<'_>,
     ) -> Result<BootedGraph, RunError> {
-        let key = key.map(|k| WrappingKey::new(k.into_bytes()));
+        let key = key.map(|k| WrappingKey::new(k.into_zeroizing()));
         let dir = StateDir::open(state_dir, ctx.euid);
         let stored = match (&dir, &key) {
             (Ok(d), Ok(k)) if !d.reseed_authorized() => {
@@ -15075,7 +15084,12 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
         boot_kernel_graph(state_dir, dir, key, sink, ctx, &inputs, None).await
     }
 
-    fn test_graph_key(_: &Path) -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
+    fn test_graph_key(
+        _: &Path,
+    ) -> Result<
+        maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+        maknae_vault::VaultError,
+    > {
         maknae_vault::graph_key_from_bytes(&[0x5a; 32])
     }
 
@@ -15563,7 +15577,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_graph::record::ProvenanceKind::Seed,
         )
         .unwrap();
-        let k = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        let k = WrappingKey::new(test_graph_key(&d.0).unwrap().into_zeroizing());
         let sealed = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
         put(&state_dir(&d.0), STORE_FILE, "", 0o600);
         std::fs::write(state_dir(&d.0).join(STORE_FILE), &sealed).unwrap();
@@ -15635,14 +15649,20 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn boot_graph(
         fx: &GraphFixture,
-        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        key: Result<
+            maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+            maknae_vault::VaultError,
+        >,
     ) -> Result<KernelGraphStatus, RunError> {
         boot_graph_held(fx, key).map(|(_, status)| status)
     }
 
     fn boot_graph_held(
         fx: &GraphFixture,
-        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        key: Result<
+            maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+            maknae_vault::VaultError,
+        >,
     ) -> Result<(StateDir, KernelGraphStatus), RunError> {
         boot_graph_from(fx, key, &fx.dir.0)
     }
@@ -15666,7 +15686,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
 
     fn boot_graph_from(
         fx: &GraphFixture,
-        key: Result<maknae_vault::GraphKey, maknae_vault::VaultError>,
+        key: Result<
+            maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+            maknae_vault::VaultError,
+        >,
         config_dir: &Path,
     ) -> Result<(StateDir, KernelGraphStatus), RunError> {
         let seq = Seq::new();
@@ -15699,7 +15722,10 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             .collect()
     }
 
-    fn key() -> Result<maknae_vault::GraphKey, maknae_vault::VaultError> {
+    fn key() -> Result<
+        maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
+        maknae_vault::VaultError,
+    > {
         test_graph_key(Path::new("/unused"))
     }
 
@@ -15859,7 +15885,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     #[test]
     fn a_store_from_before_identity_with_a_bindings_file_migrates_and_the_pdp_compiles_over_it() {
         let fx = graph_fixture("graph_pre_identity_bound");
-        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let k = WrappingKey::new(key().unwrap().into_zeroizing());
         let old =
             maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 4)
                 .build(
@@ -15943,7 +15969,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     #[test]
     fn a_store_from_before_identity_migrates_under_an_audited_intent() {
         let fx = graph_fixture("graph_pre_identity_migrate");
-        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let k = WrappingKey::new(key().unwrap().into_zeroizing());
         let old =
             maknae_graph::graph::GraphBuilder::new(maknae_graph::record::GraphSpace::Kernel, 4)
                 .build(
@@ -16400,7 +16426,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             au3_1: &au3_1,
         };
         let dir = StateDir::open_with_marker_owner(&fx.state, euid, euid);
-        let key = key().map(|k| WrappingKey::new(k.into_bytes()));
+        let key = key().map(|k| WrappingKey::new(k.into_zeroizing()));
         let stored = match (&dir, &key) {
             (Ok(d), Ok(k)) if !d.reseed_authorized() => {
                 maknae_state::store::peek_baseline(d, k).ok().flatten()
@@ -17303,7 +17329,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
             maknae_graph::record::ProvenanceKind::Seed,
         )
         .unwrap();
-        let k = WrappingKey::new(key().unwrap().into_bytes());
+        let k = WrappingKey::new(key().unwrap().into_zeroizing());
         let file = maknae_state::envelope::seal(&maknae_graph::format::encode(&old), &k).unwrap();
         let path = fx.state.join(STORE_FILE);
         std::fs::write(&path, file).unwrap();
@@ -18405,7 +18431,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     fn store_graph(d: &Dir) -> maknae_graph::graph::Graph {
-        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_zeroizing());
         maknae_graph::format::decode_stored_compiled(
             &maknae_state::envelope::open(&store_bytes(d), &key).unwrap(),
             maknae_graph::record::GraphSpace::Kernel,
@@ -18431,7 +18457,7 @@ kyIISfxBPHa6GyZY9EYUWd3r0F3e1wkXaIrmVN4PPnYiwUE5D1gD1iI=\n\
     }
 
     fn write_store(d: &Dir, graph: &maknae_graph::graph::Graph) -> Vec<u8> {
-        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_bytes());
+        let key = WrappingKey::new(test_graph_key(&d.0).unwrap().into_zeroizing());
         let sealed =
             maknae_state::envelope::seal(&maknae_graph::format::encode(graph), &key).unwrap();
         put(&state_dir(&d.0), STORE_FILE, "", 0o600);
@@ -21750,7 +21776,7 @@ mod reload_fixture {
         let key = WrappingKey::new(
             maknae_vault::graph_key_from_bytes(&[0x5a; 32])
                 .unwrap()
-                .into_bytes(),
+                .into_zeroizing(),
         );
         let layer = maknae_state::store::peek_baseline(&state, &key)
             .unwrap()
@@ -21811,7 +21837,7 @@ mod reload_fixture {
         let key = WrappingKey::new(
             maknae_vault::graph_key_from_bytes(&[0x5a; 32])
                 .unwrap()
-                .into_bytes(),
+                .into_zeroizing(),
         );
         let state = StateDir::open(&dir.join("state"), euid);
         let stored = match &state {
