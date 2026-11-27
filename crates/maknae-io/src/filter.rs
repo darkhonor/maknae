@@ -1,7 +1,13 @@
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::engine::GeneralPurpose;
 use base64::Engine;
+use std::cmp::Ordering;
+use std::fmt;
+use std::ops::ControlFlow;
 use zeroize::Zeroizing;
+
+use crate::credential::CredentialSlot;
+use crate::secret::{MaknaeSecret, SecretBuf, MAX_SECRET_BYTES};
 
 pub(crate) const MIN_VALUE: usize = 8;
 pub(crate) const WHOLE_BELOW: usize = 16;
@@ -159,6 +165,296 @@ fn table(forms: &[Form], sources: &[u32], w: usize) -> Zeroizing<Vec<(u32, u32)>
     entries
         .dedup_by(|a, b| source(*a) == source(*b) && window(forms, *a, w) == window(forms, *b, w));
     entries
+}
+
+pub(crate) const MAX_VALUES: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    Slot(CredentialSlot),
+    Label(&'static str),
+}
+
+pub struct ValueFilterBuilder<'a> {
+    entries: Vec<(Source, &'a [u8])>,
+}
+
+pub struct ValueFilter {
+    index: Index,
+    sources: Vec<Source>,
+    raw: Vec<usize>,
+    whole: Vec<usize>,
+    max_raw: usize,
+    values: usize,
+    skipped: usize,
+}
+
+struct Found {
+    seen: Vec<bool>,
+    order: Vec<u32>,
+}
+
+impl Found {
+    fn new(sources: usize) -> Self {
+        Found {
+            seen: vec![false; sources],
+            order: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, source: u32) {
+        let seen = &mut self.seen[source as usize];
+        if !*seen {
+            *seen = true;
+            self.order.push(source);
+        }
+    }
+}
+
+fn compare(a: &[u8], b: &[u8], work: &mut u64) -> Ordering {
+    for (x, y) in a.iter().zip(b) {
+        *work += 1;
+        match x.cmp(y) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+impl ValueFilter {
+    pub fn builder<'a>() -> ValueFilterBuilder<'a> {
+        ValueFilterBuilder {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn mask_in_place(&self, buf: &mut [u8]) -> Vec<Source> {
+        self.mask(buf, &mut 0)
+    }
+
+    #[cfg(test)]
+    fn mask_in_place_with_work(&self, buf: &mut [u8]) -> (Vec<Source>, u64) {
+        let mut work = 0;
+        let found = self.mask(buf, &mut work);
+        (found, work)
+    }
+
+    fn mask(&self, buf: &mut [u8], work: &mut u64) -> Vec<Source> {
+        let mut coverage = vec![false; buf.len()];
+        let mut found = Found::new(self.sources.len());
+        let _ = self.scan(buf, work, |at, n, source| {
+            coverage[at..at + n].fill(true);
+            found.add(source);
+            ControlFlow::Continue(())
+        });
+        self.tail(buf, work, |n, source| {
+            let len = coverage.len();
+            coverage[len - n..].fill(true);
+            found.add(source);
+        });
+        for (b, &c) in buf.iter_mut().zip(&coverage) {
+            if c {
+                *b = b'*';
+            }
+        }
+        found
+            .order
+            .iter()
+            .map(|&s| self.sources[s as usize].clone())
+            .collect()
+    }
+
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        self.scan(bytes, &mut 0, |_, _, _| ControlFlow::Break(()))
+            .is_break()
+    }
+
+    pub fn redact_text(&self, s: &str) -> String {
+        let len = s.len();
+        let mut coverage = vec![false; len];
+        let _ = self.scan(s.as_bytes(), &mut 0, |at, n, _| {
+            coverage[at..at + n].fill(true);
+            ControlFlow::Continue(())
+        });
+        let mut i = 0;
+        while i < len {
+            if !coverage[i] {
+                i += 1;
+                continue;
+            }
+            let mut start = i;
+            while !s.is_char_boundary(start) {
+                start -= 1;
+            }
+            let mut end = i;
+            while end < len && coverage[end] {
+                end += 1;
+            }
+            while !s.is_char_boundary(end) {
+                end += 1;
+            }
+            coverage[start..end].fill(true);
+            i = end;
+        }
+        let mut out = String::with_capacity(len);
+        let mut i = 0;
+        while i < len {
+            let covered = coverage[i];
+            let end = coverage[i..]
+                .iter()
+                .position(|&c| c != covered)
+                .map_or(len, |p| i + p);
+            if covered {
+                out.push_str("<redacted>");
+            } else {
+                out.push_str(&s[i..end]);
+            }
+            i = end;
+        }
+        out
+    }
+
+    pub fn skipped(&self) -> usize {
+        self.skipped
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.forms.is_empty()
+    }
+
+    fn scan(
+        &self,
+        buf: &[u8],
+        work: &mut u64,
+        mut hit: impl FnMut(usize, usize, u32) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        let forms = &self.index.forms;
+        for at in 0..buf.len() {
+            for (table, &w) in self.index.tables.iter().zip(&WINDOWS) {
+                let Some(needle) = buf.get(at..at + w) else {
+                    continue;
+                };
+                let (mut lo, mut hi) = (0, table.len());
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    *work += 1;
+                    if compare(window(forms, table[mid], w), needle, work).is_lt() {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                for &entry in &table[lo..] {
+                    if compare(window(forms, entry, w), needle, work).is_ne() {
+                        break;
+                    }
+                    hit(at, w, self.index.sources[entry.0 as usize])?;
+                }
+            }
+            for &f in &self.whole {
+                let form = &forms[f].bytes;
+                if let Some(candidate) = buf.get(at..at + form.len()) {
+                    if compare(form, candidate, work).is_eq() {
+                        hit(at, form.len(), self.index.sources[f])?;
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn tail(&self, buf: &[u8], work: &mut u64, mut hit: impl FnMut(usize, u32)) {
+        if buf.is_empty() || self.raw.is_empty() {
+            return;
+        }
+        let mut pi = Zeroizing::new(vec![0u32; self.max_raw]);
+        for &r in &self.raw {
+            let form = self.index.forms[r].bytes.as_slice();
+            let l = form.len();
+            let mut k = 0;
+            for q in 1..l {
+                while k > 0 && form[k] != form[q] {
+                    *work += 1;
+                    k = pi[k - 1] as usize;
+                }
+                *work += 1;
+                if form[k] == form[q] {
+                    k += 1;
+                }
+                pi[q] = k as u32;
+            }
+            let mut k = 0;
+            for &c in &buf[buf.len().saturating_sub(l)..] {
+                while k > 0 && form[k] != c {
+                    *work += 1;
+                    k = pi[k - 1] as usize;
+                }
+                *work += 1;
+                if form[k] == c {
+                    k += 1;
+                }
+            }
+            if k > 0 {
+                hit(k, self.index.sources[r]);
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ValueFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ValueFilter({} values)", self.values)
+    }
+}
+
+impl<'a> ValueFilterBuilder<'a> {
+    pub fn secret<B: SecretBuf>(self, label: &'static str, s: &'a MaknaeSecret<B>) -> Self {
+        self.source(Source::Label(label), s.bytes())
+    }
+
+    pub(crate) fn source(mut self, source: Source, bytes: &'a [u8]) -> Self {
+        self.entries.push((source, bytes));
+        self
+    }
+
+    pub fn build(mut self) -> ValueFilter {
+        let beyond = self.entries.len().saturating_sub(MAX_VALUES);
+        self.entries.truncate(MAX_VALUES);
+        let values: Vec<&[u8]> = self
+            .entries
+            .iter()
+            .map(|&(_, b)| {
+                if b.len() > MAX_SECRET_BYTES {
+                    &[][..]
+                } else {
+                    b
+                }
+            })
+            .collect();
+        let kept = values.iter().filter(|v| v.len() >= MIN_VALUE).count();
+        let index = build_index(&values);
+        let raw: Vec<usize> = (0..index.forms.len())
+            .filter(|&i| i == 0 || index.sources[i] != index.sources[i - 1])
+            .collect();
+        let whole = (0..index.forms.len())
+            .filter(|&i| index.forms[i].window == 0)
+            .collect();
+        let max_raw = raw
+            .iter()
+            .map(|&i| index.forms[i].bytes.len())
+            .max()
+            .unwrap_or(0);
+        ValueFilter {
+            index,
+            sources: self.entries.into_iter().map(|(s, _)| s).collect(),
+            raw,
+            whole,
+            max_raw,
+            values: kept,
+            skipped: beyond + values.len() - kept,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -529,5 +825,423 @@ mod tests {
             let e = entries(&idx, t);
             assert!(e.windows(2).all(|p| p[0] < p[1]), "table {t}");
         }
+    }
+
+    const TOKEN: &[u8; 64] = b"sk-ant-api03-Zq7/Lp+Xw:9Rt2Ks!Vb4Nm8Hc0Jd6Fg1Yh3Ue5Wi7Oa2Pl4Mn6B";
+    const LABELS: [&str; 8] = ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"];
+
+    fn filter_of(values: &[&[u8]]) -> ValueFilter {
+        let mut b = ValueFilter::builder();
+        for (i, v) in values.iter().enumerate() {
+            b = b.source(Source::Label(LABELS[i]), v);
+        }
+        b.build()
+    }
+
+    fn masked(f: &ValueFilter, buf: &[u8]) -> (Vec<u8>, Vec<Source>) {
+        let mut out = buf.to_vec();
+        let found = f.mask_in_place(&mut out);
+        assert_eq!(out.len(), buf.len());
+        (out, found)
+    }
+
+    fn embed(form: &[u8]) -> Vec<u8> {
+        [&b"<<"[..], form, b">>\n"].concat()
+    }
+
+    fn stars(n: usize) -> Vec<u8> {
+        vec![b'*'; n]
+    }
+
+    fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    fn spoil(form: &[u8], step: usize) -> Vec<u8> {
+        form.iter()
+            .enumerate()
+            .map(|(i, &b)| if i % step == step / 2 { b'#' } else { b })
+            .collect()
+    }
+
+    fn v0() -> Vec<Source> {
+        vec![Source::Label("v0")]
+    }
+
+    fn base64_blobs(v: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = Vec::new();
+        for prefix in [&b":"[..], b"x:", b"xy:"] {
+            for trailing in [&b""[..], b"@github.com"] {
+                let plain = [prefix, v, trailing].concat();
+                for (engine, url) in [(&STANDARD, false), (&URL_SAFE, true)] {
+                    let blob = engine.encode(&plain).into_bytes();
+                    out.push((blob, trimmed_base64(v, url, prefix.len() % 3)));
+                }
+            }
+        }
+        out
+    }
+
+    fn sample_buffers() -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for form in [
+            TOKEN.to_vec(),
+            hex(TOKEN, false),
+            hex(TOKEN, true),
+            percent(TOKEN, true),
+            percent(TOKEN, false),
+        ] {
+            out.push(embed(&form));
+            out.push(embed(&spoil(&form, 8)));
+            out.push(embed(&form[20..36]));
+            out.push(embed(&form[20..35]));
+        }
+        for (blob, _) in base64_blobs(TOKEN) {
+            out.push(embed(&blob));
+            out.push(embed(&spoil(&blob, 12)));
+        }
+        out.push(b"key=sk-ant-api03-\n".to_vec());
+        out.push(embed(b"ghp_Qw3rTy8UiOpAsDfGhJkLzXcVbNm1234"));
+        out
+    }
+
+    #[test]
+    fn raw_and_every_encoding_is_masked_inside_a_larger_buffer() {
+        for v in [&TOKEN[..], &TOKEN[..16], &TOKEN[..17]] {
+            let f = filter_of(&[v]);
+            for form in [
+                v.to_vec(),
+                hex(v, false),
+                hex(v, true),
+                percent(v, true),
+                percent(v, false),
+            ] {
+                let (out, found) = masked(&f, &embed(&form));
+                assert_eq!(out, embed(&stars(form.len())), "n={} {form:?}", v.len());
+                assert_eq!(found, v0());
+            }
+            for (blob, trimmed) in base64_blobs(v) {
+                let buf = embed(&blob);
+                let (out, found) = masked(&f, &buf);
+                let at = find(&buf, &trimmed).unwrap();
+                assert_eq!(&out[at..at + trimmed.len()], &stars(trimmed.len())[..]);
+                assert!(out.starts_with(b"<<") && out.ends_with(b">>\n"));
+                assert_eq!(found, v0(), "n={} {blob:?}", v.len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_near_miss_of_each_encoding_is_untouched() {
+        let f = filter_of(&[TOKEN]);
+        for (form, step) in [
+            (TOKEN.to_vec(), 8),
+            (hex(TOKEN, false), 16),
+            (hex(TOKEN, true), 16),
+            (percent(TOKEN, true), 8),
+            (percent(TOKEN, false), 8),
+        ] {
+            let buf = embed(&spoil(&form, step));
+            assert_eq!(masked(&f, &buf), (buf.clone(), vec![]));
+            assert!(!f.matches(&buf));
+        }
+        for (blob, _) in base64_blobs(TOKEN) {
+            let buf = embed(&spoil(&blob, 12));
+            assert_eq!(masked(&f, &buf), (buf.clone(), vec![]));
+        }
+        let short = filter_of(&[&TOKEN[..16]]);
+        for (blob, _) in base64_blobs(&TOKEN[..16]) {
+            let buf = embed(&spoil(&blob, blob.len()));
+            assert_eq!(masked(&short, &buf), (buf.clone(), vec![]), "{blob:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_from_the_middle_is_masked_and_one_byte_less_is_not() {
+        let f = filter_of(&[TOKEN]);
+        for (form, w) in [
+            (TOKEN.to_vec(), 16),
+            (hex(TOKEN, false), 32),
+            (hex(TOKEN, true), 32),
+            (trimmed_base64(TOKEN, false, 0), 24),
+            (trimmed_base64(TOKEN, true, 1), 24),
+        ] {
+            let mid = form.len() / 2 - w / 2;
+            let (out, found) = masked(&f, &embed(&form[mid..mid + w]));
+            assert_eq!(out, embed(&stars(w)), "w={w}");
+            assert_eq!(found, v0());
+            let short = embed(&form[mid..mid + w - 1]);
+            assert_eq!(masked(&f, &short), (short.clone(), vec![]), "w={w}");
+            assert!(!f.matches(&short));
+        }
+    }
+
+    #[test]
+    fn a_public_prefix_alone_is_not_masked() {
+        let f = filter_of(&[TOKEN]);
+        let prefix = b"sk-ant-api03-";
+        for buf in [
+            b"key=sk-ant-api03-\n".to_vec(),
+            embed(&hex(prefix, false)),
+            embed(&hex(prefix, true)),
+        ] {
+            assert_eq!(masked(&f, &buf), (buf.clone(), vec![]));
+            assert!(!f.matches(&buf));
+        }
+    }
+
+    #[test]
+    fn a_truncated_tail_is_masked() {
+        let f = filter_of(&[TOKEN]);
+        for n in [1, 32, 63, 64] {
+            let buf = [&b"out: "[..], &TOKEN[..n]].concat();
+            let (out, found) = masked(&f, &buf);
+            assert_eq!(out, [&b"out: "[..], &stars(n)].concat(), "n={n}");
+            assert_eq!(found, v0());
+            assert_eq!(f.matches(&buf), n >= 16, "n={n}");
+        }
+        let v = b"abcabcabcabcabcabcabQQQQ";
+        let f = filter_of(&[v]);
+        let (out, _) = masked(&f, b"zzabcabca");
+        assert_eq!(out, b"zz*******");
+        let (out, _) = masked(&f, b"abcabcabcabcabcabcabQQQQ");
+        assert_eq!(out, stars(v.len()));
+        let (out, _) = masked(&f, b"abcabcabcabcabcabcabQQQQabcabcab");
+        assert_eq!(out, stars(32));
+        let f = filter_of(&[b"aaabXXXXXXXXXXXXXXXX"]);
+        let (out, found) = masked(&f, b"zzaaaab");
+        assert_eq!(out, b"zza****");
+        assert_eq!(found, v0());
+    }
+
+    #[test]
+    fn overlapping_and_adjacent_echoes_are_all_masked() {
+        let x: &[u8] = TOKEN;
+        let y = [&TOKEN[40..], b"-the-second-value-continues"].concat();
+        let f = filter_of(&[x, &y]);
+        let buf = [&b"<<"[..], x, &y[24..], x, x, b">>\n"].concat();
+        let (out, found) = masked(&f, &buf);
+        assert_eq!(out, embed(&stars(buf.len() - 5)));
+        assert_eq!(found, vec![Source::Label("v0"), Source::Label("v1")]);
+
+        let buf = [&b"<<"[..], &y[24..], x, b">>\n"].concat();
+        let (out, found) = masked(&f, &buf);
+        assert_eq!(out, embed(&stars(buf.len() - 5)));
+        assert_eq!(found, vec![Source::Label("v1"), Source::Label("v0")]);
+    }
+
+    #[test]
+    fn a_value_never_given_is_untouched() {
+        let f = filter_of(&[TOKEN]);
+        let other = b"ghp_Qw3rTy8UiOpAsDfGhJkLzXcVbNm1234567890abcdefghijklmnopqrstuvw";
+        for buf in [
+            embed(other),
+            embed(&hex(other, false)),
+            embed(&spoil(TOKEN, 8)),
+        ] {
+            assert_eq!(masked(&f, &buf), (buf.clone(), vec![]));
+            assert!(!f.matches(&buf));
+        }
+    }
+
+    #[test]
+    fn masking_never_changes_the_length() {
+        let f = filter_of(&[TOKEN, &TOKEN[..12]]);
+        for buf in sample_buffers() {
+            let mut b = buf.clone();
+            f.mask_in_place(&mut b);
+            assert_eq!(b.len(), buf.len());
+            assert!(b.iter().zip(&buf).all(|(m, o)| m == o || *m == b'*'));
+        }
+        let mut empty: [u8; 0] = [];
+        assert!(f.mask_in_place(&mut empty).is_empty());
+    }
+
+    #[test]
+    fn matches_agrees_with_mask_in_place_without_a_tail() {
+        let f = filter_of(&[TOKEN]);
+        let mut hits = 0;
+        for buf in sample_buffers() {
+            let (out, found) = masked(&f, &buf);
+            assert_eq!(f.matches(&buf), !found.is_empty(), "{buf:?}");
+            assert_eq!(found.is_empty(), out == buf);
+            hits += usize::from(!found.is_empty());
+        }
+        assert!(hits > 5);
+    }
+
+    #[test]
+    fn redact_text_widens_a_straddling_fragment_to_whole_characters() {
+        let secret = "é0123456789abcdeéfghijklmnopqrstuvwxyz";
+        let f = filter_of(&[secret.as_bytes()]);
+        let start = format!("pre ĩ{}", &secret[2..]);
+        assert_eq!(f.redact_text(&start), "pre <redacted>");
+        let end = format!("{}èpost", &secret[..17]);
+        assert_eq!(f.redact_text(&end), "<redacted>post");
+        let both = format!("a {secret} b {secret}{secret} c");
+        assert_eq!(f.redact_text(&both), "a <redacted> b <redacted> c");
+        assert_eq!(f.redact_text("nothing here"), "nothing here");
+    }
+
+    #[test]
+    fn redact_text_output_holds_no_indexed_window_of_any_form() {
+        let short = "0123456789:abcd";
+        let f = filter_of(&[TOKEN, &TOKEN[..17], short.as_bytes()]);
+        let mut text = String::from("start ");
+        for v in [&TOKEN[..], &TOKEN[..17], short.as_bytes()] {
+            for form in [v.to_vec(), hex(v, false), hex(v, true), percent(v, true)] {
+                text.push_str(std::str::from_utf8(&form).unwrap());
+                text.push_str(" | ");
+            }
+            for (blob, _) in base64_blobs(v) {
+                text.push_str(std::str::from_utf8(&blob).unwrap());
+                text.push(' ');
+            }
+        }
+        text.push_str("end");
+        let out = f.redact_text(&text);
+        assert!(out.starts_with("start ") && out.ends_with("end"));
+        assert!(out.contains("<redacted>"));
+        for form in &f.index.forms {
+            let w = if form.window == 0 {
+                form.bytes.len()
+            } else {
+                form.window
+            };
+            for win in form.bytes.windows(w) {
+                assert!(find(out.as_bytes(), win).is_none(), "{win:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_value_under_eight_bytes_is_skipped_and_counted() {
+        let tiny: [&[u8]; 4] = [b"k", b"ke", b"key", b"keyword"];
+        let f = filter_of(&tiny);
+        assert_eq!(f.skipped(), 4);
+        assert!(f.is_empty());
+        assert_eq!(format!("{f:?}"), "ValueFilter(0 values)");
+        let buf = b"k ke key keyword\n".to_vec();
+        assert_eq!(masked(&f, &buf), (buf.clone(), vec![]));
+        assert!(!f.matches(&buf));
+        assert_eq!(f.redact_text("k ke key keyword"), "k ke key keyword");
+
+        let eight = b"Pa55w0rd";
+        let fifteen = &b"Fifteen:bytes!!"[..];
+        let f = filter_of(&[b"k", eight, fifteen]);
+        assert_eq!(f.skipped(), 1);
+        assert!(!f.is_empty());
+        for (v, label) in [(&eight[..], "v1"), (fifteen, "v2")] {
+            let (out, found) = masked(&f, &embed(v));
+            assert_eq!(out, embed(&stars(v.len())));
+            assert_eq!(found, vec![Source::Label(label)]);
+            let near = embed(&v[..v.len() - 1]);
+            assert_eq!(masked(&f, &near), (near.clone(), vec![]));
+            assert!(!f.matches(&near));
+        }
+    }
+
+    #[test]
+    fn values_beyond_the_bounds_are_skipped_and_counted() {
+        let big = vec![b'z'; MAX_SECRET_BYTES + 1];
+        let f = filter_of(&[&big]);
+        assert_eq!(f.skipped(), 1);
+        assert!(f.is_empty());
+        assert!(!f.matches(&big));
+
+        let values: Vec<Vec<u8>> = (0..=MAX_VALUES)
+            .map(|i| format!("val{i:05}").into_bytes())
+            .collect();
+        let mut b = ValueFilter::builder();
+        for v in &values {
+            b = b.source(Source::Label("bulk"), v);
+        }
+        let f = b.build();
+        assert_eq!(f.skipped(), 1);
+        assert_eq!(
+            format!("{f:?}"),
+            format!("ValueFilter({MAX_VALUES} values)")
+        );
+        assert!(f.matches(&embed(&values[MAX_VALUES - 1])));
+        assert!(!f.matches(&embed(&values[MAX_VALUES])));
+    }
+
+    #[test]
+    fn a_secret_is_read_through_the_builder() {
+        let s = MaknaeSecret::new(Zeroizing::new(String::from("hunter2-but-longer"))).unwrap();
+        let b = MaknaeSecret::new(Zeroizing::new(TOKEN.to_vec())).unwrap();
+        let t = MaknaeSecret::new(Zeroizing::new(String::from("abc"))).unwrap();
+        let f = ValueFilter::builder()
+            .secret("pw", &s)
+            .secret("tok", &b)
+            .secret("tiny", &t)
+            .build();
+        assert_eq!(f.skipped(), 1);
+        let (out, found) = masked(&f, &embed(b"hunter2-but-longer"));
+        assert_eq!(out, embed(&stars(18)));
+        assert_eq!(found, vec![Source::Label("pw")]);
+        assert_eq!(masked(&f, &embed(TOKEN)).1, vec![Source::Label("tok")]);
+    }
+
+    #[test]
+    fn debug_shows_only_the_count() {
+        let f = filter_of(&[TOKEN, b"Pa55w0rd", b"k"]);
+        let shown = format!("{f:?}");
+        assert_eq!(shown, "ValueFilter(2 values)");
+        assert_eq!(format!("{f:#?}"), shown);
+    }
+
+    const WORK_C: u64 = 16;
+    const MIB: usize = 1 << 20;
+
+    fn work_bound(f: &ValueFilter, n: usize) -> u64 {
+        let m: usize = f.index.tables.iter().map(|t| t.len()).sum::<usize>() + f.index.forms.len();
+        let log_m = u64::from(m.max(2).next_power_of_two().ilog2());
+        WORK_C * n as u64 * log_m
+    }
+
+    fn repeat_to(unit: &[u8], n: usize) -> Vec<u8> {
+        unit.iter().copied().cycle().take(n).collect()
+    }
+
+    #[test]
+    fn a_value_repeated_to_a_mebibyte_costs_linear_work() {
+        let f = filter_of(&[TOKEN]);
+        let mut buf = repeat_to(TOKEN, MIB);
+        let (found, work) = f.mask_in_place_with_work(&mut buf);
+        assert_eq!(found, v0());
+        assert!(buf.iter().all(|&b| b == b'*'));
+        let bound = work_bound(&f, MIB);
+        eprintln!("repeated token: work={work} bound={bound}");
+        assert!(work > MIB as u64);
+        assert!(work <= bound, "work={work} bound={bound}");
+    }
+
+    #[test]
+    fn a_run_of_one_byte_against_a_run_value_costs_linear_work() {
+        let v = vec![b'a'; MAX_ENCODED_VALUE];
+        let f = filter_of(&[&v]);
+        let mut buf = vec![b'a'; MIB];
+        let (found, work) = f.mask_in_place_with_work(&mut buf);
+        assert_eq!(found, v0());
+        assert!(buf.iter().all(|&b| b == b'*'));
+        let bound = work_bound(&f, MIB);
+        eprintln!("run of a: work={work} bound={bound}");
+        assert!(work > MIB as u64);
+        assert!(work <= bound, "work={work} bound={bound}");
+    }
+
+    #[test]
+    fn a_near_whole_short_value_repeated_costs_linear_work() {
+        let v = b"Fifteen:bytes!!";
+        assert_eq!(v.len(), 15);
+        let f = filter_of(&[v]);
+        let mut buf = repeat_to(&v[..14], MIB);
+        let (_, work) = f.mask_in_place_with_work(&mut buf);
+        assert!(buf[..MIB - v.len()].iter().all(|&b| b != b'*'));
+        let bound = work_bound(&f, MIB);
+        eprintln!("near-whole short: work={work} bound={bound}");
+        assert!(work > MIB as u64);
+        assert!(work <= bound, "work={work} bound={bound}");
     }
 }
