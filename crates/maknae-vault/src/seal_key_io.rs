@@ -35,7 +35,7 @@ pub fn read_egress_secret_id(credentials_dir: Option<&Path>) -> Result<MaknaeSec
     })?;
     let text = text.trim();
     crate::transit::approle_credential("egress SecretID", text)?;
-    MaknaeSecret::new(zeroize::Zeroizing::new(text.to_owned()))
+    MaknaeSecret::new(crate::secret_source::exact_text(text))
         .map_err(|e| crate::error::secret_error("egress SecretID", e))
 }
 

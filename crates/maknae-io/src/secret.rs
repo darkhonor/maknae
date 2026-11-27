@@ -277,6 +277,14 @@ mod tests {
     }
 
     #[test]
+    fn a_decoded_string_is_exactly_sized_plain_and_escaped() {
+        for (json, want) in [(&br#""plain""#[..], "plain"), (br#""sk\u002dA""#, "sk-A")] {
+            let got = de_zeroizing_string(&mut serde_json::Deserializer::from_slice(json)).unwrap();
+            assert_eq!((got.as_str(), got.capacity()), (want, want.len()));
+        }
+    }
+
+    #[test]
     fn new_infers_the_storage_form() {
         assert!(MaknaeSecret::new(Zeroizing::new(String::from("a"))).is_ok());
         assert!(MaknaeSecret::new(Zeroizing::new(vec![1u8])).is_ok());

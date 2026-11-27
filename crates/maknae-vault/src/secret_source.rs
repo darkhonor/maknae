@@ -242,14 +242,32 @@ pub(crate) fn check_seal_key_len(n: usize) -> Result<(), VaultError> {
     Ok(())
 }
 
-pub fn seal_key_to_hex(der: &[u8]) -> Result<MaknaeSecret, VaultError> {
+fn encode_hex(bytes: &[u8]) -> Zeroizing<String> {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = Zeroizing::new(String::with_capacity(2 * der.len()));
-    for b in der {
+    let mut hex = Zeroizing::new(String::with_capacity(2 * bytes.len()));
+    for b in bytes {
         hex.push(char::from(DIGITS[usize::from(b >> 4)]));
         hex.push(char::from(DIGITS[usize::from(b & 0x0f)]));
     }
-    MaknaeSecret::new(hex).map_err(|e| secret_error("seal key", e))
+    hex
+}
+
+fn decode_hex(hex: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let mut der = Zeroizing::new(Vec::with_capacity(hex.len() / 2));
+    for [hi, lo] in hex.as_chunks::<2>().0 {
+        der.push(nibble(*hi)? * 16 + nibble(*lo)?);
+    }
+    Ok(der)
+}
+
+pub(crate) fn exact_text(text: &str) -> Zeroizing<String> {
+    let mut owned = Zeroizing::new(String::with_capacity(text.len()));
+    owned.push_str(text);
+    owned
+}
+
+pub fn seal_key_to_hex(der: &[u8]) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::new(encode_hex(der)).map_err(|e| secret_error("seal key", e))
 }
 
 pub(crate) fn seal_key_der(der: Zeroizing<Vec<u8>>) -> Result<MaknaeSecretBytes, VaultError> {
@@ -263,11 +281,7 @@ pub fn seal_key_from_hex(text: &str) -> Result<MaknaeSecretBytes, VaultError> {
         return Err(VaultError::SealKey(SEAL_KEY_NOT_HEX));
     }
     check_seal_key_len(hex.len() / 2)?;
-    let mut der = Zeroizing::new(Vec::with_capacity(hex.len() / 2));
-    for [hi, lo] in hex.as_chunks::<2>().0 {
-        der.push(nibble(*hi)? * 16 + nibble(*lo)?);
-    }
-    seal_key_der(der)
+    seal_key_der(decode_hex(hex)?)
 }
 
 fn nibble(c: u8) -> Result<u8, VaultError> {
@@ -290,9 +304,7 @@ pub(crate) fn agent_secret_from_trimmed(text: &str) -> Result<MaknaeSecret, Secr
             max: MAX_AGENT_SECRET_BYTES,
         });
     }
-    let mut secret = Zeroizing::new(String::with_capacity(text.len()));
-    secret.push_str(text);
-    MaknaeSecret::new(secret)
+    MaknaeSecret::new(exact_text(text))
         .map_err(|e| SecretSourceError::Read(crate::error::secret_error("agent SecretID", e)))
 }
 
@@ -412,6 +424,8 @@ mod tests {
         ));
         let s = agent_secret_from_trimmed("\n sid \n").unwrap();
         assert_eq!(s.expose(), "sid");
+        let exact = exact_text("sid");
+        assert_eq!((exact.as_str(), exact.capacity()), ("sid", 3));
     }
 
     #[test]
@@ -604,6 +618,14 @@ mod tests {
         assert_eq!(hex.expose().len(), 2 * der.len());
         let back = seal_key_from_hex(hex.expose()).unwrap();
         assert!(back.expose() == der.as_slice());
+        let (small, small_der) = (encode_hex(&[1, 2, 3]), decode_hex(b"010203").unwrap());
+        assert_eq!((small.capacity(), small_der.capacity()), (6, 3));
+        let encoded = encode_hex(&der);
+        assert_eq!(encoded.capacity(), encoded.len());
+        assert_eq!(encoded.len(), 2 * der.len());
+        let decoded = decode_hex(encoded.as_bytes()).unwrap();
+        assert_eq!(decoded.capacity(), decoded.len());
+        assert_eq!(decoded.as_slice(), der.as_slice());
         assert_eq!(
             seal_key_to_hex(&[0x00, 0x0f, 0xa5, 0xff]).unwrap().expose(),
             "000fa5ff"
