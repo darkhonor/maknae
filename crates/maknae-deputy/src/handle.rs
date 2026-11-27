@@ -172,7 +172,7 @@ pub fn decide<'a>(
     // legitimately be tool calls with no text at all.
     let blank = |content: &[maknae_proto::ContentBlock]| {
         content.iter().all(|b| match b {
-            maknae_proto::ContentBlock::Text { text } => text.0.trim().is_empty(),
+            maknae_proto::ContentBlock::Text { text } => text.expose().trim().is_empty(),
             _ => false,
         })
     };
@@ -217,7 +217,7 @@ mod tests {
             conversation: "conv1".into(),
             turns: vec![Turn::User {
                 content: vec![ContentBlock::Text {
-                    text: SecretText(zeroize::Zeroizing::new("hello".into())),
+                    text: SecretText::from(zeroize::Zeroizing::new("hello".into())),
                 }],
             }],
             output_tokens: None,
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn no_frame_shape_can_make_the_preamble_the_whole_request() {
         let text = |t: &str| ContentBlock::Text {
-            text: SecretText(zeroize::Zeroizing::new(t.into())),
+            text: SecretText::from(zeroize::Zeroizing::new(t.into())),
         };
         let image = || ContentBlock::Image {
             data: "AAAA".into(),
@@ -432,7 +432,7 @@ mod tests {
         let call = || maknae_proto::ProposedToolCall {
             name: "read_file".into(),
             call_id: "c1".into(),
-            arguments: SecretText(zeroize::Zeroizing::new("{}".into())),
+            arguments: SecretText::from(zeroize::Zeroizing::new("{}".into())),
             refused: None,
         };
         let cases: Vec<(&str, Vec<Turn>, Refusal)> = vec![

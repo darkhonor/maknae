@@ -112,7 +112,7 @@ mod tests {
 
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
-            text: SecretText(Zeroizing::new(s.into())),
+            text: SecretText::from(Zeroizing::new(s.into())),
         }
     }
     fn user(s: &str) -> Turn {

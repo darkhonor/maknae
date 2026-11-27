@@ -27,7 +27,7 @@ const GRANT: &str = "roles:\n  user:\n    allow: [\"session.task\"]\n";
 static STORE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 fn secret(s: &str) -> SecretText {
-    SecretText(Zeroizing::new(s.into()))
+    SecretText::from(Zeroizing::new(s.into()))
 }
 
 fn nobody() -> u32 {

@@ -929,12 +929,12 @@ pub(crate) fn post_audit(draft: &PostDraft, digest: &str) -> BoardAudit {
         to: Some(addressed(&draft.to)),
         in_reply_to: draft.in_reply_to.map(|id| id.to_string()),
         attachments: bytes(draft.attachments.len()),
-        body_bytes: bytes(draft.body.0.len()),
+        body_bytes: bytes(draft.body.expose().len()),
         attachment_bytes: bytes(
             draft
                 .attachments
                 .iter()
-                .map(|a| a.content.0.len())
+                .map(|a| a.content.expose().len())
                 .fold(0, usize::saturating_add),
         ),
         digest: Some(digest.into()),
@@ -1471,7 +1471,7 @@ mod tests {
     }
 
     fn secret(s: &str) -> SecretText {
-        SecretText(maknae_io::Zeroizing::new(s.into()))
+        SecretText::from(maknae_io::Zeroizing::new(s.into()))
     }
 
     fn draft(body: &str, in_reply_to: Option<PostId>) -> PostDraft {

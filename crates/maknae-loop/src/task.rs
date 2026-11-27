@@ -75,7 +75,7 @@ impl<D: Dial> TaskClient<D> {
         text: SecretText,
         seen_follow_ups: Option<u32>,
     ) -> Result<ReportOutcome, String> {
-        if text.0.len() > self.link.transport().prompt_max_bytes {
+        if text.expose().len() > self.link.transport().prompt_max_bytes {
             return Ok(ReportOutcome::TooLarge);
         }
         report_answer(
@@ -153,7 +153,7 @@ mod tests {
     }
 
     fn text(s: &str) -> SecretText {
-        SecretText(zeroize::Zeroizing::new(s.into()))
+        SecretText::from(zeroize::Zeroizing::new(s.into()))
     }
 
     fn view(state: TaskState) -> maknae_proto::TaskView {
@@ -201,7 +201,7 @@ mod tests {
                     text,
                     seen_follow_ups,
                 } => {
-                    assert_eq!(text.0.as_str(), "done");
+                    assert_eq!(text.expose(), "done");
                     (Some(*seen_follow_ups), r.task)
                 }
                 other => panic!("unexpected verb {other:?}"),

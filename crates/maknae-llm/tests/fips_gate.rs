@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 async fn a_call_without_an_installed_fips_provider_is_refused_not_attempted() {
     let req = ChatRequest {
         model: "m",
-        messages: vec![ChatMessage::user(maknae_proto::SecretText(
+        messages: vec![ChatMessage::user(maknae_proto::SecretText::from(
             zeroize::Zeroizing::new("hi".to_string()),
         ))],
         tools: vec![],

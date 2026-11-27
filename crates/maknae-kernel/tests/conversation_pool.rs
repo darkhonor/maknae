@@ -12,7 +12,7 @@ const MUTATION_WORKERS: usize = 16;
 
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {
-        text: SecretText(maknae_io::Zeroizing::new(s.into())),
+        text: SecretText::from(maknae_io::Zeroizing::new(s.into())),
     }
 }
 

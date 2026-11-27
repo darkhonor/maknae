@@ -1153,7 +1153,7 @@ pub enum Payload {
     BoardListing(crate::BoardListing),
 }
 
-pub struct SecretText(pub zeroize::Zeroizing<String>);
+pub struct SecretText(zeroize::Zeroizing<String>);
 FIX
   printf 'pub struct Bytes(pub Zeroizing<Vec<u8>>);\n' > "$fixture/crates/maknae-proto/src/bytes.rs"
   cat > "$fixture/crates/maknae-proto/src/board.rs" <<'FIX'

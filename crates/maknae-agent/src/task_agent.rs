@@ -33,7 +33,7 @@ pub async fn run<P: TaskPlane + Send, C: Clock + Send>(
     prompt: SecretText,
 ) -> TaskAgentOutcome {
     let forges = plane.forges();
-    let bindings = choose(&[&Links], &prompt.0, forges.as_deref(), Some(parent)).bindings;
+    let bindings = choose(&[&Links], prompt.expose(), forges.as_deref(), Some(parent)).bindings;
     let given = match plane.submit(agent, prompt, bindings).await {
         Ok(view) => view,
         Err(TaskerFail::Refused | TaskerFail::Unreachable { after_write: false }) => {
@@ -139,7 +139,7 @@ async fn reported<P: TaskPlane + Send, C: Clock>(
                 .write(
                     conversation,
                     &path,
-                    entry.text.0.as_bytes(),
+                    entry.text.expose().as_bytes(),
                     ReadBasis::Unread
                 )
                 .await,
@@ -182,7 +182,7 @@ mod tests {
     }
 
     fn secret(s: &str) -> SecretText {
-        SecretText(Zeroizing::new(s.into()))
+        SecretText::from(Zeroizing::new(s.into()))
     }
 
     fn view(state: TaskState, close: Option<TaskClose>) -> TaskView {
@@ -335,7 +335,7 @@ mod tests {
             prompt: SecretText,
             _: Vec<maknae_proto::BindingRequest>,
         ) -> Result<TaskView, TaskerFail> {
-            self.cite(format!("submit {agent} {}", *prompt.0));
+            self.cite(format!("submit {agent} {}", prompt.expose()));
             self.submits.pop_front().expect("a scripted submit")
         }
         async fn sub_status(&mut self, task: &TaskRef) -> Result<TaskView, TaskerFail> {

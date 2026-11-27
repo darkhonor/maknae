@@ -395,7 +395,7 @@ pub fn route(call: &ProposedToolCall, home: Option<&str>) -> Result<ToolRequest,
     if let Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }) = call.refused {
         return Err(RouteError::ArgumentsOverBound(bytes));
     }
-    let args: &str = &call.arguments.0;
+    let args: &str = call.arguments.expose();
     match call.name.as_str() {
         "read_file" => {
             require_object(args)?;
@@ -497,7 +497,7 @@ mod tests {
         ProposedToolCall {
             name: name.into(),
             call_id: "c1".into(),
-            arguments: SecretText(Zeroizing::new(args.into())),
+            arguments: SecretText::from(Zeroizing::new(args.into())),
             refused: None,
         }
     }

@@ -1225,7 +1225,7 @@ impl TaskStore {
             next.state = TaskState::Closed;
             next.close = Some(close);
             next.rseq = Some(rseq);
-            next.report = Some((SecretText(String::new().into()), self.clock.now_secs()));
+            next.report = Some((SecretText::new(String::new()), self.clock.now_secs()));
             next.actions = hot.actions;
             next.last_action = hot.last_action;
             self.write(&next, Some(&prior)).map(|()| next)
@@ -1936,7 +1936,7 @@ impl TaskStore {
                     .skip(seen as usize)
                     .take_while(|f| {
                         let first = used == 0;
-                        used = used.saturating_add(f.0.len().max(1));
+                        used = used.saturating_add(f.expose().len().max(1));
                         first || used <= budget
                     })
                     .cloned()
@@ -2330,7 +2330,7 @@ impl TaskStore {
         let _w = self.writing();
         let next = self.publish(
             id,
-            SecretText(String::new().into()),
+            SecretText::new(String::new()),
             Some(TaskClose::Stopped),
             |held, rec| match (by.reaches(held, rec), rec.state) {
                 (false, _) => Err(TaskRefusal::Unknown),
@@ -2745,8 +2745,10 @@ fn store(e: StoreError) -> TaskRefusal {
 }
 
 fn room_for(prior: &[SecretText], text: &SecretText, total_max: usize) -> Result<(), TaskRefusal> {
-    let total = prior.iter().map(|f| f.0.len()).sum::<usize>();
-    match prior.len() >= MAX_FOLLOW_UPS_PER_TASK || total.saturating_add(text.0.len()) > total_max {
+    let total = prior.iter().map(|f| f.expose().len()).sum::<usize>();
+    match prior.len() >= MAX_FOLLOW_UPS_PER_TASK
+        || total.saturating_add(text.expose().len()) > total_max
+    {
         true => Err(TaskRefusal::FollowUps),
         false => Ok(()),
     }
@@ -2941,7 +2943,7 @@ impl TaskObjectForTest for TaskObject {
             parent: None,
             agent: agent.into(),
             ask: maknae_proto::Ask::Prompt {
-                prompt: maknae_proto::SecretText(String::new().into()),
+                prompt: maknae_proto::SecretText::new(String::new()),
             },
             labels: maknae_proto::Labels {},
             bindings: Vec::new(),
@@ -3378,7 +3380,7 @@ async fn decide<P: Authorizer + Send + Sync + 'static>(
 ) -> Result<Arc<SignedTask>, TaskRefusal> {
     maknae_proto::validate_submission(&sub).map_err(|e| TaskRefusal::Schema(e.to_string()))?;
     let maknae_proto::Ask::Prompt { prompt } = &sub.ask;
-    if prompt.0.len() > ctx.text_max {
+    if prompt.expose().len() > ctx.text_max {
         return Err(TaskRefusal::TooLong);
     }
     let target = target(&sub)?;
@@ -4265,7 +4267,7 @@ mod tests {
             version: TASK_VERSION,
             agent: agent.into(),
             ask: Ask::Prompt {
-                prompt: SecretText(String::from(PROMPT).into()),
+                prompt: SecretText::new(String::from(PROMPT)),
             },
             labels: Labels {},
             bindings: vec![],
@@ -4500,7 +4502,7 @@ mod tests {
     }
 
     fn text(s: &str) -> SecretText {
-        SecretText(String::from(s).into())
+        SecretText::new(String::from(s))
     }
 
     #[tokio::test(start_paused = true)]
@@ -5882,7 +5884,7 @@ mod tests {
         let page = reopened.reports(&me, &id("hobi"), usize::MAX);
         assert_eq!(page.entries.len(), 1, "the notice is collectable");
         assert_eq!(page.entries[0].close, Some(TaskClose::AgentGone));
-        assert!(page.entries[0].text.0.is_empty());
+        assert!(page.entries[0].text.expose().is_empty());
     }
 
     #[test]
@@ -7856,9 +7858,10 @@ mod tests {
             store.follow_up(&task, &me, text(t), 100).unwrap();
         }
         let items = |seen, budget| match store.heartbeat(&id("hobi"), HOBI, seen, budget) {
-            Heartbeat::FollowUps { items, .. } => {
-                items.iter().map(|i| i.0.to_string()).collect::<Vec<_>>()
-            }
+            Heartbeat::FollowUps { items, .. } => items
+                .iter()
+                .map(|i| i.expose().to_string())
+                .collect::<Vec<_>>(),
             other => panic!("{other:?}"),
         };
         assert_eq!(items(0, 0), ["aaaa"]);
@@ -10960,7 +10963,7 @@ mod tests {
                     &shared_signer(),
                     &ctx,
                     (id, caller, under, uid),
-                    SecretText(text.to_owned().into()),
+                    SecretText::new(text.to_owned()),
                     (&asked, tokens),
                     &crate::reach::FrameTrail {
                         emit,
@@ -11517,7 +11520,7 @@ mod tests {
             };
             let text_max = 1 << 20;
             store
-                .follow_up(&id, by, SecretText("first".to_owned().into()), text_max)
+                .follow_up(&id, by, SecretText::new("first".to_owned()), text_max)
                 .unwrap();
             Reaching::new(&pdp, &stub)
                 .add(
@@ -11530,7 +11533,7 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .follow_up(&id, by, SecretText("later".to_owned().into()), text_max)
+                .follow_up(&id, by, SecretText::new("later".to_owned()), text_max)
                 .unwrap();
             let signed = store.record(&id).unwrap().addendum.unwrap();
             assert_eq!(signed.addendum.seq(), 2);

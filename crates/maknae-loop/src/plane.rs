@@ -733,7 +733,7 @@ mod tests {
     fn user_turn() -> Vec<Turn> {
         vec![Turn::User {
             content: vec![maknae_proto::ContentBlock::Text {
-                text: maknae_proto::SecretText(zeroize::Zeroizing::new("hello".into())),
+                text: maknae_proto::SecretText::from(zeroize::Zeroizing::new("hello".into())),
             }],
         }]
     }
@@ -765,7 +765,7 @@ mod tests {
         let _ = plane
             .tasks()
             .report(
-                maknae_proto::SecretText(zeroize::Zeroizing::new("r".into())),
+                maknae_proto::SecretText::from(zeroize::Zeroizing::new("r".into())),
                 None,
             )
             .await;
@@ -797,7 +797,7 @@ mod tests {
         plane.cite(Some(id));
         let tasker = plane.tasker();
         let hobi = maknae_config::AgentId::parse("hobi").unwrap();
-        let text = maknae_proto::SecretText(zeroize::Zeroizing::new("p".into()));
+        let text = maknae_proto::SecretText::from(zeroize::Zeroizing::new("p".into()));
         let _ = tasker
             .submit(
                 &hobi,
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn only_a_claim_heartbeat_or_catalog_fetch_goes_uncited() {
         let id = Some(TaskId([1; 16]));
-        let text = || maknae_proto::SecretText(zeroize::Zeroizing::new("r".into()));
+        let text = || maknae_proto::SecretText::from(zeroize::Zeroizing::new("r".into()));
         for seen in [None, Some(0)] {
             let claim = Verb::TaskClaim {
                 seen_follow_ups: seen,
@@ -1087,7 +1087,7 @@ mod tests {
             conversation: "c".into(),
             turns: vec![Turn::User {
                 content: vec![maknae_proto::ContentBlock::Text {
-                    text: maknae_proto::SecretText(zeroize::Zeroizing::new("a".repeat(n))),
+                    text: maknae_proto::SecretText::from(zeroize::Zeroizing::new("a".repeat(n))),
                 }],
             }],
             output_tokens: None,

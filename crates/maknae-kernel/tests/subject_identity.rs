@@ -55,7 +55,9 @@ async fn the_egress_refusal_record_carries_the_decided_role() {
                 conversation: common::CONV.into(),
                 turns: vec![maknae_proto::Turn::User {
                     content: vec![maknae_proto::ContentBlock::Text {
-                        text: maknae_proto::SecretText(maknae_io::Zeroizing::new("hi".into())),
+                        text: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                            "hi".into(),
+                        )),
                     }],
                 }],
                 output_tokens: None,

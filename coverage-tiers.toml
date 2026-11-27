@@ -139,6 +139,8 @@ files = [
   # exact — a wrong branch hands a subject an object outside its home,
   # or accepts a fifo/hardlink/oversize descriptor the named requirements refuse.
   "crates/maknae-io/src/delegated.rs",
+  # #751: DeliveredCredential and the launch-credential framing; a lost redaction or a decode that admits a malformed frame leaks or forges a credential.
+  "crates/maknae-io/src/credential.rs",
   "crates/maknae-io/src/normalize.rs",
   "crates/maknae-io/src/page.rs",
   # Raw T1 syscall coverage, with no exceptions.
@@ -517,6 +519,8 @@ floor_production_region = 90
 # What stays here is the I/O around it: calling it on every read, the sticky
 # verdict, and queueing descriptors only after it admits.
 files = [
+  # #751: deny_core_dumps (soft RLIMIT_CORE, non-dumpable) and the launch-credential send/receive over a Unix socket.
+  "crates/maknae-io/src/credential_io.rs",
   # #240a: the kernel-side egress transport. T2, not T1, and by the repo's own
   # line-drawing rather than by convenience: this file is socket I/O — connect,
   # timeouts, framed read/write — and every other I/O file here is T3
@@ -1427,6 +1431,12 @@ why = "fstat on the fd openat just returned cannot fail on a healthy FS; a pure 
 path = "crates/maknae-io/src/write.rs"
 anchor = "append_raw(&fd, bytes).map_err"
 why = "a write to an fd openat just returned fails only on ENOSPC/EIO, not provokable from a unit test; a pure errno passthrough. The ENXIO-at-the-open case beside it IS covered, by append_to_a_fifo_is_enxio_at_the_open"
+
+[[exception]]
+path = "crates/maknae-io/src/credential_io.rs"
+anchor = "if let Some(code) = CORE_DUMPS_DENIED_FAILED.get() {"
+end_anchor = "io::Error::from_raw_os_error(*CORE_DUMPS_DENIED_FAILED.get_or_init(|| e.raw_os_error()))"
+why = "deny_core_dumps' sticky-failure path: lowering only the soft core limit to 0 under the current hard limit, and PR_SET_DUMPABLE 0, cannot fail for an unprivileged process, so no unit test can provoke the first failure the path records; the success path and its reapply are tested"
 
 [[t3]]
 path = "crates/maknae-proto/src/mutation.rs"

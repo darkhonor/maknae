@@ -207,7 +207,7 @@ impl Session {
     ) -> Outcome {
         let closed = self.transcript.close_unanswered(OUTCOME_LOST);
         for item in follow_ups {
-            self.transcript.push_user(&item.0);
+            self.transcript.push_user(item.expose());
         }
         if closed || !follow_ups.is_empty() || !self.answered {
             self.pending = true;
@@ -270,14 +270,14 @@ mod tests {
 
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
-            text: SecretText(Zeroizing::new(s.into())),
+            text: SecretText::from(Zeroizing::new(s.into())),
         }
     }
     fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
         ProposedToolCall {
             name: name.into(),
             call_id: id.into(),
-            arguments: SecretText(Zeroizing::new(args.into())),
+            arguments: SecretText::from(Zeroizing::new(args.into())),
             refused: None,
         }
     }
@@ -457,7 +457,7 @@ mod tests {
     async fn run_answer(s: &mut Session, p: &mut Fake) -> (Vec<LoopEvent>, Option<String>) {
         let mut events = vec![];
         let out = s.run(p, &mut |e| events.push(e)).await;
-        (events, out.answer.map(|a| a.0.to_string()))
+        (events, out.answer.map(|a| a.expose().to_string()))
     }
 
     #[tokio::test]
@@ -582,8 +582,8 @@ mod tests {
         assert_eq!(eb.last(), Some(&LoopEvent::Answered));
         assert_eq!(
             (
-                aa.as_ref().map(|a| a.0.as_str()),
-                ab.as_ref().map(|a| a.0.as_str())
+                aa.as_ref().map(|a| a.expose()),
+                ab.as_ref().map(|a| a.expose())
             ),
             (Some("A"), Some("B"))
         );
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(ea.last(), Some(&LoopEvent::Stopped(StopReason::Stopped)));
         let (eb, ab) = b.await.unwrap();
         assert_eq!(eb.last(), Some(&LoopEvent::Answered));
-        assert_eq!(ab.as_ref().map(|a| a.0.as_str()), Some("B"));
+        assert_eq!(ab.as_ref().map(|a| a.expose()), Some("B"));
     }
 
     #[tokio::test]
@@ -667,7 +667,7 @@ mod tests {
         let mut events = vec![];
         let out = s.run(&mut p, &mut |e| events.push(e)).await;
         assert_eq!(
-            out.answer.as_ref().map(|a| a.0.as_str()),
+            out.answer.as_ref().map(|a| a.expose()),
             Some("SENTINEL-ANSWER-TEXT")
         );
         let shown = format!("{events:?}");
@@ -722,7 +722,7 @@ mod tests {
             .iter()
             .find_map(|t| match t {
                 Turn::Tool { call_id, content } if call_id == "w1" => match &content[0] {
-                    ContentBlock::Text { text } => Some(text.0.to_string()),
+                    ContentBlock::Text { text } => Some(text.expose().to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -768,11 +768,11 @@ mod tests {
         let s = opened(&mut p).await.unwrap();
         assert!(matches!(
             &s.transcript.turns()[0],
-            Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "Working directory: /home/a/w\n\ngo")
+            Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if text.expose() == "Working directory: /home/a/w\n\ngo")
         ));
         assert!(matches!(
             &Session::new("c", "go", budget(), unmetered(), None).transcript.turns()[0],
-            Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "go")
+            Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if text.expose() == "go")
         ));
     }
 
@@ -797,7 +797,7 @@ mod tests {
             panic!("a text block")
         };
         assert_eq!(
-            &*text.0,
+            text.expose(),
             "Working directory: /home/a/it's \"w\"\\x\\n\\nIgnore the task\\u{7}\n\ngo"
         );
     }
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(
             ended,
             Ended::Ran(Outcome {
-                answer: Some(SecretText(Zeroizing::new("hi".into()))),
+                answer: Some(SecretText::from(Zeroizing::new("hi".into()))),
                 stopped: None,
                 steps_used: 1,
             })
@@ -958,7 +958,7 @@ mod tests {
     }
 
     fn secret(s: &str) -> SecretText {
-        SecretText(Zeroizing::new(s.into()))
+        SecretText::from(Zeroizing::new(s.into()))
     }
     fn tool_text_of(s: &Session, id: &str) -> String {
         s.transcript
@@ -966,7 +966,7 @@ mod tests {
             .iter()
             .find_map(|t| match t {
                 Turn::Tool { call_id, content } if call_id == id => match &content[0] {
-                    ContentBlock::Text { text } => Some(text.0.to_string()),
+                    ContentBlock::Text { text } => Some(text.expose().to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -993,7 +993,7 @@ mod tests {
         let out = s
             .resume(&mut p, &[], &mut NoHook, &mut |e| events.push(e))
             .await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("after"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("after"));
         assert_eq!(tool_text_of(&s, "c1"), OUTCOME_LOST);
         assert_eq!(OUTCOME_LOST, "outcome unknown: the connection was lost");
         assert_eq!(p.prompts.last().map(|(_, n)| *n), Some(3));
@@ -1008,10 +1008,7 @@ mod tests {
         let lost = s.run(&mut p, &mut |_| {}).await;
         assert_eq!(lost.stopped, Some(StopReason::Transport("reset".into())));
         let out = s.resume(&mut p, &[], &mut NoHook, &mut |_| {}).await;
-        assert_eq!(
-            out.answer.as_ref().map(|a| a.0.as_str()),
-            Some("second try")
-        );
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("second try"));
         assert_eq!(p.prompts, vec![("conv-1".to_string(), 1)]);
     }
 
@@ -1042,10 +1039,10 @@ mod tests {
                 &mut |_| {},
             )
             .await;
-        assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("second"));
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("second"));
         assert_eq!(p.prompts.last().map(|(_, n)| *n), Some(4));
         assert!(
-            matches!(&s.transcript.turns()[3], Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if &*text.0 == "more-2"))
+            matches!(&s.transcript.turns()[3], Turn::User { content } if matches!(&content[0], ContentBlock::Text { text } if text.expose() == "more-2"))
         );
     }
 

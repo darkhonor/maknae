@@ -1070,7 +1070,7 @@ mod tests {
                     kind: maknae_proto::PostKind::Note,
                     to: maknae_proto::Addressee::Board,
                     in_reply_to: None,
-                    body: maknae_proto::SecretText(maknae_io::Zeroizing::new(
+                    body: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
                         "sentinel-695-body".into(),
                     )),
                     attachments: vec![],

@@ -381,7 +381,7 @@ pub fn admitted_blocks(content: &[ContentBlock]) -> Result<(), String> {
     // this predicate refuses the "nothing to send" case, it is not a
     // meaningfulness judgement about the prompt.
     if content.iter().all(|b| match b {
-        ContentBlock::Text { text } => text.0.trim().is_empty(),
+        ContentBlock::Text { text } => text.expose().trim().is_empty(),
         _ => false,
     }) {
         return Err("prompt carries no text to send".into());
@@ -503,14 +503,14 @@ pub fn content_measure(turns: &[Turn]) -> ContentMeasure {
         };
         for b in content {
             if let ContentBlock::Text { text } = b {
-                feed(text.0.as_bytes());
+                feed(text.expose().as_bytes());
             }
         }
         for c in tool_calls {
-            feed(c.arguments.0.as_bytes());
+            feed(c.arguments.expose().as_bytes());
         }
         if let Some(r) = reasoning {
-            feed(r.0.as_bytes());
+            feed(r.expose().as_bytes());
         }
     }
     let mut digest32: String = h.finish().iter().map(|b| format!("{b:02x}")).collect();
@@ -811,7 +811,7 @@ pub fn reply_text_length(reply: &PromptReply) -> u64 {
         .blocks
         .iter()
         .map(|b| match b {
-            ContentBlock::Text { text } => text.0.len() as u64,
+            ContentBlock::Text { text } => text.expose().len() as u64,
             _ => 0,
         })
         .sum()
@@ -840,7 +840,7 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
             .map(|c| {
                 c.name.len()
                     + c.call_id.len()
-                    + c.arguments.0.len()
+                    + c.arguments.expose().len()
                     + TOOL_CALL_ENVELOPE
                     + if c.refused.is_some() {
                         CALL_REFUSAL_ENVELOPE
@@ -853,7 +853,7 @@ pub fn reply_capacity(reply: &PromptReply) -> usize {
         + reply
             .reasoning
             .as_ref()
-            .map_or(0, |r| r.0.len() + REASONING_ENVELOPE)
+            .map_or(0, |r| r.expose().len() + REASONING_ENVELOPE)
         + crate::handler::FRAME_ENVELOPE_MARGIN as usize
 }
 
@@ -958,7 +958,9 @@ mod tests {
         maknae_proto::ProposedToolCall {
             name: "read_file".into(),
             call_id: "call_1".into(),
-            arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("a".repeat(args_len))),
+            arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                "a".repeat(args_len),
+            )),
             refused: None,
         }
     }
@@ -1048,7 +1050,7 @@ mod tests {
             tool_calls: vec![maknae_proto::ProposedToolCall {
                 name: "a".into(),
                 call_id: "b".into(),
-                arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new("c".into())),
                 refused: None,
             }],
             usage: None,
@@ -1064,13 +1066,17 @@ mod tests {
                 maknae_proto::ProposedToolCall {
                     name: "a".into(),
                     call_id: "b".into(),
-                    arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                    arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                        "c".into(),
+                    )),
                     refused: None,
                 },
                 maknae_proto::ProposedToolCall {
                     name: "a".into(),
                     call_id: "b".into(),
-                    arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new("c".into())),
+                    arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
+                        "c".into(),
+                    )),
                     refused: None,
                 },
             ],
@@ -1139,7 +1145,7 @@ mod tests {
             tool_calls: vec![maknae_proto::ProposedToolCall {
                 name: "n".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
                 call_id: "i".repeat(maknae_proto::MAX_TOOL_CALL_ID_BYTES),
-                arguments: maknae_proto::SecretText(maknae_io::Zeroizing::new(
+                arguments: maknae_proto::SecretText::from(maknae_io::Zeroizing::new(
                     "a".repeat(maknae_proto::MAX_TOOL_CALL_ARGS_BYTES),
                 )),
                 refused: None,
@@ -1188,7 +1194,7 @@ mod tests {
     // The kernel has no `zeroize` dependency; `maknae_io::Zeroizing` is the same type, re-exported.
     fn text(s: &str) -> ContentBlock {
         ContentBlock::Text {
-            text: SecretText(maknae_io::Zeroizing::new(s.into())),
+            text: SecretText::from(maknae_io::Zeroizing::new(s.into())),
         }
     }
 
@@ -1828,7 +1834,7 @@ mod tests {
         ProposedToolCall {
             name: "read_file".into(),
             call_id: id.into(),
-            arguments: SecretText(maknae_io::Zeroizing::new(args.into())),
+            arguments: SecretText::from(maknae_io::Zeroizing::new(args.into())),
             refused: None,
         }
     }
@@ -1973,7 +1979,7 @@ mod tests {
                 blocks
                     .iter()
                     .map(|b| match b {
-                        ContentBlock::Text { text } => text.0.len() as u64,
+                        ContentBlock::Text { text } => text.expose().len() as u64,
                         _ => 0,
                     })
                     .sum::<u64>()
@@ -2495,7 +2501,7 @@ mod tests {
     }
 
     fn secret(s: &str) -> maknae_proto::SecretText {
-        maknae_proto::SecretText(maknae_io::Zeroizing::new(s.into()))
+        maknae_proto::SecretText::from(maknae_io::Zeroizing::new(s.into()))
     }
 
     fn encodes_without_growing(reply: maknae_proto::PromptReply, cap: usize) {
@@ -2630,7 +2636,7 @@ mod tests {
         ProposedToolCall {
             name: "w".repeat(maknae_proto::MAX_TOOL_CALL_NAME_BYTES),
             call_id: id.into(),
-            arguments: SecretText(maknae_io::Zeroizing::new(String::new())),
+            arguments: SecretText::from(maknae_io::Zeroizing::new(String::new())),
             refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes }),
         }
     }
@@ -2695,7 +2701,7 @@ mod tests {
         let ok = |id: &str| ProposedToolCall {
             name: "read_file".into(),
             call_id: id.into(),
-            arguments: SecretText(maknae_io::Zeroizing::new("{}".into())),
+            arguments: SecretText::from(maknae_io::Zeroizing::new("{}".into())),
             refused: None,
         };
         let reply = reply_of(vec![

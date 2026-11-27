@@ -138,7 +138,7 @@ mod tests {
     }
 
     fn text(s: &str) -> SecretText {
-        SecretText(zeroize::Zeroizing::new(s.into()))
+        SecretText::from(zeroize::Zeroizing::new(s.into()))
     }
 
     #[test]

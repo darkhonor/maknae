@@ -22,7 +22,7 @@ workspace = true
 # dir  — nix::dir::Dir for fd-relative enumeration. Dir::openat BORROWS the dirfd;
 #        Dir::from_fd consumes and Drop-closes it, which would destroy the anchor pin.
 # user — home.rs's session_home(): the passwd record for the effective uid (#596).
-nix = { version = "0.32", default-features = false, features = ["fs", "dir", "uio", "user"] }
+nix = { version = "0.32", default-features = false, features = ["fs", "dir", "uio", "user", "poll"] }
 # net — recvmsg with SCM_RIGHTS, for ADR-0009 subject-delegated descriptors. THE reason
 #       this is rustix and not another nix feature: `unsafe_code = "forbid"` is set
 #       workspace-wide and cannot be locally overridden, and nix's
@@ -34,19 +34,22 @@ nix = { version = "0.32", default-features = false, features = ["fs", "dir", "ui
 #       forbids it (ADR-0027 confines `unsafe` to maknae-sys), or holding bare RawFds with
 #       hand-rolled close-on-drop — the exact leak-on-the-refusal-path hazard ADR-0009
 #       names. It also parses SCM_CREDENTIALS into `UCred` (#115).
-# `default-features = false` keeps it to "std" + "net"; the fs/process/thread/event
-# APIs are not compiled in.
+# `default-features = false` keeps it to "std", "net" and "process" (`getrlimit`,
+# `setrlimit` and `set_dumpable_behavior` for `deny_core_dumps`, #751); the fs, thread
+# and event APIs are not compiled in.
 # EXACT PIN: rustix holds the `unsafe` ancillary-data parsing this crate trusts for
 # delegated descriptors and sender credentials, so `cargo update` must not move it
 # without a reviewed bump. 1.1.6 is the floor: 1.1.5 does not compile with "net"
 # alone (`mod timespec` was not gated on `net`; bytecodealliance/rustix#1681).
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "net"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "net", "process"] }
 # Credential reads return Zeroizing<..> so the buffer is wiped on drop rather than left
 # in freed heap. Re-exported from lib.rs so consumers need no zeroize pin of their own.
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 maknae-sys = { path = "../maknae-sys" }
 
 [dev-dependencies]
+# #751: the compile-fail doctest that proves DeliveredCredential does not serialize.
+serde_json = "1"
 # Every fixture needs a private, mode-controlled directory tree; $TMPDIR is 1777.
 tempfile = "3"
 

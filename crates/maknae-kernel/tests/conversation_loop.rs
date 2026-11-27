@@ -19,7 +19,7 @@ const OWNER_MAX: usize = 32;
 
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {
-        text: SecretText(maknae_io::Zeroizing::new(s.into())),
+        text: SecretText::from(maknae_io::Zeroizing::new(s.into())),
     }
 }
 fn user(s: &str) -> Turn {

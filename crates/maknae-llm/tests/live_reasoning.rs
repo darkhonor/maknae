@@ -22,7 +22,7 @@ fn live() -> Live {
 }
 
 fn text(s: &str) -> maknae_proto::SecretText {
-    maknae_proto::SecretText(Zeroizing::new(s.into()))
+    maknae_proto::SecretText::from(Zeroizing::new(s.into()))
 }
 
 async fn call(
@@ -65,12 +65,12 @@ async fn a_live_reasoning_reply_is_delivered_with_its_reasoning() {
     .await
     .expect("a usable reply");
     let answer = match &c.reply.blocks[0] {
-        maknae_proto::ContentBlock::Text { text } => text.0.trim().to_string(),
+        maknae_proto::ContentBlock::Text { text } => text.expose().trim().to_string(),
         other => panic!("{other:?}"),
     };
     println!(
         "answer={answer:?} reasoning_bytes={:?}",
-        c.reply.reasoning.as_ref().map(|r| r.0.len())
+        c.reply.reasoning.as_ref().map(|r| r.expose().len())
     );
     assert_eq!(answer, "391");
     assert!(c.reply.reasoning.is_some());

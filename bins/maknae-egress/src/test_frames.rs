@@ -44,7 +44,7 @@ pub(crate) fn request(key: &str) -> EgressFrameRequest {
         conversation: "conv1".into(),
         turns: vec![maknae_proto::Turn::User {
             content: vec![ContentBlock::Text {
-                text: SecretText(zeroize::Zeroizing::new("hi".into())),
+                text: SecretText::from(zeroize::Zeroizing::new("hi".into())),
             }],
         }],
         output_tokens: None,

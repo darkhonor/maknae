@@ -1584,7 +1584,7 @@ mod tests {
     };
 
     fn secret(s: &str) -> SecretText {
-        SecretText(Zeroizing::new(s.into()))
+        SecretText::from(Zeroizing::new(s.into()))
     }
 
     fn draft(body: &str) -> PostDraft {
@@ -1741,7 +1741,7 @@ mod tests {
         let store = open_dir(t.path()).unwrap();
         assert!(store.take_boot_findings().is_empty());
         let back = store.get(BOB, posted.post.id).unwrap();
-        assert_eq!(back.post.draft.body.0.as_str(), BODY);
+        assert_eq!(back.post.draft.body.expose(), BODY);
         assert_eq!(
             (back.seq, back.author_uid, back.post.task, &back.labels),
             (posted.seq, Some(2001), Some(task), &labels)
@@ -1930,8 +1930,7 @@ mod tests {
                 .post
                 .draft
                 .body
-                .0
-                .as_str(),
+                .expose(),
             "unknown"
         );
         drop(reopened);
@@ -2039,8 +2038,7 @@ mod tests {
                 .post
                 .draft
                 .body
-                .0
-                .as_str(),
+                .expose(),
             "first"
         );
         let mut draws = 0;
@@ -2458,8 +2456,7 @@ mod tests {
                 .post
                 .draft
                 .body
-                .0
-                .as_str(),
+                .expose(),
             "other"
         );
         assert_eq!(store.plan_read(BOB, &reader("suga"), None).cursor, 0);

@@ -49,21 +49,21 @@ use std::sync::{Arc, Mutex};
 
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {
-        text: SecretText(Zeroizing::new(s.into())),
+        text: SecretText::from(Zeroizing::new(s.into())),
     }
 }
 fn call(id: &str, name: &str, args: &str) -> ProposedToolCall {
     ProposedToolCall {
         name: name.into(),
         call_id: id.into(),
-        arguments: SecretText(Zeroizing::new(args.into())),
+        arguments: SecretText::from(Zeroizing::new(args.into())),
         refused: None,
     }
 }
 fn tool_text(t: &Turn) -> String {
     match t {
         Turn::Tool { content, .. } => match &content[0] {
-            ContentBlock::Text { text } => text.0.to_string(),
+            ContentBlock::Text { text } => text.expose().to_string(),
             _ => panic!(),
         },
         _ => panic!("not a tool turn: {t:?}"),
@@ -692,7 +692,7 @@ async fn read_then_write_then_answer_leaves_the_sequence_the_issue_names_in_the_
     )
     .await;
 
-    assert_eq!(out.answer.as_ref().map(|a| a.0.as_str()), Some("Edited."));
+    assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("Edited."));
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
         // SHORTER than "old body" on purpose: an overwrite that wrote the
@@ -1887,7 +1887,7 @@ async fn an_over_bound_write_is_a_tool_error_its_sibling_read_runs_and_the_trail
     let stub = ProposedToolCall {
         name: "write_file".into(),
         call_id: "c1".into(),
-        arguments: SecretText(Zeroizing::new(String::new())),
+        arguments: SecretText::from(Zeroizing::new(String::new())),
         refused: Some(maknae_proto::CallRefusal::ArgumentsOverBound { bytes: 74_112 }),
     };
     script(
@@ -2163,7 +2163,7 @@ async fn a_session_opens_converses_and_closes_one_kernel_conversation() {
         .await;
     match ended {
         maknae_agent::session::Ended::Ran(o) => {
-            assert_eq!(o.answer.as_ref().map(|a| a.0.as_str()), Some("hello"))
+            assert_eq!(o.answer.as_ref().map(|a| a.expose()), Some("hello"))
         }
         maknae_agent::session::Ended::Interrupted(()) => panic!("not interrupted"),
     }

@@ -67,8 +67,45 @@ pub fn output_tokens_is_acceptable(n: u64) -> bool {
 /// because ACP's `text` is a string and a peer must not have to re-encode.
 /// Decode intermediates are not wiped — ciborium's growth copies and
 /// error-path buffer, and the scratch `from_reader` supplies (ADR-0026).
+///
+/// ```
+/// use maknae_proto::SecretText;
+/// let t = SecretText::new("p");
+/// assert_eq!(t.expose(), "p");
+/// ```
+///
+/// ```compile_fail,E0423
+/// use maknae_proto::SecretText;
+/// let _ = SecretText(zeroize::Zeroizing::new(String::new()));
+/// ```
+///
+/// ```compile_fail,E0616
+/// use maknae_proto::SecretText;
+/// let t = SecretText::new("p");
+/// let _ = &t.0;
+/// ```
 #[derive(Clone, PartialEq, Eq)]
-pub struct SecretText(pub zeroize::Zeroizing<String>);
+pub struct SecretText(zeroize::Zeroizing<String>);
+
+impl SecretText {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(zeroize::Zeroizing::new(text.into()))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> zeroize::Zeroizing<String> {
+        self.0
+    }
+}
+
+impl From<zeroize::Zeroizing<String>> for SecretText {
+    fn from(text: zeroize::Zeroizing<String>) -> Self {
+        Self(text)
+    }
+}
 
 impl std::fmt::Debug for SecretText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2581,6 +2618,15 @@ mod tests {
                 && !dbg.contains("90, 90"),
             "{dbg}"
         );
+    }
+
+    #[test]
+    fn secret_text_new_expose_into_inner_and_from_agree() {
+        let t = SecretText::new("sentinel-751");
+        assert_eq!(t.expose(), "sentinel-751");
+        let back = SecretText::from(t.clone().into_inner());
+        assert!(back == t);
+        assert_eq!(&*back.into_inner(), "sentinel-751");
     }
 
     #[test]

@@ -225,8 +225,8 @@ impl PostDraft {
     pub fn content_len(&self) -> usize {
         self.attachments
             .iter()
-            .map(|a| a.label.len().saturating_add(a.content.0.len()))
-            .fold(self.body.0.len(), usize::saturating_add)
+            .map(|a| a.label.len().saturating_add(a.content.expose().len()))
+            .fold(self.body.expose().len(), usize::saturating_add)
     }
 
     fn check(&self) -> Result<(), String> {
@@ -261,7 +261,7 @@ impl PostDraft {
                 return Err("board attachment label holds a control character".into());
             }
         }
-        if self.body.0.is_empty() {
+        if self.body.expose().is_empty() {
             return Err("board post body is empty".into());
         }
         let len = self.content_len();
@@ -542,7 +542,7 @@ mod tests {
     }
 
     fn text(s: &str) -> SecretText {
-        SecretText(zeroize::Zeroizing::new(s.to_owned()))
+        SecretText::from(zeroize::Zeroizing::new(s.to_owned()))
     }
 
     fn draft() -> PostDraft {

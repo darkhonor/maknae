@@ -775,7 +775,7 @@ mod tests {
     const SENTINEL: &str = "sentinel-628-task-store-prompt";
 
     fn secret(s: &str) -> SecretText {
-        SecretText(Zeroizing::new(s.into()))
+        SecretText::from(Zeroizing::new(s.into()))
     }
 
     fn signed(agent: &str, tasker: Tasker, prompt: &str) -> SignedTask {

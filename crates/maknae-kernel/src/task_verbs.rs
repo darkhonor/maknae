@@ -417,7 +417,7 @@ pub(crate) fn report_page<'a>(
         let (Some((text, at)), Some(rseq)) = (rec.report.as_ref(), rec.rseq) else {
             continue;
         };
-        let size = text.0.len().saturating_add(REPORT_ENTRY_OVERHEAD);
+        let size = text.expose().len().saturating_add(REPORT_ENTRY_OVERHEAD);
         if !entries.is_empty()
             && (entries.len() >= TASK_PAGE_MAX || used.saturating_add(size) > budget)
         {
@@ -633,7 +633,7 @@ mod tests {
             submitted: 100,
             claimed: None,
             follow_ups: Vec::new(),
-            report: rseq.map(|_| (SecretText(Zeroizing::new(text.into())), 150)),
+            report: rseq.map(|_| (SecretText::from(Zeroizing::new(text.into())), 150)),
             actions: 0,
             last_action: None,
             unseen: false,
@@ -920,7 +920,7 @@ mod tests {
         for verb in [
             Verb::TaskAdd {
                 task: r.clone(),
-                text: SecretText(Zeroizing::new("x".into())),
+                text: SecretText::from(Zeroizing::new("x".into())),
                 bindings: vec![],
                 forge_tokens: maknae_proto::ForgeTokens::default(),
             },
@@ -955,7 +955,7 @@ mod tests {
                 version: maknae_proto::TASK_VERSION,
                 agent: "jin".into(),
                 ask: maknae_proto::Ask::Prompt {
-                    prompt: SecretText(Zeroizing::new("p".into())),
+                    prompt: SecretText::from(Zeroizing::new("p".into())),
                 },
                 labels: maknae_proto::Labels {},
                 bindings: vec![],
@@ -969,7 +969,7 @@ mod tests {
                 seen_follow_ups: None,
             },
             Verb::TaskReport {
-                text: SecretText(Zeroizing::new("r".into())),
+                text: SecretText::from(Zeroizing::new("r".into())),
                 seen_follow_ups: Some(0),
             },
         ] {
@@ -1013,7 +1013,7 @@ mod tests {
             task: TaskRef::from_id(&TaskId([0xff; 16])),
             agent: "a".repeat(32),
             close: Some(TaskClose::AgentLost),
-            text: SecretText(Zeroizing::new(String::new())),
+            text: SecretText::from(Zeroizing::new(String::new())),
             at_secs: i64::MIN,
             cursor: TaskCursor::from_seq(u64::MAX),
         };

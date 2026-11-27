@@ -96,7 +96,7 @@ pub struct PersonaFiles {
 impl PersonaRead for PersonaFiles {
     fn etc(&mut self) -> Result<Option<SecretText>, String> {
         maknae_config::read_persona(&self.config_dir, &self.agent)
-            .map(|p| p.map(SecretText))
+            .map(|p| p.map(SecretText::from))
             .map_err(|e| e.to_string())
     }
 
@@ -139,7 +139,7 @@ impl PersonaRead for PersonaFiles {
 
 fn text(mut bytes: Zeroizing<Vec<u8>>) -> Result<SecretText, String> {
     String::from_utf8(std::mem::take(&mut *bytes))
-        .map(|s| SecretText(Zeroizing::new(s)))
+        .map(|s| SecretText::from(Zeroizing::new(s)))
         .map_err(|e| {
             drop(Zeroizing::new(e.into_bytes()));
             "the persona is not UTF-8".to_string()
@@ -370,7 +370,7 @@ mod tests {
             parent: None,
             agent: to.into(),
             ask: Ask::Prompt {
-                prompt: SecretText(Zeroizing::new("sentinel-629-agentd-prompt".into())),
+                prompt: SecretText::from(Zeroizing::new("sentinel-629-agentd-prompt".into())),
             },
             labels: Labels {},
             bindings: vec![],
@@ -408,7 +408,9 @@ mod tests {
     struct PartitionPersona(PathBuf);
     impl PersonaRead for PartitionPersona {
         fn etc(&mut self) -> Result<Option<SecretText>, String> {
-            Ok(Some(SecretText(Zeroizing::new("sentinel-629-etc".into()))))
+            Ok(Some(SecretText::from(Zeroizing::new(
+                "sentinel-629-etc".into(),
+            ))))
         }
         fn present(&mut self, rel: &Path) -> Result<bool, String> {
             Ok(rel.starts_with("tasks"))
@@ -449,14 +451,14 @@ mod tests {
         let conversation = ConversationId::parse(&"a".repeat(32)).unwrap();
         let turn = [Turn::User {
             content: vec![maknae_proto::ContentBlock::Text {
-                text: SecretText(Zeroizing::new("q".into())),
+                text: SecretText::from(Zeroizing::new("q".into())),
             }],
         }];
         plane.cite(Some(id));
         let _ = plane.claim().await;
         let _ = plane.heartbeat(3).await;
         let _ = plane
-            .report(SecretText(Zeroizing::new("r".into())), None)
+            .report(SecretText::from(Zeroizing::new("r".into())), None)
             .await;
         let _ = plane
             .make_partition_dir(&format!("{d}/tasks/users/1000"))
@@ -476,7 +478,7 @@ mod tests {
         let _ = plane.close(&conversation).await;
         plane.cite(None);
         let _ = plane
-            .report(SecretText(Zeroizing::new("r".into())), None)
+            .report(SecretText::from(Zeroizing::new("r".into())), None)
             .await;
         let _ = plane.take_diagnostics();
         plane.note(DriverEvent::CloseFailed(PlaneError::Refused));
@@ -488,8 +490,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .0
-                .as_str(),
+                .expose(),
             "sentinel-629-etc"
         );
         let refused = plane
@@ -500,7 +501,7 @@ mod tests {
             Err("/home/hobi/tasks/users/1000/persona.md: the read was unavailable".into())
         );
         let sub = maknae_proto::TaskRef::from_id(&TaskId([0x30; 16]));
-        let asked = SecretText(Zeroizing::new("sentinel-609-agent-plane".into()));
+        let asked = SecretText::from(Zeroizing::new("sentinel-609-agent-plane".into()));
         assert_eq!(
             plane.submit("jin", asked, Vec::new()).await,
             Err(TaskerFail::Refused)
@@ -639,7 +640,7 @@ mod tests {
         );
         let mut forged = maknae_vault::task_sig::sign_task(&kernel, task("hobi")).unwrap();
         forged.task.ask = Ask::Prompt {
-            prompt: SecretText(Zeroizing::new("sentinel-629-forged".into())),
+            prompt: SecretText::from(Zeroizing::new("sentinel-629-forged".into())),
         };
         assert_eq!(
             trust.verify(&wire(&forged), now()),
@@ -903,11 +904,11 @@ mod tests {
     #[test]
     fn persona_text_must_be_utf8() {
         assert_eq!(
-            text(Zeroizing::new(b"sentinel-629-text".to_vec())).map(|t| t.0.to_string()),
+            text(Zeroizing::new(b"sentinel-629-text".to_vec())).map(|t| t.expose().to_string()),
             Ok("sentinel-629-text".to_string())
         );
         assert_eq!(
-            text(Zeroizing::new(vec![0xff, 0xfe])).map(|t| t.0.to_string()),
+            text(Zeroizing::new(vec![0xff, 0xfe])).map(|t| t.expose().to_string()),
             Err("the persona is not UTF-8".to_string())
         );
     }
@@ -939,7 +940,7 @@ mod tests {
             base: "o/r".into(),
             change: Some(7),
         })];
-        let asked = SecretText(Zeroizing::new("review github.com/o/r#7".into()));
+        let asked = SecretText::from(Zeroizing::new("review github.com/o/r#7".into()));
         let _ = plane.submit("jin", asked, bound.clone()).await;
         let seen = plane.plane.link_for_test().finish().await.requests;
         assert_eq!(seen.len(), 1);

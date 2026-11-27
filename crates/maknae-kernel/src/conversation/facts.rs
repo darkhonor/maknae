@@ -137,7 +137,7 @@ mod tests {
     fn user(s: &str) -> Turn {
         Turn::User {
             content: vec![ContentBlock::Text {
-                text: SecretText(Zeroizing::new(s.into())),
+                text: SecretText::from(Zeroizing::new(s.into())),
             }],
         }
     }
