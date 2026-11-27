@@ -409,10 +409,11 @@ impl ValueFilter {
         if buf.is_empty() || self.raw.is_empty() {
             return;
         }
-        let mut pi = Zeroizing::new(vec![0u32; self.max_raw.min(buf.len())]);
+        let cap = self.max_raw.min(buf.len());
+        let mut pi = Zeroizing::new(vec![0u32; cap]);
         for &r in &self.raw {
             let form = self.index.forms[r].bytes.as_slice();
-            let m = form.len().min(buf.len());
+            let m = form.len().min(cap);
             let pattern = &form[..m];
             let pi = &mut pi[..m];
             prefix_function(pattern, pi, work);
@@ -1437,5 +1438,17 @@ mod tests {
         assert_eq!(masked(&f, &hex_prefix), (hex_prefix.clone(), vec![]));
         let b64_prefix = [&b"x: "[..], &trimmed_base64(TOKEN, false, 0)[..8]].concat();
         assert_eq!(masked(&f, &b64_prefix), (b64_prefix.clone(), vec![]));
+    }
+
+    #[test]
+    fn the_scan_counts_each_search_step_and_each_compare() {
+        let v = vec![b'a'; MAX_ENCODED_VALUE + 1];
+        let f = filter_of(&[&v]);
+        assert_eq!(f.index.tables.iter().map(|t| t.len()).sum::<usize>(), 1);
+        let mut buf = vec![b'a'; 16];
+        let (found, work) = f.mask_in_place_with_work(&mut buf);
+        assert_eq!(found, v0());
+        assert_eq!(buf, stars(16));
+        assert_eq!(work, 1 + 16 + 16 + 15 + 16);
     }
 }
