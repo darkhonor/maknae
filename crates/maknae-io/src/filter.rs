@@ -3,7 +3,7 @@ use base64::engine::GeneralPurpose;
 use base64::Engine;
 use std::cmp::Ordering;
 use std::fmt;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 use zeroize::Zeroizing;
 
 use crate::credential::CredentialSlot;
@@ -240,6 +240,61 @@ fn compare(a: &[u8], b: &[u8], work: &mut u64) -> Ordering {
     a.len().cmp(&b.len())
 }
 
+fn runs(coverage: &[bool]) -> Vec<(bool, Range<usize>)> {
+    let mut at = 0;
+    coverage
+        .chunk_by(|a, b| a == b)
+        .map(|run| {
+            let range = at..at + run.len();
+            at = range.end;
+            (run[0], range)
+        })
+        .collect()
+}
+
+fn widen(s: &str, coverage: &mut [bool]) {
+    for (covered, r) in runs(coverage) {
+        if covered {
+            coverage[s.floor_char_boundary(r.start)..s.ceil_char_boundary(r.end)].fill(true);
+        }
+    }
+}
+
+fn fall_back(pattern: &[u8], pi: &[u32], mut k: usize, c: u8, work: &mut u64) -> usize {
+    for _ in 0..pattern.len() {
+        if k == 0 || pattern[k] == c {
+            break;
+        }
+        *work += 1;
+        k = pi[k - 1] as usize;
+    }
+    k
+}
+
+fn prefix_function(pattern: &[u8], pi: &mut [u32], work: &mut u64) {
+    let mut k = 0;
+    for q in 1..pattern.len() {
+        k = fall_back(pattern, pi, k, pattern[q], work);
+        *work += 1;
+        if pattern[k] == pattern[q] {
+            k += 1;
+        }
+        pi[q] = k as u32;
+    }
+}
+
+fn longest_prefix_suffix(pattern: &[u8], pi: &[u32], text: &[u8], work: &mut u64) -> usize {
+    let mut k = 0;
+    for &c in text {
+        k = fall_back(pattern, pi, k, c, work);
+        *work += 1;
+        if pattern[k] == c {
+            k += 1;
+        }
+    }
+    k
+}
+
 impl ValueFilter {
     pub fn builder<'a>() -> ValueFilterBuilder<'a> {
         ValueFilterBuilder {
@@ -295,40 +350,14 @@ impl ValueFilter {
             coverage[at..at + n].fill(true);
             ControlFlow::Continue(())
         });
-        let mut i = 0;
-        while i < len {
-            if !coverage[i] {
-                i += 1;
-                continue;
-            }
-            let mut start = i;
-            while !s.is_char_boundary(start) {
-                start -= 1;
-            }
-            let mut end = i;
-            while end < len && coverage[end] {
-                end += 1;
-            }
-            while !s.is_char_boundary(end) {
-                end += 1;
-            }
-            coverage[start..end].fill(true);
-            i = end;
-        }
+        widen(s, &mut coverage);
         let mut out = String::with_capacity(len);
-        let mut i = 0;
-        while i < len {
-            let covered = coverage[i];
-            let end = coverage[i..]
-                .iter()
-                .position(|&c| c != covered)
-                .map_or(len, |p| i + p);
+        for (covered, r) in runs(&coverage) {
             if covered {
                 out.push_str("<redacted>");
             } else {
-                out.push_str(&s[i..end]);
+                out.push_str(&s[r]);
             }
-            i = end;
         }
         out
     }
@@ -353,16 +382,10 @@ impl ValueFilter {
                 let Some(needle) = buf.get(at..at + w) else {
                     continue;
                 };
-                let (mut lo, mut hi) = (0, table.len());
-                while lo < hi {
-                    let mid = lo + (hi - lo) / 2;
+                let lo = table.partition_point(|&entry| {
                     *work += 1;
-                    if compare(window(forms, table[mid], w), needle, work).is_lt() {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
-                }
+                    compare(window(forms, entry, w), needle, work).is_lt()
+                });
                 for &entry in &table[lo..] {
                     if compare(window(forms, entry, w), needle, work).is_ne() {
                         break;
@@ -389,30 +412,10 @@ impl ValueFilter {
         let mut pi = Zeroizing::new(vec![0u32; self.max_raw]);
         for &r in &self.raw {
             let form = self.index.forms[r].bytes.as_slice();
-            let l = form.len();
-            let mut k = 0;
-            for q in 1..l {
-                while k > 0 && form[k] != form[q] {
-                    *work += 1;
-                    k = pi[k - 1] as usize;
-                }
-                *work += 1;
-                if form[k] == form[q] {
-                    k += 1;
-                }
-                pi[q] = k as u32;
-            }
-            let mut k = 0;
-            for &c in &buf[buf.len().saturating_sub(l)..] {
-                while k > 0 && form[k] != c {
-                    *work += 1;
-                    k = pi[k - 1] as usize;
-                }
-                *work += 1;
-                if form[k] == c {
-                    k += 1;
-                }
-            }
+            let pi = &mut pi[..form.len()];
+            prefix_function(form, pi, work);
+            let text = &buf[buf.len().saturating_sub(form.len())..];
+            let k = longest_prefix_suffix(form, pi, text, work);
             if k > 0 {
                 hit(k, self.index.sources[r]);
             }
@@ -1285,5 +1288,96 @@ mod tests {
         eprintln!("near-whole short: work={work} bound={bound}");
         assert!(work > MIB as u64);
         assert!(work <= bound, "work={work} bound={bound}");
+    }
+
+    #[test]
+    fn runs_group_equal_neighbours_with_their_ranges() {
+        assert!(runs(&[]).is_empty());
+        assert_eq!(runs(&[false]), vec![(false, 0..1)]);
+        assert_eq!(
+            runs(&[true, true, false, true]),
+            vec![(true, 0..2), (false, 2..3), (true, 3..4)]
+        );
+        assert_eq!(
+            runs(&[false, false, false, true, true, false]),
+            vec![(false, 0..3), (true, 3..5), (false, 5..6)]
+        );
+    }
+
+    #[test]
+    fn widen_reaches_the_boundaries_of_every_straddled_character() {
+        let s = "a😀bé€c";
+        assert_eq!(s.len(), 12);
+        let widened = |covered: &[usize]| {
+            let mut coverage = vec![false; s.len()];
+            for &i in covered {
+                coverage[i] = true;
+            }
+            widen(s, &mut coverage);
+            runs(&coverage)
+                .into_iter()
+                .filter(|(c, _)| *c)
+                .map(|(_, r)| r)
+                .collect::<Vec<_>>()
+        };
+        for i in 1..5 {
+            assert_eq!(widened(&[i]), vec![1..5], "4-byte at {i}");
+        }
+        for i in 6..8 {
+            assert_eq!(widened(&[i]), vec![6..8], "2-byte at {i}");
+        }
+        for i in 8..11 {
+            assert_eq!(widened(&[i]), vec![8..11], "3-byte at {i}");
+        }
+        assert_eq!(widened(&[0]), vec![0..1]);
+        assert_eq!(widened(&[5]), vec![5..6]);
+        assert_eq!(widened(&[11]), vec![11..12]);
+        assert_eq!(widened(&[4, 5, 6]), vec![1..8]);
+        assert_eq!(widened(&[2, 9]), vec![1..5, 8..11]);
+        assert_eq!(widened(&[]), Vec::<Range<usize>>::new());
+    }
+
+    fn pi_of(pattern: &[u8]) -> Vec<u32> {
+        let mut pi = vec![0u32; pattern.len()];
+        prefix_function(pattern, &mut pi, &mut 0);
+        pi
+    }
+
+    #[test]
+    fn prefix_function_matches_the_textbook_tables() {
+        assert_eq!(pi_of(b"aabaaab"), vec![0, 1, 0, 1, 2, 2, 3]);
+        assert_eq!(pi_of(b"abcabcab"), vec![0, 0, 0, 1, 2, 3, 4, 5]);
+        assert_eq!(pi_of(b"abacabab"), vec![0, 0, 1, 0, 1, 2, 3, 2]);
+        assert_eq!(pi_of(b"aaaa"), vec![0, 1, 2, 3]);
+        assert_eq!(pi_of(b"abcd"), vec![0, 0, 0, 0]);
+        assert_eq!(pi_of(b"x"), vec![0]);
+    }
+
+    #[test]
+    fn fall_back_follows_the_prefix_chain_to_a_continuable_state() {
+        let p = b"abacabab";
+        let pi = pi_of(p);
+        assert_eq!(fall_back(p, &pi, 0, b'z', &mut 0), 0);
+        assert_eq!(fall_back(p, &pi, 7, b'b', &mut 0), 7);
+        assert_eq!(fall_back(p, &pi, 7, b'c', &mut 0), 3);
+        assert_eq!(fall_back(p, &pi, 7, b'a', &mut 0), 0);
+        let q = b"aabaaab";
+        let pi = pi_of(q);
+        assert_eq!(fall_back(q, &pi, 5, b'b', &mut 0), 2);
+        assert_eq!(fall_back(q, &pi, 6, b'a', &mut 0), 1);
+        assert_eq!(fall_back(q, &pi, 6, b'z', &mut 0), 0);
+    }
+
+    #[test]
+    fn longest_prefix_suffix_finds_the_longest_overlap() {
+        let lps = |p: &[u8], t: &[u8]| longest_prefix_suffix(p, &pi_of(p), t, &mut 0);
+        assert_eq!(lps(b"aaabXXXX", b"zaaab"), 4);
+        assert_eq!(lps(b"aaabXXXX", b"aaaa"), 3);
+        assert_eq!(lps(b"abcabd", b"cabcab"), 5);
+        assert_eq!(lps(b"abacabab", b"abacaba"), 7);
+        assert_eq!(lps(b"abacabab", b"xabacab"), 6);
+        assert_eq!(lps(b"abacabab", b"abacabab"), 8);
+        assert_eq!(lps(b"abcd", b"xyzw"), 0);
+        assert_eq!(lps(b"abcd", b""), 0);
     }
 }
