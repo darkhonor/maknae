@@ -1358,10 +1358,10 @@ fn intake_token_from(
     locale: Locale,
 ) -> Result<MaknaeSecret, EnrollError> {
     if let Some(path) = token_file {
-        let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
+        let raw = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
             path: path.to_path_buf(),
             source: e.to_string(),
-        })?;
+        })?);
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(EnrollError::MissingToken);
@@ -1655,7 +1655,7 @@ async fn place_seal_key(
                 GenerateStep::RetractPub => retract_seal_pub(pub_path, 0)?,
                 GenerateStep::StoreCustody => {
                     store_seal_key(
-                        &der,
+                        der.expose(),
                         custody,
                         args.verbose,
                         resolver,

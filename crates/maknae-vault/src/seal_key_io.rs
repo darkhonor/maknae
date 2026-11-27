@@ -51,7 +51,7 @@ pub fn read_egress_secret_id(_credentials_dir: Option<&Path>) -> Result<MaknaeSe
 mod tests {
     use super::*;
 
-    fn der() -> zeroize::Zeroizing<Vec<u8>> {
+    fn der() -> maknae_io::MaknaeSecretBytes {
         maknae_seal::SealPrivateKey::generate()
             .unwrap()
             .to_pkcs8_der()
@@ -156,11 +156,11 @@ mod tests {
     #[test]
     fn a_credential_holding_a_seal_key_is_read_whole() {
         let key = der();
-        let creds = creds_with(&key);
+        let creds = creds_with(key.expose());
         let got = read_egress_seal_key(creds.path().to_str(), Path::new(NO_EGRESS_DIR)).unwrap();
-        assert!(got.expose() == key.as_slice());
+        assert!(got.expose() == key.expose());
         let reloaded = maknae_seal::SealPrivateKey::from_pkcs8_der(got.expose()).unwrap();
-        let original = maknae_seal::SealPrivateKey::from_pkcs8_der(&key).unwrap();
+        let original = maknae_seal::SealPrivateKey::from_pkcs8_der(key.expose()).unwrap();
         assert_eq!(
             reloaded.public_key().spki_der(),
             original.public_key().spki_der()

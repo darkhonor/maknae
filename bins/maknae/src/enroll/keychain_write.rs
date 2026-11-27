@@ -734,7 +734,7 @@ mod tests {
             .unwrap()
             .to_pkcs8_der()
             .unwrap();
-        let hex = maknae_vault::seal_key_to_hex(&der).unwrap();
+        let hex = maknae_vault::seal_key_to_hex(der.expose()).unwrap();
         assert!(validate_item_content(KeychainPlane::Daemon, UUID).is_ok());
         assert!(matches!(
             validate_item_content(KeychainPlane::Daemon, hex.expose()),

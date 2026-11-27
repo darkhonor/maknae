@@ -227,7 +227,7 @@ pub(crate) async fn place(
             GenerateStep::StoreCustody => {
                 custody
                     .store(
-                        &der,
+                        der.expose(),
                         &pair.custody_path(agent),
                         &super::agent_unit::seal_key_cred_name(agent),
                     )

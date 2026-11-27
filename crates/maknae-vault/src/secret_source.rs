@@ -613,19 +613,20 @@ mod tests {
     fn the_hex_the_enroller_writes_is_the_hex_the_reader_accepts() {
         let key = maknae_seal::SealPrivateKey::generate().unwrap();
         let der = key.to_pkcs8_der().unwrap();
+        let der = der.expose();
         assert!(der.len() <= MAX_SEAL_KEY_BYTES);
-        let hex = seal_key_to_hex(&der).unwrap();
+        let hex = seal_key_to_hex(der).unwrap();
         assert_eq!(hex.expose().len(), 2 * der.len());
         let back = seal_key_from_hex(hex.expose()).unwrap();
-        assert!(back.expose() == der.as_slice());
+        assert!(back.expose() == der);
         let (small, small_der) = (encode_hex(&[1, 2, 3]), decode_hex(b"010203").unwrap());
         assert_eq!((small.capacity(), small_der.capacity()), (6, 3));
-        let encoded = encode_hex(&der);
+        let encoded = encode_hex(der);
         assert_eq!(encoded.capacity(), encoded.len());
         assert_eq!(encoded.len(), 2 * der.len());
         let decoded = decode_hex(encoded.as_bytes()).unwrap();
         assert_eq!(decoded.capacity(), decoded.len());
-        assert_eq!(decoded.as_slice(), der.as_slice());
+        assert_eq!(decoded.as_slice(), der);
         assert_eq!(
             seal_key_to_hex(&[0x00, 0x0f, 0xa5, 0xff]).unwrap().expose(),
             "000fa5ff"

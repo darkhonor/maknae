@@ -212,7 +212,9 @@ pub(crate) fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// `pub(crate)`: `secret_io.rs`'s PLAINTEXT read branches route through this SAME
 /// gate (the sealed `$CREDENTIALS_DIRECTORY` branch does not, since systemd
 /// produces its own `0400` artifacts).
-pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
+pub(crate) fn read_secret_credential(
+    path: &Path,
+) -> Result<zeroize::Zeroizing<String>, VaultError> {
     // Non-Unix has no owner-only permission model to check → refuse rather than read the
     // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
     // a unix CI runner, hence no mutation/coverage obligation on the non-unix arm.
@@ -251,7 +253,7 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
             })?
             .value;
         std::str::from_utf8(&bytes)
-            .map(|s| s.trim().to_string())
+            .map(|s| zeroize::Zeroizing::new(s.trim().to_string()))
             .map_err(|e| VaultError::Io {
                 path: path.to_path_buf(),
                 source: std::io::Error::other(e.to_string()),
@@ -1057,9 +1059,18 @@ mod tests {
     }
 
     #[test]
+    fn secret_credential_is_read_into_a_zeroizing_string() {
+        let _: fn(&std::path::Path) -> Result<Zeroizing<String>, VaultError> =
+            read_secret_credential;
+    }
+
+    #[test]
     fn secret_credential_accepts_owner_only() {
         let p = tmpfile("secure", 0o600);
-        assert_eq!(read_secret_credential(&p).unwrap(), "secret-id-value-xyz");
+        assert_eq!(
+            read_secret_credential(&p).unwrap().as_str(),
+            "secret-id-value-xyz"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1071,7 +1082,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let got = read_secret_credential(&path);
         let _ = std::fs::remove_file(&path);
-        assert_eq!(got.unwrap(), "relative-secret");
+        assert_eq!(got.unwrap().as_str(), "relative-secret");
     }
 
     // ---- from_document plane dispatch (Task 4) ---------------------------------

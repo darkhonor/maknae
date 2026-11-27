@@ -51,7 +51,7 @@ pub(crate) fn read_daemon_secret(src: &DaemonSecretSource) -> Result<MaknaeSecre
     let text = match src {
         DaemonSecretSource::CredentialsDirectory(path) => read_sealed_trimmed(path)?,
         DaemonSecretSource::Keychain(pointer) => read_plane_secret(pointer, KeychainPlane::Daemon)?,
-        DaemonSecretSource::PlaintextPath(path) => Zeroizing::new(read_secret_credential(path)?),
+        DaemonSecretSource::PlaintextPath(path) => read_secret_credential(path)?,
     };
     MaknaeSecret::new(text).map_err(|e| secret_error("daemon SecretID", e))
 }
