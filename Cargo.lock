@@ -1286,6 +1286,7 @@ name = "maknae-llm"
 version = "0.0.0"
 dependencies = [
  "maknae-crypto",
+ "maknae-io",
  "maknae-proto",
  "reqwest",
  "serde",
