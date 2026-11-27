@@ -16,6 +16,7 @@ mod ceiling_authz;
 pub mod classification;
 mod composition;
 mod containment;
+mod control;
 mod conversation;
 mod deployment;
 mod diag;
@@ -96,10 +97,10 @@ pub use enrollment::{Boarding, Containing, FixedEnrollment, Unresolving};
 pub use enrollment::{EnrollmentView, Load, SnapshotEnrollment};
 pub use groupres::*;
 pub use handler::{
-    admits, admitted_user_for_test, after_drain, agent_class, build_authz_request, build_whoami,
-    client_class, dispatch_verb, is_filesystem_verb, may_respond, may_stop,
-    serve_outcome_to_exit_code, Admission, ChannelClass, Dispatch, Drain, ServeOutcome, Stamp,
-    APPLY_BY_RESTART_EXIT_CODE, KERNEL_ACTIONS,
+    admits, admitted_user_for_test, after_drain, agent_class, build_authz_request,
+    build_control_request, build_whoami, client_class, control_class, dispatch_verb,
+    is_filesystem_verb, may_respond, may_stop, serve_outcome_to_exit_code, Admission, ChannelClass,
+    ChannelPlane, Dispatch, Drain, ServeOutcome, Stamp, APPLY_BY_RESTART_EXIT_CODE, KERNEL_ACTIONS,
 };
 pub use live::{LiveConfig, LiveValues};
 pub use mutation::AttemptCaps;

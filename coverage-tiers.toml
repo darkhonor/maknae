@@ -545,6 +545,8 @@ files = [
   # before the write is proven by userdb.rs's fake-server test. The reply mapping
   # is userdb.rs (T1).
   "crates/maknae-kernel/src/session_facts/varlink.rs",
+  # #746: the control exchange's orchestration; its decision is handler.rs (T1) and maknae-authz-basic.
+  "crates/maknae-kernel/src/control.rs",
   # #421: the bounded, non-blocking diagnostic sink for the admission path. T2:
   # a broken queue wedges a connection handler or drops diagnostics (availability),
   # and it carries no verdict. Mutation-visible: the tests pin the drop count.

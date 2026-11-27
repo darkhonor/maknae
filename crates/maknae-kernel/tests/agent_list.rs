@@ -234,6 +234,7 @@ fn world_bound(tag: &str, agents: &[Agent], bindings: &str) -> World {
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
         count_breaker: Default::default(),
+        control: Default::default(),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;

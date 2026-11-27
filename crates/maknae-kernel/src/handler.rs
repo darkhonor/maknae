@@ -15,12 +15,19 @@ pub enum Admission {
     EnrolledAgent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelPlane {
+    Data,
+    Control,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelClass {
     pub peer_auth: PeerAuth,
     pub admission: Admission,
     pub lane: maknae_security::Lane,
     pub socket: std::path::PathBuf,
+    pub plane: ChannelPlane,
 }
 
 pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass {
@@ -29,6 +36,7 @@ pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass 
         admission: Admission::MaknaeGroupMember,
         lane: maknae_security::Lane::Local,
         socket: transport.socket_path.clone(),
+        plane: ChannelPlane::Data,
     }
 }
 
@@ -42,6 +50,23 @@ pub fn agent_class(socket: std::path::PathBuf, trust_domain: &str) -> ChannelCla
         admission: Admission::EnrolledAgent,
         lane: maknae_security::Lane::Local,
         socket,
+        plane: ChannelPlane::Data,
+    }
+}
+
+pub fn control_class(agent_socket: std::path::PathBuf, trust_domain: &str) -> ChannelClass {
+    ChannelClass {
+        socket: maknae_config::control_socket_path(&agent_socket),
+        plane: ChannelPlane::Control,
+        ..agent_class(agent_socket, trust_domain)
+    }
+}
+
+/// Whether a refusal that ends a session is answered: never on the control plane.
+pub(crate) fn answers_a_session_ending(plane: ChannelPlane) -> bool {
+    match plane {
+        ChannelPlane::Data => true,
+        ChannelPlane::Control => false,
     }
 }
 
@@ -700,10 +725,6 @@ pub(crate) fn control_op(verb: &maknae_proto::ControlVerb) -> &'static str {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by the control listener, #746")
-)]
 pub fn build_control_request(
     peer_uid: u32,
     agent: &maknae_config::AgentId,
@@ -831,6 +852,47 @@ pub(crate) fn build_kernel_request(
         resource: Resource(Attributes::new()),
         action: Action(action.to_string()),
         context: Context(context),
+    }
+}
+
+/// A notice poll's decision, or why none was made.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ControlOutcome {
+    Decided {
+        verdict: maknae_security::Verdict,
+        role: Option<&'static str>,
+    },
+    Unavailable(&'static str),
+}
+
+/// What the control socket writes back to a poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlReply {
+    Notices,
+    Unauthorized,
+    None,
+}
+
+/// `Unauthorized` only for a refusal the agent must act on: it is contained, or it is no
+/// longer enrolled as the uid its leaf was admitted under.
+pub(crate) fn control_reply(outcome: &ControlOutcome, enrolled_now: bool) -> ControlReply {
+    use maknae_security::Verdict;
+    let (verdict, role) = match outcome {
+        ControlOutcome::Unavailable(_) => return ControlReply::None,
+        ControlOutcome::Decided { verdict, role } => (verdict, *role),
+    };
+    match verdict {
+        Verdict::Permit { obligations } => match discharge_plan(obligations) {
+            Ok(()) => ControlReply::Notices,
+            Err(_) => ControlReply::None,
+        },
+        Verdict::Deny { .. } | Verdict::NotApplicable { .. } | Verdict::Indeterminate => {
+            if role == Some("adversary") || !enrolled_now {
+                ControlReply::Unauthorized
+            } else {
+                ControlReply::None
+            }
+        }
     }
 }
 
@@ -989,6 +1051,7 @@ mod tests {
                 admission: Admission::MaknaeGroupMember,
                 lane: maknae_security::Lane::Local,
                 socket: "/run/maknae/test-client.sock".into(),
+                plane: ChannelPlane::Data,
             }
         );
     }
@@ -1006,8 +1069,107 @@ mod tests {
                 admission: Admission::EnrolledAgent,
                 lane: maknae_security::Lane::Local,
                 socket: "/run/maknae/agent.sock".into(),
+                plane: ChannelPlane::Data,
             }
         );
+    }
+
+    #[test]
+    fn the_control_class_is_the_agent_class_on_the_control_plane() {
+        let agent = agent_class("/run/maknae-agent/maknaed.sock".into(), "d");
+        let control = control_class("/run/maknae-agent/maknaed.sock".into(), "d");
+        assert_eq!(control.peer_auth, agent.peer_auth);
+        assert_eq!(control.admission, agent.admission);
+        assert_eq!(control.lane, agent.lane);
+        assert_eq!(
+            control.socket,
+            std::path::PathBuf::from("/run/maknae-agent/control.sock")
+        );
+        assert_eq!(control.plane, ChannelPlane::Control);
+    }
+
+    #[test]
+    fn control_reply_maps_every_outcome() {
+        use maknae_security::{Obligation, Verdict};
+        let ob = |id: &str| Obligation {
+            id: id.into(),
+            params: Default::default(),
+        };
+        let decided = |verdict: Verdict, role: Option<&'static str>| ControlOutcome::Decided {
+            verdict,
+            role,
+        };
+        let deny = || Verdict::Deny { reason: "r".into() };
+        let refusals = || {
+            [
+                deny(),
+                Verdict::NotApplicable { note: None },
+                Verdict::Indeterminate,
+            ]
+        };
+        for reason in [
+            "authorization decision circuit breaker open",
+            "authorization decision blocking worker budget exhausted",
+            "authorization decision failed (join)",
+            "authorization decision timed out",
+            "the live baseline changed between admission and decision",
+        ] {
+            for enrolled in [true, false] {
+                assert_eq!(
+                    control_reply(&ControlOutcome::Unavailable(reason), enrolled),
+                    ControlReply::None,
+                    "{reason}"
+                );
+            }
+        }
+        for enrolled in [true, false] {
+            let audit = Verdict::Permit {
+                obligations: vec![ob("audit")],
+            };
+            assert_eq!(
+                control_reply(&decided(audit, Some("user")), enrolled),
+                ControlReply::Notices
+            );
+            let notify = Verdict::Permit {
+                obligations: vec![ob("notify")],
+            };
+            assert_eq!(
+                control_reply(&decided(notify, Some("user")), enrolled),
+                ControlReply::None
+            );
+            assert_eq!(
+                control_reply(&decided(deny(), Some("adversary")), enrolled),
+                ControlReply::Unauthorized
+            );
+        }
+        for v in refusals() {
+            assert_eq!(
+                control_reply(&decided(v.clone(), Some("user")), false),
+                ControlReply::Unauthorized,
+                "{v:?}"
+            );
+            assert_eq!(
+                control_reply(&decided(v.clone(), None), false),
+                ControlReply::Unauthorized,
+                "{v:?}"
+            );
+            assert_eq!(
+                control_reply(&decided(v.clone(), Some("user")), true),
+                ControlReply::None,
+                "{v:?}"
+            );
+            assert_eq!(control_reply(&decided(v, None), true), ControlReply::None);
+        }
+        assert_eq!(
+            control_reply(&decided(deny(), Some("admin")), true),
+            ControlReply::None
+        );
+    }
+
+    #[test]
+    fn only_the_data_plane_answers_a_session_ending() {
+        assert!(answers_a_session_ending(ChannelPlane::Data));
+        assert!(!answers_a_session_ending(ChannelPlane::Control));
     }
 
     #[test]

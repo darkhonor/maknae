@@ -745,6 +745,12 @@ pub fn parse_agent_client(dir: &AgentId, text: &str) -> Result<AgentClientConfig
     if !socket.is_absolute() {
         return Err(invalid("`agent_socket_path` must be an absolute path"));
     }
+    if crate::transport::names_the_control_socket(&socket) {
+        return Err(invalid(&format!(
+            "`agent_socket_path` must not be named {}",
+            crate::CONTROL_SOCKET_NAME
+        )));
+    }
     let prompt_max_bytes = match field(&map, "prompt_max_bytes") {
         Some(Value::Int(n)) => usize::try_from(*n)
             .ok()
@@ -2271,6 +2277,20 @@ mod tests {
                 "{whole:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_agent_client_whose_socket_is_named_control_sock_is_refused() {
+        let text = CLIENT.replacen(
+            "agent_socket_path: /run/maknae-agent/maknaed.sock",
+            "agent_socket_path: /run/maknae-agent/control.sock",
+            1,
+        );
+        let got = parse_agent_client(&hobi(), &text);
+        assert!(
+            matches!(&got, Err(ConfigError::InvalidAgent(m)) if m.contains("`agent_socket_path`")),
+            "{got:?}"
+        );
     }
 
     #[test]

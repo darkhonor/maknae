@@ -446,6 +446,7 @@ fn admission(
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
         count_breaker: Default::default(),
+        control: Default::default(),
     }
 }
 

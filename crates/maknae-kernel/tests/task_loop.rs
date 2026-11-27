@@ -257,6 +257,7 @@ fn world_of(tag: &str, role: &str, roles: &str, agents: &[(&str, u32, &str)]) ->
         board: Arc::new(board),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
         count_breaker: Default::default(),
+        control: Default::default(),
     };
     let mut cfg = maknae_config::transport_from_section(None).unwrap();
     cfg.prompt_max_bytes = maknae_config::PROMPT_MAX_BYTES_FLOOR;
@@ -562,6 +563,7 @@ impl World {
                 ),
                 switches: self.agents.switches.clone(),
                 count_breaker: Default::default(),
+                control: Default::default(),
             },
             clock: self.clock.clone(),
             blobs: self.blobs.clone(),
@@ -9873,4 +9875,809 @@ async fn a_stale_stop_is_retired_by_the_first_permitted_claim_after_release() {
     w.pdp.baseline().reload_from_file().unwrap();
     assert!(w.claim("hobi").await.is_none());
     assert!(stops(&w).is_empty());
+}
+
+mod control_plane {
+    use super::*;
+    use maknae_proto::{AgentNotice, ControlResponse, FrameClass, Notice, ProtoError};
+
+    type Polled = Result<Vec<Notice<AgentNotice>>, ProtoError>;
+
+    fn poll_body() -> Vec<u8> {
+        maknae_proto::encode_control_request(&maknae_proto::ControlRequest {
+            protocol_version: maknae_proto::PROTOCOL_VERSION,
+            verb: maknae_proto::ControlVerb::NoticePoll {},
+        })
+        .unwrap()
+    }
+
+    fn poll_frame() -> (FrameClass, Vec<u8>) {
+        (FrameClass::Control, poll_body())
+    }
+
+    fn reply_of(raw: &[u8]) -> Option<ControlResponse<AgentNotice>> {
+        if raw.is_empty() {
+            return None;
+        }
+        let caps = maknae_proto::FrameCaps {
+            control: maknae_proto::control_reply_cap::<AgentNotice>(),
+            attempt: 0,
+            prompt: 0,
+        };
+        let mut cursor = raw;
+        let (class, body) =
+            futures_lite_block(maknae_proto::read_frame_zeroizing(&mut cursor, &caps))
+                .expect("one control frame");
+        assert_eq!(class, FrameClass::Control);
+        assert!(cursor.is_empty(), "one frame only");
+        Some(maknae_proto::decode_control_response(&body).expect("a control reply"))
+    }
+
+    fn futures_lite_block<F: std::future::Future>(f: F) -> F::Output {
+        let mut f = std::pin::pin!(f);
+        let waker = std::task::Waker::noop();
+        match f.as_mut().poll(&mut std::task::Context::from_waker(waker)) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => panic!("an in-memory read is never pending"),
+        }
+    }
+
+    /// The control records: action, result, reason.
+    fn said(records: &Records) -> Vec<(String, String, String)> {
+        records
+            .snapshot()
+            .into_iter()
+            .filter(|r| r.event == "request")
+            .map(|r| (r.action, r.outcome.result, r.outcome.reason))
+            .collect()
+    }
+
+    fn one(action: &str, result: &str, reason: &str) -> Vec<(String, String, String)> {
+        vec![(action.into(), result.into(), reason.into())]
+    }
+
+    fn unauthorized_reply() -> ProtoError {
+        ProtoError {
+            code: ProtoErrCode::Unauthorized,
+            message: "not authorized".into(),
+        }
+    }
+
+    struct Failing(maknae_kernel::AuthzError);
+
+    impl maknae_kernel::SessionFacts for Failing {
+        fn membership(
+            &self,
+            _admission: maknae_kernel::Admission,
+            _uid: u32,
+        ) -> Result<maknae_kernel::Membership, maknae_kernel::AuthzError> {
+            Err(self.0.clone())
+        }
+
+        fn account(&self, _uid: u32) -> maknae_kernel::session_facts::AccountFact {
+            maknae_kernel::session_facts::AccountFact::NotChecked(
+                maknae_kernel::session_facts::NotCheckedWhy::Platform,
+            )
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Twist {
+        Panics,
+        Indeterminate,
+        Notify,
+        Admin,
+    }
+
+    /// The real composition, except on `agent.control`.
+    struct OnControl {
+        inner: Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
+        twist: Twist,
+    }
+
+    impl maknae_security::Authorizer for OnControl {
+        fn decide(&self, req: &maknae_security::Request) -> maknae_security::Verdict {
+            self.decide_cited(req).verdict
+        }
+        fn decide_reporting_role(
+            &self,
+            req: &maknae_security::Request,
+        ) -> (maknae_security::Verdict, Option<&'static str>) {
+            let d = self.decide_cited(req);
+            (d.verdict, d.role)
+        }
+        fn decide_cited(&self, req: &maknae_security::Request) -> maknae_security::Decided {
+            if req.action.0 != maknae_security::ACTION_AGENT_CONTROL {
+                return self.inner.decide_cited(req);
+            }
+            let verdict = match self.twist {
+                Twist::Admin => {
+                    return maknae_security::Decided {
+                        verdict: maknae_security::Verdict::Deny {
+                            reason: "agent hobi: an agent never holds admin".into(),
+                        },
+                        role: Some("admin"),
+                        rule: None,
+                    }
+                }
+                Twist::Panics => panic!("sentinel-746-operand-panics"),
+                Twist::Indeterminate => maknae_security::Verdict::Indeterminate,
+                Twist::Notify => maknae_security::Verdict::Permit {
+                    obligations: vec![maknae_security::Obligation {
+                        id: "notify".into(),
+                        params: Default::default(),
+                    }],
+                },
+            };
+            maknae_security::Decided {
+                verdict,
+                role: Some("user"),
+                rule: None,
+            }
+        }
+        fn decide_cited_all(
+            &self,
+            reqs: &[maknae_security::Request],
+        ) -> Vec<maknae_security::Decided> {
+            reqs.iter().map(|r| self.decide_cited(r)).collect()
+        }
+    }
+
+    impl maknae_kernel::CatalogNow for OnControl {
+        fn catalog_now(
+            &self,
+            uid: u32,
+            forges: &maknae_config::ForgeSet,
+        ) -> Result<
+            Arc<maknae_authz_basic::catalog::SubjectCatalog>,
+            maknae_authz_basic::catalog::CatalogError,
+        > {
+            self.inner.catalog_now(uid, forges)
+        }
+        fn catalog_stamp(
+            &self,
+            uid: u32,
+            forges: &maknae_config::ForgeSet,
+        ) -> Option<maknae_proto::CatalogDigest> {
+            self.inner.catalog_stamp(uid, forges)
+        }
+        fn forge_credentials(&self, agent_uid: u32) -> Vec<maknae_proto::CredentialRef> {
+            self.inner.forge_credentials(agent_uid)
+        }
+    }
+
+    impl maknae_kernel::SensitiveNow for OnControl {
+        fn sensitive_now(&self) -> Arc<maknae_config::SensitiveList> {
+            self.inner.sensitive_now()
+        }
+    }
+
+    /// A verdict the real per-read check set: a read whose bytes name no expected sender.
+    async fn mismatched_sender() -> maknae_vault::SenderVerdict {
+        let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
+        let mut collector = maknae_plane::FdCollector::new(
+            reader,
+            1,
+            Some(maknae_io::ExpectedSender {
+                pid: 1,
+                uid: u32::MAX,
+            }),
+        );
+        let verdict = collector.sender_verdict();
+        writer.writable().await.unwrap();
+        writer.try_write(b"x").unwrap();
+        let mut buf = [0u8; 1];
+        let refused = tokio::io::AsyncReadExt::read(&mut collector, &mut buf).await;
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(verdict.mismatched());
+        verdict
+    }
+
+    impl World {
+        fn control_session(
+            &self,
+            agent: &str,
+        ) -> (maknae_kernel::SessionRecord, Arc<maknae_kernel::FactsGate>) {
+            let (mut session, gate) = self.agent_session(agent);
+            session.plane = maknae_kernel::ChannelPlane::Control;
+            (session, gate)
+        }
+
+        /// One connection carrying `frame` (none when `None`), its reply bytes read to EOF.
+        #[allow(clippy::too_many_arguments)]
+        async fn frame_as<P, E>(
+            &self,
+            authorizer: Arc<P>,
+            session: maknae_kernel::SessionRecord,
+            gate: Arc<maknae_kernel::FactsGate>,
+            frame: Option<(FrameClass, Vec<u8>)>,
+            records: &Arc<E>,
+        ) -> Vec<u8>
+        where
+            P: maknae_security::Authorizer
+                + maknae_kernel::SensitiveNow
+                + maknae_kernel::CatalogNow
+                + Send
+                + Sync
+                + 'static,
+            E: maknae_audit_append::AuditEmit + Send + Sync + 'static,
+        {
+            use tokio::io::AsyncReadExt;
+            let _shared = STORE.read().await;
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let wiring = self.wiring();
+            let served = tokio::spawn(maknae_kernel::handle_with_attempt_caps(
+                server,
+                Some("spiffe://d/plane/agent/hobi".into()),
+                Arc::new(session),
+                gate,
+                Arc::clone(records),
+                self.cfg.clone(),
+                serde_json::json!({}),
+                authorizer,
+                wiring.live,
+                Arc::new("basic+ceiling".into()),
+                Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
+                Arc::new(None),
+                wiring.egress,
+                Duration::from_secs(2),
+                maknae_io::DelegatedFds::new(4),
+                common::no_baseline(),
+                maknae_kernel::AttemptCaps::default(),
+                wiring.conversations,
+                self.agents.clone(),
+            ));
+            match frame {
+                Some((class, body)) => {
+                    let _ = maknae_proto::write_frame(&mut client, class, &body).await;
+                }
+                None => tokio::io::AsyncWriteExt::shutdown(&mut client)
+                    .await
+                    .unwrap(),
+            }
+            let mut received = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut received))
+                .await
+                .expect("the daemon closes within 5s");
+            tokio::time::timeout(Duration::from_secs(5), served)
+                .await
+                .unwrap()
+                .unwrap();
+            received
+        }
+
+        async fn control_raw(
+            &self,
+            agent: &str,
+            frame: (FrameClass, Vec<u8>),
+            records: &Arc<Records>,
+        ) -> Vec<u8> {
+            let (session, gate) = self.control_session(agent);
+            self.frame_as(Arc::clone(&self.pdp), session, gate, Some(frame), records)
+                .await
+        }
+
+        async fn poll_with(&self, agent: &str, records: &Arc<Records>) -> Option<Polled> {
+            reply_of(&self.control_raw(agent, poll_frame(), records).await).map(|r| r.result)
+        }
+
+        async fn poll(&self, agent: &str) -> Polled {
+            let records = Records::new(0);
+            self.poll_with(agent, &records)
+                .await
+                .unwrap_or_else(|| panic!("no reply: {:?}", said(&records)))
+        }
+
+        fn bind_hobi_as(&self, entry: &str) {
+            let bindings = maknae_authz_basic::PolicyPaths::in_dir(&self.root).bindings;
+            let bound = std::fs::read_to_string(&bindings).unwrap();
+            common::write_0640(&bindings, &format!("{bound}  {entry}\n"));
+            self.pdp.baseline().reload_from_file().unwrap();
+        }
+    }
+
+    fn stop_for(id: TaskId) -> Vec<(Option<TaskId>, AgentNotice)> {
+        vec![(Some(id), AgentNotice::Stop)]
+    }
+
+    fn shape(polled: Polled) -> Vec<(Option<TaskId>, AgentNotice)> {
+        polled
+            .expect("notices")
+            .into_iter()
+            .map(|n| (n.task, n.body))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_tasker_stop_reaches_the_agent_on_its_next_poll() {
+        let w = world("ctl-stop-reaches", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        assert_eq!(shape(w.poll("hobi").await), []);
+        stopped(&w, &id).await;
+        let first = w.poll("hobi").await.unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|n| (n.task, n.body.clone()))
+                .collect::<Vec<_>>(),
+            stop_for(id)
+        );
+        let again = w.poll("hobi").await.unwrap();
+        assert_eq!(again, first, "offered until retired, under the same id");
+        assert!(w.claim("hobi").await.is_none());
+        assert_eq!(shape(w.poll("hobi").await), []);
+        assert_eq!(shape(w.poll("suga").await), [], "only its own agent's");
+    }
+
+    #[tokio::test]
+    async fn a_notice_poll_never_renews_the_lease() {
+        let w = world("ctl-no-renew", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        let claimed = w.store().hot(&id).unwrap();
+        for step in 1..=3 {
+            w.clock.set(T0 + 5 * step);
+            assert_eq!(shape(w.poll("hobi").await), []);
+            let hot = w.store().hot(&id).unwrap();
+            assert_eq!(
+                (hot.lease_until, hot.actions, hot.last_action),
+                (claimed.lease_until, claimed.actions, claimed.last_action),
+                "poll {step}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_working_task_whose_loop_is_stalled_lapses_agent_lost_while_notice_polls_continue() {
+        let w = world("ctl-stalled", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        let lease = CLAIM_LEASE.as_secs() as i64;
+        let mut at = T0;
+        while at <= T0 + lease {
+            at += 5;
+            w.clock.set(at);
+            w.store().sweep();
+            let polled = w.poll("hobi").await;
+            if at <= T0 + lease {
+                assert_eq!(shape(polled), [], "at {at}: the lease still holds");
+            } else {
+                assert_eq!(shape(polled), stop_for(id), "at {at}");
+            }
+        }
+        let rec = w.store().record(&id).unwrap();
+        assert_eq!(
+            (rec.state, rec.close),
+            (TaskState::Closed, Some(TaskClose::AgentLost))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_contained_agents_poll_is_refused_unauthorized_and_recorded() {
+        let w = world("ctl-contained", "user", true);
+        w.bind_hobi_as(&format!("adversary: [{{uid: {HOBI_UID}}}]"));
+        let records = Records::new(0);
+        assert_eq!(
+            w.poll_with("hobi", &records).await,
+            Some(Err(unauthorized_reply()))
+        );
+        assert_eq!(
+            said(&records),
+            one("agent.control", "deny", "subject contained: role=adversary")
+        );
+        let rec = records.snapshot().pop().unwrap();
+        assert_eq!(rec.subject.role.as_deref(), Some("adversary"));
+        assert_eq!(rec.subject.control_op.as_deref(), Some("notice_poll"));
+        assert!(rec.notices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_agent_unenrolled_after_admission_is_refused_unauthorized() {
+        let w = world("ctl-unenrolled", "user", true);
+        let (session, gate) = w.control_session("hobi");
+        std::fs::remove_file(
+            w.root
+                .join(maknae_config::AGENTS_DIR)
+                .join("hobi")
+                .join(maknae_config::ENROLLMENT_FILE),
+        )
+        .unwrap();
+        w.pdp.baseline().reload_from_file().unwrap();
+        assert_eq!(w.agents.view.agent_uid(&hobi()), None);
+        let records = Records::new(0);
+        let raw = w
+            .frame_as(
+                Arc::clone(&w.pdp),
+                session,
+                gate,
+                Some(poll_frame()),
+                &records,
+            )
+            .await;
+        assert_eq!(
+            reply_of(&raw).map(|r| r.result),
+            Some(Err(unauthorized_reply())),
+            "{:?}",
+            said(&records)
+        );
+        let (action, result, _) = &said(&records)[0];
+        assert_eq!(
+            (action.as_str(), result.as_str()),
+            ("agent.control", "deny")
+        );
+
+        let records = Records::new(0);
+        let (session, _) = w.control_session("hobi");
+        let gone = maknae_kernel::FactsGate::for_test(
+            Arc::new(Failing(maknae_kernel::AuthzError::NoUser)),
+            Duration::from_secs(5),
+        );
+        let raw = w
+            .frame_as(
+                Arc::clone(&w.pdp),
+                session,
+                gone,
+                Some(poll_frame()),
+                &records,
+            )
+            .await;
+        assert!(raw.is_empty(), "the account is gone: no reply");
+        let (action, result, _) = &said(&records)[0];
+        assert_eq!(
+            (action.as_str(), result.as_str()),
+            ("agent.control", "deny")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_plane_request_on_the_control_socket_is_closed_unanswered_and_recorded_malformed(
+    ) {
+        let w = world("ctl-data-on-control", "user", true);
+        let records = Records::new(0);
+        let raw = w
+            .control_raw(
+                "hobi",
+                (FrameClass::Control, request_body(Verb::Ping, None)),
+                &records,
+            )
+            .await;
+        assert!(raw.is_empty());
+        assert_eq!(
+            said(&records),
+            one("decode", "deny", "malformed request: decode")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_control_request_on_the_agent_socket_is_closed_unanswered_and_recorded_malformed() {
+        let w = world("ctl-control-on-agent", "user", true);
+        let records = Records::new(0);
+        let (session, gate) = w.agent_session("hobi");
+        let raw = w
+            .frame_as(
+                Arc::clone(&w.pdp),
+                session,
+                gate,
+                Some(poll_frame()),
+                &records,
+            )
+            .await;
+        assert!(raw.is_empty());
+        assert_eq!(
+            said(&records),
+            one("decode", "deny", "malformed request: decode")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_other_version_control_request_is_closed_unanswered_and_recorded_malformed() {
+        let w = world("ctl-other-version", "user", true);
+        let records = Records::new(0);
+        let body = maknae_proto::encode_control_request(&maknae_proto::ControlRequest {
+            protocol_version: maknae_proto::PROTOCOL_VERSION + 1,
+            verb: maknae_proto::ControlVerb::NoticePoll {},
+        })
+        .unwrap();
+        let raw = w
+            .control_raw("hobi", (FrameClass::Control, body), &records)
+            .await;
+        assert!(raw.is_empty());
+        assert_eq!(
+            said(&records),
+            one("decode", "deny", "malformed request: unsupported-version")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_empty_attempt_frame_on_the_control_socket_is_refused_as_a_read_failure() {
+        let w = world("ctl-attempt-frame", "user", true);
+        for class in [FrameClass::Attempt, FrameClass::Prompt] {
+            let records = Records::new(0);
+            let raw = w.control_raw("hobi", (class, poll_body()), &records).await;
+            assert!(raw.is_empty(), "{class:?}");
+            let said = said(&records);
+            assert_eq!(said.len(), 1, "{class:?}: {said:?}");
+            assert_eq!((said[0].0.as_str(), said[0].1.as_str()), ("read", "deny"));
+            assert!(said[0].2.starts_with("frame read failed"), "{said:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zero_length_attempt_frame_on_the_control_socket_is_refused_as_a_class_mismatch() {
+        let w = world("ctl-empty-attempt", "user", true);
+        for class in [FrameClass::Attempt, FrameClass::Prompt] {
+            let records = Records::new(0);
+            let raw = w.control_raw("hobi", (class, Vec::new()), &records).await;
+            assert!(raw.is_empty(), "{class:?}");
+            assert_eq!(
+                said(&records),
+                one(
+                    "decode",
+                    "deny",
+                    "frame class mismatch: the control plane takes Control"
+                ),
+                "{class:?}"
+            );
+        }
+    }
+
+    async fn twisted(w: &World, twist: Twist, records: &Arc<Records>) -> Vec<u8> {
+        let (session, gate) = w.control_session("hobi");
+        let pdp = Arc::new(OnControl {
+            inner: Arc::clone(&w.pdp),
+            twist,
+        });
+        w.frame_as(pdp, session, gate, Some(poll_frame()), records)
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_poll_with_a_panicking_operand_is_closed_with_no_reply() {
+        let w = world("ctl-panics", "user", true);
+        let records = Records::new(0);
+        assert!(twisted(&w, Twist::Panics, &records).await.is_empty());
+        assert_eq!(
+            said(&records),
+            one(
+                "agent.control",
+                "deny",
+                "indeterminate operand blocks (fail-closed)"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_with_an_indeterminate_operand_is_closed_with_no_reply() {
+        let w = world("ctl-indeterminate", "user", true);
+        let records = Records::new(0);
+        assert!(twisted(&w, Twist::Indeterminate, &records).await.is_empty());
+        assert_eq!(
+            said(&records),
+            one(
+                "agent.control",
+                "deny",
+                "indeterminate operand blocks (fail-closed)"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_with_an_unhonorable_obligation_is_closed_with_no_reply() {
+        let w = world("ctl-notify", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        stopped(&w, &id).await;
+        let records = Records::new(0);
+        assert!(twisted(&w, Twist::Notify, &records).await.is_empty());
+        assert_eq!(
+            said(&records),
+            one("agent.control", "deny", "unhonorable obligation: notify")
+        );
+        assert!(records.snapshot().pop().unwrap().notices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_admin_bound_agents_poll_is_closed_with_no_reply() {
+        let w = world("ctl-admin", "user", true);
+        let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+        let bound = std::fs::read_to_string(&bindings).unwrap();
+        common::write_0640(&bindings, &format!("{bound}  admin: [\"hobi-svc\"]\n"));
+        assert!(
+            w.pdp.baseline().reload_from_file().is_err(),
+            "the loader refuses an agent's account under admin"
+        );
+        common::write_0640(&bindings, &bound);
+        w.pdp.baseline().reload_from_file().unwrap();
+        let records = Records::new(0);
+        assert!(twisted(&w, Twist::Admin, &records).await.is_empty());
+        assert_eq!(
+            said(&records),
+            one(
+                "agent.control",
+                "deny",
+                "agent hobi: an agent never holds admin"
+            )
+        );
+        assert_eq!(
+            records.snapshot().pop().unwrap().subject.role.as_deref(),
+            Some("admin")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_whose_session_check_fails_is_closed_with_no_reply() {
+        let w = world("ctl-facts-fail", "user", true);
+        let (session, _) = w.control_session("hobi");
+        let failing = maknae_kernel::FactsGate::for_test(
+            Arc::new(Failing(maknae_kernel::AuthzError::Resolve(
+                "sentinel-746-lookup".into(),
+            ))),
+            Duration::from_secs(5),
+        );
+        let records = Records::new(0);
+        let raw = w
+            .frame_as(
+                Arc::clone(&w.pdp),
+                session,
+                failing,
+                Some(poll_frame()),
+                &records,
+            )
+            .await;
+        assert!(raw.is_empty());
+        let said = said(&records);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(
+            (said[0].0.as_str(), said[0].1.as_str()),
+            ("agent.control", "deny")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_after_a_sender_mismatch_is_closed_with_no_reply() {
+        let w = world("ctl-sender", "user", true);
+        let (mut session, gate) = w.control_session("hobi");
+        session.sender = mismatched_sender().await;
+        let records = Records::new(0);
+        let raw = w
+            .frame_as(Arc::clone(&w.pdp), session, gate, None, &records)
+            .await;
+        assert!(raw.is_empty());
+        assert_eq!(said(&records), one("read", "deny", "sender-mismatch"));
+    }
+
+    #[tokio::test]
+    async fn a_poll_after_its_session_expired_is_closed_with_no_reply() {
+        let w = world("ctl-expired", "user", true);
+        let (mut session, gate) = w.control_session("hobi");
+        session.lifetime = Duration::ZERO;
+        session.opened_at = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
+        let records = Records::new(0);
+        let raw = w
+            .frame_as(
+                Arc::clone(&w.pdp),
+                session,
+                gate,
+                Some(poll_frame()),
+                &records,
+            )
+            .await;
+        assert!(raw.is_empty());
+        let said = said(&records);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(
+            (said[0].0.as_str(), said[0].1.as_str()),
+            ("agent.control", "deny")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_on_a_session_with_no_agent_is_closed_with_no_reply() {
+        let w = world("ctl-no-agent", "user", true);
+        let (mut session, gate) = w.control_session("hobi");
+        session.channel = maknae_kernel::SessionChannel::Client;
+        let records = Records::new(0);
+        let raw = w
+            .frame_as(
+                Arc::clone(&w.pdp),
+                session,
+                gate,
+                Some(poll_frame()),
+                &records,
+            )
+            .await;
+        assert!(raw.is_empty());
+        let said = said(&records);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(
+            (said[0].0.as_str(), said[0].1.as_str()),
+            ("agent.control", "deny")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_whose_audit_append_fails_is_closed_with_no_reply() {
+        let w = world("ctl-audit-fails", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        stopped(&w, &id).await;
+        let records = Records::new(2);
+        assert_eq!(w.poll_with("hobi", &records).await, None);
+        assert_eq!(said(&records).len(), 1);
+        assert_eq!(said(&records)[0].1, "permit");
+        assert_eq!(stops(&w), [Some(id)], "nothing released, nothing retired");
+
+        w.bind_hobi_as(&format!("adversary: [{{uid: {HOBI_UID}}}]"));
+        let records = Records::new(2);
+        assert_eq!(
+            w.poll_with("hobi", &records).await,
+            None,
+            "an Unauthorized whose record failed is not sent"
+        );
+        assert_eq!(said(&records)[0].1, "deny");
+    }
+
+    #[tokio::test]
+    async fn a_poll_permit_discharges_its_audit_obligation() {
+        let w = world("ctl-audit-obligation", "user", true);
+        let req = maknae_kernel::build_control_request(
+            HOBI_UID,
+            &hobi(),
+            &maknae_proto::ControlVerb::NoticePoll {},
+            maknae_security::Lane::Local,
+        );
+        match maknae_security::Authorizer::decide(&*w.pdp, &req) {
+            maknae_security::Verdict::Permit { obligations } => {
+                assert_eq!(
+                    obligations
+                        .iter()
+                        .map(|o| o.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["audit"]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let records = Records::new(0);
+        assert_eq!(w.poll_with("hobi", &records).await, Some(Ok(Vec::new())));
+        assert_eq!(said(&records), one("agent.control", "permit", "authorized"));
+    }
+
+    #[tokio::test]
+    async fn a_poll_record_names_each_notice_and_never_more() {
+        let w = world("ctl-record", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        stopped(&w, &id).await;
+        let records = Records::new(0);
+        let notices = w.poll_with("hobi", &records).await.unwrap().unwrap();
+        let rec = records
+            .snapshot()
+            .into_iter()
+            .find(|r| r.event == "request")
+            .unwrap();
+        assert_eq!(rec.action, "agent.control");
+        assert_eq!(rec.subject.control_op.as_deref(), Some("notice_poll"));
+        assert_eq!(rec.subject.agent.as_deref(), Some("hobi"));
+        assert_eq!(rec.subject.task_id, None);
+        assert_eq!(rec.subject.tasker, None);
+        assert_eq!(rec.object, None);
+        assert_eq!(
+            rec.notices,
+            vec![maknae_audit_append::NoticeAudit {
+                id: notices[0].id.to_string(),
+                kind: "stop".into(),
+                task: Some(id.to_string()),
+            }]
+        );
+        assert_eq!(rec.notices[0].id.len(), 32);
+        assert!(rec.notices[0]
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    }
 }
