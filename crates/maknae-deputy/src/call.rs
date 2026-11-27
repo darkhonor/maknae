@@ -300,15 +300,12 @@ pub async fn fulfil<O: KeyOpener>(
             mut body,
             truncated,
         } => {
-            match maknae_io::ValueFilter::builder()
-                .secret("provider key", &key)
-                .build()
-            {
-                Ok(filter) => {
-                    filter.mask_in_place(&mut body);
-                }
-                Err(_) => body.fill(b'*'),
-            }
+            mask_body(
+                maknae_io::ValueFilter::builder()
+                    .secret("provider key", &key)
+                    .build(),
+                &mut body,
+            );
             FulfilError::Unusable {
                 defect: maknae_proto::ReplyDefect::from_status(code),
                 usage: None,
@@ -329,6 +326,15 @@ pub async fn fulfil<O: KeyOpener>(
     Ok(EgressFrameReply::Reply(completion.reply))
 }
 
+fn mask_body(filter: Result<maknae_io::ValueFilter, maknae_io::FilterError>, body: &mut [u8]) {
+    match filter {
+        Ok(filter) if !filter.is_empty() && filter.skipped() == 0 => {
+            filter.mask_in_place(body);
+        }
+        _ => body.fill(b'*'),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +342,41 @@ mod tests {
     use maknae_io::MaknaeSecret;
     use maknae_proto::ReplyDefect;
     use zeroize::Zeroizing;
+
+    #[test]
+    fn a_filter_that_cannot_be_built_masks_the_whole_body() {
+        for e in [
+            maknae_io::FilterError::ValueTooLong,
+            maknae_io::FilterError::TooManyValues,
+        ] {
+            let mut body = b"error: nothing to see here".to_vec();
+            mask_body(Err(e), &mut body);
+            assert_eq!(body, vec![b'*'; 26]);
+        }
+    }
+
+    #[test]
+    fn a_built_filter_masks_only_the_key_echo() {
+        let key =
+            MaknaeSecret::new(Zeroizing::new("sk-test-0123456789-abcdef".to_string())).unwrap();
+        let filter = maknae_io::ValueFilter::builder()
+            .secret("provider key", &key)
+            .build();
+        let mut body = b"bad key sk-test-0123456789-abcdef here".to_vec();
+        mask_body(filter, &mut body);
+        assert_eq!(body, b"bad key ************************* here");
+    }
+
+    #[test]
+    fn a_key_the_filter_would_skip_masks_the_whole_body() {
+        let key = MaknaeSecret::new(Zeroizing::new("sk-12".to_string())).unwrap();
+        let filter = maknae_io::ValueFilter::builder()
+            .secret("provider key", &key)
+            .build();
+        let mut body = b"bad key sk-12 here".to_vec();
+        mask_body(filter, &mut body);
+        assert_eq!(body, vec![b'*'; 18]);
+    }
 
     fn txt(s: &str) -> maknae_proto::ContentBlock {
         maknae_proto::ContentBlock::Text {
