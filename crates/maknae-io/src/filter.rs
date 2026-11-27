@@ -18,6 +18,7 @@ pub(crate) const PERCENT_WINDOW: usize = 16;
 pub(crate) const BASE64_WINDOW: usize = 24;
 pub(crate) const HEX_WINDOW: usize = 32;
 pub(crate) const WINDOWS: [usize; 3] = [RAW_WINDOW, BASE64_WINDOW, HEX_WINDOW];
+const _: () = assert!(PERCENT_WINDOW == RAW_WINDOW);
 
 const MAX_FORMS: usize = 11;
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
@@ -223,6 +224,7 @@ pub struct ValueFilter {
     whole: Vec<usize>,
     max_raw: usize,
     values: usize,
+    distinct: usize,
     skipped: usize,
 }
 
@@ -335,7 +337,7 @@ impl ValueFilter {
         let mut found = Found::new(self.sources.len());
         let _ = self.scan(&output, work, |_, _, source| {
             found.add(source);
-            if found.order.len() == self.values {
+            if found.order.len() == self.distinct {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
@@ -517,7 +519,20 @@ impl<'a> ValueFilterBuilder<'a> {
         }
         let values: Vec<&[u8]> = self.entries.iter().map(|&(_, b)| b).collect();
         let kept = values.iter().filter(|v| v.len() >= MIN_VALUE).count();
-        let index = build_index(&values);
+        let canon: Vec<u32> = (0..self.entries.len())
+            .map(|i| {
+                (0..i)
+                    .find(|&j| self.entries[j].0 == self.entries[i].0)
+                    .unwrap_or(i) as u32
+            })
+            .collect();
+        let mut kept_sources: Vec<u32> = (0..values.len())
+            .filter(|&i| values[i].len() >= MIN_VALUE)
+            .map(|i| canon[i])
+            .collect();
+        kept_sources.sort_unstable();
+        kept_sources.dedup();
+        let mut index = build_index(&values);
         let raw: Vec<usize> = (0..index.forms.len())
             .filter(|&i| i == 0 || index.sources[i] != index.sources[i - 1])
             .collect();
@@ -529,6 +544,9 @@ impl<'a> ValueFilterBuilder<'a> {
             .map(|&i| index.forms[i].bytes.len())
             .max()
             .unwrap_or(0);
+        for s in &mut index.sources {
+            *s = canon[*s as usize];
+        }
         Ok(ValueFilter {
             index,
             sources: self.entries.into_iter().map(|(s, _)| s).collect(),
@@ -536,6 +554,7 @@ impl<'a> ValueFilterBuilder<'a> {
             whole,
             max_raw,
             values: kept,
+            distinct: kept_sources.len(),
             skipped: values.len() - kept + self.skipped,
         })
     }
@@ -1049,6 +1068,8 @@ mod tests {
             (hex(TOKEN, true), 32),
             (trimmed_base64(TOKEN, false, 0), 24),
             (trimmed_base64(TOKEN, true, 1), 24),
+            (percent(TOKEN, true), 16),
+            (percent(TOKEN, false), 16),
         ] {
             let mid = form.len() / 2 - w / 2;
             let (out, found) = masked(&f, &embed(&form[mid..mid + w]));
@@ -1337,6 +1358,38 @@ mod tests {
         assert!(matches!(padded, Screened::Withheld { len } if len == v.len() + 4096));
         assert_eq!(calls.0, 2);
         assert!(w_alone > 0);
+        assert_eq!(w_padded, w_alone);
+    }
+
+    struct Seen(Vec<Vec<Source>>);
+
+    impl LeakHook for Seen {
+        fn leaked(&mut self, sources: &[Source]) {
+            self.0.push(sources.to_vec());
+        }
+    }
+
+    #[test]
+    fn two_values_under_one_label_are_reported_once() {
+        let a = MaknaeSecret::new(Zeroizing::new(TOKEN.to_vec())).unwrap();
+        let b = MaknaeSecret::new(Zeroizing::new(token())).unwrap();
+        let f = ValueFilter::builder()
+            .secret("dup", &a)
+            .secret("dup", &b)
+            .build()
+            .unwrap();
+        let both = [&TOKEN[..], b" ", &token()].concat();
+        let (out, found) = masked(&f, &both);
+        assert!(out.iter().all(|&c| c == b'*' || c == b' '));
+        assert_eq!(found, vec![Source::Label("dup")]);
+        let mut seen = Seen(Vec::new());
+        let screened = f.screen(Zeroizing::new(both.clone()), &mut seen);
+        assert!(matches!(screened, Screened::Withheld { len } if len == both.len()));
+        assert_eq!(seen.0, vec![vec![Source::Label("dup")]]);
+        let mut padded = TOKEN.to_vec();
+        padded.extend(std::iter::repeat_n(b'x', 4096));
+        let (_, w_alone) = f.screen_with_work(Zeroizing::new(TOKEN.to_vec()), &mut seen);
+        let (_, w_padded) = f.screen_with_work(Zeroizing::new(padded), &mut seen);
         assert_eq!(w_padded, w_alone);
     }
 
