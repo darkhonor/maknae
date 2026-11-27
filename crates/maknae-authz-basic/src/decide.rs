@@ -868,6 +868,9 @@ pub(crate) fn decide_loaded_cited(
     let Some(uid) = uid else {
         return undecided(Verdict::Indeterminate);
     };
+    if let Some(reason) = plane_refusal(req) {
+        return undecided(Verdict::Deny { reason });
+    }
     if class_of(&req.action.0) == Some(Class::Kernel) {
         return undecided(kernel_decided(req));
     }
@@ -900,6 +903,11 @@ pub(crate) fn decide_loaded_cited(
             if let Some(refused) = tool_ceiling_refusal(lp, req, uid) =>
         {
             refused
+        }
+        Role::Admin | Role::User | Role::Guest
+            if let Some(decided) = control_arm(&lp.agents, uid, role, req) =>
+        {
+            (decided, None)
         }
         Role::Admin | Role::User | Role::Guest
             if let Some(decided) = holding_arm(&lp.agents, uid, role, req) =>
@@ -1083,6 +1091,40 @@ pub(crate) fn decide_loaded_cited(
         verdict,
         role: Some(role.key()),
         cited,
+    }
+}
+
+fn plane_refusal(req: &SecRequest) -> Option<String> {
+    let control = req.action.0 == maknae_security::ACTION_AGENT_CONTROL;
+    match req.subject.0.get(maknae_security::SUBJECT_PLANE) {
+        None if control => Some("agent.control: only on the control plane".into()),
+        None => None,
+        Some(AttrValue::Str(p)) if p == maknae_security::PLANE_CONTROL => {
+            (!control).then(|| "plane control: only agent.control".into())
+        }
+        Some(_) => Some("plane: no known plane".into()),
+    }
+}
+
+fn control_arm(agents: &AgentUids, uid: u32, role: Role, req: &SecRequest) -> Option<Verdict> {
+    if req.action.0 != maknae_security::ACTION_AGENT_CONTROL {
+        return None;
+    }
+    let deny = |reason: String| Some(Verdict::Deny { reason });
+    let Some(id) = agents.get(uid) else {
+        return deny("agent.control: an enrolled agent's, on the agent channel".into());
+    };
+    match role {
+        Role::Admin => return deny(format!("agent {id}: an agent never holds admin")),
+        Role::Adversary => return deny("subject contained: role=adversary".into()),
+        Role::User | Role::Guest => {}
+    }
+    match req.context.0.get(maknae_security::CONTEXT_CONTROL_OP) {
+        Some(AttrValue::Str(op)) if op == maknae_security::CONTROL_OP_NOTICE_POLL => {
+            Some(permit_with_audit())
+        }
+        Some(AttrValue::Str(_)) => deny("agent.control: unknown operation".into()),
+        Some(_) | None => Some(Verdict::Indeterminate),
     }
 }
 
@@ -7949,5 +7991,268 @@ mod tests {
             &ask(&lp, &["build"]).verdict,
             Verdict::Deny { reason } if reason.contains("tool.invoke is not in") && reason.contains("actions allow")
         ));
+    }
+
+    fn on_plane(mut r: SecRequest, plane: Option<AttrValue>) -> SecRequest {
+        if let Some(p) = plane {
+            r.subject.0.insert(maknae_security::SUBJECT_PLANE, p);
+        }
+        r
+    }
+
+    fn control_plane() -> Option<AttrValue> {
+        Some(AttrValue::Str(maknae_security::PLANE_CONTROL.into()))
+    }
+
+    fn poll_on(
+        uid: u32,
+        channel: &str,
+        agent: Option<&str>,
+        plane: Option<AttrValue>,
+        op: Option<AttrValue>,
+    ) -> SecRequest {
+        let mut s = Attributes::new();
+        s.insert(SUBJECT_UID, AttrValue::Int(i64::from(uid)));
+        let mut c = Attributes::new();
+        c.insert(
+            maknae_security::CONTEXT_DAC_LANE,
+            AttrValue::Str(maknae_security::Lane::Local.as_str().into()),
+        );
+        if let Some(op) = op {
+            c.insert(maknae_security::CONTEXT_CONTROL_OP, op);
+        }
+        let r = SecRequest {
+            subject: Subject(s),
+            resource: Resource(Attributes::new()),
+            action: Action(maknae_security::ACTION_AGENT_CONTROL.into()),
+            context: Context(c),
+        };
+        on_plane(on_channel(r, Some(channel), agent), plane)
+    }
+
+    fn poll_by(uid: u32, plane: Option<AttrValue>, op: Option<AttrValue>) -> SecRequest {
+        poll_on(uid, maknae_security::CHANNEL_AGENT, Some("hobi"), plane, op)
+    }
+
+    fn notice_poll() -> Option<AttrValue> {
+        Some(AttrValue::Str(
+            maknae_security::CONTROL_OP_NOTICE_POLL.into(),
+        ))
+    }
+
+    fn poll() -> SecRequest {
+        poll_by(HOBI_UID, control_plane(), notice_poll())
+    }
+
+    #[test]
+    fn an_enrolled_agents_notice_poll_on_the_control_plane_is_permitted() {
+        for role in ["user", "guest"] {
+            let d = decide_loaded_cited(&lp_agent(role, None), &principal(), &poll());
+            assert_eq!(d.verdict, permit_with_audit(), "{role}");
+            assert_eq!((d.role, d.cited), (Some(role), None), "{role}");
+        }
+    }
+
+    #[test]
+    fn agent_control_without_the_control_plane_is_denied() {
+        let lp = lp_agent("user", None);
+        let person = poll_on(
+            HUMAN_UID,
+            maknae_security::CHANNEL_CLIENT,
+            None,
+            None,
+            notice_poll(),
+        );
+        for r in [poll_by(HOBI_UID, None, notice_poll()), person] {
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &r).verdict,
+                deny("agent.control: only on the control plane")
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_action_on_the_control_plane_is_denied() {
+        let lp = lp_agent("user", None);
+        for action in [
+            "session.task",
+            "liveness.ping",
+            "admin.whoami",
+            "fs.read",
+            "board.read",
+            "session.prompt",
+        ] {
+            let mut r = on_plane(as_hobi(action), control_plane());
+            if action == "session.task" {
+                r.context.0.insert(
+                    maknae_security::CONTEXT_TASK_OP,
+                    AttrValue::Str("claim".into()),
+                );
+            }
+            assert!(
+                !matches!(
+                    decide_loaded_cited(&lp, &principal(), &as_hobi(action)).verdict,
+                    Verdict::Deny { ref reason } if reason == "plane control: only agent.control"
+                ),
+                "{action}"
+            );
+            assert_eq!(
+                decide_loaded_cited(&lp, &principal(), &r).verdict,
+                deny("plane control: only agent.control"),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kernel_class_action_on_the_control_plane_is_denied() {
+        let lp = lp_agent("user", None);
+        let mut kernel = request(Some(i64::from(OPERATOR_UID)), "kernel.contain", None);
+        kernel.subject.0.insert(
+            maknae_security::SUBJECT_INITIATOR,
+            AttrValue::Str(maknae_security::INITIATOR_KERNEL.into()),
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &kernel).verdict,
+            permit_with_audit()
+        );
+        for r in [
+            on_plane(kernel, control_plane()),
+            on_plane(as_hobi("kernel.session.terminate"), control_plane()),
+        ] {
+            let d = decide_loaded_cited(&lp, &principal(), &r);
+            assert_eq!(d.verdict, deny("plane control: only agent.control"));
+            assert_eq!(d.role, None);
+        }
+    }
+
+    #[test]
+    fn an_unknown_plane_value_is_denied() {
+        let lp = lp_agent("user", None);
+        for plane in [AttrValue::Str("data".into()), AttrValue::Int(1)] {
+            for r in [
+                poll_by(HOBI_UID, Some(plane.clone()), notice_poll()),
+                on_plane(as_hobi("liveness.ping"), Some(plane.clone())),
+            ] {
+                assert_eq!(
+                    decide_loaded_cited(&lp, &principal(), &r).verdict,
+                    deny("plane: no known plane"),
+                    "{plane:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_control_operation_is_denied() {
+        let lp = lp_agent("user", None);
+        let r = poll_by(
+            HOBI_UID,
+            control_plane(),
+            Some(AttrValue::Str("reboot".into())),
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &r).verdict,
+            deny("agent.control: unknown operation")
+        );
+    }
+
+    #[test]
+    fn a_missing_control_operation_is_indeterminate() {
+        let lp = lp_agent("user", None);
+        for op in [None, Some(AttrValue::Int(0))] {
+            let d = decide_loaded_cited(&lp, &principal(), &poll_by(HOBI_UID, control_plane(), op));
+            assert_eq!(d.verdict, Verdict::Indeterminate);
+            assert_eq!(d.role, Some("user"));
+        }
+    }
+
+    #[test]
+    fn a_contained_agents_notice_poll_is_denied() {
+        let lp = lp_agent("adversary", None);
+        let d = decide_loaded_cited(&lp, &principal(), &poll());
+        assert_eq!(d.verdict, deny("subject contained: role=adversary"));
+        assert_eq!(d.role, Some("adversary"));
+        assert_eq!(
+            control_arm(&lp.agents, HOBI_UID, Role::Adversary, &poll()),
+            Some(deny("subject contained: role=adversary"))
+        );
+    }
+
+    #[test]
+    fn a_person_on_the_control_plane_is_denied() {
+        let lp = lp_agent("user", None);
+        assert_eq!(
+            decide_loaded_cited(
+                &lp,
+                &principal(),
+                &poll_by(HUMAN_UID, control_plane(), notice_poll())
+            )
+            .verdict,
+            deny("agent channel: uid 1002 is not enrolled agent hobi")
+        );
+        let client = poll_on(
+            HUMAN_UID,
+            maknae_security::CHANNEL_CLIENT,
+            None,
+            control_plane(),
+            notice_poll(),
+        );
+        let d = decide_loaded_cited(&lp, &principal(), &client);
+        assert_eq!(
+            d.verdict,
+            deny("agent.control: an enrolled agent's, on the agent channel")
+        );
+        assert_eq!(d.role, Some("user"));
+        assert_eq!(
+            control_arm(&AgentUids::default(), HOBI_UID, Role::User, &poll()),
+            Some(deny(
+                "agent.control: an enrolled agent's, on the agent channel"
+            ))
+        );
+        assert_eq!(
+            control_arm(&lp.agents, HOBI_UID, Role::User, &as_hobi("liveness.ping")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_admin_bound_agents_poll_is_denied() {
+        let d = decide_loaded_cited(&lp_agent("admin", None), &principal(), &poll());
+        assert_eq!(d.verdict, deny("agent hobi: an agent never holds admin"));
+        assert_eq!(d.role, Some("admin"));
+    }
+
+    #[test]
+    fn agent_control_is_not_grantable() {
+        for role in ["admin", "user"] {
+            let policy = maknae_config::parse_authz(&format!(
+                "schema_version: 1\nroles:\n  {role}:\n    allow: [\"agent.control\"]\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                crate::validate_grants(&policy.action_grants),
+                Err(crate::AuthzBasicError::UnknownActionTerm(
+                    "agent.control".into()
+                )),
+                "{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_policy_cannot_deny_the_notice_poll() {
+        let lp = lp_agent(
+            "user",
+            Some("schema_version: 1\nactions:\n  allow: [\"session.prompt\"]\n"),
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &as_hobi("session.delete")).verdict,
+            deny("subject hobi-svc: session.delete is not in agents.hobi.policy.actions allow")
+        );
+        assert_eq!(
+            decide_loaded_cited(&lp, &principal(), &poll()).verdict,
+            permit_with_audit()
+        );
     }
 }

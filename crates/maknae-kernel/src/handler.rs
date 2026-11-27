@@ -694,6 +694,41 @@ pub fn build_authz_request(
     }
 }
 
+pub(crate) fn control_op(verb: &maknae_proto::ControlVerb) -> &'static str {
+    match verb {
+        maknae_proto::ControlVerb::NoticePoll {} => maknae_security::CONTROL_OP_NOTICE_POLL,
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "called by the control listener, #746")
+)]
+pub fn build_control_request(
+    peer_uid: u32,
+    agent: &maknae_config::AgentId,
+    verb: &maknae_proto::ControlVerb,
+    lane: maknae_security::Lane,
+) -> maknae_security::Request {
+    use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+    let Subject(mut subject) = stamp_subject(peer_uid, None, &Stamp::Agent { agent, task: None });
+    subject.insert(
+        maknae_security::SUBJECT_PLANE,
+        AttrValue::Str(maknae_security::PLANE_CONTROL.into()),
+    );
+    let mut context = lane_context(lane);
+    context.insert(
+        maknae_security::CONTEXT_CONTROL_OP,
+        AttrValue::Str(control_op(verb).into()),
+    );
+    maknae_security::Request {
+        subject: Subject(subject),
+        resource: Resource(Attributes::new()),
+        action: Action(maknae_security::ACTION_AGENT_CONTROL.into()),
+        context: Context(context),
+    }
+}
+
 pub(crate) fn stamp_subject(
     peer_uid: u32,
     home: Option<&std::path::Path>,
@@ -1044,6 +1079,38 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
         assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
+    }
+
+    #[test]
+    fn a_control_request_is_stamped_agent_channel_and_control_plane() {
+        use maknae_security::{
+            AttrValue, CHANNEL_AGENT, CONTEXT_CONTROL_OP, CONTEXT_DAC_LANE, SUBJECT_AGENT,
+            SUBJECT_CHANNEL, SUBJECT_PLANE,
+        };
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let s = |v: &str| AttrValue::Str(v.into());
+        let r = build_control_request(
+            2001,
+            &hobi,
+            &maknae_proto::ControlVerb::NoticePoll {},
+            maknae_security::Lane::Local,
+        );
+        let mut subject = maknae_security::Attributes::new();
+        subject.insert("uid", AttrValue::Int(2001));
+        subject.insert(SUBJECT_CHANNEL, s(CHANNEL_AGENT));
+        subject.insert(SUBJECT_AGENT, s("hobi"));
+        subject.insert(SUBJECT_PLANE, s("control"));
+        assert_eq!(r.subject.0, subject);
+        assert_eq!(r.resource.0, maknae_security::Attributes::new());
+        assert_eq!(r.action.0, "agent.control");
+        let mut context = maknae_security::Attributes::new();
+        context.insert(CONTEXT_DAC_LANE, s("local"));
+        context.insert(CONTEXT_CONTROL_OP, s("notice_poll"));
+        assert_eq!(r.context.0, context);
+        assert_eq!(
+            control_op(&maknae_proto::ControlVerb::NoticePoll {}),
+            "notice_poll"
+        );
     }
 
     #[test]

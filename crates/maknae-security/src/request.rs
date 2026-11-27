@@ -41,6 +41,17 @@ pub const SUBJECT_CHANNEL: &str = "channel";
 pub const CHANNEL_CLIENT: &str = "client";
 pub const CHANNEL_AGENT: &str = "agent";
 
+/// The plane a request arrived on; absent is the data plane, [`PLANE_CONTROL`] the control socket. Kernel-stamped.
+pub const SUBJECT_PLANE: &str = "plane";
+pub const PLANE_CONTROL: &str = "control";
+
+/// Which `agent.control` operation the request is, stamped by the kernel from the control verb.
+pub const CONTEXT_CONTROL_OP: &str = "control_op";
+pub const CONTROL_OP_NOTICE_POLL: &str = "notice_poll";
+
+/// The one action the control plane decides.
+pub const ACTION_AGENT_CONTROL: &str = "agent.control";
+
 /// The agent id from the verified agent-plane SAN; kernel-stamped.
 pub const SUBJECT_AGENT: &str = "agent";
 
