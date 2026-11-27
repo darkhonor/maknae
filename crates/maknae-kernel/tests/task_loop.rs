@@ -8697,7 +8697,7 @@ mod board {
             let bodies: Vec<String> = l
                 .entries
                 .iter()
-                .map(|e| e.post.draft.body.0.to_string())
+                .map(|e| e.post.draft.body.expose().to_string())
                 .collect();
             assert_eq!(bodies, ["sentinel-715-3"]);
             assert_eq!(board_records(&records)[0].object, w.own_mark_board());
