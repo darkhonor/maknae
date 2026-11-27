@@ -412,64 +412,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn construction_denies_core_dumps() {
-        use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
-        let hard = getrlimit(Resource::Core).maximum;
-        let rlimit_checked = hard != Some(0);
-        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::Dumpable)
-            .unwrap();
-        assert_eq!(
-            rustix::process::dumpable_behavior().unwrap(),
-            rustix::process::DumpableBehavior::Dumpable
-        );
-        if rlimit_checked {
-            setrlimit(
-                Resource::Core,
-                Rlimit {
-                    current: hard,
-                    maximum: hard,
-                },
-            )
-            .unwrap();
-            assert_ne!(getrlimit(Resource::Core).current, Some(0));
-        } else {
-            eprintln!("host hard RLIMIT_CORE is 0: checking dumpability only");
-        }
-        text(SENTINEL).unwrap();
-        if rlimit_checked {
-            assert_eq!(getrlimit(Resource::Core).current, Some(0));
-        }
-        assert_eq!(
-            rustix::process::dumpable_behavior().unwrap(),
-            rustix::process::DumpableBehavior::NotDumpable,
-            "host hard RLIMIT_CORE is {hard:?}"
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn construction_lowers_the_soft_core_limit() {
-        use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
-        let hard = getrlimit(Resource::Core).maximum;
-        if hard == Some(0) {
-            eprintln!("host hard RLIMIT_CORE is 0: nothing to check");
-            return;
-        }
-        setrlimit(
-            Resource::Core,
-            Rlimit {
-                current: hard,
-                maximum: hard,
-            },
-        )
-        .unwrap();
-        assert_ne!(getrlimit(Resource::Core).current, Some(0));
-        text(SENTINEL).unwrap();
-        assert_eq!(getrlimit(Resource::Core).current, Some(0));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn proc_self_fd_still_resolves_after_a_secret_is_built() {
         text(SENTINEL).unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();

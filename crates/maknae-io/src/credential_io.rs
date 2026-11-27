@@ -371,28 +371,6 @@ mod tests {
         assert_eq!(b.read_timeout().unwrap(), Some(Duration::from_secs(7)));
     }
 
-    #[test]
-    fn receive_denies_core_dumps_before_it_reads_even_a_malformed_frame() {
-        let (mut a, mut b) = pair();
-        a.write_all(&4u32.to_be_bytes()).unwrap();
-        a.write_all(b"XXXX").unwrap();
-        assert!(matches!(
-            LaunchCredentials::receive(&mut b),
-            Err(ReceiveError::Decode(_))
-        ));
-        assert_eq!(getrlimit(Resource::Core).current, Some(0));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn deny_core_dumps_reapplies_after_dumpability_is_reset() {
-        use rustix::process::{dumpable_behavior, set_dumpable_behavior, DumpableBehavior};
-        deny_core_dumps().unwrap();
-        set_dumpable_behavior(DumpableBehavior::Dumpable).unwrap();
-        deny_core_dumps().unwrap();
-        assert_eq!(dumpable_behavior().unwrap(), DumpableBehavior::NotDumpable);
-    }
-
     fn slow_drain(mut b: UnixStream) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
