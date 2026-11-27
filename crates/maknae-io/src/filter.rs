@@ -1105,7 +1105,13 @@ mod tests {
         let f = filter_of(&[TOKEN, &TOKEN[..17], short.as_bytes()]);
         let mut text = String::from("start ");
         for v in [&TOKEN[..], &TOKEN[..17], short.as_bytes()] {
-            for form in [v.to_vec(), hex(v, false), hex(v, true), percent(v, true)] {
+            for form in [
+                v.to_vec(),
+                hex(v, false),
+                hex(v, true),
+                percent(v, true),
+                percent(v, false),
+            ] {
                 text.push_str(std::str::from_utf8(&form).unwrap());
                 text.push_str(" | ");
             }
