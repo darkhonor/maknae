@@ -1220,7 +1220,7 @@ mod tests {
                             hint: "",
                         }),
                         None => Ok(maknae_vault::WrappedSecret {
-                            token: maknae_vault::WrappingToken::new(Zeroizing::new(
+                            token: maknae_io::MaknaeSecret::vault_token(Zeroizing::new(
                                 "hvs.forge-wrap-sentinel-168".into(),
                             ))
                             .unwrap(),

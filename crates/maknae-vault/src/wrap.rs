@@ -1,7 +1,5 @@
-use crate::api_shape::{
-    de_secret, json_refusal, token_is_acceptable, url_path_is_safe, SecretStr, VaultOp,
-    WrapMismatch,
-};
+use crate::api_shape::{json_refusal, url_path_is_safe, SecretStr, VaultOp, WrapMismatch};
+use crate::error::secret_error;
 use crate::VaultError;
 use maknae_io::MaknaeSecret;
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -38,61 +36,12 @@ pub fn forge_token_subpath(server: &str) -> Option<ForgeTokenSubpath> {
     Some(ForgeTokenSubpath(subpath))
 }
 
-pub struct KvSecret(Zeroizing<String>);
-
-impl KvSecret {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
-            what: "KV secret",
-            why,
-        })?;
-        Ok(Self(secret))
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
+pub fn kv_secret(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::vault_token(secret).map_err(|e| secret_error("KV secret", e))
 }
 
-impl fmt::Debug for KvSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("KvSecret(<redacted>)")
-    }
-}
-
-pub struct WrappingToken(Zeroizing<String>);
-
-impl WrappingToken {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
-            what: "wrapping token",
-            why,
-        })?;
-        Ok(Self(secret))
-    }
-
-    pub fn from_opened(mut bytes: Zeroizing<Vec<u8>>) -> Result<Self, VaultError> {
-        match String::from_utf8(std::mem::take(&mut *bytes)) {
-            Ok(s) => Self::new(Zeroizing::new(s)),
-            Err(e) => {
-                let _wiped = Zeroizing::new(e.into_bytes());
-                Err(VaultError::InvalidSecret {
-                    what: "wrapping token",
-                    why: "not UTF-8",
-                })
-            }
-        }
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for WrappingToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("WrappingToken(<redacted>)")
-    }
+pub(crate) fn wrapping_token(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::vault_token(secret).map_err(|e| secret_error("wrapping token", e))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +113,7 @@ fn missing_client_token() -> VaultError {
 pub(crate) fn client_token<'a>(
     op: VaultOp,
     user: Option<&'a MaknaeSecret>,
-    wrapping: Option<&'a WrappingToken>,
+    wrapping: Option<&'a MaknaeSecret>,
     service: Option<&'a MaknaeSecret>,
 ) -> Result<Option<&'a str>, VaultError> {
     match op {
@@ -267,7 +216,7 @@ pub fn aad_parts<'a>(
 
 #[derive(Debug)]
 pub struct WrappedSecret {
-    pub token: WrappingToken,
+    pub token: MaknaeSecret,
     pub ttl: Duration,
     pub creation_path: String,
     pub creation_time: String,
@@ -298,7 +247,7 @@ struct WrappedReadDto {
 
 #[derive(Deserialize)]
 struct WrapInfoDto {
-    #[serde(deserialize_with = "de_secret")]
+    #[serde(deserialize_with = "maknae_io::secret::de_zeroizing_string")]
     token: Zeroizing<String>,
     ttl: u64,
     creation_time: String,
@@ -339,7 +288,7 @@ fn parse_wrapped(
     }
     check_ttl(info.ttl, requested_ttl)?;
     Ok(WrappedSecret {
-        token: WrappingToken::new(info.token)?,
+        token: wrapping_token(info.token)?,
         ttl: Duration::from_secs(info.ttl),
         creation_path: info.creation_path,
         creation_time: info.creation_time,
@@ -447,18 +396,18 @@ pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<Stri
 pub(crate) trait UnwrapOps {
     fn lookup(
         &self,
-        token: &WrappingToken,
+        token: &MaknaeSecret,
     ) -> impl Future<Output = Result<WrapLookup, VaultError>> + Send;
     fn unwrap_body(
         &self,
-        token: WrappingToken,
+        token: MaknaeSecret,
         checked: &CheckedLookup,
     ) -> impl Future<Output = Result<Zeroizing<Vec<u8>>, VaultError>> + Send;
 }
 
 pub(crate) async fn unwrap_checked<O: UnwrapOps>(
     ops: &O,
-    token: WrappingToken,
+    token: MaknaeSecret,
     expect: &WrapExpectation,
 ) -> Result<Zeroizing<String>, VaultError> {
     let lookup = ops.lookup(&token).await?;
@@ -486,8 +435,8 @@ mod tests {
         .unwrap()
     }
 
-    fn wrapping(s: &str) -> WrappingToken {
-        WrappingToken::new(Zeroizing::new(s.to_string())).unwrap()
+    fn wrapping(s: &str) -> MaknaeSecret {
+        wrapping_token(Zeroizing::new(s.to_string())).unwrap()
     }
 
     fn wrapped_body(path: &str, ttl: u64, data: &str) -> String {
@@ -574,13 +523,13 @@ mod tests {
 
     #[test]
     fn a_kv_secret_is_shape_checked_and_redacted() {
-        let s = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
+        let s = kv_secret(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
         assert!(s.expose() == "github_pat_SENTINEL");
-        assert_eq!(format!("{s:?}"), "KvSecret(<redacted>)");
+        assert_eq!(format!("{s:?}"), "MaknaeSecret(<redacted>)");
         for bad in ["", "a b", "a\"b", "tok\n"] {
             assert!(
                 matches!(
-                    KvSecret::new(Zeroizing::new(bad.into())),
+                    kv_secret(Zeroizing::new(bad.into())),
                     Err(VaultError::InvalidSecret {
                         what: "KV secret",
                         ..
@@ -962,17 +911,14 @@ mod tests {
 
     #[test]
     fn a_wrapping_token_from_opened_bytes_is_utf8_and_shape_checked() {
-        let t = WrappingToken::from_opened(Zeroizing::new(b"hvs.OPENED".to_vec())).unwrap();
+        let t = MaknaeSecret::from_opened(Zeroizing::new(b"hvs.OPENED".to_vec())).unwrap();
         assert!(t.expose() == "hvs.OPENED");
-        assert!(format!("{t:?}") == "WrappingToken(<redacted>)");
+        assert!(format!("{t:?}") == "MaknaeSecret(<redacted>)");
         assert!(matches!(
-            WrappingToken::from_opened(Zeroizing::new(vec![0xff, 0xfe])),
-            Err(VaultError::InvalidSecret {
-                why: "not UTF-8",
-                ..
-            })
+            MaknaeSecret::from_opened(Zeroizing::new(vec![0xff, 0xfe])),
+            Err(maknae_io::SecretError::NotUtf8)
         ));
-        assert!(WrappingToken::from_opened(Zeroizing::new(b"hvs. x".to_vec())).is_err());
+        assert!(MaknaeSecret::from_opened(Zeroizing::new(b"hvs. x".to_vec())).is_err());
     }
 
     #[test]
@@ -1155,7 +1101,7 @@ mod tests {
     }
 
     impl UnwrapOps for Scripted {
-        async fn lookup(&self, token: &WrappingToken) -> Result<WrapLookup, VaultError> {
+        async fn lookup(&self, token: &MaknaeSecret) -> Result<WrapLookup, VaultError> {
             assert!(token.expose() == "hvs.wrap");
             self.calls.lock().unwrap().push("lookup");
             if !self.lookup_ok {
@@ -1170,7 +1116,7 @@ mod tests {
 
         async fn unwrap_body(
             &self,
-            token: WrappingToken,
+            token: MaknaeSecret,
             _checked: &CheckedLookup,
         ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
             assert!(token.expose() == "hvs.wrap");

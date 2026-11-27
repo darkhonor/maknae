@@ -1034,7 +1034,8 @@ mod tests {
 
     fn wrapped(token: &str) -> maknae_vault::WrappedSecret {
         maknae_vault::WrappedSecret {
-            token: maknae_vault::WrappingToken::new(zeroize::Zeroizing::new(token.into())).unwrap(),
+            token: maknae_io::MaknaeSecret::vault_token(zeroize::Zeroizing::new(token.into()))
+                .unwrap(),
             ttl: std::time::Duration::from_secs(60),
             creation_path: FULL_PATH.into(),
             creation_time: "2026-10-02T00:00:00Z".into(),

@@ -184,10 +184,6 @@ impl<'de> Deserialize<'de> for SecretStr {
     }
 }
 
-pub(crate) fn de_secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
-    d.deserialize_str(SecretStrVisitor)
-}
-
 pub(crate) fn json_refusal(op: VaultOp, e: &serde_json::Error) -> VaultError {
     let (line, column) = (e.line(), e.column());
     VaultError::VaultBody {
@@ -455,17 +451,6 @@ mod tests {
     fn the_secret_visitor_names_what_it_expects() {
         let expected: &dyn serde::de::Expected = &SecretStrVisitor;
         assert_eq!(expected.to_string(), "a string");
-    }
-
-    #[test]
-    fn de_secret_reads_a_field_into_a_zeroizing_string() {
-        #[derive(serde::Deserialize)]
-        struct T {
-            #[serde(deserialize_with = "de_secret")]
-            v: Zeroizing<String>,
-        }
-        let t: T = serde_json::from_slice(br#"{"v":"hvs.x"}"#).unwrap();
-        assert!(t.v.as_str() == "hvs.x");
     }
 
     #[test]

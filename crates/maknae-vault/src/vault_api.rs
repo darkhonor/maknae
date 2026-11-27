@@ -8,8 +8,7 @@ use crate::transit::{parse_service_login, parse_sign_reply, ServiceLogin};
 use crate::user_login::{parse_login, UserLogin};
 use crate::wrap::{
     kv_data_path, kv_metadata_path, parse_lookup, parse_wrapped_read, parse_wrapped_write,
-    unwrap_checked, CheckedLookup, KvSecret, UnwrapOps, WrapExpectation, WrapLookup, WrappedSecret,
-    WrappingToken,
+    unwrap_checked, CheckedLookup, UnwrapOps, WrapExpectation, WrapLookup, WrappedSecret,
 };
 use crate::{UserAuth, UserAuthMethod, VaultError};
 use maknae_crypto::assert_fips_provider;
@@ -79,7 +78,7 @@ impl VaultApi {
         kv_mount: &str,
         secret_path: &str,
         field: &str,
-        secret: &KvSecret,
+        secret: &MaknaeSecret,
         wrap_ttl: Duration,
     ) -> Result<(), VaultError> {
         let path = kv_data_path(kv_mount, secret_path)?;
@@ -100,7 +99,7 @@ impl VaultApi {
         self.execute(VaultOp::DeleteMetadata, req).await.map(drop)
     }
 
-    pub async fn lookup_wrapping(&self, token: &WrappingToken) -> Result<WrapLookup, VaultError> {
+    pub async fn lookup_wrapping(&self, token: &MaknaeSecret) -> Result<WrapLookup, VaultError> {
         let body = lookup_body(token)?;
         let req = lookup_request(&self.http, &self.base, body)?;
         let body = self.execute(VaultOp::WrapLookup, req).await?;
@@ -109,7 +108,7 @@ impl VaultApi {
 
     pub async fn unwrap_kv_field(
         &self,
-        token: WrappingToken,
+        token: MaknaeSecret,
         expect: &WrapExpectation,
     ) -> Result<Zeroizing<String>, VaultError> {
         unwrap_checked(self, token, expect).await
@@ -161,13 +160,13 @@ impl VaultApi {
 }
 
 impl UnwrapOps for VaultApi {
-    async fn lookup(&self, token: &WrappingToken) -> Result<WrapLookup, VaultError> {
+    async fn lookup(&self, token: &MaknaeSecret) -> Result<WrapLookup, VaultError> {
         self.lookup_wrapping(token).await
     }
 
     async fn unwrap_body(
         &self,
-        token: WrappingToken,
+        token: MaknaeSecret,
         _checked: &CheckedLookup,
     ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let req = unwrap_request(&self.http, &self.base, &token)?;
@@ -179,7 +178,7 @@ impl UnwrapOps for VaultApi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wrap::{KvSecret, FORGE_TOKEN_FIELD};
+    use crate::wrap::{kv_secret, FORGE_TOKEN_FIELD};
     use maknae_crypto::rcgen;
 
     fn ca() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -222,7 +221,7 @@ mod tests {
             .build()
             .unwrap();
         let pw = crate::password(Zeroizing::new("pw".into())).unwrap();
-        let wrapping = || WrappingToken::new(Zeroizing::new("hvs.w".into())).unwrap();
+        let wrapping = || MaknaeSecret::vault_token(Zeroizing::new("hvs.w".into())).unwrap();
         let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.u".into())).unwrap();
         let expect = WrapExpectation::new(
             "maknae-kv",
@@ -256,7 +255,7 @@ mod tests {
             rt.block_on(api.revoke_self(&user)),
             Err(VaultError::VaultTransport { .. })
         ));
-        let secret = KvSecret::new(Zeroizing::new("github_pat_x".into())).unwrap();
+        let secret = kv_secret(Zeroizing::new("github_pat_x".into())).unwrap();
         assert!(matches!(
             rt.block_on(api.write_wrapped(
                 &user,
@@ -333,7 +332,7 @@ mod tests {
             rt.block_on(api.read_wrapped(&user, "maknae-kv", "../bob/x", Duration::from_secs(60))),
             Err(VaultError::InvalidKeyVaultPath(_))
         ));
-        let secret = KvSecret::new(Zeroizing::new("github_pat_x".into())).unwrap();
+        let secret = kv_secret(Zeroizing::new("github_pat_x".into())).unwrap();
         assert!(matches!(
             rt.block_on(api.write_wrapped(
                 &user,

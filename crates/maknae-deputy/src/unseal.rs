@@ -43,6 +43,7 @@ pub enum OpenFailure {
     Invalid,
     Field,
     Vault,
+    CoreDumps,
 }
 
 impl OpenFailure {
@@ -60,6 +61,7 @@ impl OpenFailure {
             }
             OpenFailure::Field => "the key field is absent from the secret",
             OpenFailure::Vault => "the Vault unwrap failed",
+            OpenFailure::CoreDumps => "core dumps could not be denied",
         }
     }
 }
@@ -277,7 +279,8 @@ mod tests {
     fn each_open_failure_has_its_own_content_free_reason() {
         use OpenFailure::*;
         assert_eq!(
-            [Request, Seal, Token, WrongPath, Ttl, Invalid, Field, Vault].map(|f| f.reason()),
+            [Request, Seal, Token, WrongPath, Ttl, Invalid, Field, Vault, CoreDumps]
+                .map(|f| f.reason()),
             [
                 "the request cannot name a Vault key path",
                 "the sealed key does not match this request",
@@ -287,6 +290,7 @@ mod tests {
                 "the wrapping token is expired, already used, or not a wrapping token",
                 "the key field is absent from the secret",
                 "the Vault unwrap failed",
+                "core dumps could not be denied",
             ]
         );
     }

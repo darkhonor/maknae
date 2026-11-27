@@ -5,7 +5,6 @@ use crate::transit::{
 use crate::user_login::login_path;
 use crate::wrap::{
     client_token, field_echo, kv_field_is_acceptable, wrap_ttl_value, KvDataPath, KvMetadataPath,
-    KvSecret, WrappingToken,
 };
 use crate::{UserAuth, VaultError};
 use base64::engine::general_purpose::STANDARD;
@@ -113,7 +112,7 @@ pub(crate) fn login_body(password: &MaknaeSecret) -> Result<Zeroizing<Vec<u8>>, 
     )
 }
 
-pub(crate) fn lookup_body(token: &WrappingToken) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+pub(crate) fn lookup_body(token: &MaknaeSecret) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let token = token.expose();
     json_body(LOOKUP_BODY_OVERHEAD + token.len(), &LookupBody { token })
 }
@@ -132,7 +131,7 @@ pub(crate) fn approle_login_body(
 
 pub(crate) fn kv_write_body(
     field: &str,
-    secret: &KvSecret,
+    secret: &MaknaeSecret,
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     if !kv_field_is_acceptable(field) {
         return Err(VaultError::KvField {
@@ -268,7 +267,7 @@ pub(crate) fn lookup_request(
 pub(crate) fn unwrap_request(
     http: &Client,
     base: &ApiBase,
-    token: &WrappingToken,
+    token: &MaknaeSecret,
 ) -> Result<Request, VaultError> {
     let token = client_token(VaultOp::Unwrap, None, Some(token), None)?;
     finish(authed(
@@ -318,7 +317,7 @@ pub(crate) fn transit_sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wrap::{kv_data_path, kv_metadata_path, KvSecret, FORGE_TOKEN_FIELD};
+    use crate::wrap::{kv_data_path, kv_metadata_path, FORGE_TOKEN_FIELD};
     use crate::{MAX_PASSWORD_BYTES, MAX_TOKEN_BYTES};
     use maknae_crypto::rcgen;
 
@@ -343,8 +342,8 @@ mod tests {
         crate::password(Zeroizing::new(s.to_string())).unwrap()
     }
 
-    fn wrapping() -> WrappingToken {
-        WrappingToken::new(Zeroizing::new("hvs.wrap".into())).unwrap()
+    fn wrapping() -> MaknaeSecret {
+        MaknaeSecret::vault_token(Zeroizing::new("hvs.wrap".into())).unwrap()
     }
 
     fn body_json(req: &Request) -> serde_json::Value {
@@ -476,7 +475,7 @@ mod tests {
     fn the_wrapped_write_request_carries_the_wrap_ttl_and_a_zeroizing_body() {
         let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
-        let secret = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
+        let secret = crate::wrap::kv_secret(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
         let body = kv_write_body(FORGE_TOKEN_FIELD, &secret).unwrap();
         assert_eq!(
             body.capacity(),
@@ -772,7 +771,7 @@ mod tests {
         let body = login_body(&worst).unwrap();
         let want = LOGIN_BODY_OVERHEAD + 6 * MAX_PASSWORD_BYTES;
         assert_eq!((body.len(), body.capacity()), (want, want));
-        let token = WrappingToken::new(Zeroizing::new("a".repeat(MAX_TOKEN_BYTES))).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("a".repeat(MAX_TOKEN_BYTES))).unwrap();
         let body = lookup_body(&token).unwrap();
         let want = LOOKUP_BODY_OVERHEAD + MAX_TOKEN_BYTES;
         assert_eq!((body.len(), body.capacity()), (want, want));
