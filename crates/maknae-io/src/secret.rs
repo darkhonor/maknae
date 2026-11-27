@@ -110,6 +110,7 @@ impl std::error::Error for SecretError {
 /// let _ = MaknaeSecret::new(Zeroizing::new([1u8; 1])).unwrap();
 /// fn holds<B: SecretBuf>() {}
 /// holds::<String>();
+/// let _ = serde_json::to_string(&1);
 /// struct Mine(Vec<u8>);
 /// impl zeroize::Zeroize for Mine {
 ///     fn zeroize(&mut self) {
@@ -239,6 +240,10 @@ impl Visitor<'_> for ZeroizingStringVisitor {
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
         Ok(Zeroizing::new(v.to_owned()))
     }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(Zeroizing::new(v))
+    }
 }
 
 pub fn de_zeroizing_string<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
@@ -366,6 +371,12 @@ mod tests {
         use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
         let hard = getrlimit(Resource::Core).maximum;
         let rlimit_checked = hard != Some(0);
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::Dumpable)
+            .unwrap();
+        assert_eq!(
+            rustix::process::dumpable_behavior().unwrap(),
+            rustix::process::DumpableBehavior::Dumpable
+        );
         if rlimit_checked {
             setrlimit(
                 Resource::Core,
@@ -435,6 +446,18 @@ mod tests {
     }
 
     #[test]
+    fn de_zeroizing_string_takes_an_owned_string_without_a_copy() {
+        use serde::de::IntoDeserializer;
+        let owned = String::from(SENTINEL);
+        let at = owned.as_ptr();
+        let de: serde::de::value::StringDeserializer<serde::de::value::Error> =
+            owned.into_deserializer();
+        let got = de_zeroizing_string(de).unwrap();
+        assert_eq!(got.as_str(), SENTINEL);
+        assert_eq!(got.as_ptr(), at);
+    }
+
+    #[test]
     fn de_zeroizing_string_reads_only_a_string() {
         let mut de = serde_json::Deserializer::from_str("\"a\\\"b\"");
         assert_eq!(de_zeroizing_string(&mut de).unwrap().as_str(), "a\"b");
@@ -461,6 +484,8 @@ mod tests {
             assert_eq!(e.to_string(), why);
             assert!(!format!("{e:?}").contains(SENTINEL));
             assert!(!seen.contains(&why), "{why} repeats");
+            let has_source = std::error::Error::source(e).is_some();
+            assert_eq!(has_source, matches!(e, SecretError::CoreDumps(_)), "{why}");
             seen.push(why);
         }
     }
