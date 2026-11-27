@@ -375,7 +375,28 @@ mod tests {
     fn a_notice_id_of_another_length_does_not_decode() {
         let mut b = Vec::new();
         ciborium::into_writer(&serde_bytes_like(&[1u8; 15]), &mut b).unwrap();
-        assert!(ciborium::from_reader::<NoticeId, _>(b.as_slice()).is_err());
+        let e = ciborium::from_reader::<NoticeId, _>(b.as_slice()).unwrap_err();
+        assert!(e.to_string().contains("16-byte"));
+    }
+
+    #[test]
+    fn a_reply_of_exactly_the_cap_encodes_and_one_over_does_not() {
+        let cap = control_reply_cap::<AgentNotice>();
+        let sized = |m: usize| ControlResponse::<AgentNotice> {
+            protocol_version: PROTOCOL_VERSION,
+            result: Err(ProtoError {
+                code: ProtoErrCode::Unauthorized,
+                message: "x".repeat(m),
+            }),
+        };
+        let raw = |m: usize| {
+            let mut b = Vec::new();
+            ciborium::into_writer(&sized(m), &mut b).unwrap();
+            b.len()
+        };
+        let m = (0..cap).find(|m| raw(*m) == cap).unwrap();
+        assert_eq!(encode_control_response(&sized(m)).unwrap().len(), cap);
+        assert!(encode_control_response(&sized(m + 1)).is_err());
     }
 
     fn serde_bytes_like(v: &[u8]) -> ciborium::Value {
