@@ -1037,6 +1037,7 @@ mod tests {
     use super::*;
     use maknae_crypto::rcgen;
     use std::os::unix::fs::PermissionsExt;
+    use zeroize::Zeroizing;
 
     fn tmpfile(name: &str, mode: u32) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("mv-cred-{}-{}", std::process::id(), name));
