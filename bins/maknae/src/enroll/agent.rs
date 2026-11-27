@@ -789,10 +789,14 @@ pub(crate) fn redact_error(
         },
         other => other,
     };
-    if filter.matches(render(format_args!("{e} {e:?}")).as_bytes()) {
-        EnrollError::State(filter.redact_text(&render(format_args!("{e}"))))
+    if !filter.matches(render(format_args!("{e} {e:?}")).as_bytes()) {
+        return e;
+    }
+    let collapsed = EnrollError::State(filter.redact_text(&render(format_args!("{e}"))));
+    if filter.matches(render(format_args!("{collapsed} {collapsed:?}")).as_bytes()) {
+        EnrollError::State(WITHHELD.to_string())
     } else {
-        e
+        collapsed
     }
 }
 
@@ -3745,6 +3749,17 @@ pub(crate) mod tests {
             .as_ref()
             .is_ok_and(|f| !f.is_empty() && f.skipped() == 1));
         assert!(withheld(&skipped));
+    }
+
+    #[test]
+    fn a_collapsed_error_whose_debug_rebuilds_the_secret_is_withheld() {
+        let value = r#"xxxxxxxx\"yyyyyyyy"#;
+        let secret = MaknaeSecret::new(Zeroizing::new(value.to_string())).unwrap();
+        let filter = secret_filter(&secret);
+        let e = redact_error(EnrollError::Owner("xxxxxxxx\"yyyyyyyy".into()), &filter);
+        let shown = format!("{e} {e:?}");
+        assert!(!shown.contains(value), "{shown}");
+        assert!(matches!(e, EnrollError::State(m) if m == WITHHELD));
     }
 
     #[test]

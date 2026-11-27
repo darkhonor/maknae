@@ -396,7 +396,9 @@ impl ValueFilter {
                 *b = b'*';
             }
         }
-        if self.matches(buf) {
+        let mut rebuilt = self.matches(buf);
+        self.tail(buf, &mut 0, |_, _| rebuilt = true);
+        if rebuilt {
             buf.fill(b'*');
         }
         found
@@ -1674,5 +1676,16 @@ mod tests {
         assert_eq!(out, stars(buf.len()));
         assert_eq!(found, v0());
         assert!(f.matches(&out));
+    }
+
+    #[test]
+    fn a_mask_that_rebuilds_a_value_prefix_at_the_end_masks_the_whole_buffer() {
+        let v = [&b"Qz"[..], &[b'*'; 6], b"0123456789"].concat();
+        let f = filter_of(&[&v]);
+        let (out, found) = masked(&f, b"out: QzQz*");
+        assert_eq!(out, stars(10));
+        assert_eq!(found, v0());
+        let (out, _) = masked(&f, b"out: Qz");
+        assert_eq!(out, b"out: **");
     }
 }
