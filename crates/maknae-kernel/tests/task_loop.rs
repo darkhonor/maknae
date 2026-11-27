@@ -10622,6 +10622,83 @@ mod control_plane {
     }
 
     #[tokio::test]
+    async fn a_poll_whose_answer_never_reached_the_agent_is_recorded_undelivered() {
+        let w = world("ctl-undelivered", "user", true);
+        let id = w.submit("hobi", "a").await;
+        assert_eq!(w.claimed("hobi").await, id);
+        stopped(&w, &id).await;
+        let _shared = STORE.read().await;
+        let (session, gate) = w.control_session("hobi");
+        let (mut client, server) = tokio::io::duplex(1 << 20);
+        maknae_proto::write_frame(&mut client, FrameClass::Control, &poll_body())
+            .await
+            .unwrap();
+        drop(client);
+        let records = Records::new(0);
+        let wiring = w.wiring();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            maknae_kernel::handle_with_attempt_caps(
+                server,
+                Some("spiffe://d/plane/agent/hobi".into()),
+                Arc::new(session),
+                gate,
+                Arc::clone(&records),
+                w.cfg.clone(),
+                serde_json::json!({}),
+                Arc::clone(&w.pdp),
+                wiring.live,
+                Arc::new("basic+ceiling".into()),
+                Arc::new("US".into()),
+                Arc::new("ml-dsa-87".to_string()),
+                Arc::new(None),
+                wiring.egress,
+                Duration::from_secs(2),
+                maknae_io::DelegatedFds::new(4),
+                common::no_baseline(),
+                maknae_kernel::AttemptCaps::default(),
+                wiring.conversations,
+                w.agents.clone(),
+            ),
+        )
+        .await
+        .expect("the handler returns");
+        let polls: Vec<_> = records
+            .snapshot()
+            .into_iter()
+            .filter(|r| r.event == "request")
+            .collect();
+        assert_eq!(
+            polls
+                .iter()
+                .map(|r| (
+                    r.action.as_str(),
+                    r.outcome.result.as_str(),
+                    r.outcome.reason.as_str(),
+                    r.outcome.posture.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("agent.control", "permit", "authorized", "authorized"),
+                (
+                    "agent.control",
+                    "permit",
+                    "delivery failed: response not written",
+                    "undelivered"
+                ),
+            ]
+        );
+        assert_eq!(polls[1].subject.control_op.as_deref(), Some("notice_poll"));
+        assert_eq!(polls[1].notices, polls[0].notices);
+        assert_eq!(polls[1].notices.len(), 1);
+        assert_eq!(
+            stops(&w),
+            [Some(id)],
+            "an undelivered Stop is offered again"
+        );
+    }
+
+    #[tokio::test]
     async fn a_poll_permit_discharges_its_audit_obligation() {
         let w = world("ctl-audit-obligation", "user", true);
         let req = maknae_kernel::build_control_request(

@@ -110,18 +110,20 @@ async fn write_reply<S: AsyncWrite + Unpin>(
     stream: &mut S,
     cfg: &TransportConfig,
     result: Result<Vec<Notice<AgentNotice>>, ProtoError>,
-) {
+) -> bool {
     let response = ControlResponse {
         protocol_version: PROTOCOL_VERSION,
         result,
     };
-    if let Ok(bytes) = maknae_proto::encode_control_response(&response) {
-        let _ = tokio::time::timeout(
-            Duration::from_millis(cfg.read_timeout_ms),
-            maknae_proto::write_frame(stream, FrameClass::Control, &bytes),
-        )
-        .await;
-    }
+    let Ok(bytes) = maknae_proto::encode_control_response(&response) else {
+        return false;
+    };
+    let written = tokio::time::timeout(
+        Duration::from_millis(cfg.read_timeout_ms),
+        maknae_proto::write_frame(stream, FrameClass::Control, &bytes),
+    )
+    .await;
+    matches!(written, Ok(Ok(())))
 }
 
 /// The session checks the data plane makes before a decision, and the agent its leaf names.
@@ -240,7 +242,7 @@ pub(crate) async fn serve_control<S, E, P>(
         ControlOutcome::Unavailable(_) => None,
     };
     let reason = outcome_reason(&outcome);
-    let record = |result, posture, notices: &[Notice<AgentNotice>]| {
+    let said = |(result, reason, posture): (&str, &str, &str), notices: &[Notice<AgentNotice>]| {
         poll_record(
             (host, socket),
             uid,
@@ -248,17 +250,30 @@ pub(crate) async fn serve_control<S, E, P>(
             user.as_deref(),
             role,
             (session_id, session.seq.next()),
-            (result, &reason, posture),
+            (result, reason, posture),
             notices,
             au3_1,
         )
+    };
+    let record = |result, posture, notices: &[Notice<AgentNotice>]| {
+        said((result, &reason, posture), notices)
     };
     match reply {
         ControlReply::Notices => {
             let notices = agents.tasks.notices_for(agent);
             let rec = record("permit", "authorized", &notices);
-            if may_respond(emit_or_report(emit, &rec, action, uid, session_id).await) {
-                write_reply(stream, cfg, Ok(notices)).await;
+            if may_respond(emit_or_report(emit, &rec, action, uid, session_id).await)
+                && !write_reply(stream, cfg, Ok(notices.clone())).await
+            {
+                let undelivered = said(
+                    (
+                        "permit",
+                        "delivery failed: response not written",
+                        "undelivered",
+                    ),
+                    &notices,
+                );
+                emit_or_report(emit, &undelivered, action, uid, session_id).await;
             }
         }
         ControlReply::Unauthorized => {
