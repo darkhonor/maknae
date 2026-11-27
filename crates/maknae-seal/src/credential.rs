@@ -32,7 +32,6 @@ fn seal_secret_error(e: SecretError) -> SealError {
     match e {
         SecretError::CoreDumps(io) => SealError::CoreDumps(io.kind()),
         SecretError::Empty | SecretError::TooLong => SealError::PlaintextLength,
-        SecretError::NotUtf8 | SecretError::NotAVaultToken => SealError::Open,
         _ => SealError::Open,
     }
 }
