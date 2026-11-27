@@ -63,7 +63,10 @@ pub mod normalize;
 mod page;
 pub mod program;
 pub mod secret;
-pub use secret::{MaknaeSecret, MaknaeSecretBytes, SecretBuf, SecretError, MAX_SECRET_BYTES};
+pub use secret::{
+    check_vault_token, MaknaeSecret, MaknaeSecretBytes, SecretBuf, SecretError, MAX_SECRET_BYTES,
+    MAX_VAULT_TOKEN_BYTES,
+};
 mod strategy;
 mod syscall;
 mod term;

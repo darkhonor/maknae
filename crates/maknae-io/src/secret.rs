@@ -5,7 +5,7 @@ use serde::de::{Deserialize, Deserializer, Error as _, Visitor};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const MAX_SECRET_BYTES: usize = 65_536;
-const MAX_VAULT_TOKEN_BYTES: usize = 1024;
+pub const MAX_VAULT_TOKEN_BYTES: usize = 1024;
 
 mod sealed {
     pub trait Sealed {
@@ -16,6 +16,23 @@ mod sealed {
 
 /// A storage form a `MaknaeSecret` can hold: `String`, `Vec<u8>` or `[u8; N]`.
 pub trait SecretBuf: sealed::Sealed + Zeroize {}
+
+/// The Vault token rule: 1..=1024 bytes of `[A-Za-z0-9._-]`. It returns only `Empty`, `TooLong`
+/// or `NotAVaultToken`.
+pub fn check_vault_token(s: &str) -> Result<(), SecretError> {
+    match s.len() {
+        0 => return Err(SecretError::Empty),
+        1..=MAX_VAULT_TOKEN_BYTES => {}
+        _ => return Err(SecretError::TooLong),
+    }
+    if !s
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err(SecretError::NotAVaultToken);
+    }
+    Ok(())
+}
 
 fn within_limit(len: usize) -> Result<(), SecretError> {
     match len {
@@ -176,16 +193,7 @@ impl<B: SecretBuf> MaknaeSecret<B> {
 impl MaknaeSecret<String> {
     pub fn vault_token(value: Zeroizing<String>) -> Result<Self, SecretError> {
         let secret = Self::new(value)?;
-        if secret.0.len() > MAX_VAULT_TOKEN_BYTES {
-            return Err(SecretError::TooLong);
-        }
-        if !secret
-            .0
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        {
-            return Err(SecretError::NotAVaultToken);
-        }
+        check_vault_token(&secret.0)?;
         Ok(secret)
     }
 
@@ -321,6 +329,24 @@ mod tests {
         for bad in ["hvs token", "hvs/x", "a\"b"] {
             assert!(
                 matches!(token(bad), Err(SecretError::NotAVaultToken)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_vault_token_is_the_one_vault_token_rule() {
+        assert_eq!(MAX_VAULT_TOKEN_BYTES, 1024);
+        assert!(check_vault_token("hvs.A-b_9").is_ok());
+        assert!(check_vault_token(&"a".repeat(MAX_VAULT_TOKEN_BYTES)).is_ok());
+        assert!(matches!(check_vault_token(""), Err(SecretError::Empty)));
+        assert!(matches!(
+            check_vault_token(&"a".repeat(MAX_VAULT_TOKEN_BYTES + 1)),
+            Err(SecretError::TooLong)
+        ));
+        for bad in ["hvs token", "hvs/x", "a\"b", "\u{e9}"] {
+            assert!(
+                matches!(check_vault_token(bad), Err(SecretError::NotAVaultToken)),
                 "{bad}"
             );
         }

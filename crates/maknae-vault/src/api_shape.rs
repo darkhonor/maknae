@@ -3,7 +3,7 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 pub const MAX_VAULT_BODY_BYTES: usize = 64 * 1024;
-pub const MAX_TOKEN_BYTES: usize = 1024;
+pub use maknae_io::MAX_VAULT_TOKEN_BYTES as MAX_TOKEN_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapMismatch {
@@ -149,16 +149,11 @@ pub(crate) fn url_path_is_safe(s: &str) -> bool {
 }
 
 pub(crate) fn token_is_acceptable(s: &str) -> Result<(), &'static str> {
-    if !(1..=MAX_TOKEN_BYTES).contains(&s.len()) {
-        return Err("must be 1..=1024 bytes");
-    }
-    if !s
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    {
-        return Err("has a character outside [A-Za-z0-9._-]");
-    }
-    Ok(())
+    maknae_io::check_vault_token(s).map_err(|e| match e {
+        maknae_io::SecretError::Empty | maknae_io::SecretError::TooLong => "must be 1..=1024 bytes",
+        maknae_io::SecretError::NotAVaultToken => "has a character outside [A-Za-z0-9._-]",
+        _ => "is not a Vault token",
+    })
 }
 
 pub(crate) fn json_refusal(op: VaultOp, e: &serde_json::Error) -> VaultError {
@@ -199,10 +194,18 @@ mod tests {
     fn token_shape_is_bounded_and_header_safe() {
         assert_eq!(token_is_acceptable("hvs.CAESIabc_-9"), Ok(()));
         assert_eq!(token_is_acceptable(&"a".repeat(MAX_TOKEN_BYTES)), Ok(()));
-        assert!(token_is_acceptable("").is_err());
-        assert!(token_is_acceptable(&"a".repeat(MAX_TOKEN_BYTES + 1)).is_err());
+        let length = Err("must be 1..=1024 bytes");
+        assert_eq!(token_is_acceptable(""), length);
+        assert_eq!(
+            token_is_acceptable(&"a".repeat(MAX_TOKEN_BYTES + 1)),
+            length
+        );
         for bad in ["hvs.a b", "hvs.a\nb", "hvs.\"", "hvs.a/b"] {
-            assert!(token_is_acceptable(bad).is_err(), "{bad:?}");
+            assert_eq!(
+                token_is_acceptable(bad),
+                Err("has a character outside [A-Za-z0-9._-]"),
+                "{bad:?}"
+            );
         }
     }
 
