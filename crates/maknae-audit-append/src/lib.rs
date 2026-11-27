@@ -28,8 +28,8 @@ pub use record::{
     canonical_json, AuditRecord, BoardAudit, ByteRangeAudit, CategoryAudit, EgressAudit,
     EgressStatus, GraphAudit, Integrity, LabelAudit, LineSpanAudit, MutationAudit,
     MutationEffectKind, MutationEffectRecord, MutationOperation, MutationOrigin, MutationPhase,
-    MutationStatus, Outcome, PageAudit, ProvenanceAudit, RefusedToolCall, RuleAudit, Source,
-    Subject, TierAudit, Where, NO_PEER_UID,
+    MutationStatus, NoticeAudit, Outcome, PageAudit, ProvenanceAudit, RefusedToolCall, RuleAudit,
+    Source, Subject, TierAudit, Where, NO_PEER_UID,
 };
 pub use record::{BindingKind, ReachBasis, ReachWhy, RecordAgentReach, RecordBinding, RecordReach};
 pub use scan::ScanResult;
