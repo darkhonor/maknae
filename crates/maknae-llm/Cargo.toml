@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 maknae-proto = { path = "../maknae-proto" }
+maknae-io = { path = "../maknae-io" }
 # For the FIPS assertion ONLY. maknae-crypto owns `assert_fips_provider` and is
 # the single implementation of that control; re-deriving the rustls check here
 # would be two sites for one property — the `maknae-io` failure.

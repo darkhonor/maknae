@@ -37,7 +37,7 @@ fn read_item_from(keychain: &Path, item: &KeychainItem) -> Result<Zeroizing<Stri
 pub(crate) fn read_agent_secret(
     id: &crate::agent_enroll::AgentId,
     enrolled_uid: u32,
-) -> Result<crate::AgentSecret, crate::SecretSourceError> {
+) -> Result<maknae_io::MaknaeSecret, crate::SecretSourceError> {
     crate::keychain_policy::read_agent_gated(
         nix::unistd::geteuid().as_raw(),
         enrolled_uid,

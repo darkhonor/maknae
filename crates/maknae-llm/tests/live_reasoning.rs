@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 
 struct Live {
     url: String,
-    key: Zeroizing<String>,
+    key: maknae_io::MaknaeSecret,
     model: String,
 }
 
@@ -16,7 +16,7 @@ fn live() -> Live {
     let key = std::fs::read_to_string(var("LIVE_LLM_KEY_FILE")).expect("read the key file");
     Live {
         url: format!("{}/v1/chat/completions", var("LIVE_LLM_BASE")),
-        key: Zeroizing::new(key.trim().to_string()),
+        key: maknae_io::MaknaeSecret::new(Zeroizing::new(key.trim().to_string())).unwrap(),
         model: var("LIVE_LLM_MODEL"),
     }
 }

@@ -1,6 +1,7 @@
 //! The check that a GitHub installation-token grant is exactly the permission
 //! set that was asked for.
 
+use maknae_io::secret::de_zeroizing_string;
 use maknae_proto::{AccessLevel, GithubPermission, PermissionSet};
 use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,13 +78,13 @@ pub(super) fn grant_is_metadata_read(grant: &Grant) -> bool {
 /// to parse can still be revoked with it.
 #[derive(Deserialize)]
 pub(super) struct Bearer {
-    #[serde(deserialize_with = "de_secret")]
+    #[serde(deserialize_with = "de_zeroizing_string")]
     pub(super) token: Zeroizing<String>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct Grant {
-    #[serde(deserialize_with = "de_secret")]
+    #[serde(deserialize_with = "de_zeroizing_string")]
     pub(super) token: Zeroizing<String>,
     pub(super) expires_at: String,
     #[serde(deserialize_with = "unique_keys")]
@@ -95,24 +96,6 @@ pub(super) struct Grant {
 #[derive(Deserialize)]
 struct GrantedRepository {
     name: String,
-}
-
-struct SecretStrVisitor;
-
-impl serde::de::Visitor<'_> for SecretStrVisitor {
-    type Value = Zeroizing<String>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a string")
-    }
-
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(Zeroizing::new(v.to_owned()))
-    }
-}
-
-fn de_secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
-    d.deserialize_str(SecretStrVisitor)
 }
 
 fn unique_keys<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, String)>, D::Error> {

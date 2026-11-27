@@ -5,7 +5,9 @@
 //! reads inside these functions — the caller supplies already-observed inputs) is what
 //! makes the fail-closed precedence provably testable and mutation-hardened (T1).
 use crate::agent_enroll::AGENT_CREDENTIAL_NAME;
+use crate::error::secret_error;
 use crate::VaultError;
+use maknae_io::{MaknaeSecret, MaknaeSecretBytes};
 use std::env::VarError;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -181,39 +183,33 @@ pub fn resolve_graph_key_source(
     }
 }
 
-pub struct GraphKey(Zeroizing<[u8; GRAPH_KEY_BYTES]>);
-
-impl GraphKey {
-    pub fn generate() -> Result<Self, VaultError> {
-        let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
-        maknae_crypto::random::fill(&mut key[..]).map_err(|_| VaultError::Random)?;
-        Ok(GraphKey(key))
-    }
-
-    pub fn into_bytes(self) -> Zeroizing<[u8; GRAPH_KEY_BYTES]> {
-        self.0
-    }
+pub fn generate_graph_key() -> Result<MaknaeSecret<[u8; GRAPH_KEY_BYTES]>, VaultError> {
+    let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
+    maknae_crypto::random::fill(&mut key[..]).map_err(|_| VaultError::Random)?;
+    graph_key(key)
 }
 
-impl fmt::Debug for GraphKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("GraphKey(<redacted>)")
-    }
+fn graph_key(
+    key: Zeroizing<[u8; GRAPH_KEY_BYTES]>,
+) -> Result<MaknaeSecret<[u8; GRAPH_KEY_BYTES]>, VaultError> {
+    MaknaeSecret::new(key).map_err(|e| secret_error("graph key", e))
 }
 
-pub fn graph_key_from_bytes(bytes: &[u8]) -> Result<GraphKey, VaultError> {
+pub fn graph_key_from_bytes(
+    bytes: &[u8],
+) -> Result<MaknaeSecret<[u8; GRAPH_KEY_BYTES]>, VaultError> {
     if bytes.len() != GRAPH_KEY_BYTES {
         return Err(VaultError::GraphKey(GRAPH_KEY_LENGTH));
     }
     let mut key = Zeroizing::new([0u8; GRAPH_KEY_BYTES]);
     key.copy_from_slice(bytes);
-    Ok(GraphKey(key))
+    graph_key(key)
 }
 
 pub(crate) fn graph_key_from_credential(
     path: &Path,
     read: Result<Zeroizing<Vec<u8>>, VaultError>,
-) -> Result<GraphKey, VaultError> {
+) -> Result<MaknaeSecret<[u8; GRAPH_KEY_BYTES]>, VaultError> {
     match read {
         Ok(bytes) => graph_key_from_bytes(&bytes),
         Err(VaultError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Err(
@@ -226,7 +222,7 @@ pub(crate) fn graph_key_from_credential(
     }
 }
 
-pub fn graph_key_from_hex(text: &str) -> Result<GraphKey, VaultError> {
+pub fn graph_key_from_hex(text: &str) -> Result<MaknaeSecret<[u8; GRAPH_KEY_BYTES]>, VaultError> {
     let hex = text.as_bytes();
     if hex.len() != 2 * GRAPH_KEY_BYTES {
         return Err(VaultError::GraphKey(GRAPH_KEY_NOT_HEX));
@@ -236,7 +232,7 @@ pub fn graph_key_from_hex(text: &str) -> Result<GraphKey, VaultError> {
         let digit = |c| nibble(c).map_err(|_| VaultError::GraphKey(GRAPH_KEY_NOT_HEX));
         *out = digit(*hi)? * 16 + digit(*lo)?;
     }
-    Ok(GraphKey(key))
+    graph_key(key)
 }
 
 pub(crate) fn check_seal_key_len(n: usize) -> Result<(), VaultError> {
@@ -246,59 +242,46 @@ pub(crate) fn check_seal_key_len(n: usize) -> Result<(), VaultError> {
     Ok(())
 }
 
-pub struct SealKeyDer(Zeroizing<Vec<u8>>);
-
-impl SealKeyDer {
-    pub(crate) fn new(der: Zeroizing<Vec<u8>>) -> Self {
-        Self(der)
-    }
-
-    pub fn expose(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SealKeyDer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SealKeyDer(<redacted>)")
-    }
-}
-
-pub struct SealKeyHex(Zeroizing<String>);
-
-impl SealKeyHex {
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SealKeyHex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SealKeyHex(<redacted>)")
-    }
-}
-
-pub fn seal_key_to_hex(der: &[u8]) -> SealKeyHex {
+fn encode_hex(bytes: &[u8]) -> Zeroizing<String> {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = Zeroizing::new(String::with_capacity(2 * der.len()));
-    for b in der {
+    let mut hex = Zeroizing::new(String::with_capacity(2 * bytes.len()));
+    for b in bytes {
         hex.push(char::from(DIGITS[usize::from(b >> 4)]));
         hex.push(char::from(DIGITS[usize::from(b & 0x0f)]));
     }
-    SealKeyHex(hex)
+    hex
 }
 
-pub fn seal_key_from_hex(text: &str) -> Result<SealKeyDer, VaultError> {
+fn decode_hex(hex: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let mut der = Zeroizing::new(Vec::with_capacity(hex.len() / 2));
+    for [hi, lo] in hex.as_chunks::<2>().0 {
+        der.push(nibble(*hi)? * 16 + nibble(*lo)?);
+    }
+    Ok(der)
+}
+
+pub(crate) fn exact_text(text: &str) -> Zeroizing<String> {
+    let mut owned = Zeroizing::new(String::with_capacity(text.len()));
+    owned.push_str(text);
+    owned
+}
+
+pub fn seal_key_to_hex(der: &[u8]) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::new(encode_hex(der)).map_err(|e| secret_error("seal key", e))
+}
+
+pub(crate) fn seal_key_der(der: Zeroizing<Vec<u8>>) -> Result<MaknaeSecretBytes, VaultError> {
+    check_seal_key_len(der.len())?;
+    MaknaeSecretBytes::new(der).map_err(|e| secret_error("seal key", e))
+}
+
+pub fn seal_key_from_hex(text: &str) -> Result<MaknaeSecretBytes, VaultError> {
     let hex = text.as_bytes();
     if !hex.len().is_multiple_of(2) {
         return Err(VaultError::SealKey(SEAL_KEY_NOT_HEX));
     }
     check_seal_key_len(hex.len() / 2)?;
-    let mut der = Zeroizing::new(Vec::with_capacity(hex.len() / 2));
-    for [hi, lo] in hex.as_chunks::<2>().0 {
-        der.push(nibble(*hi)? * 16 + nibble(*lo)?);
-    }
-    Ok(SealKeyDer(der))
+    seal_key_der(decode_hex(hex)?)
 }
 
 fn nibble(c: u8) -> Result<u8, VaultError> {
@@ -311,41 +294,18 @@ fn nibble(c: u8) -> Result<u8, VaultError> {
 
 pub const MAX_AGENT_SECRET_BYTES: u64 = 1024;
 
-pub struct AgentSecret(Zeroizing<String>);
-
-impl AgentSecret {
-    pub fn new(secret: Zeroizing<String>) -> Self {
-        Self(secret)
+pub(crate) fn agent_secret_from_trimmed(text: &str) -> Result<MaknaeSecret, SecretSourceError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(SecretSourceError::Empty);
     }
-
-    pub fn expose(&self) -> &str {
-        &self.0
+    if text.len() as u64 > MAX_AGENT_SECRET_BYTES {
+        return Err(SecretSourceError::TooLarge {
+            max: MAX_AGENT_SECRET_BYTES,
+        });
     }
-
-    pub(crate) fn into_inner(self) -> Zeroizing<String> {
-        self.0
-    }
-
-    pub(crate) fn from_trimmed(text: &str) -> Result<Self, SecretSourceError> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(SecretSourceError::Empty);
-        }
-        if text.len() as u64 > MAX_AGENT_SECRET_BYTES {
-            return Err(SecretSourceError::TooLarge {
-                max: MAX_AGENT_SECRET_BYTES,
-            });
-        }
-        let mut secret = Zeroizing::new(String::with_capacity(text.len()));
-        secret.push_str(text);
-        Ok(Self(secret))
-    }
-}
-
-impl fmt::Debug for AgentSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AgentSecret(<redacted>)")
-    }
+    MaknaeSecret::new(exact_text(text))
+        .map_err(|e| SecretSourceError::Read(crate::error::secret_error("agent SecretID", e)))
 }
 
 #[derive(Debug)]
@@ -459,12 +419,13 @@ mod tests {
             PathBuf::from("/run/credentials/maknae-agent@hobi.service/maknae-agent-secret-id")
         );
         assert!(matches!(
-            AgentSecret::from_trimmed(" \t\n"),
+            agent_secret_from_trimmed(" \t\n"),
             Err(SecretSourceError::Empty)
         ));
-        let s = AgentSecret::from_trimmed("\n sid \n").unwrap();
+        let s = agent_secret_from_trimmed("\n sid \n").unwrap();
         assert_eq!(s.expose(), "sid");
-        assert_eq!(s.0.capacity(), 3);
+        let exact = exact_text("sid");
+        assert_eq!((exact.as_str(), exact.capacity()), ("sid", 3));
     }
 
     #[test]
@@ -652,15 +613,22 @@ mod tests {
     fn the_hex_the_enroller_writes_is_the_hex_the_reader_accepts() {
         let key = maknae_seal::SealPrivateKey::generate().unwrap();
         let der = key.to_pkcs8_der().unwrap();
+        let der = der.expose();
         assert!(der.len() <= MAX_SEAL_KEY_BYTES);
-        let hex = seal_key_to_hex(&der);
+        let hex = seal_key_to_hex(der).unwrap();
         assert_eq!(hex.expose().len(), 2 * der.len());
-        assert_eq!(hex.0.capacity(), 2 * der.len());
         let back = seal_key_from_hex(hex.expose()).unwrap();
-        assert!(back.expose() == der.as_slice());
-        assert_eq!(back.0.capacity(), der.len());
+        assert!(back.expose() == der);
+        let (small, small_der) = (encode_hex(&[1, 2, 3]), decode_hex(b"010203").unwrap());
+        assert_eq!((small.capacity(), small_der.capacity()), (6, 3));
+        let encoded = encode_hex(der);
+        assert_eq!(encoded.capacity(), encoded.len());
+        assert_eq!(encoded.len(), 2 * der.len());
+        let decoded = decode_hex(encoded.as_bytes()).unwrap();
+        assert_eq!(decoded.capacity(), decoded.len());
+        assert_eq!(decoded.as_slice(), der);
         assert_eq!(
-            seal_key_to_hex(&[0x00, 0x0f, 0xa5, 0xff]).expose(),
+            seal_key_to_hex(&[0x00, 0x0f, 0xa5, 0xff]).unwrap().expose(),
             "000fa5ff"
         );
         assert_eq!(
@@ -700,10 +668,10 @@ mod tests {
 
     #[test]
     fn the_seal_key_holders_print_nothing_of_the_key() {
-        let der = SealKeyDer::new(Zeroizing::new(vec![0xde, 0xad, 0xbe, 0xef]));
-        let hex = seal_key_to_hex(der.expose());
-        assert_eq!(format!("{der:?}"), "SealKeyDer(<redacted>)");
-        assert_eq!(format!("{hex:?}"), "SealKeyHex(<redacted>)");
+        let der = MaknaeSecretBytes::new(Zeroizing::new(vec![0xde, 0xad, 0xbe, 0xef])).unwrap();
+        let hex = seal_key_to_hex(der.expose()).unwrap();
+        assert_eq!(format!("{der:?}"), "MaknaeSecret(<redacted>)");
+        assert_eq!(format!("{hex:?}"), "MaknaeSecret(<redacted>)");
         assert_eq!(
             format!("{:#?}", (&der, &hex)).matches("<redacted>").count(),
             2
@@ -749,7 +717,7 @@ mod tests {
     fn a_graph_key_is_exactly_32_bytes() {
         let bytes: Vec<u8> = (0u8..32).collect();
         assert_eq!(
-            *graph_key_from_bytes(&bytes).unwrap().into_bytes(),
+            *graph_key_from_bytes(&bytes).unwrap().into_zeroizing(),
             *<&[u8; 32]>::try_from(bytes.as_slice()).unwrap()
         );
         for n in [0, 31, 33, 64] {
@@ -776,7 +744,7 @@ mod tests {
         assert_eq!(
             *graph_key_from_credential(path, Ok(Zeroizing::new(key.clone())))
                 .unwrap()
-                .into_bytes(),
+                .into_zeroizing(),
             key[..]
         );
         assert!(matches!(
@@ -815,10 +783,12 @@ mod tests {
         let hex = format!("000fa5ff{}", "19".repeat(28));
         let mut want = [0x19u8; 32];
         want[..4].copy_from_slice(&[0x00, 0x0f, 0xa5, 0xff]);
-        assert_eq!(*graph_key_from_hex(&hex).unwrap().into_bytes(), want);
-        let enrolled = seal_key_to_hex(&want);
+        assert_eq!(*graph_key_from_hex(&hex).unwrap().into_zeroizing(), want);
+        let enrolled = seal_key_to_hex(&want).unwrap();
         assert_eq!(
-            *graph_key_from_hex(enrolled.expose()).unwrap().into_bytes(),
+            *graph_key_from_hex(enrolled.expose())
+                .unwrap()
+                .into_zeroizing(),
             want
         );
         let upper = hex.to_uppercase();
@@ -850,8 +820,8 @@ mod tests {
 
     #[test]
     fn two_generated_graph_keys_differ_and_are_32_bytes() {
-        let a = GraphKey::generate().unwrap().into_bytes();
-        let b = GraphKey::generate().unwrap().into_bytes();
+        let a = generate_graph_key().unwrap().into_zeroizing();
+        let b = generate_graph_key().unwrap().into_zeroizing();
         assert_ne!(*a, *b);
         assert_ne!(*a, [0u8; GRAPH_KEY_BYTES]);
     }
@@ -860,7 +830,7 @@ mod tests {
     fn the_graph_key_prints_nothing_of_the_key() {
         let key = graph_key_from_bytes(&[0xde; 32]).unwrap();
         let shown = format!("{key:?}");
-        assert_eq!(shown, "GraphKey(<redacted>)");
+        assert_eq!(shown, "MaknaeSecret(<redacted>)");
         assert!(!shown.contains("222") && !shown.contains("de"), "{shown}");
     }
 }

@@ -1,16 +1,15 @@
 use crate::keychain::{observe_pointer, read_plane_secret};
 use crate::secret_source::{
-    check_seal_key_len, resolve_egress_seal_key_source, seal_key_from_hex, EgressSealKeySource,
-    SealKeyDer,
+    resolve_egress_seal_key_source, seal_key_der, seal_key_from_hex, EgressSealKeySource,
 };
 use crate::{KeychainPlane, VaultError, MAX_SEAL_KEY_BYTES};
+use maknae_io::{MaknaeSecret, MaknaeSecretBytes};
 use std::path::Path;
-use zeroize::Zeroizing;
 
 pub fn read_egress_seal_key(
     credentials_dir: Option<&str>,
     egress_dir: &Path,
-) -> Result<SealKeyDer, VaultError> {
+) -> Result<MaknaeSecretBytes, VaultError> {
     let pointer = match credentials_dir {
         None => observe_pointer(egress_dir, KeychainPlane::Egress)?,
         Some(_) => None,
@@ -18,8 +17,7 @@ pub fn read_egress_seal_key(
     match resolve_egress_seal_key_source(credentials_dir, pointer.as_deref())? {
         EgressSealKeySource::CredentialsDirectory(path) => {
             let der = crate::read_storage_within(&path, Some(MAX_SEAL_KEY_BYTES as u64))?;
-            check_seal_key_len(der.len())?;
-            Ok(SealKeyDer::new(der))
+            seal_key_der(der)
         }
         EgressSealKeySource::Keychain(pointer) => {
             seal_key_from_hex(&read_plane_secret(&pointer, KeychainPlane::Egress)?)
@@ -28,9 +26,7 @@ pub fn read_egress_seal_key(
 }
 
 #[cfg(target_os = "linux")]
-pub fn read_egress_secret_id(
-    credentials_dir: Option<&Path>,
-) -> Result<Zeroizing<String>, VaultError> {
+pub fn read_egress_secret_id(credentials_dir: Option<&Path>) -> Result<MaknaeSecret, VaultError> {
     let path = crate::secret_source::resolve_egress_secret_id_source(credentials_dir)?;
     let bytes = crate::read_storage_within(&path, Some(crate::MAX_TOKEN_BYTES as u64))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| VaultError::InvalidSecret {
@@ -39,13 +35,12 @@ pub fn read_egress_secret_id(
     })?;
     let text = text.trim();
     crate::transit::approle_credential("egress SecretID", text)?;
-    Ok(Zeroizing::new(text.to_owned()))
+    MaknaeSecret::new(crate::secret_source::exact_text(text))
+        .map_err(|e| crate::error::secret_error("egress SecretID", e))
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn read_egress_secret_id(
-    _credentials_dir: Option<&Path>,
-) -> Result<Zeroizing<String>, VaultError> {
+pub fn read_egress_secret_id(_credentials_dir: Option<&Path>) -> Result<MaknaeSecret, VaultError> {
     Err(VaultError::CredentialSource(format!(
         "the egress SecretID has no custody on {}: it is read only from $CREDENTIALS_DIRECTORY on Linux",
         std::env::consts::OS
@@ -56,7 +51,7 @@ pub fn read_egress_secret_id(
 mod tests {
     use super::*;
 
-    fn der() -> Zeroizing<Vec<u8>> {
+    fn der() -> maknae_io::MaknaeSecretBytes {
         maknae_seal::SealPrivateKey::generate()
             .unwrap()
             .to_pkcs8_der()
@@ -86,8 +81,7 @@ mod tests {
             b"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0\n",
         );
         let got = read_egress_secret_id(Some(creds.path())).unwrap();
-        assert!(got.as_str() == "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0");
-        assert_eq!(got.capacity(), got.len());
+        assert!(got.expose() == "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0");
         for other in [
             crate::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             crate::EGRESS_SEAL_KEY_CRED_NAME,
@@ -146,7 +140,10 @@ mod tests {
             &vec![b'a'; crate::MAX_TOKEN_BYTES],
         );
         assert_eq!(
-            read_egress_secret_id(Some(creds.path())).unwrap().len(),
+            read_egress_secret_id(Some(creds.path()))
+                .unwrap()
+                .expose()
+                .len(),
             crate::MAX_TOKEN_BYTES
         );
         let creds = creds_named(crate::EGRESS_SECRET_ID_CRED_NAME, b"SENTINEL x");
@@ -159,11 +156,11 @@ mod tests {
     #[test]
     fn a_credential_holding_a_seal_key_is_read_whole() {
         let key = der();
-        let creds = creds_with(&key);
+        let creds = creds_with(key.expose());
         let got = read_egress_seal_key(creds.path().to_str(), Path::new(NO_EGRESS_DIR)).unwrap();
-        assert!(got.expose() == key.as_slice());
+        assert!(got.expose() == key.expose());
         let reloaded = maknae_seal::SealPrivateKey::from_pkcs8_der(got.expose()).unwrap();
-        let original = maknae_seal::SealPrivateKey::from_pkcs8_der(&key).unwrap();
+        let original = maknae_seal::SealPrivateKey::from_pkcs8_der(key.expose()).unwrap();
         assert_eq!(
             reloaded.public_key().spki_der(),
             original.public_key().spki_der()

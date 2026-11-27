@@ -1,10 +1,7 @@
 //! Operator-gated: MAKNAE_VAULT_ADDR, MAKNAE_VAULT_CA, MAKNAE_VAULT_TOKEN; optional MAKNAE_KV_MOUNT, MAKNAE_USERPASS_MOUNT.
 #![cfg(unix)]
 
-use maknae_vault::{
-    Password, UserAuth, UserAuthMethod, VaultApi, VaultError, WrapExpectation, WrapMismatch,
-    WrappingToken,
-};
+use maknae_vault::{UserAuth, UserAuthMethod, VaultApi, VaultError, WrapExpectation, WrapMismatch};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -46,7 +43,7 @@ async fn scenario(
         .login(
             auth,
             user,
-            &Password::new(password.clone()).map_err(|e| e.to_string())?,
+            &maknae_vault::password(password.clone()).map_err(|e| e.to_string())?,
         )
         .await
         .map_err(|e| format!("login: {e}"))?;
@@ -73,7 +70,10 @@ async fn scenario(
     if lookup.creation_path != format!("{kv_mount}/data/{own}") {
         return Err(format!("creation_path {}", lookup.creation_path));
     }
-    let copy = || WrappingToken::new(Zeroizing::new(wrapped.token.expose().to_string())).unwrap();
+    let copy = || {
+        maknae_io::MaknaeSecret::vault_token(Zeroizing::new(wrapped.token.expose().to_string()))
+            .unwrap()
+    };
     let wrong = WrapExpectation::new(kv_mount, other, "api_key", ttl).map_err(|e| e.to_string())?;
     match api.unwrap_kv_field(copy(), &wrong).await {
         Err(VaultError::WrapMismatch(WrapMismatch::CreationPath)) => {}
@@ -90,7 +90,7 @@ async fn scenario(
         .unwrap_kv_field(wrapped.token, &right)
         .await
         .map_err(|e| format!("unwrap: {e}"))?;
-    if key.as_str() != "LIVE-SENTINEL-KEY" {
+    if key.expose() != "LIVE-SENTINEL-KEY" {
         return Err("unwrapped the wrong value".into());
     }
     match api.unwrap_kv_field(replay, &right).await {

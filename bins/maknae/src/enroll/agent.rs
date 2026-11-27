@@ -11,7 +11,9 @@ use super::EnrollError;
 use crate::stderr::errln;
 use clap::{Args, ValueEnum};
 use maknae_config::{AgentClientConfig, AgentProvider, AgentRole, PersonaMode, Value};
-use maknae_io::{AnchorRequired, FileOwner, IoError, IoKind, Mode, StrategyPref, TargetRequired};
+use maknae_io::{
+    AnchorRequired, FileOwner, IoError, IoKind, MaknaeSecret, Mode, StrategyPref, TargetRequired,
+};
 use maknae_msgs::{msg, Locale, MsgId};
 use maknae_vault::agent_enroll::{AgentId, BindCidrs, HostAccounts, DEFAULT_AGENT_APPROLE_MOUNT};
 use std::collections::BTreeMap;
@@ -450,11 +452,11 @@ pub(crate) trait AgentOps: AgentVaultOps {
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
-    ) -> Result<(Zeroizing<String>, String), EnrollError>;
+    ) -> Result<(MaknaeSecret, String), EnrollError>;
     async fn seal(
         &self,
         agent: &AgentId,
-        secret: &Zeroizing<String>,
+        secret: &MaknaeSecret,
     ) -> Result<SecretSource, EnrollError>;
     fn write_record(&self, record: &AgentRecord) -> Result<(), EnrollError>;
     fn write_client(&self, client: &AgentClientConfig) -> Result<(), EnrollError>;
@@ -646,7 +648,7 @@ struct AgentSlot<'a, O> {
 impl<O: AgentOps> secret_slot::SecretSlot for AgentSlot<'_, O> {
     type Sealed = SecretSource;
 
-    async fn mint(&self) -> Result<(Zeroizing<String>, String), EnrollError> {
+    async fn mint(&self) -> Result<(MaknaeSecret, String), EnrollError> {
         self.ops
             .mint(&self.plan.mount, self.role, &self.plan.cidrs)
             .await
@@ -656,7 +658,7 @@ impl<O: AgentOps> secret_slot::SecretSlot for AgentSlot<'_, O> {
         self.ops.write_state(&self.plan.agent, state)
     }
 
-    async fn seal(&self, secret: &Zeroizing<String>) -> Result<SecretSource, EnrollError> {
+    async fn seal(&self, secret: &MaknaeSecret) -> Result<SecretSource, EnrollError> {
         self.ops.seal(&self.plan.agent, secret).await
     }
 
@@ -737,8 +739,8 @@ fn render(args: std::fmt::Arguments<'_>) -> Zeroizing<String> {
     out
 }
 
-pub(crate) fn scrub_secret(e: EnrollError, secret: &Zeroizing<String>) -> EnrollError {
-    let secret = secret.as_str();
+pub(crate) fn scrub_secret(e: EnrollError, secret: &MaknaeSecret) -> EnrollError {
+    let secret = secret.expose();
     if secret.is_empty() {
         return e;
     }
@@ -909,7 +911,7 @@ impl AgentOps for RealAgentOps {
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
-    ) -> Result<(Zeroizing<String>, String), EnrollError> {
+    ) -> Result<(MaknaeSecret, String), EnrollError> {
         Ok(self
             .vault
             .client
@@ -920,9 +922,9 @@ impl AgentOps for RealAgentOps {
     async fn seal(
         &self,
         agent: &AgentId,
-        secret: &Zeroizing<String>,
+        secret: &MaknaeSecret,
     ) -> Result<SecretSource, EnrollError> {
-        self.seal_platform(agent, secret.as_str())
+        self.seal_platform(agent, secret.expose())
             .await
             .map_err(|e| scrub_secret(e, secret))
     }
@@ -1992,22 +1994,25 @@ pub(crate) mod tests {
             mount: &str,
             role: &str,
             cidrs: &BindCidrs,
-        ) -> Result<(Zeroizing<String>, String), EnrollError> {
+        ) -> Result<(MaknaeSecret, String), EnrollError> {
             self.log.borrow_mut().push(format!(
                 "mint:{mount}:{role}:{}",
                 cidrs.as_slice().join(",")
             ));
             self.check("mint")?;
-            Ok((Zeroizing::new(SENTINEL.into()), "acc-new".into()))
+            Ok((
+                MaknaeSecret::new(Zeroizing::new(SENTINEL.into())).unwrap(),
+                "acc-new".into(),
+            ))
         }
 
         async fn seal(
             &self,
             _agent: &AgentId,
-            secret: &Zeroizing<String>,
+            secret: &MaknaeSecret,
         ) -> Result<SecretSource, EnrollError> {
             self.log.borrow_mut().push("seal".into());
-            self.sealed.borrow_mut().push(secret.to_string());
+            self.sealed.borrow_mut().push(secret.expose().to_string());
             self.check("seal")?;
             Ok(SecretSource::Tpm2)
         }
@@ -3620,7 +3625,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_seal_error_never_carries_the_secret() {
-        let secret = Zeroizing::new(SENTINEL.to_string());
+        let secret = MaknaeSecret::new(Zeroizing::new(SENTINEL.to_string())).unwrap();
         let leaked = [
             EnrollError::Command {
                 program: "systemd-creds encrypt".into(),

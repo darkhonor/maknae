@@ -155,7 +155,7 @@ mod tests {
         let not_utf8 = EgressDir::new();
         not_utf8.publish("coder", &[0xff; SEAL_PUB_PEM_LEN], 0o640);
         let private = EgressDir::new();
-        private.publish("coder", &k.to_pkcs8_der().unwrap()[..64], 0o640);
+        private.publish("coder", &k.to_pkcs8_der().unwrap().expose()[..64], 0o640);
         for (label, d, owner) in [
             ("absent", &absent, euid()),
             ("not owned by the required owner", &foreign, euid() + 1),

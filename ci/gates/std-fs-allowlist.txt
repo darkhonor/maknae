@@ -18,7 +18,8 @@ bins/maknae/src/enroll/mod.rs|std::fs::remove_file(path)?;
 # Enrollment input reads intentionally preserve their existing caller-selected symlink and
 # permission semantics. maknae-io has no follow-final-symlink read contract; migration would
 # be a behavior change and belongs to the enrollment I/O contract work, not this storage pass.
-bins/maknae/src/enroll/mod.rs|let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
+# --token-file names an operator path that may be a pipe or a symlink, which maknae-io's anchored read refuses.
+bins/maknae/src/enroll/mod.rs|let raw = std::fs::File::open(path).and_then(|mut f| read_token_bytes(&mut f));
 bins/maknae/src/enroll/mod.rs|let vault_ca_bytes = std::fs::read(&vault_ca_path).map_err(|e| EnrollError::Io {
 bins/maknae/src/enroll/mod.rs|let text = std::fs::read_to_string(&state_path).map_err(|e| EnrollError::Io {
 bins/maknae/src/enroll/mod.rs|Some(root_path) => match std::fs::read_to_string(&root_path) {

@@ -38,10 +38,11 @@ async fn operator_client_role_id_secret_id_ca_chain_roundtrip() {
         .expect("set MAKNAE_VAULT_ADDR (e.g. https://vault.example:8200)");
     let ca_path =
         std::env::var("MAKNAE_VAULT_CA").expect("set MAKNAE_VAULT_CA to the Vault TLS CA path");
-    let token = Zeroizing::new(
+    let token = maknae_io::MaknaeSecret::new(Zeroizing::new(
         std::env::var("MAKNAE_VAULT_TOKEN")
             .expect("set MAKNAE_VAULT_TOKEN to your own live Vault token"),
-    );
+    ))
+    .unwrap();
     let approle_mount = env_or("MAKNAE_APPROLE_MOUNT", "maknae-approle");
     let approle_role = env_or("MAKNAE_APPROLE_ROLE", "maknae-kernel");
     let pki_int_mount = env_or("MAKNAE_PKI_INT_MOUNT", "maknae-pki-int");
@@ -59,7 +60,7 @@ async fn operator_client_role_id_secret_id_ca_chain_roundtrip() {
         .mint_secret_id(&approle_mount, &approle_role)
         .await
         .expect("mint a new SecretID");
-    assert!(!secret_id.is_empty(), "SecretID is non-empty");
+    assert!(!secret_id.expose().is_empty(), "SecretID is non-empty");
     assert!(!accessor.is_empty(), "accessor is non-empty");
 
     let ca_chain = client

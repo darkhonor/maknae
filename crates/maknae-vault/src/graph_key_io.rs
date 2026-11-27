@@ -1,16 +1,16 @@
 use crate::keychain::{observe_pointer, read_plane_secret};
 use crate::keychain_policy::daemon_keychain_dir;
 use crate::secret_source::{
-    graph_key_from_credential, graph_key_from_hex, resolve_graph_key_source, GraphKey,
-    GraphKeySource,
+    graph_key_from_credential, graph_key_from_hex, resolve_graph_key_source, GraphKeySource,
 };
 use crate::{KeychainPlane, VaultError, GRAPH_KEY_BYTES};
+use maknae_io::MaknaeSecret;
 use std::path::Path;
 
 pub fn read_graph_key(
     credentials_dir: Option<&str>,
     config_dir: &Path,
-) -> Result<GraphKey, VaultError> {
+) -> Result<MaknaeSecret<[u8; GRAPH_KEY_BYTES]>, VaultError> {
     let pointer = match credentials_dir {
         None => observe_pointer(&daemon_keychain_dir(config_dir), KeychainPlane::Graph)?,
         Some(_) => None,
@@ -43,7 +43,7 @@ mod tests {
         let key: Vec<u8> = (100u8..132).collect();
         let creds = creds_with(&key);
         let got = read_graph_key(creds.path().to_str(), Path::new(NO_CONFIG_DIR)).unwrap();
-        assert_eq!(got.into_bytes().as_slice(), key.as_slice());
+        assert_eq!(got.into_zeroizing().as_slice(), key.as_slice());
     }
 
     #[test]

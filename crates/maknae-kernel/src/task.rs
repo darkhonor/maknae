@@ -10247,7 +10247,10 @@ mod tests {
                 &doc,
                 &dir,
                 maknae_vault::Plane::Kernel,
-                maknae_io::Zeroizing::new(secret_id.trim().to_string()),
+                maknae_io::MaknaeSecret::new(maknae_io::Zeroizing::new(
+                    secret_id.trim().to_string(),
+                ))
+                .unwrap(),
             )
             .unwrap(),
         );

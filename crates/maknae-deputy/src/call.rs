@@ -300,7 +300,7 @@ pub async fn fulfil<O: KeyOpener>(
             mut body,
             truncated,
         } => {
-            maknae_llm::redact(&mut body, key.as_bytes());
+            maknae_llm::redact(&mut body, key.expose().as_bytes());
             FulfilError::Unusable {
                 defect: maknae_proto::ReplyDefect::from_status(code),
                 usage: None,
@@ -325,6 +325,7 @@ pub async fn fulfil<O: KeyOpener>(
 mod tests {
     use super::*;
     use crate::unseal::OpenRequest;
+    use maknae_io::MaknaeSecret;
     use maknae_proto::ReplyDefect;
     use zeroize::Zeroizing;
 
@@ -413,22 +414,14 @@ mod tests {
 
     struct Fixed(&'static str);
     impl KeyOpener for Fixed {
-        async fn open(
-            &self,
-            _s: &[u8],
-            _r: &OpenRequest<'_>,
-        ) -> Result<Zeroizing<String>, OpenFailure> {
-            Ok(Zeroizing::new(self.0.to_string()))
+        async fn open(&self, _s: &[u8], _r: &OpenRequest<'_>) -> Result<MaknaeSecret, OpenFailure> {
+            Ok(MaknaeSecret::new(Zeroizing::new(self.0.to_string())).unwrap())
         }
     }
 
     struct Refuses(OpenFailure);
     impl KeyOpener for Refuses {
-        async fn open(
-            &self,
-            _s: &[u8],
-            _r: &OpenRequest<'_>,
-        ) -> Result<Zeroizing<String>, OpenFailure> {
+        async fn open(&self, _s: &[u8], _r: &OpenRequest<'_>) -> Result<MaknaeSecret, OpenFailure> {
             Err(self.0)
         }
     }
@@ -441,7 +434,7 @@ mod tests {
             &self,
             sealed: &[u8],
             r: &OpenRequest<'_>,
-        ) -> Result<Zeroizing<String>, OpenFailure> {
+        ) -> Result<MaknaeSecret, OpenFailure> {
             self.seen.lock().unwrap().push((
                 sealed.to_vec(),
                 format!(
@@ -449,7 +442,7 @@ mod tests {
                     r.conversation, r.provider, r.model, r.kv_mount, r.key_vault_path, r.key_field
                 ),
             ));
-            Ok(Zeroizing::new("sk-test-not-real".into()))
+            Ok(MaknaeSecret::new(Zeroizing::new("sk-test-not-real".into())).unwrap())
         }
     }
 

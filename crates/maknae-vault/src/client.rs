@@ -6,20 +6,22 @@
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::agent_enroll::AgentId;
 use crate::auth::AppRoleAuth;
+use crate::error::secret_error;
 use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
-use crate::secret_source::{resolve_daemon_secret_source, AgentSecret, CredentialSourceKind};
+use crate::secret_source::{resolve_daemon_secret_source, CredentialSourceKind};
 use crate::{
     generate_plane_csr, load_ca_pin, peer_auth::SanRule, sign_refusal_detail,
     validate_deployment_id, validate_vault_addr, vault_config_from_document, vault_error_text,
-    verify::verify_uri_san, Plane, PlaneSubject, UserToken, VaultApi, VaultConfig, VaultError,
-    WrappedSecret, VAULT_SECTION,
+    verify::verify_uri_san, Plane, PlaneSubject, VaultApi, VaultConfig, VaultError, WrappedSecret,
+    VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rustls::sign::CertifiedKey;
+use maknae_io::{MaknaeSecret, MaknaeSecretBytes};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -27,12 +29,11 @@ use tokio::sync::Mutex;
 use vaultrs::client::{Client, VaultClient, VaultClientSettings, VaultClientSettingsBuilder};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
-use zeroize::Zeroizing;
 
 struct IdentityInner {
     plane_key: PlaneKey,
     leaf_pem: String,
-    key_der: Zeroizing<Vec<u8>>,
+    key_der: MaknaeSecretBytes,
     chain_pem: Vec<String>,
 }
 
@@ -52,7 +53,7 @@ impl PlaneIdentity {
     /// The private key in DER (crate-internal only — used to build the rustls
     /// `CertifiedKey` in `tls.rs`; never handed to a caller).
     pub(crate) fn key_der(&self) -> &[u8] {
-        &self.0.key_der
+        self.0.key_der.expose()
     }
     pub(crate) fn plane_key(&self) -> PlaneKey {
         self.0.plane_key
@@ -70,7 +71,7 @@ impl PlaneIdentity {
         plane_key: PlaneKey,
         leaf_pem: String,
         chain_pem: Vec<String>,
-        key_der: Zeroizing<Vec<u8>>,
+        key_der: MaknaeSecretBytes,
     ) -> Self {
         PlaneIdentity(Arc::new(IdentityInner {
             plane_key,
@@ -122,7 +123,7 @@ pub const PLANE_SHUTDOWN_BOUND: std::time::Duration = PLANE_HTTP_TIMEOUT.saturat
 enum PlaneAuth {
     AppRole(AppRoleAuth),
     AgentAppRole(AppRoleAuth),
-    UserToken(UserToken),
+    UserToken(MaknaeSecret),
 }
 
 impl PlaneAuth {
@@ -211,7 +212,9 @@ pub(crate) fn read_trimmed(path: &Path) -> Result<String, VaultError> {
 /// `pub(crate)`: `secret_io.rs`'s PLAINTEXT read branches route through this SAME
 /// gate (the sealed `$CREDENTIALS_DIRECTORY` branch does not, since systemd
 /// produces its own `0400` artifacts).
-pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> {
+pub(crate) fn read_secret_credential(
+    path: &Path,
+) -> Result<zeroize::Zeroizing<String>, VaultError> {
     // Non-Unix has no owner-only permission model to check → refuse rather than read the
     // wrapped SecretID unchecked (fail closed; mirrors maknae-config). Not exercisable on
     // a unix CI runner, hence no mutation/coverage obligation on the non-unix arm.
@@ -250,7 +253,7 @@ pub(crate) fn read_secret_credential(path: &Path) -> Result<String, VaultError> 
             })?
             .value;
         std::str::from_utf8(&bytes)
-            .map(|s| s.trim().to_string())
+            .map(|s| zeroize::Zeroizing::new(s.trim().to_string()))
             .map_err(|e| VaultError::Io {
                 path: path.to_path_buf(),
                 source: std::io::Error::other(e.to_string()),
@@ -304,8 +307,9 @@ async fn sign_leaf_for(
     pki_int_mount: &str,
     plane_key: PlaneKey,
     client: &VaultClient,
-) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
+) -> Result<(MaknaeSecretBytes, String, Vec<String>), VaultError> {
     let (key_der, csr_pem) = generate_plane_csr(subject, deployment_id, plane_key)?;
+    let key_der = MaknaeSecretBytes::new(key_der).map_err(|e| secret_error("plane key", e))?;
     let resp = vaultrs::pki::cert::ca::sign(
         client,
         pki_int_mount,
@@ -462,7 +466,7 @@ impl PlaneClient {
         doc: &Document,
         dir: &Path,
         plane: Plane,
-        secret_id: Zeroizing<String>,
+        secret_id: MaknaeSecret,
     ) -> Result<Self, VaultError> {
         Self::build(doc, dir, plane, |cfg| {
             // RoleID is non-secret (an identifier), still read from disk here.
@@ -476,11 +480,11 @@ impl PlaneClient {
         })
     }
 
-    pub fn for_user(doc: &Document, dir: &Path, token: UserToken) -> Result<Self, VaultError> {
+    pub fn for_user(doc: &Document, dir: &Path, token: MaknaeSecret) -> Result<Self, VaultError> {
         Self::build(doc, dir, Plane::Cli, |_| Ok(PlaneAuth::UserToken(token)))
     }
 
-    pub fn for_agent(login: &AgentLogin, secret: AgentSecret) -> Result<Self, VaultError> {
+    pub fn for_agent(login: &AgentLogin, secret_id: MaknaeSecret) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         validate_vault_addr(&login.addr)?;
         validate_deployment_id(&login.trust_domain)?;
@@ -506,7 +510,7 @@ impl PlaneClient {
         let _ca = load_ca_pin(&login.config_dir)?;
         let auth = PlaneAuth::AgentAppRole(AppRoleAuth {
             role_id: login.role_id.clone(),
-            secret_id: secret.into_inner(),
+            secret_id,
             approle_mount: login.approle_mount.clone(),
         });
         Self::assemble(
@@ -640,7 +644,7 @@ impl PlaneClient {
         match &self.auth {
             PlaneAuth::AppRole(auth) | PlaneAuth::AgentAppRole(auth) => {
                 let token = auth.authenticate(&client).await?;
-                client.set_token(&token.client_token);
+                client.set_token(token.client_token.expose());
                 // Record the actual lease so the supervisor loop (spawn_supervisor) renews on
                 // the real TTL; surface a non-renewable token (a role misconfig) rather than
                 // silently failing later.
@@ -725,7 +729,7 @@ impl PlaneClient {
     async fn sign_leaf(
         &self,
         client: &VaultClient,
-    ) -> Result<(Zeroizing<Vec<u8>>, String, Vec<String>), VaultError> {
+    ) -> Result<(MaknaeSecretBytes, String, Vec<String>), VaultError> {
         sign_leaf_for(
             &self.subject,
             &self.deployment_id,
@@ -761,9 +765,7 @@ impl PlaneClient {
         let token = {
             let client = self.client.lock().await;
             let held = client.settings.token.as_str();
-            let mut copy = Zeroizing::new(String::with_capacity(held.len()));
-            copy.push_str(held);
-            UserToken::new(copy)?
+            crate::user_token(crate::secret_source::exact_text(held))?
         };
         VaultApi::new(&self.vault_addr, &self.vault_ca)?
             .read_wrapped(&token, kv_mount, secret_path, wrap_ttl)
@@ -1037,6 +1039,7 @@ mod tests {
     use super::*;
     use maknae_crypto::rcgen;
     use std::os::unix::fs::PermissionsExt;
+    use zeroize::Zeroizing;
 
     fn tmpfile(name: &str, mode: u32) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("mv-cred-{}-{}", std::process::id(), name));
@@ -1056,9 +1059,18 @@ mod tests {
     }
 
     #[test]
+    fn read_secret_credential_returns_zeroizing_string_at_compile_time() {
+        let _: fn(&std::path::Path) -> Result<Zeroizing<String>, VaultError> =
+            read_secret_credential;
+    }
+
+    #[test]
     fn secret_credential_accepts_owner_only() {
         let p = tmpfile("secure", 0o600);
-        assert_eq!(read_secret_credential(&p).unwrap(), "secret-id-value-xyz");
+        assert_eq!(
+            read_secret_credential(&p).unwrap().as_str(),
+            "secret-id-value-xyz"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1070,7 +1082,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let got = read_secret_credential(&path);
         let _ = std::fs::remove_file(&path);
-        assert_eq!(got.unwrap(), "relative-secret");
+        assert_eq!(got.unwrap().as_str(), "relative-secret");
     }
 
     // ---- from_document plane dispatch (Task 4) ---------------------------------
@@ -1350,7 +1362,7 @@ mod tests {
             &doc,
             &fx.0,
             Plane::Cli,
-            Zeroizing::new("cli-secret-value".into()),
+            MaknaeSecret::new(Zeroizing::new("cli-secret-value".into())).unwrap(),
         );
         std::env::remove_var("CREDENTIALS_DIRECTORY");
         let _ = std::fs::remove_dir_all(&creds_dir);
@@ -1560,8 +1572,8 @@ mod tests {
 
     const DEAD_VAULT: &str = "https://127.0.0.1:1";
 
-    fn user_token() -> UserToken {
-        UserToken::new(Zeroizing::new("hvs.user-token-sentinel".into())).unwrap()
+    fn user_token() -> MaknaeSecret {
+        MaknaeSecret::vault_token(Zeroizing::new("hvs.user-token-sentinel".into())).unwrap()
     }
 
     fn current_thread(paused: bool) -> tokio::runtime::Runtime {
@@ -1646,7 +1658,7 @@ mod tests {
             &doc,
             &fx.0,
             Plane::Kernel,
-            Zeroizing::new("secret-id-sentinel".into()),
+            MaknaeSecret::new(Zeroizing::new("secret-id-sentinel".into())).unwrap(),
         )
         .unwrap();
         assert_eq!(approle.auth.token_source(), PlaneTokenSource::AppRoleLogin);
@@ -1676,7 +1688,7 @@ mod tests {
             &doc,
             &fx.0,
             Plane::Kernel,
-            Zeroizing::new("secret-id-sentinel".into()),
+            MaknaeSecret::new(Zeroizing::new("secret-id-sentinel".into())).unwrap(),
         )
         .unwrap();
         let rt = current_thread(true);
@@ -1710,13 +1722,13 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-login", DEAD_VAULT, "");
         std::fs::remove_file(fx.0.join("maknaed-approle-id")).unwrap();
-        let secret = AgentSecret::new(Zeroizing::new("agent-secret-sentinel".into()));
+        let secret = MaknaeSecret::new(Zeroizing::new("agent-secret-sentinel".into())).unwrap();
         let client = PlaneClient::for_agent(&agent_login(&fx.0, DEAD_VAULT), secret).unwrap();
         match &client.auth {
             PlaneAuth::AgentAppRole(auth) => {
                 assert_eq!(auth.approle_mount, "agents-approle-sentinel");
                 assert_eq!(auth.role_id, "agent-role-id-sentinel");
-                assert_eq!(auth.secret_id.as_str(), "agent-secret-sentinel");
+                assert_eq!(auth.secret_id.expose(), "agent-secret-sentinel");
             }
             PlaneAuth::AppRole(_) => panic!("an agent logged in on the kernel's AppRole"),
             PlaneAuth::UserToken(_) => panic!("an agent logged in with a user token"),
@@ -1744,7 +1756,7 @@ mod tests {
     fn a_wrapped_read_as_self_carries_the_clients_own_login_or_nothing() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-wrapped-read", DEAD_VAULT, "");
-        let secret = AgentSecret::new(Zeroizing::new("s".into()));
+        let secret = MaknaeSecret::new(Zeroizing::new("s".into())).unwrap();
         let client = PlaneClient::for_agent(&agent_login(&fx.0, DEAD_VAULT), secret).unwrap();
         assert_eq!(
             client.subject(),
@@ -1792,7 +1804,7 @@ mod tests {
             .unwrap();
         let addr = format!("https://{}", listener.local_addr().unwrap());
         let fx = DispatchFixture::with_addr("agent-wrapped-unlocked", &addr, "");
-        let secret = AgentSecret::new(Zeroizing::new("s".into()));
+        let secret = MaknaeSecret::new(Zeroizing::new("s".into())).unwrap();
         let client = Arc::new(PlaneClient::for_agent(&agent_login(&fx.0, &addr), secret).unwrap());
         rt.block_on(async {
             client.client.lock().await.set_token("hvs.sentinel-629");
@@ -1819,7 +1831,7 @@ mod tests {
     fn an_agent_login_refuses_a_plaintext_vault_or_a_bad_trust_domain() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fx = DispatchFixture::with_addr("agent-login-bad", DEAD_VAULT, "");
-        let secret = || AgentSecret::new(Zeroizing::new("s".into()));
+        let secret = || MaknaeSecret::new(Zeroizing::new("s".into())).unwrap();
         let plain = agent_login(&fx.0, "http://127.0.0.1:1");
         assert!(matches!(
             PlaneClient::for_agent(&plain, secret()),

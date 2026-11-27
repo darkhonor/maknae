@@ -1,6 +1,7 @@
 //! Opening a turn's sealed key into its provider key, behind the `KeyOpener` seam (#153).
 use crate::handle::Refusal;
 use maknae_config::EgressBounds;
+use maknae_io::MaknaeSecret;
 use maknae_proto::EgressFrameRequest;
 use maknae_seal::{ForgePurpose, ForgeSealContext, SealAad, SealPrivateKey};
 use maknae_vault::FORGE_TOKEN_FIELD;
@@ -43,6 +44,7 @@ pub enum OpenFailure {
     Invalid,
     Field,
     Vault,
+    CoreDumps,
 }
 
 impl OpenFailure {
@@ -60,6 +62,7 @@ impl OpenFailure {
             }
             OpenFailure::Field => "the key field is absent from the secret",
             OpenFailure::Vault => "the Vault unwrap failed",
+            OpenFailure::CoreDumps => "core dumps could not be denied",
         }
     }
 }
@@ -69,7 +72,7 @@ pub trait KeyOpener {
         &self,
         sealed: &[u8],
         req: &OpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send;
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send;
 }
 
 /// Where a tasker's sealed forge token was read from, checked against the tasker
@@ -142,7 +145,7 @@ pub trait ForgeOpener {
         &self,
         sealed: &[u8],
         req: &ForgeOpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send;
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send;
 }
 
 /// The seal alone: what it holds is the wrapping token the tasker's client read.
@@ -277,7 +280,8 @@ mod tests {
     fn each_open_failure_has_its_own_content_free_reason() {
         use OpenFailure::*;
         assert_eq!(
-            [Request, Seal, Token, WrongPath, Ttl, Invalid, Field, Vault].map(|f| f.reason()),
+            [Request, Seal, Token, WrongPath, Ttl, Invalid, Field, Vault, CoreDumps]
+                .map(|f| f.reason()),
             [
                 "the request cannot name a Vault key path",
                 "the sealed key does not match this request",
@@ -287,6 +291,7 @@ mod tests {
                 "the wrapping token is expired, already used, or not a wrapping token",
                 "the key field is absent from the secret",
                 "the Vault unwrap failed",
+                "core dumps could not be denied",
             ]
         );
     }

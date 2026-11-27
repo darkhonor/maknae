@@ -2,14 +2,13 @@
 use maknae_deputy::unseal::{
     open_forge_seal, ForgeOpenRequest, ForgeOpener, KeyOpener, OpenFailure, OpenRequest,
 };
+use maknae_io::{MaknaeSecret, SecretError};
 use maknae_seal::{SealAad, SealContext, SealPrivateKey};
 use maknae_vault::{
-    aad_parts, VaultApi, VaultError, WrapExpectation, WrapMismatch, WrappingToken,
-    USER_KEY_WRAP_TTL,
+    aad_parts, VaultApi, VaultError, WrapExpectation, WrapMismatch, USER_KEY_WRAP_TTL,
 };
 use std::future::Future;
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 pub struct SealedOpener {
     pub key: Arc<SealPrivateKey>,
@@ -19,17 +18,17 @@ pub struct SealedOpener {
 pub trait Unwrapper {
     fn unwrap_field(
         &self,
-        token: WrappingToken,
+        token: MaknaeSecret,
         expect: &WrapExpectation,
-    ) -> impl Future<Output = Result<Zeroizing<String>, VaultError>> + Send;
+    ) -> impl Future<Output = Result<MaknaeSecret, VaultError>> + Send;
 }
 
 impl Unwrapper for VaultApi {
     fn unwrap_field(
         &self,
-        token: WrappingToken,
+        token: MaknaeSecret,
         expect: &WrapExpectation,
-    ) -> impl Future<Output = Result<Zeroizing<String>, VaultError>> + Send {
+    ) -> impl Future<Output = Result<MaknaeSecret, VaultError>> + Send {
         self.unwrap_kv_field(token, expect)
     }
 }
@@ -40,8 +39,13 @@ pub fn vault_diagnostic(e: &VaultError) -> Option<String> {
             WrapMismatch::CreationPath | WrapMismatch::CreationTtl { .. } | WrapMismatch::Invalid,
         )
         | VaultError::KvField { .. } => None,
+        VaultError::CoreDumps(io) => Some(core_dumps_line(io)),
         other => Some(format!("maknae-egress: the Vault unwrap failed: {other}")),
     }
+}
+
+fn core_dumps_line(io: &std::io::Error) -> String {
+    format!("maknae-egress: core dumps could not be denied: {io}")
 }
 
 pub fn vault_failure(e: VaultError) -> OpenFailure {
@@ -53,7 +57,18 @@ pub fn vault_failure(e: VaultError) -> OpenFailure {
         VaultError::WrapMismatch(WrapMismatch::CreationTtl { .. }) => OpenFailure::Ttl,
         VaultError::WrapMismatch(WrapMismatch::Invalid) => OpenFailure::Invalid,
         VaultError::KvField { .. } => OpenFailure::Field,
+        VaultError::CoreDumps(_) => OpenFailure::CoreDumps,
         _ => OpenFailure::Vault,
+    }
+}
+
+pub fn token_failure(e: SecretError) -> OpenFailure {
+    match e {
+        SecretError::CoreDumps(io) => {
+            eprintln!("{}", core_dumps_line(&io));
+            OpenFailure::CoreDumps
+        }
+        _ => OpenFailure::Token,
     }
 }
 
@@ -61,7 +76,7 @@ pub fn unseal_token(
     key: &SealPrivateKey,
     sealed: &[u8],
     req: &OpenRequest<'_>,
-) -> Result<(WrappingToken, WrapExpectation), OpenFailure> {
+) -> Result<(MaknaeSecret, WrapExpectation), OpenFailure> {
     let expectation = WrapExpectation::new(
         req.kv_mount,
         req.key_vault_path,
@@ -79,7 +94,7 @@ pub fn unseal_token(
     })
     .map_err(|_| OpenFailure::Seal)?;
     let opened = maknae_seal::open(key, &aad, sealed).map_err(|_| OpenFailure::Seal)?;
-    let token = WrappingToken::from_opened(opened).map_err(|_| OpenFailure::Token)?;
+    let token = MaknaeSecret::from_opened(opened).map_err(token_failure)?;
     Ok((token, expectation))
 }
 
@@ -88,7 +103,7 @@ pub fn open_with<'a, U: Unwrapper + Sync>(
     vault: &'a U,
     sealed: &[u8],
     req: &OpenRequest<'_>,
-) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send + 'a {
+) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send + 'a {
     let unsealed = unseal_token(key, sealed, req);
     async move {
         let (token, expectation) = unsealed?;
@@ -104,7 +119,7 @@ pub fn unseal_forge_token(
     key: &SealPrivateKey,
     sealed: &[u8],
     req: &ForgeOpenRequest<'_>,
-) -> Result<(WrappingToken, WrapExpectation), OpenFailure> {
+) -> Result<(MaknaeSecret, WrapExpectation), OpenFailure> {
     let expectation = WrapExpectation::new(
         req.kv_mount(),
         req.expected_path(),
@@ -113,7 +128,7 @@ pub fn unseal_forge_token(
     )
     .map_err(|_| OpenFailure::Request)?;
     let opened = open_forge_seal(key, sealed, req)?;
-    let token = WrappingToken::from_opened(opened).map_err(|_| OpenFailure::Token)?;
+    let token = MaknaeSecret::from_opened(opened).map_err(token_failure)?;
     Ok((token, expectation))
 }
 
@@ -122,7 +137,7 @@ pub fn open_forge_with<'a, U: Unwrapper + Sync>(
     vault: &'a U,
     sealed: &[u8],
     req: &ForgeOpenRequest<'_>,
-) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send + 'a {
+) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send + 'a {
     let unsealed = unseal_forge_token(key, sealed, req);
     async move {
         let (token, expectation) = unsealed?;
@@ -138,7 +153,7 @@ impl ForgeOpener for SealedOpener {
         &self,
         sealed: &[u8],
         req: &ForgeOpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send {
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send {
         open_forge_with(&self.key, &*self.api, sealed, req)
     }
 }
@@ -148,7 +163,7 @@ impl KeyOpener for SealedOpener {
         &self,
         sealed: &[u8],
         req: &OpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send {
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send {
         open_with(&self.key, &*self.api, sealed, req)
     }
 }
@@ -158,6 +173,7 @@ pub(crate) mod tests {
     use super::*;
     use maknae_deputy::reach::open::tasker_open_request;
     use std::sync::{Mutex, Once};
+    use zeroize::Zeroizing;
 
     const ALICE: &str = "maknae/users/alice/openai/personal";
     const BOB: &str = "maknae/users/bob/openai/personal";
@@ -245,9 +261,9 @@ ampbv97Rcx9j
     impl Unwrapper for MintedVault {
         async fn unwrap_field(
             &self,
-            token: WrappingToken,
+            token: MaknaeSecret,
             expect: &WrapExpectation,
-        ) -> Result<Zeroizing<String>, VaultError> {
+        ) -> Result<MaknaeSecret, VaultError> {
             assert!(token.expose().as_bytes() == TOKEN);
             self.calls.lock().unwrap().push(format!(
                 "{}|{}|{}",
@@ -258,7 +274,7 @@ ampbv97Rcx9j
             if expect.creation_path() != self.creation_path {
                 return Err(VaultError::WrapMismatch(WrapMismatch::CreationPath));
             }
-            Ok(Zeroizing::new("sk-ALICE-SENTINEL".into()))
+            Ok(MaknaeSecret::new(Zeroizing::new("sk-ALICE-SENTINEL".into())).unwrap())
         }
     }
 
@@ -374,7 +390,7 @@ ampbv97Rcx9j
         assert_eq!(bobs.calls(), [format!("{ALICE_CREATION_PATH}|api_key|60")]);
         let alices = MintedVault::minted_on(ALICE_CREATION_PATH);
         let got = run(open_with(&key, &alices, &blob, &alice())).unwrap();
-        assert!(got.as_str() == "sk-ALICE-SENTINEL");
+        assert!(got.expose() == "sk-ALICE-SENTINEL");
     }
 
     #[test]
@@ -401,6 +417,17 @@ ampbv97Rcx9j
                     why: "absent",
                 },
                 OpenFailure::Field,
+            ),
+            (
+                VaultError::KvField {
+                    field: "api_key".into(),
+                    why: "empty",
+                },
+                OpenFailure::Field,
+            ),
+            (
+                VaultError::CoreDumps(std::io::Error::other("rlimit")),
+                OpenFailure::CoreDumps,
             ),
             (
                 VaultError::WrapMismatch(WrapMismatch::NotWrapped),
@@ -451,13 +478,46 @@ ampbv97Rcx9j
     }
 
     #[test]
+    fn a_core_dump_failure_from_vault_logs_its_cause_not_an_unwrap_failure() {
+        assert_eq!(
+            vault_diagnostic(&VaultError::CoreDumps(std::io::Error::other(
+                "setrlimit refused"
+            )))
+            .as_deref(),
+            Some("maknae-egress: core dumps could not be denied: setrlimit refused")
+        );
+        assert_eq!(
+            core_dumps_line(&std::io::Error::other("setrlimit refused")),
+            "maknae-egress: core dumps could not be denied: setrlimit refused"
+        );
+    }
+
+    #[test]
+    fn a_core_dump_failure_opening_the_token_is_not_reported_as_a_bad_token() {
+        use maknae_io::SecretError;
+        let denied = || std::io::Error::other("setrlimit refused");
+        assert_eq!(
+            token_failure(SecretError::CoreDumps(denied())),
+            OpenFailure::CoreDumps
+        );
+        for shape in [
+            SecretError::Empty,
+            SecretError::TooLong,
+            SecretError::NotAVaultToken,
+            SecretError::NotUtf8,
+        ] {
+            assert_eq!(token_failure(shape), OpenFailure::Token);
+        }
+    }
+
+    #[test]
     fn the_diagnostic_for_a_real_vault_failure_names_no_token_path_or_field() {
         fips();
         let d = tempfile::tempdir().unwrap();
         let ca = d.path().join(maknae_vault::EGRESS_VAULT_CA_FILE);
         std::fs::write(&ca, TEST_CA_PEM).unwrap();
         let api = VaultApi::new("https://127.0.0.1:1", &ca).unwrap();
-        let token = || WrappingToken::from_opened(Zeroizing::new(TOKEN.to_vec())).unwrap();
+        let token = || MaknaeSecret::from_opened(Zeroizing::new(TOKEN.to_vec())).unwrap();
         let expect = WrapExpectation::new(
             "maknae-kv",
             "maknae/users/alice/PATH-SENTINEL",
@@ -571,7 +631,7 @@ ampbv97Rcx9j
         );
         let alices = MintedVault::minted_on(ALICE_FORGE_CREATION_PATH);
         let got = run(open_forge_with(&key, &alices, &blob, &req)).unwrap();
-        assert!(got.as_str() == "sk-ALICE-SENTINEL");
+        assert!(got.expose() == "sk-ALICE-SENTINEL");
     }
 
     #[test]

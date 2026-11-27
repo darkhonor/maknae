@@ -17,9 +17,11 @@
 //! green). The hand-rolled endpoint mirrors the pattern in vaultrs' own
 //! `src/api/pki/requests.rs` (`#[derive(Endpoint)]` + `#[endpoint(path = ..., ...)]`).
 use crate::agent_enroll::{AgentId, BindCidrs};
+use crate::error::secret_error;
 use crate::VaultError;
 use maknae_config::AGENT_ENTITY_PREFIX;
 use maknae_crypto::assert_fips_provider;
+use maknae_io::MaknaeSecret;
 use serde::Deserialize;
 use vaultrs::api::auth::approle::requests::GenerateNewSecretIDRequestBuilder;
 use vaultrs::api::identity::entity::responses::ReadEntityByNameResponse;
@@ -65,6 +67,10 @@ fn agent_entity_name(name: &str) -> Result<&str, VaultError> {
     }
 }
 
+pub fn operator_token(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::new(secret).map_err(|e| secret_error("operator token", e))
+}
+
 /// A token-authenticated Vault client for the operator-driven `enroll` flow.
 ///
 /// Deliberately does NOT `#[derive(Debug)]`: the wrapped `VaultClient` carries the
@@ -85,7 +91,7 @@ impl OperatorClient {
     pub fn new(
         addr: &str,
         ca_path: &std::path::Path,
-        token: Zeroizing<String>,
+        token: MaknaeSecret,
     ) -> Result<Self, VaultError> {
         assert_fips_provider()?;
         // The same scheme guard as the two plane clients (self-review round 7
@@ -103,7 +109,7 @@ impl OperatorClient {
         let settings = VaultClientSettingsBuilder::default()
             .address(addr)
             .ca_certs(vec![ca_path.to_string_lossy().to_string()])
-            .token(token.as_str())
+            .token(token.expose())
             // Stated, not defaulted (#240b self-review): vaultrs fills an unset
             // `verify` from VAULT_SKIP_VERIFY and turns verification OFF for
             // any value other than 0/f/false — the empty string included, and
@@ -155,18 +161,25 @@ impl OperatorClient {
     }
 
     /// Mint a new SecretID for `role`, returning `(secret, accessor)`. The secret is
-    /// held in `Zeroizing` and MUST NOT be cloned into a bare `String` or logged; the
+    /// held in a `MaknaeSecret` and MUST NOT be cloned into a bare `String` or logged; the
     /// accessor is non-secret and is what `destroy_accessor` needs to roll the
-    /// SecretID back if the rest of enrollment fails.
+    /// SecretID back if the rest of enrollment fails. A SecretID `MaknaeSecret` refuses
+    /// is destroyed by its accessor before the error returns; a failed destroy is logged.
     pub async fn mint_secret_id(
         &self,
         mount: &str,
         role: &str,
-    ) -> Result<(Zeroizing<String>, String), VaultError> {
+    ) -> Result<(MaknaeSecret, String), VaultError> {
         let resp = vaultrs::auth::approle::role::secret::generate(&self.inner, mount, role, None)
             .await
             .map_err(|e| VaultError::Operator(e.to_string()))?;
-        Ok((Zeroizing::new(resp.secret_id), resp.secret_id_accessor))
+        hold_minted(
+            resp.secret_id,
+            resp.secret_id_accessor,
+            |acc| async move { self.destroy_accessor(mount, role, &acc).await },
+            to_stderr,
+        )
+        .await
     }
 
     /// Destroy a previously-minted SecretID by its accessor (rotate/failure
@@ -190,7 +203,7 @@ impl OperatorClient {
         mount: &str,
         role: &str,
         cidrs: &BindCidrs,
-    ) -> Result<(Zeroizing<String>, String), VaultError> {
+    ) -> Result<(MaknaeSecret, String), VaultError> {
         let resp = vaultrs::auth::approle::role::secret::generate(
             &self.inner,
             mount,
@@ -199,7 +212,13 @@ impl OperatorClient {
         )
         .await
         .map_err(|e| VaultError::Operator(e.to_string()))?;
-        Ok((Zeroizing::new(resp.secret_id), resp.secret_id_accessor))
+        hold_minted(
+            resp.secret_id,
+            resp.secret_id_accessor,
+            |acc| async move { self.destroy_accessor(mount, role, &acc).await },
+            to_stderr,
+        )
+        .await
     }
 
     /// `destroy_accessor` that treats an already-absent accessor as success.
@@ -331,6 +350,37 @@ fn join_ca_chain(chain: Vec<String>) -> Result<String, VaultError> {
         .join("\n"))
 }
 
+fn undestroyed_line(accessor: &str, e: &VaultError) -> String {
+    format!(
+        "maknae-vault: the minted SecretID (accessor {accessor}) could not be destroyed ({e}); \
+         it stays valid until its Vault TTL expires, or until it is destroyed by that accessor"
+    )
+}
+
+fn to_stderr(line: &str) {
+    eprintln!("{line}");
+}
+
+async fn hold_minted<F, Fut>(
+    secret_id: String,
+    accessor: String,
+    destroy: F,
+    log: impl FnOnce(&str),
+) -> Result<(MaknaeSecret, String), VaultError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), VaultError>>,
+{
+    let refused = match MaknaeSecret::new(Zeroizing::new(secret_id)) {
+        Ok(secret) => return Ok((secret, accessor)),
+        Err(e) => secret_error("SecretID", e),
+    };
+    if let Err(e) = destroy(accessor.clone()).await {
+        log(&undestroyed_line(&accessor, &e));
+    }
+    Err(refused)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +502,93 @@ mod tests {
             join_ca_chain(chain).unwrap(),
             "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----"
         );
+    }
+
+    #[tokio::test]
+    async fn a_minted_secret_id_the_constructor_refuses_is_destroyed_by_its_accessor() {
+        let destroyed = std::cell::RefCell::new(Vec::new());
+        let destroy = |acc: String| {
+            destroyed.borrow_mut().push(acc);
+            async { Ok(()) }
+        };
+        let got = hold_minted(String::new(), "acc-1".into(), destroy, |_: &str| {}).await;
+        assert!(
+            matches!(
+                got,
+                Err(VaultError::InvalidSecret {
+                    what: "SecretID",
+                    why: "is empty"
+                })
+            ),
+            "{:?}",
+            got.err()
+        );
+        assert_eq!(*destroyed.borrow(), ["acc-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_held_secret_id_is_not_destroyed() {
+        let destroyed = std::cell::RefCell::new(Vec::new());
+        let destroy = |acc: String| {
+            destroyed.borrow_mut().push(acc);
+            async { Ok(()) }
+        };
+        let (secret, accessor) =
+            hold_minted("sid-SENTINEL".into(), "acc-2".into(), destroy, |_: &str| {})
+                .await
+                .unwrap();
+        assert_eq!(
+            (secret.expose(), accessor.as_str()),
+            ("sid-SENTINEL", "acc-2")
+        );
+        assert!(destroyed.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_destroy_keeps_the_constructor_error_and_logs_the_accessor() {
+        let destroyed = std::cell::RefCell::new(Vec::new());
+        let destroy = |acc: String| {
+            destroyed.borrow_mut().push(acc);
+            async { Err(VaultError::Operator("vault down".into())) }
+        };
+        let mut logged = Vec::new();
+        let got = hold_minted(String::new(), "acc-3".into(), destroy, |l: &str| {
+            logged.push(l.to_owned())
+        })
+        .await;
+        assert!(
+            matches!(
+                got,
+                Err(VaultError::InvalidSecret {
+                    what: "SecretID",
+                    why: "is empty"
+                })
+            ),
+            "{:?}",
+            got.err()
+        );
+        assert_eq!(*destroyed.borrow(), ["acc-3"]);
+        assert_eq!(
+            logged,
+            [
+                "maknae-vault: the minted SecretID (accessor acc-3) could not be destroyed \
+              (operator Vault operation failed: vault down); it stays valid until its Vault \
+              TTL expires, or until it is destroyed by that accessor"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_operator_token_is_refused_when_empty_and_redacted_when_held() {
+        assert!(matches!(
+            operator_token(Zeroizing::new(String::new())),
+            Err(VaultError::InvalidSecret {
+                what: "operator token",
+                why: "is empty"
+            })
+        ));
+        let t = operator_token(Zeroizing::new("hvs.OP-SENTINEL".into())).unwrap();
+        assert_eq!(t.expose(), "hvs.OP-SENTINEL");
+        assert!(!format!("{t:?}").contains("SENTINEL"));
     }
 }

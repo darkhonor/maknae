@@ -68,8 +68,8 @@ fn req<'a>(model: &'a str) -> ChatRequest<'a> {
     }
 }
 
-fn key() -> Zeroizing<String> {
-    Zeroizing::new("sk-test-not-a-real-key".to_string())
+fn key() -> maknae_io::MaknaeSecret {
+    maknae_io::MaknaeSecret::new(Zeroizing::new("sk-test-not-a-real-key".to_string())).unwrap()
 }
 
 async fn call(url: &str, offered: &[String]) -> Result<maknae_proto::PromptReply, CallError> {

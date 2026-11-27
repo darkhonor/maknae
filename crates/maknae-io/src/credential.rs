@@ -3,66 +3,81 @@ use std::io;
 
 use zeroize::Zeroizing;
 
-use crate::credential_io::deny_core_dumps;
+use crate::{MaknaeSecret, MaknaeSecretBytes, SecretError, MAX_SECRET_BYTES};
 
 /// A credential a front end holds to deliver to a tool. It never prints, copies or compares,
 /// and its only encoding is the frame `deliver_to` and `send` write (#751).
 ///
 /// ```
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = format!("{c:?}");
 /// ```
 ///
 /// ```compile_fail,E0277
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = format!("{c}");
 /// ```
 ///
 /// ```compile_fail,E0599
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = c.clone();
 /// ```
 ///
 /// ```compile_fail,E0616
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = &c.0;
 /// ```
 ///
 /// ```compile_fail,E0624
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = c.expose();
 /// ```
 ///
 /// ```compile_fail,E0369
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = c == c;
 /// ```
 ///
 /// ```compile_fail,E0277
-/// use maknae_io::{credential::DeliveredCredential, Zeroizing};
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// let _ = serde_json::to_string(&c);
 /// ```
-pub struct DeliveredCredential(Zeroizing<Vec<u8>>);
+///
+/// ```
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
+/// let _ = c;
+/// ```
+///
+/// ```compile_fail,E0599
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
+/// let _ = c.into_secret();
+/// ```
+pub struct DeliveredCredential(MaknaeSecretBytes);
+
+impl MaknaeSecret<String> {
+    pub fn into_delivered(self) -> DeliveredCredential {
+        DeliveredCredential(self.into_utf8_bytes())
+    }
+}
+
+impl MaknaeSecretBytes {
+    pub fn into_delivered(self) -> DeliveredCredential {
+        DeliveredCredential(self)
+    }
+}
 
 impl DeliveredCredential {
-    pub fn new(secret: Zeroizing<Vec<u8>>) -> io::Result<Self> {
-        deny_core_dumps()?;
-        Ok(Self(secret))
-    }
-
-    pub fn from_secret_string(mut secret: Zeroizing<String>) -> io::Result<Self> {
-        Self::new(Zeroizing::new(std::mem::take(&mut *secret).into_bytes()))
-    }
-
     fn expose(&self) -> &[u8] {
-        &self.0
+        self.0.expose()
     }
 }
 
@@ -73,7 +88,6 @@ impl fmt::Debug for DeliveredCredential {
 }
 
 pub const MAX_CREDENTIALS: usize = 16;
-pub const MAX_VALUE: usize = 65_536;
 const MAX_NAME: usize = 64;
 const FRAME_TAG: &[u8; 4] = b"MKLC";
 const TAG_ENV: u8 = 1;
@@ -224,28 +238,28 @@ impl CredentialSlot {
 /// bound by its invocation id (ADR-0036, amendment 2026-11-27, statement 2).
 ///
 /// ```
-/// use maknae_io::credential::{CredentialSlot, DeliveredCredential, LaunchCredentials};
-/// use maknae_io::Zeroizing;
+/// use maknae_io::credential::{CredentialSlot, LaunchCredentials};
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
 /// let mut lc = LaunchCredentials::new([0; 16]);
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// c.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
 /// let _ = format!("{lc:?}");
 /// ```
 ///
 /// ```compile_fail,E0624
-/// use maknae_io::credential::{CredentialSlot, DeliveredCredential, LaunchCredentials};
-/// use maknae_io::Zeroizing;
+/// use maknae_io::credential::{CredentialSlot, LaunchCredentials};
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
 /// let mut lc = LaunchCredentials::new([0; 16]);
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// c.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
 /// let _ = lc.encode();
 /// ```
 ///
 /// ```compile_fail,E0277
-/// use maknae_io::credential::{CredentialSlot, DeliveredCredential, LaunchCredentials};
-/// use maknae_io::Zeroizing;
+/// use maknae_io::credential::{CredentialSlot, LaunchCredentials};
+/// use maknae_io::{MaknaeSecretBytes, Zeroizing};
 /// let mut lc = LaunchCredentials::new([0; 16]);
-/// let c = DeliveredCredential::new(Zeroizing::new(b"t".to_vec())).unwrap();
+/// let c = MaknaeSecretBytes::new(Zeroizing::new(b"t".to_vec())).unwrap().into_delivered();
 /// c.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
 /// let _ = format!("{lc}");
 /// ```
@@ -258,8 +272,6 @@ pub struct LaunchCredentials {
 pub enum DeliverErrorKind {
     DuplicateSlot,
     TooMany,
-    EmptyValue,
-    ValueTooLong,
 }
 
 #[derive(Debug)]
@@ -294,7 +306,8 @@ pub enum DecodeError {
 
 /// One frame: the 4-byte tag, the invocation, the count, and at most `MAX_CREDENTIALS`
 /// entries of a tag, a name, a length and the value.
-pub(crate) const MAX_FRAME: usize = 4 + 16 + 1 + MAX_CREDENTIALS * (2 + MAX_NAME + 4 + MAX_VALUE);
+pub(crate) const MAX_FRAME: usize =
+    4 + 16 + 1 + MAX_CREDENTIALS * (2 + MAX_NAME + 4 + MAX_SECRET_BYTES);
 
 #[derive(Debug)]
 pub enum ReceiveError {
@@ -311,11 +324,7 @@ impl DeliveredCredential {
         into: &mut LaunchCredentials,
         slot: CredentialSlot,
     ) -> Result<(), DeliverError> {
-        let kind = if self.expose().is_empty() {
-            DeliverErrorKind::EmptyValue
-        } else if self.expose().len() > MAX_VALUE {
-            DeliverErrorKind::ValueTooLong
-        } else if into.entries.iter().any(|(s, _)| *s == slot) {
+        let kind = if into.entries.iter().any(|(s, _)| *s == slot) {
             DeliverErrorKind::DuplicateSlot
         } else if into.entries.len() >= MAX_CREDENTIALS {
             DeliverErrorKind::TooMany
@@ -387,19 +396,19 @@ impl LaunchCredentials {
             let value_len =
                 u32::from_be_bytes(r.take(4)?.try_into().map_err(|_| DecodeError::Truncated)?)
                     as usize;
-            if value_len > MAX_VALUE {
+            if value_len > MAX_SECRET_BYTES {
                 return Err(DecodeError::ValueTooLong);
             }
             if value_len == 0 {
                 return Err(DecodeError::EmptyValue);
             }
             let value = Zeroizing::new(r.take(value_len)?.to_vec());
-            let cred = DeliveredCredential::new(value).map_err(|_| DecodeError::Process)?;
+            let cred = MaknaeSecretBytes::new(value)
+                .map_err(|_: SecretError| DecodeError::Process)?
+                .into_delivered();
             cred.deliver_to(&mut lc, slot).map_err(|e| match e.kind() {
                 DeliverErrorKind::DuplicateSlot => DecodeError::DuplicateSlot,
                 DeliverErrorKind::TooMany => DecodeError::TooMany,
-                DeliverErrorKind::EmptyValue => DecodeError::EmptyValue,
-                DeliverErrorKind::ValueTooLong => DecodeError::ValueTooLong,
             })?;
         }
         if !r.0.is_empty() {
@@ -443,7 +452,9 @@ mod tests {
     const SENTINEL: &str = "hunter2-sentinel-751";
 
     fn cred() -> DeliveredCredential {
-        DeliveredCredential::new(Zeroizing::new(SENTINEL.as_bytes().to_vec())).unwrap()
+        MaknaeSecretBytes::new(Zeroizing::new(SENTINEL.as_bytes().to_vec()))
+            .unwrap()
+            .into_delivered()
     }
 
     #[test]
@@ -459,10 +470,12 @@ mod tests {
     }
 
     #[test]
-    fn from_secret_string_holds_the_same_bytes() {
-        let c =
-            DeliveredCredential::from_secret_string(Zeroizing::new(SENTINEL.to_owned())).unwrap();
+    fn a_text_secret_becomes_a_delivered_credential_without_a_copy() {
+        let text = Zeroizing::new(SENTINEL.to_owned());
+        let at = text.as_ptr();
+        let c = MaknaeSecret::new(text).unwrap().into_delivered();
         assert_eq!(c.expose(), SENTINEL.as_bytes());
+        assert_eq!(c.expose().as_ptr(), at);
     }
 
     #[test]
@@ -483,12 +496,14 @@ mod tests {
     fn sample() -> LaunchCredentials {
         let mut lc = LaunchCredentials::new([7; 16]);
         cred().deliver_to(&mut lc, slot_env("GH_TOKEN")).unwrap();
-        DeliveredCredential::new(Zeroizing::new(b"netrc-body".to_vec()))
+        MaknaeSecretBytes::new(Zeroizing::new(b"netrc-body".to_vec()))
             .unwrap()
+            .into_delivered()
             .deliver_to(&mut lc, CredentialSlot::Netrc)
             .unwrap();
-        DeliveredCredential::new(Zeroizing::new(b"file-body".to_vec()))
+        MaknaeSecretBytes::new(Zeroizing::new(b"file-body".to_vec()))
             .unwrap()
+            .into_delivered()
             .deliver_to(&mut lc, CredentialSlot::file("token.txt").unwrap())
             .unwrap();
         lc
@@ -627,7 +642,7 @@ mod tests {
         named_netrc[21] = TAG_NETRC;
         let mut too_long = one_env(b"GH_TOKEN", b"v");
         let at = 21 + 2 + 8;
-        too_long[at..at + 4].copy_from_slice(&(MAX_VALUE as u32 + 1).to_be_bytes());
+        too_long[at..at + 4].copy_from_slice(&(MAX_SECRET_BYTES as u32 + 1).to_be_bytes());
         let mut trailing = one_env(b"GH_TOKEN", b"v");
         trailing.push(0);
         let mut dup = one_env(b"GH_TOKEN", b"v");
@@ -703,8 +718,9 @@ mod tests {
         let mut lc = LaunchCredentials::new([1; 16]);
         for i in 0..MAX_CREDENTIALS {
             let name = format!("T{i:02}{}", "A".repeat(MAX_NAME - 3));
-            DeliveredCredential::new(Zeroizing::new(vec![b'v'; MAX_VALUE]))
+            MaknaeSecretBytes::new(Zeroizing::new(vec![b'v'; MAX_SECRET_BYTES]))
                 .unwrap()
+                .into_delivered()
                 .deliver_to(&mut lc, CredentialSlot::env_var(&name).unwrap())
                 .unwrap();
         }
@@ -749,23 +765,6 @@ mod tests {
         let got = LaunchCredentials::receive(&mut b).unwrap();
         sender.join().unwrap().unwrap();
         assert_eq!(got.slots().count(), MAX_CREDENTIALS);
-    }
-
-    #[test]
-    fn deliver_to_refuses_an_empty_or_oversize_value_and_returns_it() {
-        let mut lc = LaunchCredentials::new([0; 16]);
-        let empty = DeliveredCredential::new(Zeroizing::new(Vec::new())).unwrap();
-        let err = empty
-            .deliver_to(&mut lc, CredentialSlot::Netrc)
-            .unwrap_err();
-        assert_eq!(err.kind(), DeliverErrorKind::EmptyValue);
-        let big = DeliveredCredential::new(Zeroizing::new(vec![b'x'; MAX_VALUE + 1])).unwrap();
-        let err = big.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap_err();
-        assert_eq!(err.kind(), DeliverErrorKind::ValueTooLong);
-        assert_eq!(err.into_credential().expose().len(), MAX_VALUE + 1);
-        let max = DeliveredCredential::new(Zeroizing::new(vec![b'x'; MAX_VALUE])).unwrap();
-        max.deliver_to(&mut lc, CredentialSlot::Netrc).unwrap();
-        assert_eq!(lc.slots().count(), 1);
     }
 
     #[test]

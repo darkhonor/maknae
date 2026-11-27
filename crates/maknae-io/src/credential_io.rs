@@ -175,7 +175,7 @@ mod tests {
         );
     }
 
-    use crate::credential::{CredentialSlot, DeliveredCredential};
+    use crate::credential::CredentialSlot;
 
     fn pair() -> (UnixStream, UnixStream) {
         let (a, b) = UnixStream::pair().unwrap();
@@ -191,8 +191,9 @@ mod tests {
     fn big() -> LaunchCredentials {
         let mut lc = LaunchCredentials::new([4; 16]);
         for i in 0..crate::credential::MAX_CREDENTIALS {
-            DeliveredCredential::new(Zeroizing::new(vec![b'v'; crate::credential::MAX_VALUE]))
+            crate::MaknaeSecretBytes::new(Zeroizing::new(vec![b'v'; crate::MAX_SECRET_BYTES]))
                 .unwrap()
+                .into_delivered()
                 .deliver_to(&mut lc, CredentialSlot::env_var(&format!("T{i}")).unwrap())
                 .unwrap();
         }
@@ -201,8 +202,9 @@ mod tests {
 
     fn one() -> LaunchCredentials {
         let mut lc = LaunchCredentials::new([9; 16]);
-        DeliveredCredential::new(Zeroizing::new(b"secret-751".to_vec()))
+        crate::MaknaeSecretBytes::new(Zeroizing::new(b"secret-751".to_vec()))
             .unwrap()
+            .into_delivered()
             .deliver_to(&mut lc, CredentialSlot::env_var("GH_TOKEN").unwrap())
             .unwrap();
         lc
@@ -367,28 +369,6 @@ mod tests {
         LaunchCredentials::receive(&mut b).unwrap();
         peer.join().unwrap();
         assert_eq!(b.read_timeout().unwrap(), Some(Duration::from_secs(7)));
-    }
-
-    #[test]
-    fn receive_denies_core_dumps_before_it_reads_even_a_malformed_frame() {
-        let (mut a, mut b) = pair();
-        a.write_all(&4u32.to_be_bytes()).unwrap();
-        a.write_all(b"XXXX").unwrap();
-        assert!(matches!(
-            LaunchCredentials::receive(&mut b),
-            Err(ReceiveError::Decode(_))
-        ));
-        assert_eq!(getrlimit(Resource::Core).current, Some(0));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn deny_core_dumps_reapplies_after_dumpability_is_reset() {
-        use rustix::process::{dumpable_behavior, set_dumpable_behavior, DumpableBehavior};
-        deny_core_dumps().unwrap();
-        set_dumpable_behavior(DumpableBehavior::Dumpable).unwrap();
-        deny_core_dumps().unwrap();
-        assert_eq!(dumpable_behavior().unwrap(), DumpableBehavior::NotDumpable);
     }
 
     fn slow_drain(mut b: UnixStream) -> std::thread::JoinHandle<()> {

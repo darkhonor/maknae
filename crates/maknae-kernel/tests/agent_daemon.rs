@@ -753,7 +753,7 @@ impl WrappedRead for Vault {
         let path = secret_path.to_string();
         async move {
             Ok(maknae_vault::WrappedSecret {
-                token: maknae_vault::WrappingToken::new(Zeroizing::new(
+                token: maknae_io::MaknaeSecret::vault_token(Zeroizing::new(
                     "hvs.wrap-sentinel-629".into(),
                 ))
                 .unwrap(),

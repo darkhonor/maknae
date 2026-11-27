@@ -6,13 +6,14 @@ use maknae_agent::drive::{Budget, LoopEvent, Outcome, StopReason};
 use maknae_agent::plane::{Plane, PlaneError};
 use maknae_agent::session::{Closed, Ended, Session};
 use maknae_config::{UserProviderEntry, UserProviders, Value};
+use maknae_io::MaknaeSecret;
 use maknae_loop::keys::{
     sealed_choice, sealed_forge_token, ChoiceFault, ForgeTokenTarget, KeySupply, KeyTarget,
 };
 use maknae_loop::plane::LoopPlane;
 use maknae_proto::{ForgeTokens, ProviderChoice};
 use maknae_seal::SealPublicKey;
-use maknae_vault::{UserToken, VaultApi, VaultError, WrappedSecret};
+use maknae_vault::{VaultApi, VaultError, WrappedSecret};
 use std::future::Future;
 use std::io::Write;
 use std::path::Path;
@@ -121,10 +122,10 @@ fn seal_key_from(pem: &str) -> Result<SealPublicKey, String> {
     })
 }
 
-pub(crate) fn token_copy(token: &UserToken) -> Result<UserToken, String> {
+pub(crate) fn token_copy(token: &MaknaeSecret) -> Result<MaknaeSecret, String> {
     let mut copy = zeroize::Zeroizing::new(String::with_capacity(token.expose().len()));
     copy.push_str(token.expose());
-    UserToken::new(copy).map_err(|e| e.to_string())
+    maknae_vault::user_token(copy).map_err(|e| e.to_string())
 }
 
 pub fn forge_read_failure(server: &str, e: &VaultError) -> String {
@@ -219,7 +220,7 @@ impl ForgePlace {
 /// The session's forge token supply: the person's own wrapped reads under their login.
 pub struct ForgeLogins {
     pub api: VaultApi,
-    pub token: UserToken,
+    pub token: MaknaeSecret,
     pub expires_at: u64,
     pub place: Result<ForgePlace, String>,
 }
@@ -345,7 +346,7 @@ pub fn warning_line(n: &Notice) -> String {
 /// under their login and seals it to exactly that request (ADR-0028).
 pub struct UserLoginKeys {
     pub api: VaultApi,
-    pub token: UserToken,
+    pub token: MaknaeSecret,
     pub entry: UserProviderEntry,
     pub kv_mount: String,
     pub user_prefix: String,
@@ -1040,7 +1041,8 @@ mod tests {
 
     fn wrapped(token: &str) -> maknae_vault::WrappedSecret {
         maknae_vault::WrappedSecret {
-            token: maknae_vault::WrappingToken::new(zeroize::Zeroizing::new(token.into())).unwrap(),
+            token: maknae_io::MaknaeSecret::vault_token(zeroize::Zeroizing::new(token.into()))
+                .unwrap(),
             ttl: std::time::Duration::from_secs(60),
             creation_path: FULL_PATH.into(),
             creation_time: "2026-10-02T00:00:00Z".into(),
@@ -1277,8 +1279,7 @@ mod tests {
             seal_key_from("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n").unwrap_err(),
             "the Egress Daemon public key published on this host is not usable (the sealing public key is not a canonical P-384 SubjectPublicKeyInfo PEM): ask your administrator to run `sudo maknae enroll`"
         );
-        let t =
-            maknae_vault::UserToken::new(zeroize::Zeroizing::new("hvs.copy-153".into())).unwrap();
+        let t = MaknaeSecret::vault_token(zeroize::Zeroizing::new("hvs.copy-153".into())).unwrap();
         assert!(token_copy(&t).unwrap().expose() == "hvs.copy-153");
     }
 

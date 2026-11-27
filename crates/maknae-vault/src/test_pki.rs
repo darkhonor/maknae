@@ -54,7 +54,7 @@ impl TestCa {
             alg,
             leaf.pem(),
             vec![self.pem.clone()],
-            kp.serialize_der().into(),
+            maknae_io::MaknaeSecretBytes::new(kp.serialize_der().into()).unwrap(),
         )
     }
 

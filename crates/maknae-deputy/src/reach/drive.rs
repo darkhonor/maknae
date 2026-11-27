@@ -10,9 +10,9 @@ use crate::mint::signer::Signer;
 use crate::unseal::ForgeOpener;
 use maknae_config::{ApiBase, GithubAppConfig, REACH_CONCURRENCY_MAX};
 use maknae_forge::{Auth, HttpReply, Step};
+use maknae_io::MaknaeSecret;
 use maknae_proto::{Observations, ReachRefusal, ReachReply, ReachRequest, ReachSide};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 /// The deputy's own bound on concurrent reach exchanges; waiting for one counts against the frame's deadline.
 pub struct ReachGate(tokio::sync::Semaphore);
@@ -46,7 +46,7 @@ pub struct ReachDeps<'a, S: Signer, O: ForgeOpener> {
 struct Held {
     github: GithubClient,
     api: ApiBase,
-    token: Option<Zeroizing<String>>,
+    token: Option<MaknaeSecret>,
     minting: bool,
 }
 
@@ -76,7 +76,7 @@ impl Drop for Held {
                     .enable_all()
                     .build()
                     .ok()
-                    .and_then(|rt| rt.block_on(github.revoke_status(&api, &token)).ok());
+                    .and_then(|rt| rt.block_on(github.revoke_status(&api, token.expose())).ok());
                 if let Some(line) = unwound_line(status) {
                     eprintln!("{line}");
                 }
@@ -131,7 +131,14 @@ async fn drive<S: Signer, O: ForgeOpener>(
         possibly_live(a.req().server(), ForgeError::Unanswered, d.journal);
     }
     if let Some(token) = held.token.take() {
-        revoke(d.github, a.api(), &token, a.req().server(), d.journal).await;
+        revoke(
+            d.github,
+            a.api(),
+            token.expose(),
+            a.req().server(),
+            d.journal,
+        )
+        .await;
     }
     match outcome {
         Ok(Ok(observed)) => (ReachReply::Observed(observed), None),
@@ -156,7 +163,7 @@ async fn exchange<S: Signer, O: ForgeOpener>(
                 .open(sealed.as_bytes(), open)
                 .await
                 .map_err(open_refusal)?;
-            if !tasker_token_is_usable(&token) {
+            if !tasker_token_is_usable(token.expose()) {
                 return Err(ReachRefusal::Login);
             }
             (a.reach().tasker(asks), Some(token), None)
@@ -172,10 +179,10 @@ async fn exchange<S: Signer, O: ForgeOpener>(
             Step::Done(result) => return result,
             Step::Get { path, auth } => {
                 let bearer = match (auth, app) {
-                    (Auth::Tasker, _) => tasker.as_ref().map(|t| t.as_str()),
+                    (Auth::Tasker, _) => tasker.as_ref().map(|t| t.expose()),
                     (Auth::AppJwt, Some(app)) => Some(app_jwt(app, d, &mut jwt).await?),
                     (Auth::AppJwt, None) => None,
-                    (Auth::Installation, _) => held.token.as_ref().map(|t| t.as_str()),
+                    (Auth::Installation, _) => held.token.as_ref().map(|t| t.expose()),
                 };
                 match bearer {
                     Some(bearer) => d.github.get(a.api(), &path, bearer).await.ok(),
@@ -217,7 +224,7 @@ async fn exchange<S: Signer, O: ForgeOpener>(
             },
             Step::Revoke => {
                 let sent = match held.token.as_ref() {
-                    Some(token) => Some(d.github.revoke_status(a.api(), token).await),
+                    Some(token) => Some(d.github.revoke_status(a.api(), token.expose()).await),
                     None => None,
                 };
                 match sent {
@@ -244,8 +251,8 @@ fn empty(status: u16) -> HttpReply {
 
 async fn app_jwt<'j, S: Signer, O: ForgeOpener>(
     app: &GithubAppConfig,
-    d: &ReachDeps<'_, S, O>,
-    jwt: &'j mut Option<Zeroizing<String>>,
+    d: &mut ReachDeps<'_, S, O>,
+    jwt: &'j mut Option<MaknaeSecret>,
 ) -> Result<&'j str, ReachRefusal> {
     let token = match jwt.take() {
         Some(token) => token,
@@ -257,10 +264,15 @@ async fn app_jwt<'j, S: Signer, O: ForgeOpener>(
                 .sign(&app.transit_mount, &app.transit_key, input.as_bytes())
                 .await
                 .map_err(|_| ReachRefusal::Signer)?;
-            assemble_jwt(&input, &signature)
+            let held = assemble_jwt(&input, &signature);
+            drop(signature);
+            held.map_err(|e| {
+                (d.journal)(&format!("reach: the App JWT could not be held: {e:?}"));
+                ReachRefusal::Signer
+            })?
         }
     };
-    Ok(jwt.insert(token).as_str())
+    Ok(jwt.insert(token).expose())
 }
 
 async fn revoke(
@@ -342,6 +354,7 @@ mod tests {
     use maknae_proto::{ForgeOp, RepoAsk};
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use zeroize::Zeroizing;
 
     const TASKER_TOKEN: &str = "ghp_TASKER_TOKEN_SENTINEL";
     const INSTALLATION_TOKEN: &str = "ghs_INSTALLATION_TOKEN_SENTINEL";
@@ -357,7 +370,10 @@ mod tests {
     }
 
     fn jwt() -> String {
-        assemble_jwt(&signing_input(5834363, NOW), SIGNATURE).to_string()
+        assemble_jwt(&signing_input(5834363, NOW), SIGNATURE)
+            .unwrap()
+            .expose()
+            .to_owned()
     }
 
     fn metadata_grant(perms: &str) -> String {
@@ -529,7 +545,7 @@ mod tests {
             &self,
             sealed: &[u8],
             req: &ForgeOpenRequest<'_>,
-        ) -> Result<Zeroizing<String>, OpenFailure> {
+        ) -> Result<MaknaeSecret, OpenFailure> {
             self.opened.lock().unwrap().push(format!(
                 "{}|{}|{}|{}",
                 req.server(),
@@ -537,7 +553,8 @@ mod tests {
                 req.key_field(),
                 sealed.len()
             ));
-            self.token.map(|t| Zeroizing::new(t.to_owned()))
+            self.token
+                .map(|t| MaknaeSecret::new(Zeroizing::new(t.to_owned())).unwrap())
         }
     }
 
@@ -820,6 +837,19 @@ mod tests {
         assert_eq!((seen.requests.len(), seen.extra), (0, 0));
 
         let mut rig = Rig::new();
+        rig.signer = FakeSigner::signing(&vec![0u8; 50_000]);
+        let (reply, seen) = rig.run(&agent(), vec![]).await;
+        assert_eq!(refused(&reply), Some(ReachRefusal::Signer));
+        assert_eq!((seen.requests.len(), seen.extra), (0, 0));
+        assert!(
+            rig.journal
+                .iter()
+                .any(|l| l.contains("the App JWT could not be held") && l.contains("TooLong")),
+            "{:?}",
+            rig.journal
+        );
+
+        let mut rig = Rig::new();
         rig.clock = None;
         let (reply, _) = rig.run(&agent(), vec![]).await;
         assert_eq!(refused(&reply), Some(ReachRefusal::Signer));
@@ -1093,7 +1123,8 @@ mod tests {
         let api = ApiBase::parse("https://api.github.com").unwrap();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut held = Held::new(&github, &api);
-            held.token = Some(Zeroizing::new(INSTALLATION_TOKEN.to_owned()));
+            held.token =
+                Some(MaknaeSecret::new(Zeroizing::new(INSTALLATION_TOKEN.to_owned())).unwrap());
             panic!("an exchange unwinds while holding a token");
         }));
         assert!(unwound.is_err());

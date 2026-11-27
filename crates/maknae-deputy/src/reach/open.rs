@@ -43,7 +43,9 @@ pub fn open_refusal(f: OpenFailure) -> ReachRefusal {
         OpenFailure::Seal | OpenFailure::Token | OpenFailure::WrongPath | OpenFailure::Ttl => {
             ReachRefusal::Seal
         }
-        OpenFailure::Invalid | OpenFailure::Field | OpenFailure::Vault => ReachRefusal::Login,
+        OpenFailure::Invalid | OpenFailure::Field | OpenFailure::Vault | OpenFailure::CoreDumps => {
+            ReachRefusal::Login
+        }
     }
 }
 
@@ -242,13 +244,15 @@ mod tests {
     fn each_open_failure_reaches_its_class() {
         use OpenFailure::*;
         assert_eq!(
-            [Request, Seal, Token, WrongPath, Ttl, Invalid, Field, Vault].map(open_refusal),
+            [Request, Seal, Token, WrongPath, Ttl, Invalid, Field, Vault, CoreDumps]
+                .map(open_refusal),
             [
                 ReachRefusal::Request,
                 ReachRefusal::Seal,
                 ReachRefusal::Seal,
                 ReachRefusal::Seal,
                 ReachRefusal::Seal,
+                ReachRefusal::Login,
                 ReachRefusal::Login,
                 ReachRefusal::Login,
                 ReachRefusal::Login,

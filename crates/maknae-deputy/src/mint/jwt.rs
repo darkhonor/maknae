@@ -2,6 +2,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use maknae_io::{MaknaeSecret, SecretError};
 use zeroize::Zeroizing;
 
 pub const JWT_BACKDATE_SECS: u64 = 60;
@@ -22,8 +23,11 @@ pub fn signing_input(app_id: u64, now: u64) -> String {
     )
 }
 
-/// The JWT is a bearer credential, so its buffer is sized once and never grows (ADR-0026).
-pub fn assemble_jwt(signing_input: &str, signature: &[u8]) -> Zeroizing<String> {
+pub fn assemble_jwt(signing_input: &str, signature: &[u8]) -> Result<MaknaeSecret, SecretError> {
+    MaknaeSecret::new(jwt_text(signing_input, signature))
+}
+
+fn jwt_text(signing_input: &str, signature: &[u8]) -> Zeroizing<String> {
     let encoded = base64::encoded_len(signature.len(), false).unwrap_or(usize::MAX);
     let mut jwt = Zeroizing::new(String::with_capacity(
         signing_input
@@ -69,12 +73,18 @@ mod tests {
     #[test]
     fn assemble_jwt_appends_base64url_signature_without_padding() {
         let signature = [0xfb, 0xff, 0xfe, 0x00, 0x3e];
-        let jwt = assemble_jwt("aGVhZA.Y2xhaW1z", &signature);
+        let jwt = jwt_text("aGVhZA.Y2xhaW1z", &signature);
         assert_eq!(jwt.as_str(), "aGVhZA.Y2xhaW1z.-__-AD4");
         assert_eq!(jwt.capacity(), jwt.len());
+        assert_eq!(
+            assemble_jwt("aGVhZA.Y2xhaW1z", &signature)
+                .unwrap()
+                .expose(),
+            "aGVhZA.Y2xhaW1z.-__-AD4"
+        );
         for n in [0usize, 1, 2, 3, 256, 512] {
             let sig = vec![0xab; n];
-            let jwt = assemble_jwt("h.c", &sig);
+            let jwt = jwt_text("h.c", &sig);
             let (prefix, encoded) = jwt.rsplit_once('.').expect("three parts");
             assert_eq!(prefix, "h.c");
             assert!(!encoded.contains('='), "{n}");

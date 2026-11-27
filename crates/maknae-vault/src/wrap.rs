@@ -1,10 +1,7 @@
-use crate::api_shape::{
-    de_secret, json_refusal, token_is_acceptable, url_path_is_safe, SecretStr, VaultOp,
-    WrapMismatch,
-};
-use crate::transit::ServiceToken;
-use crate::user_login::UserToken;
+use crate::api_shape::{json_refusal, url_path_is_safe, VaultOp, WrapMismatch};
+use crate::error::secret_error;
 use crate::VaultError;
+use maknae_io::MaknaeSecret;
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use serde::Deserialize;
 use std::fmt;
@@ -39,61 +36,12 @@ pub fn forge_token_subpath(server: &str) -> Option<ForgeTokenSubpath> {
     Some(ForgeTokenSubpath(subpath))
 }
 
-pub struct KvSecret(Zeroizing<String>);
-
-impl KvSecret {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
-            what: "KV secret",
-            why,
-        })?;
-        Ok(Self(secret))
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
+pub fn kv_secret(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::vault_token(secret).map_err(|e| secret_error("KV secret", e))
 }
 
-impl fmt::Debug for KvSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("KvSecret(<redacted>)")
-    }
-}
-
-pub struct WrappingToken(Zeroizing<String>);
-
-impl WrappingToken {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
-            what: "wrapping token",
-            why,
-        })?;
-        Ok(Self(secret))
-    }
-
-    pub fn from_opened(mut bytes: Zeroizing<Vec<u8>>) -> Result<Self, VaultError> {
-        match String::from_utf8(std::mem::take(&mut *bytes)) {
-            Ok(s) => Self::new(Zeroizing::new(s)),
-            Err(e) => {
-                let _wiped = Zeroizing::new(e.into_bytes());
-                Err(VaultError::InvalidSecret {
-                    what: "wrapping token",
-                    why: "not UTF-8",
-                })
-            }
-        }
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for WrappingToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("WrappingToken(<redacted>)")
-    }
+pub(crate) fn wrapping_token(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::vault_token(secret).map_err(|e| secret_error("wrapping token", e))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,9 +112,9 @@ fn missing_client_token() -> VaultError {
 
 pub(crate) fn client_token<'a>(
     op: VaultOp,
-    user: Option<&'a UserToken>,
-    wrapping: Option<&'a WrappingToken>,
-    service: Option<&'a ServiceToken>,
+    user: Option<&'a MaknaeSecret>,
+    wrapping: Option<&'a MaknaeSecret>,
+    service: Option<&'a MaknaeSecret>,
 ) -> Result<Option<&'a str>, VaultError> {
     match op {
         VaultOp::UserpassLogin | VaultOp::WrapLookup | VaultOp::AppRoleLogin => Ok(None),
@@ -268,7 +216,7 @@ pub fn aad_parts<'a>(
 
 #[derive(Debug)]
 pub struct WrappedSecret {
-    pub token: WrappingToken,
+    pub token: MaknaeSecret,
     pub ttl: Duration,
     pub creation_path: String,
     pub creation_time: String,
@@ -299,7 +247,7 @@ struct WrappedReadDto {
 
 #[derive(Deserialize)]
 struct WrapInfoDto {
-    #[serde(deserialize_with = "de_secret")]
+    #[serde(deserialize_with = "maknae_io::secret::de_zeroizing_string")]
     token: Zeroizing<String>,
     ttl: u64,
     creation_time: String,
@@ -340,7 +288,7 @@ fn parse_wrapped(
     }
     check_ttl(info.ttl, requested_ttl)?;
     Ok(WrappedSecret {
-        token: WrappingToken::new(info.token)?,
+        token: wrapping_token(info.token)?,
         ttl: Duration::from_secs(info.ttl),
         creation_path: info.creation_path,
         creation_time: info.creation_time,
@@ -390,6 +338,11 @@ struct Level<'f> {
     depth: u8,
 }
 
+#[derive(Deserialize)]
+struct KvLeaf(
+    #[serde(deserialize_with = "maknae_io::secret::de_zeroizing_string")] Zeroizing<String>,
+);
+
 impl<'de> DeserializeSeed<'de> for Level<'_> {
     type Value = Option<Zeroizing<String>>;
 
@@ -421,7 +374,7 @@ impl<'de> Visitor<'de> for Level<'_> {
                 return Err(<A::Error as serde::de::Error>::custom("duplicate key"));
             }
             found = Some(if self.depth == LEAF_DEPTH {
-                Some(map.next_value::<SecretStr>()?.0)
+                Some(map.next_value::<KvLeaf>()?.0)
             } else {
                 map.next_value_seed(Level {
                     field: self.field,
@@ -433,35 +386,46 @@ impl<'de> Visitor<'de> for Level<'_> {
     }
 }
 
-pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<String>, VaultError> {
+pub(crate) fn pick_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<String>, VaultError> {
     let mut de = serde_json::Deserializer::from_slice(body);
     let picked = Level { field, depth: 0 }
         .deserialize(&mut de)
         .map_err(|e| json_refusal(VaultOp::Unwrap, &e))?;
     de.end().map_err(|e| json_refusal(VaultOp::Unwrap, &e))?;
-    picked.ok_or_else(|| VaultError::KvField {
+    let picked = picked.ok_or_else(|| VaultError::KvField {
         field: field.to_string(),
         why: "absent",
-    })
+    })?;
+    if picked.is_empty() {
+        return Err(VaultError::KvField {
+            field: field.to_string(),
+            why: "empty",
+        });
+    }
+    Ok(picked)
+}
+
+pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::new(pick_kv_field(body, field)?).map_err(|e| secret_error("KV field", e))
 }
 
 pub(crate) trait UnwrapOps {
     fn lookup(
         &self,
-        token: &WrappingToken,
+        token: &MaknaeSecret,
     ) -> impl Future<Output = Result<WrapLookup, VaultError>> + Send;
     fn unwrap_body(
         &self,
-        token: WrappingToken,
+        token: MaknaeSecret,
         checked: &CheckedLookup,
     ) -> impl Future<Output = Result<Zeroizing<Vec<u8>>, VaultError>> + Send;
 }
 
 pub(crate) async fn unwrap_checked<O: UnwrapOps>(
     ops: &O,
-    token: WrappingToken,
+    token: MaknaeSecret,
     expect: &WrapExpectation,
-) -> Result<Zeroizing<String>, VaultError> {
+) -> Result<MaknaeSecret, VaultError> {
     let lookup = ops.lookup(&token).await?;
     let checked = check_lookup(&lookup, expect)?;
     let body = ops.unwrap_body(token, &checked).await?;
@@ -487,8 +451,8 @@ mod tests {
         .unwrap()
     }
 
-    fn wrapping(s: &str) -> WrappingToken {
-        WrappingToken::new(Zeroizing::new(s.to_string())).unwrap()
+    fn wrapping(s: &str) -> MaknaeSecret {
+        wrapping_token(Zeroizing::new(s.to_string())).unwrap()
     }
 
     fn wrapped_body(path: &str, ttl: u64, data: &str) -> String {
@@ -575,13 +539,13 @@ mod tests {
 
     #[test]
     fn a_kv_secret_is_shape_checked_and_redacted() {
-        let s = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
+        let s = kv_secret(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
         assert!(s.expose() == "github_pat_SENTINEL");
-        assert_eq!(format!("{s:?}"), "KvSecret(<redacted>)");
+        assert_eq!(format!("{s:?}"), "MaknaeSecret(<redacted>)");
         for bad in ["", "a b", "a\"b", "tok\n"] {
             assert!(
                 matches!(
-                    KvSecret::new(Zeroizing::new(bad.into())),
+                    kv_secret(Zeroizing::new(bad.into())),
                     Err(VaultError::InvalidSecret {
                         what: "KV secret",
                         ..
@@ -692,7 +656,7 @@ mod tests {
 
     #[test]
     fn each_call_carries_only_its_own_token_and_lookup_carries_none() {
-        let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let wrap = wrapping("hvs.wrap");
         let (u, w) = (Some(&user), Some(&wrap));
         let pick = |op| client_token(op, u, w, None).unwrap();
@@ -740,9 +704,9 @@ mod tests {
 
     #[test]
     fn client_token_requires_the_service_token_for_transit_sign() {
-        let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let wrap = wrapping("hvs.wrap");
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let (u, w, s) = (Some(&user), Some(&wrap), Some(&service));
         assert!(client_token(VaultOp::TransitSign, u, w, s).unwrap() == Some("hvs.service"));
         assert_eq!(client_token(VaultOp::AppRoleLogin, u, w, s).unwrap(), None);
@@ -963,17 +927,14 @@ mod tests {
 
     #[test]
     fn a_wrapping_token_from_opened_bytes_is_utf8_and_shape_checked() {
-        let t = WrappingToken::from_opened(Zeroizing::new(b"hvs.OPENED".to_vec())).unwrap();
+        let t = MaknaeSecret::from_opened(Zeroizing::new(b"hvs.OPENED".to_vec())).unwrap();
         assert!(t.expose() == "hvs.OPENED");
-        assert!(format!("{t:?}") == "WrappingToken(<redacted>)");
+        assert!(format!("{t:?}") == "MaknaeSecret(<redacted>)");
         assert!(matches!(
-            WrappingToken::from_opened(Zeroizing::new(vec![0xff, 0xfe])),
-            Err(VaultError::InvalidSecret {
-                why: "not UTF-8",
-                ..
-            })
+            MaknaeSecret::from_opened(Zeroizing::new(vec![0xff, 0xfe])),
+            Err(maknae_io::SecretError::NotUtf8)
         ));
-        assert!(WrappingToken::from_opened(Zeroizing::new(b"hvs. x".to_vec())).is_err());
+        assert!(MaknaeSecret::from_opened(Zeroizing::new(b"hvs. x".to_vec())).is_err());
     }
 
     #[test]
@@ -1085,14 +1046,15 @@ mod tests {
 
     #[test]
     fn field_selection_returns_only_the_named_field() {
-        let v = select_kv_field(KV_BODY, "api_key").unwrap();
+        let v = pick_kv_field(KV_BODY, "api_key").unwrap();
         assert!(v.as_str() == "sk-ALICE-SENTINEL");
         assert_eq!(v.capacity(), 17);
         let escaped =
-            select_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k").unwrap();
-        assert!(escaped.as_str() == "sk-X");
+            pick_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k").unwrap();
+        assert!(escaped.as_str() == "sk-X" && escaped.capacity() == 4);
         let named_data = select_kv_field(br#"{"data":{"data":{"data":"d"}}}"#, "data").unwrap();
-        assert!(named_data.as_str() == "d");
+        assert!(named_data.expose() == "d");
+        assert!(select_kv_field(KV_BODY, "api_key").unwrap().expose() == "sk-ALICE-SENTINEL");
     }
 
     #[test]
@@ -1130,6 +1092,14 @@ mod tests {
         assert!(!e.contains("98765432"), "{e}");
     }
 
+    #[test]
+    fn an_empty_kv_value_is_refused_by_name() {
+        let Err(e) = select_kv_field(br#"{"data":{"data":{"api_key":""}}}"#, "api_key") else {
+            panic!("an empty KV value must be refused");
+        };
+        assert!(matches!(e, VaultError::KvField { why: "empty", .. }), "{e}");
+    }
+
     struct Scripted {
         path: &'static str,
         ttl_secs: u64,
@@ -1156,7 +1126,7 @@ mod tests {
     }
 
     impl UnwrapOps for Scripted {
-        async fn lookup(&self, token: &WrappingToken) -> Result<WrapLookup, VaultError> {
+        async fn lookup(&self, token: &MaknaeSecret) -> Result<WrapLookup, VaultError> {
             assert!(token.expose() == "hvs.wrap");
             self.calls.lock().unwrap().push("lookup");
             if !self.lookup_ok {
@@ -1171,7 +1141,7 @@ mod tests {
 
         async fn unwrap_body(
             &self,
-            token: WrappingToken,
+            token: MaknaeSecret,
             _checked: &CheckedLookup,
         ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
             assert!(token.expose() == "hvs.wrap");
@@ -1194,7 +1164,7 @@ mod tests {
     fn a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field() {
         let ops = Scripted::new(ALICE, 60, true);
         let key = run(unwrap_checked(&ops, wrapping("hvs.wrap"), &expect())).unwrap();
-        assert!(key.as_str() == "sk-ALICE-SENTINEL");
+        assert!(key.expose() == "sk-ALICE-SENTINEL");
         assert_eq!(ops.calls(), ["lookup", "unwrap"]);
     }
 

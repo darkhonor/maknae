@@ -4,8 +4,9 @@ use crate::token_record::{
     token_file_refusal, token_file_required, StoredToken, SystemdCreds, TokenCustody,
     MAX_CREDS_FILE_BYTES, MAX_TOKEN_RECORD_BYTES, TOKEN_CREDS_NAME, TOKEN_FILE_MODE,
 };
-use crate::{UserToken, VaultError};
+use crate::VaultError;
 use maknae_io::program::{command, Program};
+use maknae_io::MaknaeSecret;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -59,7 +60,7 @@ pub fn load_user_token(
     cli_dir: &Path,
     vault_addr: &str,
     now: u64,
-) -> Result<UserToken, VaultError> {
+) -> Result<MaknaeSecret, VaultError> {
     read_user_token(cli_dir)?.usable_at(vault_addr, now)
 }
 
@@ -318,7 +319,7 @@ mod tests {
 
     fn stored(token: &str, expires_at: u64) -> StoredToken {
         let login = crate::UserLogin {
-            token: UserToken::new(Zeroizing::new(token.into())).unwrap(),
+            token: MaknaeSecret::vault_token(Zeroizing::new(token.into())).unwrap(),
             lease: Duration::from_secs(expires_at),
             renewable: true,
         };

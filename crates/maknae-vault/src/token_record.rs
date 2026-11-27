@@ -1,6 +1,6 @@
 use crate::keychain_policy::{KeychainDelete, ITEM_NOT_FOUND, TOKEN_DELETE_REMEDY};
-use crate::{UserLogin, UserToken, VaultError, MAX_TOKEN_BYTES};
-use maknae_io::{AnchorRequired, IoError, IoKind, TargetRequired};
+use crate::{UserLogin, VaultError, MAX_TOKEN_BYTES};
+use maknae_io::{AnchorRequired, IoError, IoKind, MaknaeSecret, TargetRequired};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,7 +22,7 @@ pub const MAX_TOKEN_RECORD_BYTES: usize =
 
 #[derive(Debug)]
 pub struct StoredToken {
-    token: UserToken,
+    token: MaknaeSecret,
     expires_at: u64,
     vault_addr: String,
 }
@@ -58,6 +58,13 @@ fn parse_expiry(digits: &[u8]) -> Option<u64> {
     })
 }
 
+fn record_token_error(e: VaultError) -> VaultError {
+    match e {
+        VaultError::InvalidSecret { .. } => VaultError::TokenRecord("malformed token"),
+        other => other,
+    }
+}
+
 impl StoredToken {
     pub fn from_login(
         login: UserLogin,
@@ -80,7 +87,7 @@ impl StoredToken {
         self.vault_addr == vault_addr
     }
 
-    pub fn token(&self) -> &UserToken {
+    pub fn token(&self) -> &MaknaeSecret {
         &self.token
     }
 
@@ -128,8 +135,8 @@ impl StoredToken {
         let token = std::str::from_utf8(&rest[at + 1..])
             .map_err(|_| VaultError::TokenRecord("the token is not UTF-8"))?;
         Ok(Self {
-            token: UserToken::new(Zeroizing::new(token.to_owned()))
-                .map_err(|_| VaultError::TokenRecord("malformed token"))?,
+            token: crate::user_token(Zeroizing::new(token.to_owned()))
+                .map_err(record_token_error)?,
             expires_at,
             vault_addr: String::from_utf8_lossy(addr).into_owned(),
         })
@@ -143,14 +150,14 @@ impl StoredToken {
         now < self.expires_at
     }
 
-    pub fn fresh_at(self, now: u64) -> Result<UserToken, VaultError> {
+    pub fn fresh_at(self, now: u64) -> Result<MaknaeSecret, VaultError> {
         if !self.is_fresh_at(now) {
             return Err(VaultError::TokenExpired);
         }
         Ok(self.token)
     }
 
-    pub fn usable_at(self, vault_addr: &str, now: u64) -> Result<UserToken, VaultError> {
+    pub fn usable_at(self, vault_addr: &str, now: u64) -> Result<MaknaeSecret, VaultError> {
         if !self.issued_by(vault_addr) {
             return Err(VaultError::TokenOtherVault(self.vault_addr));
         }
@@ -346,10 +353,27 @@ pub(crate) fn read_record(mut r: impl Read, cap: usize) -> Result<Zeroizing<Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_token_the_core_dump_denial_refused_keeps_its_cause() {
+        let denied = crate::error::secret_error(
+            "user token",
+            maknae_io::SecretError::CoreDumps(std::io::Error::other("rlimit")),
+        );
+        assert!(matches!(
+            super::record_token_error(denied),
+            VaultError::CoreDumps(_)
+        ));
+        let shape = crate::user_token(Zeroizing::new("hvs.a b".into())).unwrap_err();
+        assert!(matches!(
+            super::record_token_error(shape),
+            VaultError::TokenRecord("malformed token")
+        ));
+    }
+
     use super::*;
 
-    fn token(s: &str) -> UserToken {
-        UserToken::new(Zeroizing::new(s.to_string())).unwrap()
+    fn token(s: &str) -> MaknaeSecret {
+        MaknaeSecret::vault_token(Zeroizing::new(s.to_string())).unwrap()
     }
 
     const ADDR: &str = "https://vault.example:8200/v1/";

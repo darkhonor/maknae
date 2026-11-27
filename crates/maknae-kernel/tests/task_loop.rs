@@ -3878,7 +3878,7 @@ async fn an_agents_sealed_key_opens_only_on_the_path_the_kernel_admits_for_that_
         *read.lock().unwrap() = Some(path.clone());
         async move {
             Ok(maknae_vault::WrappedSecret {
-                token: maknae_vault::WrappingToken::new(Zeroizing::new(
+                token: maknae_io::MaknaeSecret::vault_token(Zeroizing::new(
                     "hvs.wrap-sentinel-629".into(),
                 ))
                 .unwrap(),

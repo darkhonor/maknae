@@ -107,6 +107,7 @@ pub enum VaultError {
         what: &'static str,
         why: &'static str,
     },
+    CoreDumps(std::io::Error),
     InvalidWrapTtl(&'static str),
     UserpassLogin(&'static str),
     VaultStatus {
@@ -249,6 +250,7 @@ impl std::fmt::Display for VaultError {
             VaultError::ConfigShape { key, want } => write!(f, "config key {key} must be {want}"),
             VaultError::InvalidUsername(m) => write!(f, "invalid Vault username: {m}"),
             VaultError::InvalidSecret { what, why } => write!(f, "malformed {what}: {why}"),
+            VaultError::CoreDumps(e) => write!(f, "core dumps could not be denied: {e}"),
             VaultError::InvalidWrapTtl(m) => write!(f, "invalid wrap TTL: {m}"),
             VaultError::UserpassLogin(m) => write!(f, "userpass login refused: {m}"),
             VaultError::VaultStatus {
@@ -319,6 +321,16 @@ impl std::fmt::Display for VaultError {
 
 impl std::error::Error for VaultError {}
 
+pub(crate) fn secret_error(what: &'static str, e: maknae_io::SecretError) -> VaultError {
+    match e {
+        maknae_io::SecretError::CoreDumps(io) => VaultError::CoreDumps(io),
+        other => VaultError::InvalidSecret {
+            what,
+            why: other.why(),
+        },
+    }
+}
+
 impl From<maknae_config::ConfigError> for VaultError {
     fn from(e: maknae_config::ConfigError) -> Self {
         VaultError::Config(e)
@@ -328,6 +340,25 @@ impl From<maknae_config::ConfigError> for VaultError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_io::SecretError;
+
+    #[test]
+    fn a_core_dump_failure_is_reported_as_its_own_vault_error() {
+        let denied = SecretError::CoreDumps(std::io::Error::from_raw_os_error(1));
+        assert!(matches!(
+            secret_error("service token", denied),
+            VaultError::CoreDumps(e) if e.raw_os_error() == Some(1)
+        ));
+        for (e, why) in [
+            (SecretError::Empty, "is empty"),
+            (SecretError::TooLong, "is longer than its limit"),
+        ] {
+            assert!(matches!(
+                secret_error("service token", e),
+                VaultError::InvalidSecret { what: "service token", why: w } if w == why
+            ));
+        }
+    }
 
     #[test]
     fn each_crypto_refusal_keeps_its_name_and_message() {

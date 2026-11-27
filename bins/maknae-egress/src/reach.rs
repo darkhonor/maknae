@@ -136,9 +136,9 @@ mod tests {
             &self,
             _sealed: &[u8],
             req: &ForgeOpenRequest<'_>,
-        ) -> Result<Zeroizing<String>, OpenFailure> {
+        ) -> Result<maknae_io::MaknaeSecret, OpenFailure> {
             self.0.lock().unwrap().push(req.expected_path().to_owned());
-            Ok(Zeroizing::new("ghp_TASKERSENTINEL".into()))
+            Ok(maknae_io::MaknaeSecret::new(Zeroizing::new("ghp_TASKERSENTINEL".into())).unwrap())
         }
     }
 

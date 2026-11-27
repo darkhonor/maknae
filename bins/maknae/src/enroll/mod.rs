@@ -39,6 +39,7 @@ use crate::stderr::errln;
 pub(crate) use agent_access::{Host, Platform, Ran, Run};
 use clap::{ArgGroup, Args, Subcommand};
 use maknae_io::program::{command, Program};
+use maknae_io::MaknaeSecret;
 use maknae_msgs::{detect_locale, msg, Locale, MsgId};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1348,24 +1349,51 @@ async fn run_helper(
 // Token intake (spec §4.1 step 2)
 // ============================================================================
 
-fn intake_token(args: &EnrollArgs, locale: Locale) -> Result<Zeroizing<String>, EnrollError> {
+fn intake_token(args: &EnrollArgs, locale: Locale) -> Result<MaknaeSecret, EnrollError> {
     intake_token_from(args.token_file.as_deref(), locale)
+}
+
+fn read_token_bytes(r: &mut impl std::io::Read) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut buf = Zeroizing::new(vec![0u8; maknae_io::MAX_SECRET_BYTES + 1]);
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if n > maknae_io::MAX_SECRET_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("longer than {} bytes", maknae_io::MAX_SECRET_BYTES),
+        ));
+    }
+    buf.truncate(n);
+    Ok(buf)
 }
 
 fn intake_token_from(
     token_file: Option<&Path>,
     locale: Locale,
-) -> Result<Zeroizing<String>, EnrollError> {
+) -> Result<MaknaeSecret, EnrollError> {
     if let Some(path) = token_file {
-        let raw = std::fs::read_to_string(path).map_err(|e| EnrollError::Io {
+        let io_err = |source: String| EnrollError::Io {
             path: path.to_path_buf(),
-            source: e.to_string(),
-        })?;
-        let trimmed = raw.trim();
+            source,
+        };
+        let raw = std::fs::File::open(path).and_then(|mut f| read_token_bytes(&mut f));
+        let raw = raw.map_err(|e| io_err(e.to_string()))?;
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| io_err("stream did not contain valid UTF-8".to_owned()))?;
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             return Err(EnrollError::MissingToken);
         }
-        return Ok(Zeroizing::new(trimmed.to_string()));
+        return Ok(maknae_vault::operator_token(Zeroizing::new(
+            trimmed.to_string(),
+        ))?);
     }
     let prompt = msg(locale, MsgId::EnrollTokenPrompt);
     let raw = rpassword::prompt_password(prompt).map_err(|e| EnrollError::Io {
@@ -1375,7 +1403,7 @@ fn intake_token_from(
     if raw.trim().is_empty() {
         return Err(EnrollError::MissingToken);
     }
-    Ok(Zeroizing::new(raw))
+    Ok(maknae_vault::operator_token(Zeroizing::new(raw))?)
 }
 
 // ============================================================================
@@ -1601,7 +1629,7 @@ async fn store_seal_key(
     release_team: &str,
 ) -> Result<(), EnrollError> {
     keychain_write::seal_secret_macos(
-        maknae_vault::seal_key_to_hex(der).expose(),
+        maknae_vault::seal_key_to_hex(der)?.expose(),
         maknae_vault::KeychainPlane::Egress,
         keychain_write::EGRESS_BINARY,
         release_team,
@@ -1652,7 +1680,7 @@ async fn place_seal_key(
                 GenerateStep::RetractPub => retract_seal_pub(pub_path, 0)?,
                 GenerateStep::StoreCustody => {
                     store_seal_key(
-                        &der,
+                        der.expose(),
                         custody,
                         args.verbose,
                         resolver,
@@ -1769,14 +1797,14 @@ async fn graph_key_present(custody: &Path) -> Result<bool, EnrollError> {
 
 #[cfg(target_os = "macos")]
 async fn store_graph_key(
-    key: maknae_vault::GraphKey,
+    key: maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
     _custody: &artifact_table::Artifact,
     _verbose: bool,
     _resolver: &artifact_write::RealOwnerResolver,
     release_team: &str,
 ) -> Result<(), EnrollError> {
     keychain_write::add_secret_macos(
-        maknae_vault::seal_key_to_hex(&key.into_bytes()[..]).expose(),
+        maknae_vault::seal_key_to_hex(&key.into_zeroizing()[..])?.expose(),
         maknae_vault::KeychainPlane::Graph,
         keychain_write::DAEMON_BINARY,
         release_team,
@@ -1786,13 +1814,13 @@ async fn store_graph_key(
 
 #[cfg(not(target_os = "macos"))]
 async fn store_graph_key(
-    key: maknae_vault::GraphKey,
+    key: maknae_io::MaknaeSecret<[u8; maknae_vault::GRAPH_KEY_BYTES]>,
     custody: &artifact_table::Artifact,
     verbose: bool,
     resolver: &artifact_write::RealOwnerResolver,
 ) -> Result<(), EnrollError> {
     seal_linux(
-        &key.into_bytes()[..],
+        &key.into_zeroizing()[..],
         &custody.path,
         maknae_vault::GRAPH_KEY_CRED_NAME,
         verbose,
@@ -1821,7 +1849,7 @@ async fn place_graph_key(
     match action {
         GraphKeyAction::Create => {
             store_graph_key(
-                maknae_vault::GraphKey::generate()?,
+                maknae_vault::generate_graph_key()?,
                 custody,
                 args.verbose,
                 resolver,
@@ -2813,7 +2841,7 @@ async fn finish_enrollment(
     #[cfg(target_os = "macos")] release_team: &str,
     seal_home: maknae_vault::SealPubHome,
     daemon_role_id: &str,
-    daemon_secret: &Zeroizing<String>,
+    daemon_secret: &MaknaeSecret,
     vault_ca_pem: &[u8],
     root_ca_pem: &str,
     int_ca_pem: &str,
@@ -2902,7 +2930,7 @@ async fn finish_enrollment(
     if args.insecure_plaintext_secret {
         contents.insert(
             etc.join("private/maknae-secret-id"),
-            daemon_secret.as_bytes().to_vec(),
+            daemon_secret.expose().as_bytes().to_vec(),
         );
     }
 
@@ -2928,7 +2956,7 @@ async fn finish_enrollment(
         #[cfg(target_os = "macos")]
         {
             keychain_write::seal_secret_macos(
-                daemon_secret,
+                daemon_secret.expose(),
                 maknae_vault::KeychainPlane::Daemon,
                 keychain_write::DAEMON_BINARY,
                 release_team,
@@ -2942,7 +2970,7 @@ async fn finish_enrollment(
         }
     } else {
         seal_linux(
-            daemon_secret.as_bytes(),
+            daemon_secret.expose().as_bytes(),
             &sealed_row.path,
             maknae_vault::DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
             args.verbose,
@@ -3075,6 +3103,109 @@ pub async fn run_enroll_helper(args: HelperArgs) -> ExitCode {
 mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::*;
+
+    fn token_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("maknae-token-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_token_file_is_trimmed_and_read_through_a_symlink_or_a_pipe() {
+        let d = token_dir("read");
+        let file = d.join("token");
+        std::fs::write(&file, "  hvs.SENTINEL-752\n").unwrap();
+        let link = d.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        for p in [&file, &link] {
+            let got = intake_token_from(Some(p), Locale::EnUs).unwrap();
+            assert_eq!(got.expose(), "hvs.SENTINEL-752");
+        }
+        let fifo = d.join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let writer = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || std::fs::write(fifo, "hvs.piped\n").unwrap())
+        };
+        let got = intake_token_from(Some(&fifo), Locale::EnUs).unwrap();
+        assert_eq!(got.expose(), "hvs.piped");
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_token_read_fills_one_buffer_that_never_grows() {
+        struct Trickle<'a>(&'a [u8]);
+        impl std::io::Read for Trickle<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let k = self.0.len().min(buf.len()).min(3);
+                buf[..k].copy_from_slice(&self.0[..k]);
+                self.0 = &self.0[k..];
+                Ok(k)
+            }
+        }
+        let want: Vec<u8> = (0..5000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let got = read_token_bytes(&mut Trickle(&want)).unwrap();
+        assert_eq!(got.as_slice(), want.as_slice());
+        assert_eq!(got.capacity(), maknae_io::MAX_SECRET_BYTES + 1);
+        let full = vec![b'a'; maknae_io::MAX_SECRET_BYTES];
+        assert_eq!(
+            read_token_bytes(&mut Trickle(&full)).unwrap().len(),
+            full.len()
+        );
+        let over = vec![b'a'; maknae_io::MAX_SECRET_BYTES + 1];
+        assert!(read_token_bytes(&mut Trickle(&over)).is_err());
+    }
+
+    #[test]
+    fn the_token_read_retries_an_interrupted_read() {
+        struct Interrupted(Vec<std::io::Result<&'static [u8]>>);
+        impl std::io::Read for Interrupted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let step = self.0.remove(0)?;
+                buf[..step.len()].copy_from_slice(step);
+                Ok(step.len())
+            }
+        }
+        let mut r = Interrupted(vec![
+            Err(std::io::ErrorKind::Interrupted.into()),
+            Ok(b"hvs."),
+            Ok(b"tok"),
+            Ok(b""),
+        ]);
+        let got = read_token_bytes(&mut r).unwrap();
+        assert_eq!(got.as_slice(), b"hvs.tok");
+        assert_eq!(got.capacity(), maknae_io::MAX_SECRET_BYTES + 1);
+    }
+
+    #[test]
+    fn a_token_file_that_is_blank_not_utf8_or_over_the_cap_is_refused() {
+        let d = token_dir("refuse");
+        let file = d.join("token");
+        std::fs::write(&file, " \n").unwrap();
+        assert!(matches!(
+            intake_token_from(Some(&file), Locale::EnUs),
+            Err(EnrollError::MissingToken)
+        ));
+        std::fs::write(&file, b"hvs.\xff").unwrap();
+        match intake_token_from(Some(&file), Locale::EnUs) {
+            Err(EnrollError::Io { path, source }) => {
+                assert_eq!(path, file);
+                assert_eq!(source, "stream did not contain valid UTF-8");
+            }
+            other => panic!("got {other:?}"),
+        }
+        std::fs::write(&file, "a".repeat(maknae_io::MAX_SECRET_BYTES + 1)).unwrap();
+        assert!(
+            matches!(
+                intake_token_from(Some(&file), Locale::EnUs),
+                Err(EnrollError::Io { ref path, .. }) if path == &file
+            ),
+            "a token file over the cap is refused at the read"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     // ---- #93 daemon TPM-detection mechanism (regression guard) -------------
     // The `systemd-analyze has-tpm2` verb is v253+ and errors on RHEL 9's
@@ -4231,7 +4362,7 @@ lpE4Nfhw3jZWJyqzO7kL9ey3/dduAjAfjKftO7e9He2FqUUiExbwKFQ9VTZu30O7\n\
         let client = maknae_vault::OperatorClient::new(
             addr,
             &ca_path,
-            Zeroizing::new("test-token".to_string()),
+            MaknaeSecret::new(Zeroizing::new("test-token".to_string())).unwrap(),
         )
         .expect("OperatorClient::new performs no network I/O — settings-only");
         let _ = std::fs::remove_file(&ca_path);

@@ -585,7 +585,7 @@ mod tests {
             k,
             "not a pem".into(),
             good.chain_pem().to_vec(),
-            good.key_der().to_vec().into(),
+            maknae_io::MaknaeSecretBytes::new(good.key_der().to_vec().into()).unwrap(),
         );
         assert!(sign_task(&bad, task("suga")).is_err());
         assert!(identity_fingerprint(&bad).is_err());

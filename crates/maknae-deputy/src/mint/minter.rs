@@ -8,6 +8,7 @@ use super::jwt::{assemble_jwt, signing_input};
 use super::recipient::recipient_key_owned_by;
 use super::signer::Signer;
 use maknae_config::{AgentId, ApiBase, CredentialKind, GithubAppConfig};
+use maknae_io::{MaknaeSecret, SecretError};
 use maknae_proto::{
     ForgeStatus, MintRefusal, MintReply, PermissionSet, RevokeReply, RevokeRequest,
     SealedCredential, SealedCredentialBytes,
@@ -17,7 +18,6 @@ use maknae_seal::{
     SealPublicKey,
 };
 use std::path::Path;
-use zeroize::Zeroizing;
 
 pub struct MintDeps<'a, S: Signer> {
     pub signer: &'a S,
@@ -36,7 +36,7 @@ pub struct LiveTokens {
     pub api: ApiBase,
     /// The frame's task, agent, class and App, for the journal.
     pub label: String,
-    pub tokens: Vec<Zeroizing<String>>,
+    pub tokens: Vec<MaknaeSecret>,
 }
 
 impl std::fmt::Debug for LiveTokens {
@@ -106,6 +106,12 @@ async fn mint_sets<S: Signer>(
         let token = match mint_one(m.app, set, d).await {
             Ok(t) => t,
             Err(Failure::Signer) => return Err(MintRefusal::Signer),
+            Err(Failure::Jwt(e)) => {
+                (d.journal)(&format!(
+                    "{label} set={index}: the App JWT could not be held: {e:?}"
+                ));
+                return Err(MintRefusal::Signer);
+            }
             Err(Failure::Forge(e)) => {
                 if live_token_may_remain(e) {
                     (d.journal)(&format!(
@@ -127,13 +133,13 @@ async fn mint_sets<S: Signer>(
         let pair = seal_to(
             &recipient,
             &context(CredentialDirection::ToAgent),
-            &token.token,
+            token.token.expose(),
         )
         .and_then(|for_agent| {
             seal_to(
                 d.own_pub,
                 &context(CredentialDirection::ToRevoke),
-                &token.token,
+                token.token.expose(),
             )
             .map(|for_revocation| (for_agent, for_revocation))
         });
@@ -151,6 +157,7 @@ async fn mint_sets<S: Signer>(
 
 enum Failure {
     Signer,
+    Jwt(SecretError),
     Forge(ForgeError),
 }
 
@@ -166,10 +173,11 @@ async fn mint_one<S: Signer>(
         .sign(&app.transit_mount, &app.transit_key, input.as_bytes())
         .await
         .map_err(|_| Failure::Signer)?;
-    let jwt = assemble_jwt(&input, &signature);
+    let jwt = assemble_jwt(&input, &signature).map_err(Failure::Jwt);
     drop(signature);
+    let jwt = jwt?;
     d.github
-        .mint(&app.api, app.installation_id, &jwt, set)
+        .mint(&app.api, app.installation_id, jwt.expose(), set)
         .await
         .map_err(Failure::Forge)
 }
@@ -195,6 +203,7 @@ fn forge_refusal(e: ForgeError) -> MintRefusal {
         | ForgeError::Oversize
         | ForgeError::Shape
         | ForgeError::Malformed { .. }
+        | ForgeError::CoreDumps { .. }
         | ForgeError::Undocumented { .. } => MintRefusal::Forge(ForgeStatus::Other),
     }
 }
@@ -208,6 +217,7 @@ pub(crate) fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Mismatch { revoked: false }
         | ForgeError::Malformed { revoked: false }
         | ForgeError::Undocumented { revoked: false }
+        | ForgeError::CoreDumps { revoked: false }
         | ForgeError::Status(ForgeStatus::Other) => true,
         ForgeError::Status(
             ForgeStatus::Unauthorized
@@ -218,6 +228,7 @@ pub(crate) fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Transport
         | ForgeError::Mismatch { revoked: true }
         | ForgeError::Malformed { revoked: true }
+        | ForgeError::CoreDumps { revoked: true }
         | ForgeError::Undocumented { revoked: true } => false,
     }
 }
@@ -231,7 +242,7 @@ fn frame_label(verb: &str, task: &str, agent: &AgentId, class: &str, app: &str) 
 
 pub async fn revoke_all(github: &GithubClient, live: LiveTokens, journal: &mut dyn FnMut(&str)) {
     for (set, token) in live.tokens.iter().enumerate() {
-        let failure = match github.revoke(&live.api, token).await {
+        let failure = match github.revoke(&live.api, token.expose()).await {
             Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone) => continue,
             Ok(RevokeReply::Refused(r)) => format!("{:?}", RevokeReply::Refused(r)),
             Err(e) => format!("{e:?}"),
@@ -260,9 +271,18 @@ pub async fn revoke<S: Signer>(
     };
     let label = frame_label("revoke", &r.task, agent, &r.class, &r.app);
     let reply = match open_credential(d.own_key, &ctx, r.for_revocation.as_bytes()) {
+        Err(e @ maknae_seal::SealError::CoreDumps(_)) => {
+            (d.journal)(&format!(
+                "{label} set={}: the revocation token could not be held: {e}",
+                r.set
+            ));
+            RevokeReply::Refused(MintRefusal::Request)
+        }
         Err(_) => RevokeReply::Refused(MintRefusal::Request),
-        Ok(token) if !is_installation_token(&token) => RevokeReply::Refused(MintRefusal::Request),
-        Ok(token) => match d.github.revoke(&app.api, &token).await {
+        Ok(token) if !is_installation_token(token.expose()) => {
+            RevokeReply::Refused(MintRefusal::Request)
+        }
+        Ok(token) => match d.github.revoke(&app.api, token.expose()).await {
             Ok(reply) => reply,
             Err(e) => {
                 (d.journal)(&format!(
@@ -298,6 +318,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use zeroize::Zeroizing;
 
     const KIND: &str = "github-app-installation";
     const SIGNATURE: &[u8] = b"transit-signature-sentinel";
@@ -591,6 +612,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_jwt_too_long_to_hold_is_a_signer_refusal_journaled_with_no_github_call() {
+        let mut rig = Rig::new();
+        rig.signer = FakeSigner::signing(&vec![0u8; 50_000]);
+        let (reply, live, seen, journal) = rig.mint(&request(vec![set(&["a"])]), vec![]).await;
+        assert_eq!(reply, MintReply::Refused(MintRefusal::Signer));
+        assert!(live.tokens.is_empty());
+        assert_eq!((seen.requests.len(), seen.extra), (0, 0));
+        assert!(
+            journal
+                .iter()
+                .any(|l| l.contains("the App JWT could not be held") && l.contains("TooLong")),
+            "{journal:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_missing_or_unsafe_recipient_key_refuses_before_any_io() {
         let absent = Rig::new();
         std::fs::remove_file(absent.egress.key_file("coder")).unwrap();
@@ -693,11 +730,11 @@ mod tests {
             );
             assert_eq!(c.input, input.as_bytes());
         }
-        let jwt = super::super::jwt::assemble_jwt(&input, SIGNATURE);
+        let jwt = super::super::jwt::assemble_jwt(&input, SIGNATURE).unwrap();
         assert_eq!(seen.mints(), 2);
         for r in &seen.requests {
             assert!(
-                r.contains(&format!("authorization: Bearer {}", jwt.as_str())),
+                r.contains(&format!("authorization: Bearer {}", jwt.expose())),
                 "{r}"
             );
         }
@@ -705,7 +742,7 @@ mod tests {
         assert!(seen.requests[1].contains(r#""repositories":["beta"]"#));
         assert_eq!(seen.extra, 0);
         assert_eq!(
-            live.tokens.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            live.tokens.iter().map(|t| t.expose()).collect::<Vec<_>>(),
             ["ghs_one", "ghs_two"]
         );
         assert_eq!(live.api.as_str(), "https://api.github.example");
@@ -726,7 +763,7 @@ mod tests {
             let opened =
                 open_credential(&rig.agent_key, &ctx(CredentialDirection::ToAgent, i), blob)
                     .unwrap();
-            assert_eq!(opened.as_str(), want);
+            assert_eq!(opened.expose(), want);
             for wrong in [
                 ctx(CredentialDirection::ToRevoke, i),
                 ctx(CredentialDirection::ToAgent, 1 - i),
@@ -772,7 +809,7 @@ mod tests {
         let blob = creds[0].for_revocation.as_bytes();
         let opened =
             open_credential(&rig.own, &ctx(CredentialDirection::ToRevoke, 0), blob).unwrap();
-        assert_eq!(opened.as_str(), "ghs_one");
+        assert_eq!(opened.expose(), "ghs_one");
         assert!(open_credential(&rig.own, &ctx(CredentialDirection::ToAgent, 0), blob).is_err());
         assert!(
             open_credential(&rig.agent_key, &ctx(CredentialDirection::ToRevoke, 0), blob).is_err()
@@ -1108,7 +1145,7 @@ mod tests {
             label: "mint task=\"t\"".into(),
             tokens: ["t0", "t1", "t2", "t3"]
                 .iter()
-                .map(|t| Zeroizing::new(t.to_string()))
+                .map(|t| MaknaeSecret::new(Zeroizing::new(t.to_string())).unwrap())
                 .collect(),
         };
         let mut lines = Vec::new();
@@ -1335,7 +1372,7 @@ mod tests {
         let live = LiveTokens {
             api: ApiBase::parse("https://api.github.example").unwrap(),
             label: String::new(),
-            tokens: vec![Zeroizing::new("ghs_secret".into())],
+            tokens: vec![MaknaeSecret::new(Zeroizing::new("ghs_secret".into())).unwrap()],
         };
         assert_eq!(format!("{live:?}"), "LiveTokens(<1 tokens>)");
     }

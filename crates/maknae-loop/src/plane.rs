@@ -957,7 +957,7 @@ mod tests {
             role_id: "agent-role".into(),
             agent: AgentId::parse(agent).unwrap(),
         };
-        let secret = maknae_vault::AgentSecret::new(zeroize::Zeroizing::new("s".into()));
+        let secret = maknae_io::MaknaeSecret::new(zeroize::Zeroizing::new("s".into())).unwrap();
         PlaneClient::for_agent(&login, secret).unwrap()
     }
 

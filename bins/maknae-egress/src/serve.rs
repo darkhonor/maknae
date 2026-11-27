@@ -677,8 +677,10 @@ mod tests {
             &self,
             _s: &[u8],
             _r: &OpenRequest<'_>,
-        ) -> Result<zeroize::Zeroizing<String>, OpenFailure> {
-            self.0.map(|k| zeroize::Zeroizing::new(k.to_string()))
+        ) -> Result<maknae_io::MaknaeSecret, OpenFailure> {
+            self.0.map(|k| {
+                maknae_io::MaknaeSecret::new(zeroize::Zeroizing::new(k.to_string())).unwrap()
+            })
         }
     }
 
@@ -1594,9 +1596,14 @@ mod tests {
                 &self,
                 sealed: &[u8],
                 _r: &OpenRequest<'_>,
-            ) -> Result<zeroize::Zeroizing<String>, OpenFailure> {
+            ) -> Result<maknae_io::MaknaeSecret, OpenFailure> {
                 self.sealed.lock().unwrap().push(sealed.to_vec());
-                Ok(zeroize::Zeroizing::new("sk-test-not-real".into()))
+                Ok(
+                    maknae_io::MaknaeSecret::new(zeroize::Zeroizing::new(
+                        "sk-test-not-real".into(),
+                    ))
+                    .unwrap(),
+                )
             }
         }
         fips();
@@ -2131,7 +2138,7 @@ mod tests {
                 assert_eq!(
                     open_credential(&agent, &ctx, c.for_agent.as_bytes())
                         .unwrap()
-                        .as_str(),
+                        .expose(),
                     want
                 );
             }

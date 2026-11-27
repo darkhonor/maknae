@@ -83,7 +83,7 @@ pub use keychain_policy::{
 };
 #[cfg(unix)]
 pub use maknae_plane::SenderVerdict;
-pub use operator::{EntityAlias, EntityFacts, OperatorClient};
+pub use operator::{operator_token, EntityAlias, EntityFacts, OperatorClient};
 pub use password_line::{PasswordFeed, PasswordLine};
 pub use peer_auth::{ChannelPeer, PeerAuth, SanRule};
 pub use peer_identity::{creds_match_listener_uid, creds_match_uid, listener_uid_is, peer_uid_is};
@@ -99,13 +99,13 @@ pub use seal_pub_store::{
 };
 pub use secret_io::read_agent_secret;
 pub use secret_source::{
-    credentials_directory_env, daemon_sealed_credential, graph_key_from_bytes, graph_key_from_hex,
-    resolve_agent_secret_source, resolve_daemon_secret_source, resolve_egress_seal_key_source,
-    resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex, AgentSecret,
-    CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, GraphKey, GraphKeySource,
-    SealKeyDer, SealKeyHex, SecretSourceError, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME,
-    EGRESS_SEAL_KEY_CRED_NAME, EGRESS_SECRET_ID_CRED_NAME, GRAPH_KEY_BYTES, GRAPH_KEY_CRED_NAME,
-    MAX_AGENT_SECRET_BYTES, MAX_SEAL_KEY_BYTES,
+    credentials_directory_env, daemon_sealed_credential, generate_graph_key, graph_key_from_bytes,
+    graph_key_from_hex, resolve_agent_secret_source, resolve_daemon_secret_source,
+    resolve_egress_seal_key_source, resolve_graph_key_source, seal_key_from_hex, seal_key_to_hex,
+    CredentialSourceKind, DaemonSecretSource, EgressSealKeySource, GraphKeySource,
+    SecretSourceError, DAEMON_CREDENTIALS_DIRECTORY_CRED_NAME, EGRESS_SEAL_KEY_CRED_NAME,
+    EGRESS_SECRET_ID_CRED_NAME, GRAPH_KEY_BYTES, GRAPH_KEY_CRED_NAME, MAX_AGENT_SECRET_BYTES,
+    MAX_SEAL_KEY_BYTES,
 };
 #[cfg(unix)]
 pub use socket::bind_listener as bind_group_gated_uds;
@@ -126,20 +126,18 @@ pub use token_record::{
 pub use token_store::{
     erase_user_token, load_user_token, observe_systemd_creds, read_user_token, store_user_token,
 };
-pub use transit::{
-    parse_transit_signature, ServiceLogin, ServiceToken, TRANSIT_SIGN_INPUT_MAX_BYTES,
-};
+pub use transit::{parse_transit_signature, ServiceLogin, TRANSIT_SIGN_INPUT_MAX_BYTES};
 pub use trust_bundle::TrustBundle;
 pub use user_login::{
-    userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
+    password, user_token, userpass_username_is_acceptable, UserLogin, MAX_PASSWORD_BYTES,
     MAX_USERNAME_BYTES,
 };
 pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
 pub use verify::{leaf_not_after, verify_uri_san, VerifyError};
 pub use wrap::{
-    aad_parts, forge_token_subpath, kv_data_path, kv_metadata_path, AadParts, ForgeTokenSubpath,
-    KvDataPath, KvMetadataPath, KvSecret, WrapExpectation, WrapLookup, WrappedSecret,
-    WrappingToken, FORGE_TOKEN_FIELD, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
+    aad_parts, forge_token_subpath, kv_data_path, kv_metadata_path, kv_secret, AadParts,
+    ForgeTokenSubpath, KvDataPath, KvMetadataPath, WrapExpectation, WrapLookup, WrappedSecret,
+    FORGE_TOKEN_FIELD, MAX_KV_DATA_PATH_BYTES, MAX_WRAP_TTL, USER_KEY_WRAP_TTL,
 };
 
 #[used]

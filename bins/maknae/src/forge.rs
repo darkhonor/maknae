@@ -1,8 +1,9 @@
 use crate::stderr::errln;
 use crate::tty::{HiddenLine, PromptError};
 use maknae_agent::hints::Forge;
+use maknae_io::MaknaeSecret;
 use maknae_loop::tasker::{TaskerClient, TaskerError};
-use maknae_vault::{KvSecret, PasswordFeed, UserToken, VaultApi, VaultError, MAX_TOKEN_BYTES};
+use maknae_vault::{PasswordFeed, VaultApi, VaultError, MAX_TOKEN_BYTES};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +22,7 @@ pub(crate) trait LoginStore {
         kv_mount: &str,
         path: &str,
         field: &str,
-        secret: &KvSecret,
+        secret: &MaknaeSecret,
         wrap_ttl: Duration,
     ) -> Result<(), VaultError>;
 
@@ -70,7 +71,7 @@ pub(crate) async fn login(
     place: &Place<'_>,
     forges: &[Forge],
     server: &str,
-    token: impl FnOnce() -> Result<KvSecret, String>,
+    token: impl FnOnce() -> Result<MaknaeSecret, String>,
 ) -> Result<String, String> {
     let path = login_path(forges, server, place)?;
     let secret = token()?;
@@ -160,7 +161,7 @@ impl TokenLine {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Result<KvSecret, String> {
+    pub(crate) fn finish(mut self) -> Result<MaknaeSecret, String> {
         if self.ended != Some(PasswordFeed::Done) {
             return Err("the token line was not completed".into());
         }
@@ -171,7 +172,7 @@ impl TokenLine {
             drop(Zeroizing::new(e.into_bytes()));
             "the token is not UTF-8".to_string()
         })?;
-        KvSecret::new(Zeroizing::new(token)).map_err(|e| e.to_string())
+        maknae_vault::kv_secret(Zeroizing::new(token)).map_err(|e| e.to_string())
     }
 }
 
@@ -200,7 +201,7 @@ pub(crate) fn prompt_failure(e: PromptError) -> String {
     }
 }
 
-fn read_token(server: &str) -> Result<KvSecret, String> {
+fn read_token(server: &str) -> Result<MaknaeSecret, String> {
     let mut line = TokenLine::new();
     crate::tty::read_hidden(&format!("Token for {server} (will be hidden): "), &mut line)
         .map_err(prompt_failure)?;
@@ -209,7 +210,7 @@ fn read_token(server: &str) -> Result<KvSecret, String> {
 
 struct Vault<'a> {
     api: &'a VaultApi,
-    token: &'a UserToken,
+    token: &'a MaknaeSecret,
 }
 
 impl LoginStore for Vault<'_> {
@@ -218,7 +219,7 @@ impl LoginStore for Vault<'_> {
         kv_mount: &str,
         path: &str,
         field: &str,
-        secret: &KvSecret,
+        secret: &MaknaeSecret,
         wrap_ttl: Duration,
     ) -> Result<(), VaultError> {
         self.api
@@ -269,7 +270,7 @@ async fn catalog(
     document: &maknae_config::Document,
     dir: &std::path::Path,
     transport: maknae_config::TransportConfig,
-    token: &UserToken,
+    token: &MaknaeSecret,
 ) -> Result<Vec<Forge>, String> {
     let (client, trust) = crate::cli::minted_plane(document, dir, token).await?;
     let client = Arc::new(client);
@@ -342,7 +343,7 @@ mod tests {
             kv_mount: &str,
             path: &str,
             field: &str,
-            secret: &KvSecret,
+            secret: &MaknaeSecret,
             wrap_ttl: Duration,
         ) -> Result<(), VaultError> {
             self.0.borrow_mut().push(Call::Write {
@@ -386,8 +387,8 @@ mod tests {
         ]
     }
 
-    fn typed(token: &str) -> Result<KvSecret, String> {
-        KvSecret::new(Zeroizing::new(token.to_string())).map_err(|e| e.to_string())
+    fn typed(token: &str) -> Result<MaknaeSecret, String> {
+        maknae_vault::kv_secret(Zeroizing::new(token.to_string())).map_err(|e| e.to_string())
     }
 
     fn block<F: std::future::Future>(f: F) -> F::Output {
@@ -481,6 +482,21 @@ mod tests {
             last = line.feed(b);
         }
         last
+    }
+
+    #[test]
+    fn a_forge_pat_with_a_quote_is_refused_before_the_kv_body_is_built() {
+        for bad in ["ghp\"abc", "ghp\\abc"] {
+            assert!(typed(bad).is_err(), "{bad:?}");
+            let mut line = TokenLine::new();
+            assert_eq!(
+                fed(&mut line, format!("{bad}\r").as_bytes()),
+                PasswordFeed::Done
+            );
+            assert!(line.finish().is_err(), "{bad:?}");
+        }
+        assert!(typed("ghp\nabc").is_err());
+        assert!(maknae_vault::kv_secret(Zeroizing::new("ghp\"abc".into())).is_err());
     }
 
     #[test]

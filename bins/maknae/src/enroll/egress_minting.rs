@@ -10,9 +10,8 @@ use super::artifact_write::{self, OwnerResolver};
 use super::secret_slot::{self, SecretSlot};
 use super::EnrollError;
 use maknae_config::MintingConfig;
-use maknae_io::{AnchorRequired, FileOwner, Mode, StrategyPref, TargetRequired};
+use maknae_io::{AnchorRequired, FileOwner, MaknaeSecret, Mode, StrategyPref, TargetRequired};
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 pub(crate) const ROLE: &str = "maknae-egress";
 pub(crate) const UNIT: &str = "maknae-egress.service";
@@ -20,12 +19,12 @@ const SMALL_FILE: u64 = 64 * 1024;
 
 pub(crate) trait MintingOps {
     async fn read_role_id(&self, mount: &str) -> Result<String, EnrollError>;
-    async fn mint(&self, mount: &str) -> Result<(Zeroizing<String>, String), EnrollError>;
+    async fn mint(&self, mount: &str) -> Result<(MaknaeSecret, String), EnrollError>;
     async fn list_accessors(&self, mount: &str) -> Result<Vec<String>, EnrollError>;
     async fn destroy(&self, mount: &str, accessor: &str) -> Result<(), EnrollError>;
     /// `false` when Vault has no such mount or role.
     async fn role_exists(&self, mount: &str) -> Result<bool, EnrollError>;
-    async fn seal(&self, secret: &Zeroizing<String>, custody: &Path) -> Result<(), EnrollError>;
+    async fn seal(&self, secret: &MaknaeSecret, custody: &Path) -> Result<(), EnrollError>;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -299,7 +298,7 @@ struct EgressSlot<'a, O> {
 impl<O: MintingOps> SecretSlot for EgressSlot<'_, O> {
     type Sealed = ();
 
-    async fn mint(&self) -> Result<(Zeroizing<String>, String), EnrollError> {
+    async fn mint(&self) -> Result<(MaknaeSecret, String), EnrollError> {
         self.ops.mint(self.mount).await
     }
 
@@ -307,7 +306,7 @@ impl<O: MintingOps> SecretSlot for EgressSlot<'_, O> {
         self.files.write_state(state)
     }
 
-    async fn seal(&self, secret: &Zeroizing<String>) -> Result<(), EnrollError> {
+    async fn seal(&self, secret: &MaknaeSecret) -> Result<(), EnrollError> {
         self.ops
             .seal(secret, &self.files.custody_path())
             .await
@@ -454,7 +453,7 @@ impl MintingOps for RealMintingOps<'_> {
         Ok(self.client.read_role_id(mount, ROLE).await?)
     }
 
-    async fn mint(&self, mount: &str) -> Result<(Zeroizing<String>, String), EnrollError> {
+    async fn mint(&self, mount: &str) -> Result<(MaknaeSecret, String), EnrollError> {
         Ok(self.client.mint_secret_id(mount, ROLE).await?)
     }
 
@@ -473,9 +472,9 @@ impl MintingOps for RealMintingOps<'_> {
         Ok(self.client.find_role_id(mount, ROLE).await?.is_some())
     }
 
-    async fn seal(&self, secret: &Zeroizing<String>, custody: &Path) -> Result<(), EnrollError> {
+    async fn seal(&self, secret: &MaknaeSecret, custody: &Path) -> Result<(), EnrollError> {
         super::seal_linux(
-            secret.as_bytes(),
+            secret.expose().as_bytes(),
             custody,
             maknae_vault::EGRESS_SECRET_ID_CRED_NAME,
             self.verbose,
@@ -504,6 +503,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use zeroize::Zeroizing;
 
     const SENTINEL: &str = "e9e55e11-0000-4000-8000-5ec7e7aa0000";
     const ROLE_ID: &str = "egress-role-uuid-1111";
@@ -540,9 +540,12 @@ mod tests {
             Ok(ROLE_ID.into())
         }
 
-        async fn mint(&self, mount: &str) -> Result<(Zeroizing<String>, String), EnrollError> {
+        async fn mint(&self, mount: &str) -> Result<(MaknaeSecret, String), EnrollError> {
             self.push(format!("mint {mount}"))?;
-            Ok((Zeroizing::new(SENTINEL.into()), "acc-new".into()))
+            Ok((
+                MaknaeSecret::new(Zeroizing::new(SENTINEL.into())).unwrap(),
+                "acc-new".into(),
+            ))
         }
 
         async fn list_accessors(&self, mount: &str) -> Result<Vec<String>, EnrollError> {
@@ -559,13 +562,9 @@ mod tests {
             Ok(!self.role_gone)
         }
 
-        async fn seal(
-            &self,
-            secret: &Zeroizing<String>,
-            custody: &Path,
-        ) -> Result<(), EnrollError> {
+        async fn seal(&self, secret: &MaknaeSecret, custody: &Path) -> Result<(), EnrollError> {
             self.push("seal".into())?;
-            std::fs::write(custody, secret.as_bytes()).unwrap();
+            std::fs::write(custody, secret.expose().as_bytes()).unwrap();
             std::fs::set_permissions(custody, std::fs::Permissions::from_mode(0o600)).unwrap();
             Ok(())
         }

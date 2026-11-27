@@ -1,16 +1,15 @@
 use crate::api_shape::{addr_refusal, VaultOp};
 use crate::transit::{
-    approle_credential, approle_login_path, transit_sign_path, ServiceToken,
-    TRANSIT_SIGN_INPUT_MAX_BYTES,
+    approle_credential, approle_login_path, transit_sign_path, TRANSIT_SIGN_INPUT_MAX_BYTES,
 };
-use crate::user_login::{login_path, Password, UserToken};
+use crate::user_login::login_path;
 use crate::wrap::{
     client_token, field_echo, kv_field_is_acceptable, wrap_ttl_value, KvDataPath, KvMetadataPath,
-    KvSecret, WrappingToken,
 };
 use crate::{UserAuth, VaultError};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use maknae_io::MaknaeSecret;
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use reqwest::{Body, Client, Method, Request, RequestBuilder};
 use serde::ser::SerializeMap;
@@ -96,16 +95,49 @@ impl Serialize for OneField<'_> {
     }
 }
 
+fn escaped_room(s: &str) -> usize {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        s.len()
+    } else {
+        6 * s.len()
+    }
+}
+
+struct Presized<'a>(&'a mut Vec<u8>);
+
+impl std::io::Write for Presized<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buf.len() > self.0.capacity() {
+            return Err(std::io::Error::other("body outgrew its presized buffer"));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn json_body<T: Serialize>(capacity: usize, value: &T) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let mut body = Zeroizing::new(Vec::with_capacity(capacity));
-    serde_json::to_writer(&mut *body, value).map_err(|e| VaultError::VaultBody {
-        op: "request body",
-        why: format!("{:?}", e.classify()),
+    serde_json::to_writer(Presized(&mut body), value).map_err(|e| {
+        if e.is_io() {
+            VaultError::InvalidSecret {
+                what: "request body",
+                why: "a value needs JSON escaping",
+            }
+        } else {
+            VaultError::VaultBody {
+                op: "request body",
+                why: format!("{:?}", e.classify()),
+            }
+        }
     })?;
     Ok(body)
 }
 
-pub(crate) fn login_body(password: &Password) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+pub(crate) fn login_body(password: &MaknaeSecret) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let password = password.expose();
     json_body(
         LOGIN_BODY_OVERHEAD + 6 * password.len(),
@@ -113,15 +145,16 @@ pub(crate) fn login_body(password: &Password) -> Result<Zeroizing<Vec<u8>>, Vaul
     )
 }
 
-pub(crate) fn lookup_body(token: &WrappingToken) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+pub(crate) fn lookup_body(token: &MaknaeSecret) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let token = token.expose();
     json_body(LOOKUP_BODY_OVERHEAD + token.len(), &LookupBody { token })
 }
 
 pub(crate) fn approle_login_body(
     role_id: &str,
-    secret_id: &Zeroizing<String>,
+    secret_id: &MaknaeSecret,
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let secret_id = secret_id.expose();
     approle_credential("AppRole role_id", role_id)?;
     approle_credential("AppRole SecretID", secret_id)?;
     json_body(
@@ -132,7 +165,7 @@ pub(crate) fn approle_login_body(
 
 pub(crate) fn kv_write_body(
     field: &str,
-    secret: &KvSecret,
+    secret: &MaknaeSecret,
 ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     if !kv_field_is_acceptable(field) {
         return Err(VaultError::KvField {
@@ -142,7 +175,7 @@ pub(crate) fn kv_write_body(
     }
     let value = secret.expose();
     json_body(
-        KV_WRITE_BODY_OVERHEAD + 6 * field.len() + value.len(),
+        KV_WRITE_BODY_OVERHEAD + escaped_room(field) + value.len(),
         &KvWriteBody {
             data: OneField { field, value },
         },
@@ -215,7 +248,7 @@ pub(crate) fn login_request(
 pub(crate) fn wrapped_read_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
     path: &KvDataPath,
     wrap_ttl: Duration,
 ) -> Result<Request, VaultError> {
@@ -228,7 +261,7 @@ pub(crate) fn wrapped_read_request(
 pub(crate) fn wrapped_write_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
     path: &KvDataPath,
     wrap_ttl: Duration,
     body: Zeroizing<Vec<u8>>,
@@ -242,7 +275,7 @@ pub(crate) fn wrapped_write_request(
 pub(crate) fn delete_metadata_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
     path: &KvMetadataPath,
 ) -> Result<Request, VaultError> {
     let token = client_token(VaultOp::DeleteMetadata, Some(token), None, None)?;
@@ -268,7 +301,7 @@ pub(crate) fn lookup_request(
 pub(crate) fn unwrap_request(
     http: &Client,
     base: &ApiBase,
-    token: &WrappingToken,
+    token: &MaknaeSecret,
 ) -> Result<Request, VaultError> {
     let token = client_token(VaultOp::Unwrap, None, Some(token), None)?;
     finish(authed(
@@ -280,7 +313,7 @@ pub(crate) fn unwrap_request(
 pub(crate) fn revoke_self_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
 ) -> Result<Request, VaultError> {
     let token = client_token(VaultOp::RevokeSelf, Some(token), None, None)?;
     finish(authed(
@@ -304,7 +337,7 @@ pub(crate) fn approle_login_request(
 pub(crate) fn transit_sign_request(
     http: &Client,
     base: &ApiBase,
-    token: &ServiceToken,
+    token: &MaknaeSecret,
     mount: &str,
     key: &str,
     body: Zeroizing<Vec<u8>>,
@@ -318,7 +351,7 @@ pub(crate) fn transit_sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wrap::{kv_data_path, kv_metadata_path, KvSecret, FORGE_TOKEN_FIELD};
+    use crate::wrap::{kv_data_path, kv_metadata_path, FORGE_TOKEN_FIELD};
     use crate::{MAX_PASSWORD_BYTES, MAX_TOKEN_BYTES};
     use maknae_crypto::rcgen;
 
@@ -339,12 +372,12 @@ mod tests {
         ApiBase::new("https://vault.example:8200/").unwrap()
     }
 
-    fn pw(s: &str) -> Password {
-        Password::new(Zeroizing::new(s.to_string())).unwrap()
+    fn pw(s: &str) -> MaknaeSecret {
+        crate::password(Zeroizing::new(s.to_string())).unwrap()
     }
 
-    fn wrapping() -> WrappingToken {
-        WrappingToken::new(Zeroizing::new("hvs.wrap".into())).unwrap()
+    fn wrapping() -> MaknaeSecret {
+        MaknaeSecret::vault_token(Zeroizing::new("hvs.wrap".into())).unwrap()
     }
 
     fn body_json(req: &Request) -> serde_json::Value {
@@ -449,7 +482,7 @@ mod tests {
 
     #[test]
     fn the_wrapped_read_carries_the_user_token_and_the_wrap_ttl() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "maknae/users/alice/openai").unwrap();
         let req =
             wrapped_read_request(&http(), &base(), &token, &path, Duration::from_secs(60)).unwrap();
@@ -474,13 +507,13 @@ mod tests {
 
     #[test]
     fn the_wrapped_write_request_carries_the_wrap_ttl_and_a_zeroizing_body() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
-        let secret = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
+        let secret = crate::wrap::kv_secret(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
         let body = kv_write_body(FORGE_TOKEN_FIELD, &secret).unwrap();
         assert_eq!(
             body.capacity(),
-            KV_WRITE_BODY_OVERHEAD + 6 * FORGE_TOKEN_FIELD.len() + secret.expose().len()
+            KV_WRITE_BODY_OVERHEAD + FORGE_TOKEN_FIELD.len() + secret.expose().len()
         );
         let passed = (body.as_ptr(), body.len());
         let req = wrapped_write_request(
@@ -527,7 +560,7 @@ mod tests {
 
     #[test]
     fn the_delete_targets_the_metadata_path() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_metadata_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
         let req = delete_metadata_request(&http(), &base(), &token, &path).unwrap();
         assert_eq!(*req.method(), Method::DELETE);
@@ -544,7 +577,7 @@ mod tests {
 
     #[test]
     fn a_wrap_ttl_out_of_bounds_is_refused_before_any_request() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "a").unwrap();
         assert!(matches!(
             wrapped_read_request(&http(), &base(), &token, &path, Duration::ZERO),
@@ -583,7 +616,7 @@ mod tests {
 
     #[test]
     fn revoke_self_authenticates_with_the_user_token_and_sends_no_body() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let req = revoke_self_request(&http(), &base(), &token).unwrap();
         assert_eq!(*req.method(), Method::POST);
         assert_eq!(header(&req, X_VAULT_REQUEST), "true");
@@ -596,8 +629,11 @@ mod tests {
         assert!(req.body().is_none());
     }
 
-    fn secret_id() -> Zeroizing<String> {
-        Zeroizing::new("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into())
+    fn secret_id() -> MaknaeSecret {
+        MaknaeSecret::new(Zeroizing::new(
+            "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".into(),
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -625,22 +661,28 @@ mod tests {
     fn a_malformed_approle_credential_or_mount_is_refused_before_any_request() {
         for (role, secret) in [
             ("", "s"),
-            ("r", ""),
             ("r\"", "s"),
+            ("r", "s\""),
             ("r", "s\nx"),
             ("r", "s x"),
         ] {
             assert!(
                 matches!(
-                    approle_login_body(role, &Zeroizing::new(secret.into())),
+                    approle_login_body(
+                        role,
+                        &MaknaeSecret::new(Zeroizing::new(secret.into())).unwrap()
+                    ),
                     Err(VaultError::InvalidSecret { .. })
                 ),
                 "{role:?} {secret:?}"
             );
         }
-        let e = approle_login_body("r", &Zeroizing::new("SENTINEL x".into()))
-            .unwrap_err()
-            .to_string();
+        let e = approle_login_body(
+            "r",
+            &MaknaeSecret::new(Zeroizing::new("SENTINEL x".into())).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(!e.contains("SENTINEL"), "{e}");
         let body = approle_login_body("r", &secret_id()).unwrap();
         assert!(matches!(
@@ -651,7 +693,7 @@ mod tests {
 
     #[test]
     fn the_transit_sign_request_pins_the_hash_in_the_path_and_pkcs1v15_in_the_body() {
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let body = transit_sign_body(b"eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxIn0").unwrap();
         let req = transit_sign_request(
             &http(),
@@ -699,7 +741,7 @@ mod tests {
 
     #[test]
     fn a_malformed_transit_mount_or_key_is_refused_before_any_request() {
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         for (mount, key) in [("../x", "k"), ("t", "a/b"), ("t", "..")] {
             let body = transit_sign_body(b"x").unwrap();
             assert!(
@@ -714,7 +756,7 @@ mod tests {
 
     #[test]
     fn the_service_request_bodies_are_sized_once_and_never_grow() {
-        let secret = Zeroizing::new("s".repeat(MAX_TOKEN_BYTES));
+        let secret = MaknaeSecret::new(Zeroizing::new("s".repeat(MAX_TOKEN_BYTES))).unwrap();
         let body = approle_login_body(&"r".repeat(MAX_TOKEN_BYTES), &secret).unwrap();
         let want = APPROLE_BODY_OVERHEAD + 2 * MAX_TOKEN_BYTES;
         assert_eq!((body.len(), body.capacity()), (want, want));
@@ -731,7 +773,7 @@ mod tests {
         let passed = (body.as_ptr(), body.len());
         let req = approle_login_request(&http(), &base(), "approle", body).unwrap();
         assert_eq!(sent(&req), passed);
-        let service = ServiceToken::new(Zeroizing::new("hvs.service".into())).unwrap();
+        let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let body = transit_sign_body(b"x.y").unwrap();
         let passed = (body.as_ptr(), body.len());
         let req = transit_sign_request(&http(), &base(), &service, "t", "k", body).unwrap();
@@ -767,12 +809,40 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_needs_escaping_is_refused_not_grown_into() {
+        let dirty = || MaknaeSecret::new(Zeroizing::new("a\"b\\c\u{1}".into())).unwrap();
+        let secret = dirty();
+        assert!(matches!(
+            kv_write_body(FORGE_TOKEN_FIELD, &secret),
+            Err(VaultError::InvalidSecret {
+                what: "request body",
+                ..
+            })
+        ));
+        assert!(matches!(
+            lookup_body(&dirty()),
+            Err(VaultError::InvalidSecret {
+                what: "request body",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_valid_token_body_is_byte_exact() {
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.a-b_C".into())).unwrap();
+        assert_eq!(&**lookup_body(&token).unwrap(), br#"{"token":"hvs.a-b_C"}"#);
+        let body = kv_write_body("token", &token).unwrap();
+        assert_eq!(&**body, br#"{"data":{"token":"hvs.a-b_C"}}"#);
+    }
+
+    #[test]
     fn request_bodies_are_sized_once_and_never_grow() {
         let worst = pw(&"\u{1}".repeat(MAX_PASSWORD_BYTES));
         let body = login_body(&worst).unwrap();
         let want = LOGIN_BODY_OVERHEAD + 6 * MAX_PASSWORD_BYTES;
         assert_eq!((body.len(), body.capacity()), (want, want));
-        let token = WrappingToken::new(Zeroizing::new("a".repeat(MAX_TOKEN_BYTES))).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("a".repeat(MAX_TOKEN_BYTES))).unwrap();
         let body = lookup_body(&token).unwrap();
         let want = LOOKUP_BODY_OVERHEAD + MAX_TOKEN_BYTES;
         assert_eq!((body.len(), body.capacity()), (want, want));

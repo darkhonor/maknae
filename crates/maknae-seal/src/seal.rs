@@ -69,8 +69,9 @@ impl SealPrivateKey {
         Self { key, public }
     }
 
-    pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, SealError> {
-        self.key.to_pkcs8_der().map_err(SealError::from)
+    pub fn to_pkcs8_der(&self) -> Result<maknae_io::MaknaeSecretBytes, SealError> {
+        let der = self.key.to_pkcs8_der().map_err(SealError::from)?;
+        maknae_io::MaknaeSecretBytes::new(der).map_err(key_secret_error)
     }
 
     pub fn public_key(&self) -> &SealPublicKey {
@@ -118,6 +119,13 @@ pub fn seal(
         plaintext,
     )
     .map_err(SealError::from)
+}
+
+fn key_secret_error(e: maknae_io::SecretError) -> SealError {
+    match e {
+        maknae_io::SecretError::CoreDumps(io) => SealError::CoreDumps(io.raw_os_error()),
+        _ => SealError::PrivateKey,
+    }
 }
 
 pub fn open(
@@ -294,7 +302,8 @@ mod tests {
     fn a_key_reloaded_from_pkcs8_opens_what_was_sealed_to_it() {
         let key = SealPrivateKey::generate().unwrap();
         let blob = seal(key.public_key(), &aad(ctx()), TOKEN).unwrap();
-        let reloaded = SealPrivateKey::from_pkcs8_der(&key.to_pkcs8_der().unwrap()).unwrap();
+        let der: maknae_io::MaknaeSecretBytes = key.to_pkcs8_der().unwrap();
+        let reloaded = SealPrivateKey::from_pkcs8_der(der.expose()).unwrap();
         let opened = open(&reloaded, &aad(ctx()), blob.as_bytes()).unwrap();
         assert!(opened.as_slice() == TOKEN);
     }
@@ -427,9 +436,23 @@ mod tests {
     }
 
     #[test]
+    fn each_secret_error_maps_to_its_named_key_error() {
+        let denied = maknae_io::SecretError::CoreDumps(std::io::Error::from_raw_os_error(1));
+        assert_eq!(key_secret_error(denied), SealError::CoreDumps(Some(1)));
+        for e in [
+            maknae_io::SecretError::Empty,
+            maknae_io::SecretError::TooLong,
+            maknae_io::SecretError::NotUtf8,
+            maknae_io::SecretError::NotAVaultToken,
+        ] {
+            assert_eq!(key_secret_error(e), SealError::PrivateKey);
+        }
+    }
+
+    #[test]
     fn pkcs8_round_trips_into_the_same_public_key() {
         let key = SealPrivateKey::generate().unwrap();
-        let back = SealPrivateKey::from_pkcs8_der(&key.to_pkcs8_der().unwrap()).unwrap();
+        let back = SealPrivateKey::from_pkcs8_der(key.to_pkcs8_der().unwrap().expose()).unwrap();
         assert_eq!(back.public_key(), key.public_key());
         assert_ne!(
             SealPrivateKey::generate().unwrap().public_key(),

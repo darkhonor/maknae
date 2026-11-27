@@ -2,6 +2,7 @@ use crate::{
     open, seal, CredentialSealContext, SealAad, SealError, SealPrivateKey, SealPublicKey,
     SealedBlob,
 };
+use maknae_io::{MaknaeSecret, SecretError};
 use zeroize::Zeroizing;
 
 pub fn seal_credential(
@@ -16,14 +17,22 @@ pub fn open_credential(
     key: &SealPrivateKey,
     ctx: &CredentialSealContext<'_>,
     sealed: &[u8],
-) -> Result<Zeroizing<String>, SealError> {
+) -> Result<MaknaeSecret, SealError> {
     let mut bytes = open(key, &SealAad::credential(ctx)?, sealed)?;
     match String::from_utf8(std::mem::take(&mut *bytes)) {
-        Ok(token) => Ok(Zeroizing::new(token)),
+        Ok(token) => MaknaeSecret::new(Zeroizing::new(token)).map_err(seal_secret_error),
         Err(e) => {
             drop(Zeroizing::new(e.into_bytes()));
             Err(SealError::Open)
         }
+    }
+}
+
+fn seal_secret_error(e: SecretError) -> SealError {
+    match e {
+        SecretError::CoreDumps(io) => SealError::CoreDumps(io.raw_os_error()),
+        SecretError::Empty | SecretError::TooLong => SealError::PlaintextLength,
+        _ => SealError::Open,
     }
 }
 
@@ -47,11 +56,25 @@ mod tests {
     }
 
     #[test]
+    fn each_secret_error_maps_to_its_named_seal_error() {
+        let denied = SecretError::CoreDumps(std::io::Error::from_raw_os_error(1));
+        assert_eq!(seal_secret_error(denied), SealError::CoreDumps(Some(1)));
+        for (e, want) in [
+            (SecretError::Empty, SealError::PlaintextLength),
+            (SecretError::TooLong, SealError::PlaintextLength),
+            (SecretError::NotUtf8, SealError::Open),
+            (SecretError::NotAVaultToken, SealError::Open),
+        ] {
+            assert_eq!(seal_secret_error(e), want);
+        }
+    }
+
+    #[test]
     fn a_credential_blob_opens_only_under_its_own_context() {
         let key = SealPrivateKey::generate().unwrap();
         let blob = seal_credential(key.public_key(), &cctx(), TOKEN).unwrap();
         let opened = open_credential(&key, &cctx(), blob.as_bytes()).unwrap();
-        assert_eq!(opened.as_str(), TOKEN);
+        assert_eq!(opened.expose(), TOKEN);
 
         let changed = [
             CredentialSealContext {
