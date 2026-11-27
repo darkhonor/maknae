@@ -3159,6 +3159,27 @@ mod tests {
     }
 
     #[test]
+    fn the_token_read_retries_an_interrupted_read() {
+        struct Interrupted(Vec<std::io::Result<&'static [u8]>>);
+        impl std::io::Read for Interrupted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let step = self.0.remove(0)?;
+                buf[..step.len()].copy_from_slice(step);
+                Ok(step.len())
+            }
+        }
+        let mut r = Interrupted(vec![
+            Err(std::io::ErrorKind::Interrupted.into()),
+            Ok(b"hvs."),
+            Ok(b"tok"),
+            Ok(b""),
+        ]);
+        let got = read_token_bytes(&mut r).unwrap();
+        assert_eq!(got.as_slice(), b"hvs.tok");
+        assert_eq!(got.capacity(), maknae_io::MAX_SECRET_BYTES + 1);
+    }
+
+    #[test]
     fn a_token_file_that_is_blank_not_utf8_or_over_the_cap_is_refused() {
         let d = token_dir("refuse");
         let file = d.join("token");

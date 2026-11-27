@@ -173,9 +173,12 @@ impl OperatorClient {
         let resp = vaultrs::auth::approle::role::secret::generate(&self.inner, mount, role, None)
             .await
             .map_err(|e| VaultError::Operator(e.to_string()))?;
-        hold_minted(resp.secret_id, resp.secret_id_accessor, |acc| async move {
-            self.destroy_accessor(mount, role, &acc).await
-        })
+        hold_minted(
+            resp.secret_id,
+            resp.secret_id_accessor,
+            |acc| async move { self.destroy_accessor(mount, role, &acc).await },
+            to_stderr,
+        )
         .await
     }
 
@@ -209,9 +212,12 @@ impl OperatorClient {
         )
         .await
         .map_err(|e| VaultError::Operator(e.to_string()))?;
-        hold_minted(resp.secret_id, resp.secret_id_accessor, |acc| async move {
-            self.destroy_accessor(mount, role, &acc).await
-        })
+        hold_minted(
+            resp.secret_id,
+            resp.secret_id_accessor,
+            |acc| async move { self.destroy_accessor(mount, role, &acc).await },
+            to_stderr,
+        )
         .await
     }
 
@@ -345,13 +351,21 @@ fn join_ca_chain(chain: Vec<String>) -> Result<String, VaultError> {
 }
 
 fn undestroyed_line(accessor: &str, e: &VaultError) -> String {
-    format!("maknae-vault: the minted SecretID (accessor {accessor}) could not be destroyed: {e}")
+    format!(
+        "maknae-vault: the minted SecretID (accessor {accessor}) could not be destroyed ({e}); \
+         it stays valid until its Vault TTL expires, or until it is destroyed by that accessor"
+    )
+}
+
+fn to_stderr(line: &str) {
+    eprintln!("{line}");
 }
 
 async fn hold_minted<F, Fut>(
     secret_id: String,
     accessor: String,
     destroy: F,
+    log: impl FnOnce(&str),
 ) -> Result<(MaknaeSecret, String), VaultError>
 where
     F: FnOnce(String) -> Fut,
@@ -362,7 +376,7 @@ where
         Err(e) => secret_error("SecretID", e),
     };
     if let Err(e) = destroy(accessor.clone()).await {
-        eprintln!("{}", undestroyed_line(&accessor, &e));
+        log(&undestroyed_line(&accessor, &e));
     }
     Err(refused)
 }
@@ -497,7 +511,7 @@ mod tests {
             destroyed.borrow_mut().push(acc);
             async { Ok(()) }
         };
-        let got = hold_minted(String::new(), "acc-1".into(), destroy).await;
+        let got = hold_minted(String::new(), "acc-1".into(), destroy, |_: &str| {}).await;
         assert!(
             matches!(
                 got,
@@ -519,9 +533,10 @@ mod tests {
             destroyed.borrow_mut().push(acc);
             async { Ok(()) }
         };
-        let (secret, accessor) = hold_minted("sid-SENTINEL".into(), "acc-2".into(), destroy)
-            .await
-            .unwrap();
+        let (secret, accessor) =
+            hold_minted("sid-SENTINEL".into(), "acc-2".into(), destroy, |_: &str| {})
+                .await
+                .unwrap();
         assert_eq!(
             (secret.expose(), accessor.as_str()),
             ("sid-SENTINEL", "acc-2")
@@ -531,8 +546,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_destroy_keeps_the_constructor_error_and_logs_the_accessor() {
-        let destroy = |_: String| async { Err(VaultError::Operator("vault down".into())) };
-        let got = hold_minted(String::new(), "acc-3".into(), destroy).await;
+        let destroyed = std::cell::RefCell::new(Vec::new());
+        let destroy = |acc: String| {
+            destroyed.borrow_mut().push(acc);
+            async { Err(VaultError::Operator("vault down".into())) }
+        };
+        let mut logged = Vec::new();
+        let got = hold_minted(String::new(), "acc-3".into(), destroy, |l: &str| {
+            logged.push(l.to_owned())
+        })
+        .await;
         assert!(
             matches!(
                 got,
@@ -544,10 +567,14 @@ mod tests {
             "{:?}",
             got.err()
         );
+        assert_eq!(*destroyed.borrow(), ["acc-3"]);
         assert_eq!(
-            undestroyed_line("acc-3", &VaultError::Operator("vault down".into())),
-            "maknae-vault: the minted SecretID (accessor acc-3) could not be destroyed: \
-             operator Vault operation failed: vault down"
+            logged,
+            [
+                "maknae-vault: the minted SecretID (accessor acc-3) could not be destroyed \
+              (operator Vault operation failed: vault down); it stays valid until its Vault \
+              TTL expires, or until it is destroyed by that accessor"
+            ]
         );
     }
 
