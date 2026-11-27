@@ -29,7 +29,6 @@ use tokio::sync::Mutex;
 use vaultrs::client::{Client, VaultClient, VaultClientSettings, VaultClientSettingsBuilder};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
-use zeroize::Zeroizing;
 
 struct IdentityInner {
     plane_key: PlaneKey,
