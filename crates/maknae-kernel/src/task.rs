@@ -12647,6 +12647,19 @@ mod tests {
     }
 
     #[test]
+    fn a_close_no_longer_due_queues_no_stop() {
+        let (_blobs, clock, store) = clocked();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        clock.set(1_001 + CLAIM_LEASE.as_secs() as i64);
+        let due = store.due(8);
+        assert_eq!(due[0].why, DueFor::Close(TaskClose::AgentLost));
+        store.heartbeat(&id("hobi"), HOBI, 0, 0);
+        assert_eq!(store.perform(&due), 0);
+        assert!(store.notices_for(&id("hobi")).is_empty());
+    }
+
+    #[test]
     fn a_withdrawn_queued_task_queues_no_stop() {
         let (_blobs, store) = mem();
         let task = held_by(&store, Tasker::Uid(1000));
