@@ -737,7 +737,7 @@ fn render(args: std::fmt::Arguments<'_>) -> Zeroizing<String> {
 }
 
 const WITHHELD: &str =
-    "<redacted>: error text withheld, the value filter cannot cover the SecretID";
+    "<redacted>: sealing the SecretID failed; the error text is withheld because the value filter cannot cover the SecretID";
 
 pub(crate) fn secret_filter(secret: &MaknaeSecret) -> Result<ValueFilter, FilterError> {
     ValueFilter::builder().secret("secret_id", secret).build()
@@ -3639,28 +3639,78 @@ pub(crate) mod tests {
     #[test]
     fn a_seal_error_never_carries_the_secret() {
         let secret = MaknaeSecret::new(Zeroizing::new(SENTINEL.to_string())).unwrap();
-        let leaked = [
-            EnrollError::Command {
-                program: "systemd-creds encrypt".into(),
-                detail: format!("bad input: {SENTINEL} echoed"),
-            },
-            EnrollError::Owner(format!("x{SENTINEL}x")),
-            EnrollError::State(SENTINEL.into()),
-            EnrollError::Io {
-                path: std::path::PathBuf::from("/p"),
-                source: format!("{SENTINEL} {SENTINEL}"),
-            },
-            EnrollError::HrotUnavailable {
-                detail: SENTINEL.into(),
-            },
-            EnrollError::Vault(maknae_vault::VaultError::Operator(format!("op {SENTINEL}"))),
+        type Keeps = fn(&EnrollError) -> bool;
+        #[allow(unused_mut)]
+        let mut leaked: Vec<(EnrollError, Keeps)> = vec![
+            (
+                EnrollError::Command {
+                    program: "systemd-creds encrypt".into(),
+                    detail: format!("bad input: {SENTINEL} echoed"),
+                },
+                |e| matches!(e, EnrollError::Command { .. }),
+            ),
+            (
+                EnrollError::Command {
+                    program: format!("run {SENTINEL}"),
+                    detail: "exit 1".into(),
+                },
+                |e| matches!(e, EnrollError::Command { .. }),
+            ),
+            (EnrollError::Owner(format!("x{SENTINEL}x")), |e| {
+                matches!(e, EnrollError::Owner(_))
+            }),
+            (EnrollError::State(SENTINEL.into()), |e| {
+                matches!(e, EnrollError::State(_))
+            }),
+            (
+                EnrollError::Io {
+                    path: std::path::PathBuf::from("/p"),
+                    source: format!("{SENTINEL} {SENTINEL}"),
+                },
+                |e| matches!(e, EnrollError::Io { .. }),
+            ),
+            (
+                EnrollError::HrotUnavailable {
+                    detail: SENTINEL.into(),
+                },
+                |e| matches!(e, EnrollError::HrotUnavailable { .. }),
+            ),
+            (
+                EnrollError::Vault(maknae_vault::VaultError::Operator(format!("op {SENTINEL}"))),
+                |e| matches!(e, EnrollError::State(_)),
+            ),
         ];
+        #[cfg(target_os = "macos")]
+        leaked.extend([
+            (
+                EnrollError::Keychain {
+                    op: "add",
+                    detail: SENTINEL.into(),
+                },
+                (|e| matches!(e, EnrollError::Keychain { .. })) as Keeps,
+            ),
+            (
+                EnrollError::NotDeveloperIdSigned {
+                    binary: "/b".into(),
+                    reason: SENTINEL.into(),
+                },
+                |e| matches!(e, EnrollError::NotDeveloperIdSigned { .. }),
+            ),
+            (
+                EnrollError::NotRootInstalled {
+                    path: "/p".into(),
+                    detail: SENTINEL.into(),
+                },
+                |e| matches!(e, EnrollError::NotRootInstalled { .. }),
+            ),
+        ]);
         let filter = secret_filter(&secret);
-        for e in leaked {
+        for (e, keeps) in leaked {
             let scrubbed = redact_error(e, &filter);
             let shown = format!("{scrubbed} {scrubbed:?}");
             assert!(!shown.contains(SENTINEL), "{shown}");
             assert!(shown.contains("<redacted>"), "{shown}");
+            assert!(keeps(&scrubbed), "{scrubbed:?}");
         }
         let clean = redact_error(
             EnrollError::Command {
