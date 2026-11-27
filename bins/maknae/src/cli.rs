@@ -2547,7 +2547,7 @@ mod tests {
                     ))
                 }
             },
-            |_| async {},
+            |_| -> std::future::Ready<()> { panic!("the watch slept") },
             std::time::Instant::now,
         )
         .await;
@@ -2576,7 +2576,7 @@ mod tests {
                     Err("sent".to_owned())
                 }
             },
-            |_| async {},
+            |_| -> std::future::Ready<()> { panic!("the watch slept") },
             std::time::Instant::now,
         )
         .await;
