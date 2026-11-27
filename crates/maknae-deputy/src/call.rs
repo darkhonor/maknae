@@ -378,6 +378,27 @@ mod tests {
         assert_eq!(body, vec![b'*'; 18]);
     }
 
+    #[test]
+    fn an_empty_filter_masks_the_whole_body() {
+        let mut body = b"bad key here".to_vec();
+        mask_body(maknae_io::ValueFilter::builder().build(), &mut body);
+        assert_eq!(body, vec![b'*'; 12]);
+    }
+
+    #[test]
+    fn a_filter_that_skipped_one_value_masks_the_whole_body() {
+        let long =
+            MaknaeSecret::new(Zeroizing::new("sk-test-0123456789-abcdef".to_string())).unwrap();
+        let short = MaknaeSecret::new(Zeroizing::new("sk-12".to_string())).unwrap();
+        let filter = maknae_io::ValueFilter::builder()
+            .secret("long", &long)
+            .secret("short", &short)
+            .build();
+        let mut body = b"bad key here".to_vec();
+        mask_body(filter, &mut body);
+        assert_eq!(body, vec![b'*'; 12]);
+    }
+
     fn txt(s: &str) -> maknae_proto::ContentBlock {
         maknae_proto::ContentBlock::Text {
             text: maknae_proto::SecretText::from(Zeroizing::new(s.into())),
