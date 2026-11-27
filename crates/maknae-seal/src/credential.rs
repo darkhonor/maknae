@@ -20,14 +20,20 @@ pub fn open_credential(
 ) -> Result<MaknaeSecret, SealError> {
     let mut bytes = open(key, &SealAad::credential(ctx)?, sealed)?;
     match String::from_utf8(std::mem::take(&mut *bytes)) {
-        Ok(token) => MaknaeSecret::new(Zeroizing::new(token)).map_err(|e| match e {
-            SecretError::CoreDumps(io) => SealError::CoreDumps(io.kind()),
-            _ => SealError::Open,
-        }),
+        Ok(token) => MaknaeSecret::new(Zeroizing::new(token)).map_err(seal_secret_error),
         Err(e) => {
             drop(Zeroizing::new(e.into_bytes()));
             Err(SealError::Open)
         }
+    }
+}
+
+fn seal_secret_error(e: SecretError) -> SealError {
+    match e {
+        SecretError::CoreDumps(io) => SealError::CoreDumps(io.kind()),
+        SecretError::Empty | SecretError::TooLong => SealError::PlaintextLength,
+        SecretError::NotUtf8 | SecretError::NotAVaultToken => SealError::Open,
+        _ => SealError::Open,
     }
 }
 
@@ -47,6 +53,23 @@ mod tests {
             kind: "github-app-installation",
             app: "app-1",
             set: 3,
+        }
+    }
+
+    #[test]
+    fn each_secret_error_maps_to_its_named_seal_error() {
+        let denied = SecretError::CoreDumps(std::io::Error::from_raw_os_error(1));
+        assert_eq!(
+            seal_secret_error(denied),
+            SealError::CoreDumps(std::io::ErrorKind::PermissionDenied)
+        );
+        for (e, want) in [
+            (SecretError::Empty, SealError::PlaintextLength),
+            (SecretError::TooLong, SealError::PlaintextLength),
+            (SecretError::NotUtf8, SealError::Open),
+            (SecretError::NotAVaultToken, SealError::Open),
+        ] {
+            assert_eq!(seal_secret_error(e), want);
         }
     }
 

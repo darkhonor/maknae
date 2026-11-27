@@ -268,9 +268,9 @@ pub async fn revoke<S: Signer>(
     };
     let label = frame_label("revoke", &r.task, agent, &r.class, &r.app);
     let reply = match open_credential(d.own_key, &ctx, r.for_revocation.as_bytes()) {
-        Err(maknae_seal::SealError::CoreDumps(kind)) => {
+        Err(e @ maknae_seal::SealError::CoreDumps(_)) => {
             (d.journal)(&format!(
-                "{label} set={}: the revocation token could not be held: core dumps could not be denied: {kind}",
+                "{label} set={}: the revocation token could not be held: {e}",
                 r.set
             ));
             RevokeReply::Refused(MintRefusal::Request)
