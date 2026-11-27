@@ -9781,3 +9781,96 @@ mod board {
         }
     }
 }
+
+fn stops(w: &World) -> Vec<Option<TaskId>> {
+    w.store()
+        .notices_for(&hobi())
+        .iter()
+        .map(|n| n.task)
+        .collect()
+}
+
+async fn stopped(w: &World, id: &TaskId) {
+    match w.ask(Verb::TaskStop { task: r(id) }).await {
+        RespResult::Ok(Payload::TaskAcknowledged(v)) => {
+            assert_eq!(v.close, Some(TaskClose::Stopped));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(stops(w), [Some(*id)]);
+}
+
+#[tokio::test]
+async fn a_stop_is_retired_by_the_next_claim() {
+    let w = world("stop-retired-claim", "user", true);
+    let first = w.submit("hobi", "a").await;
+    let next = w.submit("hobi", "b").await;
+    assert_eq!(w.claimed("hobi").await, first);
+    stopped(&w, &first).await;
+    assert_eq!(w.claimed("hobi").await, next);
+    assert!(stops(&w).is_empty());
+}
+
+#[tokio::test]
+async fn a_stop_is_retired_by_the_next_heartbeat() {
+    let w = world("stop-retired-beat", "user", true);
+    let id = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    stopped(&w, &id).await;
+    w.beat("hobi", 0).await;
+    assert!(stops(&w).is_empty());
+}
+
+#[tokio::test]
+async fn a_claim_answered_idle_by_the_standing_check_still_retires() {
+    let w = world("stop-retired-undecided", "user", true);
+    let mine = w.mine("hobi");
+    w.working(&mine);
+    w.store().stop(&mine, &Tasker::Uid(w.me)).unwrap();
+    assert_eq!(stops(&w), [Some(mine)]);
+    w.anothers("hobi");
+    common::write_0640(
+        &maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings,
+        &format!(
+            "schema_version: 1\nbindings:\n  user: [\"{}\", \"sentinel-746-no-such-user\"]\n",
+            w.user
+        ),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let records = Records::new(0);
+    let resp = w.agent_response_with("hobi", CLAIM, &records).await;
+    assert!(
+        matches!(resp.result, RespResult::Ok(Payload::TaskIdle)),
+        "{resp:?}"
+    );
+    assert!(task_records(&records)
+        .pop()
+        .unwrap()
+        .outcome
+        .reason
+        .starts_with("idle: the tasker's standing could not be decided: "));
+    assert!(stops(&w).is_empty());
+}
+
+#[tokio::test]
+async fn a_stale_stop_is_retired_by_the_first_permitted_claim_after_release() {
+    let w = world("stop-stale-release", "user", true);
+    let id = w.submit("hobi", "a").await;
+    assert_eq!(w.claimed("hobi").await, id);
+    stopped(&w, &id).await;
+    let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+    let bound = std::fs::read_to_string(&bindings).unwrap();
+    common::write_0640(
+        &bindings,
+        &format!("{bound}  adversary: [{{uid: {HOBI_UID}}}]\n"),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let records = Records::new(0);
+    let refused = w.agent_with("hobi", CLAIM, None, &records).await;
+    assert!(refused.as_ref().is_none_or(unauthorized), "{refused:?}");
+    assert_eq!(stops(&w), [Some(id)], "a refused claim retires nothing");
+    common::write_0640(&bindings, &bound);
+    w.pdp.baseline().reload_from_file().unwrap();
+    assert!(w.claim("hobi").await.is_none());
+    assert!(stops(&w).is_empty());
+}

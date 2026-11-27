@@ -4897,6 +4897,7 @@ async fn serve_task_verb<S, E, P>(
                     .await;
                 return;
             };
+            store.retire_stops(&agent);
             let of =
                 |rec: AuditRecord, id: &maknae_proto::TaskId, tasker: &maknae_proto::Tasker| {
                     cite_task(rec, id, Some(maknae_proto::tasker_text(tasker)))
@@ -10527,6 +10528,21 @@ fn task_notice_record(ctx: &BootCtx<'_>, notice: &crate::task::Notice) -> AuditR
                 None,
             );
             rec.subject.task_op = Some("submit".into());
+            rec
+        }
+        Notice::StopUnqueued { task, agent, why } => {
+            let mut rec = task_record(
+                ctx,
+                (
+                    "deny",
+                    "unavailable",
+                    &format!("stop notice not queued: {why}"),
+                ),
+                Some(task),
+                None,
+                None,
+            );
+            rec.subject.agent = Some(agent.as_str().to_owned());
             rec
         }
     }
@@ -30452,6 +30468,40 @@ mod task_sweep_tests {
             TASK_SWEEP_STOP_TIMEOUT + TASK_SWEEP_ABORT_RECORD_TIMEOUT <= RELOAD_STOP_TIMEOUT,
             "the final sweep is joined inside the reloader's stop bound"
         );
+    }
+
+    #[test]
+    fn a_stop_notice_not_queued_is_recorded() {
+        let (seq, au) = (Seq::new(), serde_json::json!({}));
+        let ctx = ctx(&seq, &au);
+        let task = TaskId([7; 16]);
+        let rec = task_notice_record(
+            &ctx,
+            &Notice::StopUnqueued {
+                task,
+                agent: maknae_config::AgentId::parse("hobi").unwrap(),
+                why: "sentinel-746-why".into(),
+            },
+        );
+        assert_eq!(
+            (
+                rec.event.as_str(),
+                rec.action.as_str(),
+                rec.outcome.result.as_str(),
+                rec.outcome.reason.as_str(),
+                rec.outcome.posture.as_str(),
+            ),
+            (
+                "task",
+                "session.task",
+                "deny",
+                "stop notice not queued: sentinel-746-why",
+                "unavailable"
+            )
+        );
+        assert_eq!(rec.subject.task_id, Some(task.to_string()));
+        assert_eq!(rec.object, Some(format!("task:{task}")));
+        assert_eq!(rec.subject.agent.as_deref(), Some("hobi"));
     }
 
     #[test]

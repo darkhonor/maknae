@@ -84,6 +84,8 @@ files = [
   # #609: the task store's binding of each task to its agent and uid, and the
   # submission order (PDP before store); a wrong arm hands an agent another's task.
   "crates/maknae-kernel/src/task.rs",
+  # #746: the agent notice queue's bounds; a wrong arm evicts a queued Stop or floods an agent.
+  "crates/maknae-kernel/src/notice.rs",
   # #628: the task store at rest; a wrong arm resets a counter or loads an unaudited task.
   "crates/maknae-kernel/src/task_store.rs",
   # #695: the board store's write-through and cursor rules; a wrong arm loses a post or

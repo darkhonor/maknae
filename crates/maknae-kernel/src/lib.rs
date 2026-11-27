@@ -31,6 +31,7 @@ pub mod live;
 mod membership;
 mod mutation;
 mod mutation_exchange;
+mod notice;
 mod partition_authz;
 mod posture;
 mod provider_choice;

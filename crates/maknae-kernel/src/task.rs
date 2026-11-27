@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use maknae_audit_append::AuditEmit;
 use maknae_config::AgentId;
 use maknae_proto::{
-    Binding, SecretText, SignedTask, TaskClose, TaskId, TaskObject, TaskReportPage, TaskState,
-    TaskSubmission, TaskView, Tasker,
+    AgentNotice, Binding, NoticeId, SecretText, SignedTask, TaskClose, TaskId, TaskObject,
+    TaskReportPage, TaskState, TaskSubmission, TaskView, Tasker,
 };
 use maknae_security::Authorizer;
 
 use crate::enrollment::{EnrollmentView, Load};
+use crate::notice::NoticeQueue;
 use crate::task_store::{
     encode, name_of, ordinal_key, BootFinding, Clock, Counters, Hot, RootTasker, StoreError,
     TaskBlobs, TaskRecord, CLAIM_LEASE, COUNTERS, REPORT_HOLD,
@@ -239,6 +240,11 @@ pub enum Notice {
         tasker: Tasker,
         failed: Option<String>,
     },
+    StopUnqueued {
+        task: TaskId,
+        agent: AgentId,
+        why: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -448,6 +454,7 @@ struct Held {
     notices: Vec<Notice>,
     /// Ids a notice has called owed, until one calls them settled.
     owed_said: BTreeSet<TaskId>,
+    stops: NoticeQueue<AgentNotice>,
 }
 
 impl Held {
@@ -484,6 +491,28 @@ impl Held {
 
     fn note(&mut self, notice: Notice) {
         self.notices.push(notice);
+    }
+
+    fn queue_stop(&mut self, task: TaskId, agent: &AgentId, tasker: &Tasker) {
+        let why = match draw_id() {
+            Ok(id) => {
+                let stop = maknae_proto::Notice {
+                    id: NoticeId(id),
+                    task: Some(task),
+                    body: AgentNotice::Stop,
+                };
+                match self.stops.offer(agent, tasker, stop) {
+                    Ok(()) => return,
+                    Err(refused) => refused.as_str().to_owned(),
+                }
+            }
+            Err(e) => e.to_string(),
+        };
+        self.note(Notice::StopUnqueued {
+            task,
+            agent: agent.clone(),
+            why,
+        });
     }
 
     fn unmark(&mut self, id: &TaskId) {
@@ -1132,6 +1161,7 @@ impl TaskStore {
                 let mut held = self.held();
                 let lapsed = held.hot.get(&d.task).is_none_or(|h| h.lease_until < now);
                 let rec = held.live(&d.task);
+                let working = rec.is_some_and(|r| r.state == TaskState::Working);
                 let holding = held.holding.contains_key(&d.task);
                 let still = match (d.why, held.closing.get(&d.task)) {
                     (DueFor::Hold(_), _) => holding,
@@ -1170,6 +1200,21 @@ impl TaskStore {
                         held.hold_said.insert(d.task);
                     }
                     (true, DueFor::Expiry | DueFor::Orphaned) | (false, _) => {}
+                }
+                let stop = match d.why {
+                    DueFor::Close(TaskClose::AgentGone) => held.enrolled.contains_key(&d.agent),
+                    DueFor::Close(
+                        TaskClose::Stopped
+                        | TaskClose::Dropped
+                        | TaskClose::AgentLost
+                        | TaskClose::Withdrawn
+                        | TaskClose::ParentEnded,
+                    )
+                    | DueFor::Hold(Contained::Tasker | Contained::Root) => true,
+                    DueFor::Hold(Contained::Agent) | DueFor::Expiry | DueFor::Orphaned => false,
+                };
+                if still && working && !d.recorded && stop {
+                    held.queue_stop(d.task, &d.agent, &d.tasker);
                 }
                 still
             };
@@ -1434,6 +1479,7 @@ impl TaskStore {
             .enrolled
             .keys()
             .chain(held.tasks.values().filter(|t| open(t)).map(|t| &t.agent))
+            .chain(held.stops.agents())
             .cloned()
             .collect();
         for agent in known {
@@ -1449,9 +1495,14 @@ impl TaskStore {
                 held.unenroll(&agent, |t| now != Some(t.agent_uid));
             }
             match now {
-                Some(uid) => held.enrolled.insert(agent, uid),
-                None => held.enrolled.remove(&agent),
-            };
+                Some(uid) => {
+                    held.enrolled.insert(agent, uid);
+                }
+                None => {
+                    held.stops.retire_all(&agent);
+                    held.enrolled.remove(&agent);
+                }
+            }
         }
         held.hold_contained(view);
     }
@@ -2014,6 +2065,17 @@ impl TaskStore {
         }
     }
 
+    /// The control notices `agent` has yet to retire, oldest first.
+    pub fn notices_for(&self, agent: &AgentId) -> Vec<maknae_proto::Notice<AgentNotice>> {
+        self.held().stops.pending(agent)
+    }
+
+    pub fn retire_stops(&self, agent: &AgentId) {
+        self.held().stops.retire(agent, |n| match n.body {
+            AgentNotice::Stop => true,
+        });
+    }
+
     /// What the kernel has yet to record, oldest first.
     pub fn take_notices(&self) -> Vec<Notice> {
         std::mem::take(&mut self.held().notices)
@@ -2341,7 +2403,9 @@ impl TaskStore {
                 ) => Err(TaskRefusal::NotWorking),
             },
         )?;
-        Ok(self.view_of(&self.held(), &next))
+        let mut held = self.held();
+        held.queue_stop(*id, &next.agent, &next.tasker);
+        Ok(self.view_of(&held, &next))
     }
 
     /// Withdraws a queued task `by` reaches. Answered once the record is durably pending or
@@ -12500,5 +12564,301 @@ mod tests {
             assert!(why.contains("more than 1280"), "{why}");
             assert_eq!((stub.frames(), store.len()), (1, 0));
         }
+    }
+
+    fn one_stop(store: &TaskStore, agent: &str, task: TaskId) {
+        let got = store.notices_for(&id(agent));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            (got[0].task, &got[0].body),
+            (Some(task), &AgentNotice::Stop)
+        );
+    }
+
+    fn unqueued(notices: &[Notice]) -> Vec<(TaskId, AgentId, String)> {
+        notices
+            .iter()
+            .filter_map(|n| {
+                if let Notice::StopUnqueued { task, agent, why } = n {
+                    Some((*task, agent.clone(), why.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn working_child(store: &TaskStore, parent: TaskId) -> TaskId {
+        let v = view(&[("hobi", HOBI), ("jin", JIN)]);
+        let child = store
+            .mint_live(
+                signer(),
+                &v,
+                at(0, JIN),
+                Tasker::Agent {
+                    agent: "hobi".into(),
+                    uid: HOBI,
+                },
+                Some(parent),
+                sub("jin"),
+                Vec::new(),
+            )
+            .unwrap()
+            .task
+            .task_id;
+        store.start_for_test(&child);
+        child
+    }
+
+    #[test]
+    fn a_tasker_stop_queues_one_stop_for_the_working_agent() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        store.start_for_test(&task);
+        store.stop(&task, &me).unwrap();
+        one_stop(&store, "hobi", task);
+        assert!(store.notices_for(&id("jin")).is_empty());
+        assert!(unqueued(&store.take_notices()).is_empty());
+    }
+
+    #[test]
+    fn a_stop_of_a_queued_task_queues_nothing() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        assert_eq!(store.stop(&task, &me), Err(TaskRefusal::NotWorking));
+        assert_eq!(
+            store.stop(&task, &Tasker::Uid(1001)),
+            Err(TaskRefusal::Unknown)
+        );
+        assert!(store.notices_for(&id("hobi")).is_empty());
+    }
+
+    #[test]
+    fn a_lapsed_lease_queues_a_stop_for_agent_lost() {
+        let (_blobs, clock, store) = clocked();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        clock.set(1_001 + CLAIM_LEASE.as_secs() as i64);
+        store.sweep();
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentLost));
+        one_stop(&store, "hobi", task);
+    }
+
+    #[test]
+    fn a_withdrawn_queued_task_queues_no_stop() {
+        let (_blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.withdraw_authority(&task);
+        store.close_all_due();
+        assert_eq!(closed(&store, &task), Some(TaskClose::Withdrawn));
+        assert!(store.notices_for(&id("hobi")).is_empty());
+    }
+
+    #[test]
+    fn a_parent_ended_close_queues_a_stop_for_the_working_child() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let parent = held_by(&store, me.clone());
+        store.start_for_test(&parent);
+        let child = working_child(&store, parent);
+        store.stop(&parent, &me).unwrap();
+        assert!(store.notices_for(&id("jin")).is_empty());
+        assert!(store
+            .close_all_due()
+            .iter()
+            .any(|d| d.task == child && d.why == DueFor::Close(TaskClose::ParentEnded)));
+        one_stop(&store, "jin", child);
+        one_stop(&store, "hobi", parent);
+    }
+
+    #[test]
+    fn a_hold_for_a_contained_tasker_or_root_queues_a_stop() {
+        let (_blobs, store) = mem();
+        let parent = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&parent);
+        let child = working_child(&store, parent);
+        store.mark_unenrolled(&containing(&[1000]));
+        let mut held: Vec<_> = store
+            .close_all_due()
+            .iter()
+            .map(|d| (d.task, d.why))
+            .collect();
+        held.sort_by_key(|(task, _)| *task);
+        let mut want = vec![
+            (parent, DueFor::Hold(Contained::Tasker)),
+            (child, DueFor::Hold(Contained::Root)),
+        ];
+        want.sort_by_key(|(task, _)| *task);
+        assert_eq!(held, want);
+        one_stop(&store, "hobi", parent);
+        one_stop(&store, "jin", child);
+    }
+
+    #[test]
+    fn the_agents_own_containment_queues_no_stop() {
+        let (_blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        store.mark_unenrolled(&containing(&[HOBI]));
+        assert_eq!(
+            store
+                .close_all_due()
+                .iter()
+                .map(|d| d.why)
+                .collect::<Vec<_>>(),
+            [DueFor::Hold(Contained::Agent)]
+        );
+        assert_eq!(store.record(&task).unwrap().state, TaskState::Held);
+        assert!(store.notices_for(&id("hobi")).is_empty());
+        assert!(unqueued(&store.take_notices()).is_empty());
+    }
+
+    #[test]
+    fn a_stop_is_retired_by_retire_stops_not_by_being_offered() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        store.start_for_test(&task);
+        store.stop(&task, &me).unwrap();
+        let first = store.notices_for(&id("hobi"));
+        assert_eq!(store.notices_for(&id("hobi")), first);
+        store.retire_stops(&id("jin"));
+        assert_eq!(store.notices_for(&id("hobi")), first);
+        store.retire_stops(&id("hobi"));
+        assert!(store.notices_for(&id("hobi")).is_empty());
+    }
+
+    #[test]
+    fn an_unenrolled_agents_notices_are_retired() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        store.retain_enrolled(&view(&[("hobi", HOBI)]));
+        let task = held_by(&store, me.clone());
+        store.start_for_test(&task);
+        store.stop(&task, &me).unwrap();
+        store.mark_unenrolled(&view(&[("hobi", HOBI)]));
+        one_stop(&store, "hobi", task);
+        store.mark_unenrolled(&view(&[("hobi", HOBI_AGAIN)]));
+        one_stop(&store, "hobi", task);
+        store.mark_unenrolled(&view(&[]));
+        assert!(store.notices_for(&id("hobi")).is_empty());
+    }
+
+    #[test]
+    fn an_unenrolled_agents_agent_gone_close_queues_no_stop() {
+        let (_blobs, store) = mem();
+        store.retain_enrolled(&view(&[("hobi", HOBI)]));
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        store.retain_enrolled(&view(&[]));
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
+        assert!(store.notices_for(&id("hobi")).is_empty());
+        assert!(unqueued(&store.take_notices()).is_empty());
+    }
+
+    #[test]
+    fn an_agent_gone_close_under_a_new_uid_queues_a_stop() {
+        let (_blobs, store) = mem();
+        store.retain_enrolled(&view(&[("hobi", HOBI)]));
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        store.retain_enrolled(&view(&[("hobi", HOBI_AGAIN)]));
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentGone));
+        one_stop(&store, "hobi", task);
+    }
+
+    #[test]
+    fn a_failed_close_write_queues_one_stop_across_sweeps() {
+        let (blobs, clock, store) = clocked();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        clock.set(1_001 + CLAIM_LEASE.as_secs() as i64);
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        assert_eq!(store.sweep().len(), 1);
+        assert_eq!(closed(&store, &task), None);
+        one_stop(&store, "hobi", task);
+        store.retire_stops(&id("hobi"));
+        store.sweep();
+        assert_eq!(store.due(8)[0].task, task, "still due, and performed again");
+        assert!(store.notices_for(&id("hobi")).is_empty());
+        blobs.fail(None);
+        store.sweep();
+        assert_eq!(closed(&store, &task), Some(TaskClose::AgentLost));
+        assert!(store.notices_for(&id("hobi")).is_empty());
+        assert!(unqueued(&store.take_notices()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_hold_write_queues_one_stop_across_sweeps() {
+        let (blobs, store) = mem();
+        let task = held_by(&store, Tasker::Uid(1000));
+        store.start_for_test(&task);
+        store.mark_unenrolled(&containing(&[1000]));
+        blobs.fail(Some(crate::task_store::Fail::Records));
+        store.close_all_due();
+        one_stop(&store, "hobi", task);
+        store.retire_stops(&id("hobi"));
+        store.close_all_due();
+        assert!(store.notices_for(&id("hobi")).is_empty());
+        blobs.fail(None);
+        store.close_all_due();
+        assert_eq!(store.record(&task).unwrap().state, TaskState::Held);
+        assert!(store.notices_for(&id("hobi")).is_empty());
+    }
+
+    #[test]
+    fn a_stop_queued_after_the_retire_survives_the_claim() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        store.start_for_test(&task);
+        store.retire_stops(&id("hobi"));
+        store.stop(&task, &me).unwrap();
+        store.heartbeat(&id("hobi"), HOBI, 0, usize::MAX);
+        claim_head(&store, &id("hobi"), HOBI, signer()).unwrap();
+        one_stop(&store, "hobi", task);
+    }
+
+    #[test]
+    fn a_stop_past_the_bound_is_recorded_and_not_queued() {
+        let (_blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let tasks: Vec<TaskId> = (0..3)
+            .map(|_| {
+                let task = held_by(&store, me.clone());
+                store.start_for_test(&task);
+                task
+            })
+            .collect();
+        for task in &tasks {
+            store.stop(task, &me).unwrap();
+        }
+        let queued: Vec<_> = store
+            .notices_for(&id("hobi"))
+            .iter()
+            .map(|n| n.task)
+            .collect();
+        assert_eq!(queued, [Some(tasks[0]), Some(tasks[1])]);
+        assert_eq!(
+            unqueued(&store.take_notices()),
+            [(
+                tasks[2],
+                id("hobi"),
+                "the tasker has 2 notices outstanding for the agent".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn notices_are_not_kept_across_a_store_reopen() {
+        let (blobs, store) = mem();
+        let me = Tasker::Uid(1000);
+        let task = held_by(&store, me.clone());
+        store.start_for_test(&task);
+        store.stop(&task, &me).unwrap();
+        one_stop(&store, "hobi", task);
+        assert!(reopen(&blobs).notices_for(&id("hobi")).is_empty());
     }
 }
