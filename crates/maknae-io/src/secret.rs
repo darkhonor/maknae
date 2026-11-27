@@ -55,8 +55,11 @@ impl<const N: usize> sealed::Sealed for [u8; N] {
     }
 
     fn len_ok(&self) -> Result<(), SecretError> {
-        const { assert!(N > 0) };
-        Ok(())
+        if N == 0 {
+            Err(SecretError::Empty)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -157,11 +160,6 @@ impl std::error::Error for SecretError {
 ///     }
 /// }
 /// impl maknae_io::SecretBuf for Mine {}
-/// ```
-///
-/// ```compile_fail,E0080
-/// use maknae_io::{MaknaeSecret, Zeroizing};
-/// let _ = MaknaeSecret::new(Zeroizing::new([0u8; 0]));
 /// ```
 pub struct MaknaeSecret<B: SecretBuf = String>(Zeroizing<B>);
 
@@ -359,6 +357,15 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_array_secret_is_refused() {
+        assert!(matches!(
+            MaknaeSecret::new(Zeroizing::new([0u8; 0])),
+            Err(SecretError::Empty)
+        ));
+        assert!(MaknaeSecret::new(Zeroizing::new([7u8; 1])).is_ok());
+    }
+
+    #[test]
     fn the_sealed_read_returns_each_form_bytes() {
         assert_eq!(sealed::Sealed::bytes(&String::from("ab")), b"ab");
         assert_eq!(sealed::Sealed::bytes(&vec![1u8, 2]), &[1u8, 2]);
@@ -462,7 +469,8 @@ mod tests {
         let mut de = serde_json::Deserializer::from_str("\"a\\\"b\"");
         assert_eq!(de_zeroizing_string(&mut de).unwrap().as_str(), "a\"b");
         let mut de = serde_json::Deserializer::from_str("7");
-        assert!(de_zeroizing_string(&mut de).is_err());
+        let err = de_zeroizing_string(&mut de).unwrap_err().to_string();
+        assert!(err.contains("a string"), "{err}");
     }
 
     #[test]
