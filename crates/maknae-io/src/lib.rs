@@ -62,6 +62,8 @@ pub mod mutation;
 pub mod normalize;
 mod page;
 pub mod program;
+pub mod secret;
+pub use secret::{MaknaeSecret, MaknaeSecretBytes, SecretBuf, SecretError, MAX_SECRET_BYTES};
 mod strategy;
 mod syscall;
 mod term;

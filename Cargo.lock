@@ -1241,6 +1241,7 @@ dependencies = [
  "maknae-sys",
  "nix",
  "rustix",
+ "serde",
  "serde_json",
  "tempfile",
  "zeroize",

@@ -141,6 +141,7 @@ files = [
   "crates/maknae-io/src/delegated.rs",
   # #751: DeliveredCredential and the launch-credential framing; a lost redaction or a decode that admits a malformed frame leaks or forges a credential.
   "crates/maknae-io/src/credential.rs",
+  "crates/maknae-io/src/secret.rs",
   "crates/maknae-io/src/normalize.rs",
   "crates/maknae-io/src/page.rs",
   # Raw T1 syscall coverage, with no exceptions.
@@ -1437,6 +1438,11 @@ path = "crates/maknae-io/src/credential_io.rs"
 anchor = "if let Some(code) = CORE_DUMPS_DENIED_FAILED.get() {"
 end_anchor = "io::Error::from_raw_os_error(*CORE_DUMPS_DENIED_FAILED.get_or_init(|| e.raw_os_error()))"
 why = "deny_core_dumps' sticky-failure path: lowering only the soft core limit to 0 under the current hard limit, and PR_SET_DUMPABLE 0, cannot fail for an unprivileged process, so no unit test can provoke the first failure the path records; the success path and its reapply are tested"
+
+[[exception]]
+path = "crates/maknae-io/src/secret.rs"
+anchor = "crate::deny_core_dumps().map_err(SecretError::CoreDumps)?;"
+why = "MaknaeSecret::new's CoreDumps mapping: deny_core_dumps cannot fail for an unprivileged process, the same reason as the credential_io.rs sticky-failure exception, so the mapping has no failure to carry in a unit test; the success path is tested"
 
 [[t3]]
 path = "crates/maknae-proto/src/mutation.rs"
