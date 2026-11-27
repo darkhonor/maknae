@@ -18,6 +18,7 @@
 //! a client that installed its own would be the failure the pin prevents.
 
 use crate::{take_capped, to_prompt_reply, ChatRequest, Completion, ReplyError};
+use maknae_io::MaknaeSecret;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -74,13 +75,13 @@ pub const ERROR_BODY_WAIT: Duration = Duration::from_secs(2);
 
 /// One non-streaming chat completion.
 ///
-/// `api_key` is `Zeroizing` and is used only as a bearer header — it is never
+/// `api_key` is a `MaknaeSecret` and is used only as a bearer header — it is never
 /// logged, never rendered by `Debug`, and never returned in an error. A
 /// `Status` carries at most [`ERROR_BODY_MAX_BYTES`] of the error body, read
 /// for at most [`ERROR_BODY_WAIT`], for the caller to journal.
 pub async fn chat_completion(
     endpoint: &str,
-    api_key: &Zeroizing<String>,
+    api_key: &MaknaeSecret,
     req: &ChatRequest<'_>,
     offered: &[String],
     timeout: Duration,
@@ -113,7 +114,7 @@ pub async fn chat_completion(
 
     let resp = client
         .post(endpoint)
-        .bearer_auth(api_key.as_str())
+        .bearer_auth(api_key.expose())
         .json(req)
         .send()
         .await

@@ -34,7 +34,7 @@ async fn a_call_without_an_installed_fips_provider_is_refused_not_attempted() {
     };
     let out = maknae_llm::chat_completion(
         "http://127.0.0.1:1/v1/chat/completions",
-        &Zeroizing::new("sk-test".to_string()),
+        &maknae_io::MaknaeSecret::new(Zeroizing::new("sk-test".to_string())).unwrap(),
         &req,
         &[],
         Duration::from_secs(2),

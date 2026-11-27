@@ -110,7 +110,7 @@ impl VaultApi {
         &self,
         token: MaknaeSecret,
         expect: &WrapExpectation,
-    ) -> Result<Zeroizing<String>, VaultError> {
+    ) -> Result<MaknaeSecret, VaultError> {
         unwrap_checked(self, token, expect).await
     }
 

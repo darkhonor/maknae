@@ -822,7 +822,7 @@ mod tests {
         m.revoke_all(LiveTokens {
             api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
             label: String::new(),
-            tokens: vec![Zeroizing::new("ghs_SENTINEL".into())],
+            tokens: vec![MaknaeSecret::new(Zeroizing::new("ghs_SENTINEL".into())).unwrap()],
         });
         assert_eq!(recorded(), Vec::<String>::new(), "no client, no attempt");
     }
@@ -838,8 +838,8 @@ mod tests {
             api: ApiBase::parse("https://127.0.0.1:1").unwrap(),
             label: "mint task=\"t\" agent=coder".into(),
             tokens: vec![
-                Zeroizing::new("ghs_SENTINEL1".into()),
-                Zeroizing::new("ghs_SENTINEL2".into()),
+                MaknaeSecret::new(Zeroizing::new("ghs_SENTINEL1".into())).unwrap(),
+                MaknaeSecret::new(Zeroizing::new("ghs_SENTINEL2".into())).unwrap(),
             ],
         });
         let lines = recorded();

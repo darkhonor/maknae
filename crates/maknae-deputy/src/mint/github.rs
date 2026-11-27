@@ -7,6 +7,7 @@ use super::grant::{
 };
 use maknae_config::ApiBase;
 use maknae_forge::HttpReply;
+use maknae_io::MaknaeSecret;
 use maknae_proto::{ForgeStatus, GithubPermission, PermissionSet, RevokeReply};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -46,14 +47,14 @@ pub enum ForgeError {
 }
 
 pub struct MintedToken {
-    pub token: Zeroizing<String>,
+    pub token: MaknaeSecret,
     pub expires_at: String,
 }
 
 impl std::fmt::Debug for MintedToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MintedToken")
-            .field("token", &format_args!("<{} bytes>", self.token.len()))
+            .field("token", &self.token)
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -176,9 +177,9 @@ impl GithubClient {
                 .await
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Bearer>(&bytes).ok())
-                .filter(|bearer| is_installation_token(&bearer.token));
+                .filter(|bearer| is_installation_token(bearer.token.expose()));
             let revoked = match bearer {
-                Some(bearer) => self.revoked(api, &bearer.token).await,
+                Some(bearer) => self.revoked(api, bearer.token).await,
                 None => false,
             };
             return Err(GrantError::Undocumented { status, revoked });
@@ -186,19 +187,19 @@ impl GithubClient {
         let bytes = read_capped(resp).await.map_err(forge)?;
         let bearer: Bearer =
             serde_json::from_slice(&bytes).map_err(|_| forge(ForgeError::Shape))?;
-        if !is_installation_token(&bearer.token) {
+        if !is_installation_token(bearer.token.expose()) {
             return Err(forge(ForgeError::Shape));
         }
         let Ok(grant) = serde_json::from_slice::<Grant>(&bytes) else {
-            let revoked = self.revoked(api, &bearer.token).await;
+            let revoked = self.revoked(api, bearer.token).await;
             return Err(forge(ForgeError::Malformed { revoked }));
         };
         if !matches(&grant) {
-            let revoked = self.revoked(api, &bearer.token).await;
+            let revoked = self.revoked(api, bearer.token).await;
             return Err(forge(ForgeError::Mismatch { revoked }));
         }
         if !is_github_timestamp(&grant.expires_at) {
-            let revoked = self.revoked(api, &bearer.token).await;
+            let revoked = self.revoked(api, bearer.token).await;
             return Err(forge(ForgeError::Malformed { revoked }));
         }
         Ok(MintedToken {
@@ -237,13 +238,12 @@ impl GithubClient {
     }
 
     /// Spawned so a caller cancelled mid-revoke does not abandon it; the client's call timeout bounds it.
-    async fn revoked(&self, api: &ApiBase, token: &str) -> bool {
+    async fn revoked(&self, api: &ApiBase, token: MaknaeSecret) -> bool {
         let github = self.clone();
         let api = api.clone();
-        let token = Zeroizing::new(token.to_owned());
         tokio::spawn(async move {
             matches!(
-                github.revoke(&api, &token).await,
+                github.revoke(&api, token.expose()).await,
                 Ok(RevokeReply::Revoked | RevokeReply::AlreadyGone)
             )
         })
@@ -468,7 +468,7 @@ mod tests {
         let c = GithubClient::loopback_for_tests(&base);
         let ta = c.mint(&api(), 42, JWT, &a).await.unwrap();
         let tb = c.mint(&api(), 42, JWT, &b).await.unwrap();
-        assert_eq!((ta.token.as_str(), tb.token.as_str()), ("ghs_a", "ghs_b"));
+        assert_eq!((ta.token.expose(), tb.token.expose()), ("ghs_a", "ghs_b"));
         assert_eq!(ta.expires_at, "2026-11-19T01:00:00Z");
 
         let seen = h.await.unwrap();
@@ -661,7 +661,7 @@ mod tests {
         .await;
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
-            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.as_str(),
+            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.expose(),
             "ghs_m"
         );
         let seen = h.await.unwrap();
@@ -720,7 +720,7 @@ mod tests {
         .await;
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
-            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.as_str(),
+            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.expose(),
             "ghs_c"
         );
         assert_eq!(h.await.unwrap().requests.len(), 1);
@@ -938,7 +938,7 @@ mod tests {
         let (base, _h) = stub(vec![reply("201 Created", &at_cap)]).await;
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
-            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.as_str(),
+            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.expose(),
             "ghs_cap"
         );
 
@@ -947,7 +947,7 @@ mod tests {
         let (base, _h) = stub(vec![undeclared_at_cap]).await;
         let c = GithubClient::loopback_for_tests(&base);
         assert_eq!(
-            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.as_str(),
+            c.mint(&api(), 7, JWT, &asked).await.unwrap().token.expose(),
             "ghs_cap"
         );
     }
@@ -972,6 +972,31 @@ mod tests {
                 "{body}"
             );
             assert_eq!(h.await.unwrap().requests.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_grant_whose_token_is_not_a_string_is_refused_and_nothing_is_revoked() {
+        fips();
+        let asked = set(
+            &["alpha"],
+            &[(GithubPermission::Contents, AccessLevel::Read)],
+        );
+        for token in ["7", "null", "true", r#"{"a":"ghs_x"}"#, r#"["ghs_x"]"#] {
+            let body = grant("x", r#"{"contents":"read"}"#, &["alpha"])
+                .replace(r#""token":"x""#, &format!(r#""token":{token}"#));
+            let (base, h) = stub(vec![
+                reply("201 Created", &body),
+                reply("204 No Content", ""),
+            ])
+            .await;
+            let c = GithubClient::loopback_for_tests(&base);
+            assert_eq!(
+                c.mint(&api(), 7, JWT, &asked).await.unwrap_err(),
+                ForgeError::Shape,
+                "{token}"
+            );
+            assert_eq!(h.await.unwrap().requests.len(), 1, "{token}: no revoke");
         }
     }
 
@@ -1120,7 +1145,7 @@ mod tests {
         .await;
         let c = GithubClient::loopback_for_tests(&base);
         let minted = c.mint(&api(), 7, JWT, &asked).await.unwrap();
-        assert_eq!(minted.token.as_str(), sentinel);
+        assert_eq!(minted.token.expose(), sentinel);
         let shown = format!("{minted:?} {c:?} {minted:#?} {c:#?}");
         assert!(!shown.contains(sentinel), "{shown}");
         assert!(shown.contains("2026-11-19T01:00:00Z"), "{shown}");
@@ -1240,7 +1265,7 @@ mod tests {
         .await;
         let c = GithubClient::loopback_for_tests(&base);
         let t = c.mint_metadata_read(&api(), 77, JWT).await.unwrap();
-        assert_eq!(t.token.as_str(), "ghs_meta");
+        assert_eq!(t.token.expose(), "ghs_meta");
         let seen = h.await.unwrap();
         assert_eq!((seen.requests.len(), seen.extra), (1, 0));
         let head = head_of(&seen.requests[0]);

@@ -90,7 +90,7 @@ async fn scenario(
         .unwrap_kv_field(wrapped.token, &right)
         .await
         .map_err(|e| format!("unwrap: {e}"))?;
-    if key.as_str() != "LIVE-SENTINEL-KEY" {
+    if key.expose() != "LIVE-SENTINEL-KEY" {
         return Err("unwrapped the wrong value".into());
     }
     match api.unwrap_kv_field(replay, &right).await {

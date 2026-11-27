@@ -9,7 +9,6 @@ use maknae_vault::{
 };
 use std::future::Future;
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 pub struct SealedOpener {
     pub key: Arc<SealPrivateKey>,
@@ -21,7 +20,7 @@ pub trait Unwrapper {
         &self,
         token: MaknaeSecret,
         expect: &WrapExpectation,
-    ) -> impl Future<Output = Result<Zeroizing<String>, VaultError>> + Send;
+    ) -> impl Future<Output = Result<MaknaeSecret, VaultError>> + Send;
 }
 
 impl Unwrapper for VaultApi {
@@ -29,7 +28,7 @@ impl Unwrapper for VaultApi {
         &self,
         token: MaknaeSecret,
         expect: &WrapExpectation,
-    ) -> impl Future<Output = Result<Zeroizing<String>, VaultError>> + Send {
+    ) -> impl Future<Output = Result<MaknaeSecret, VaultError>> + Send {
         self.unwrap_kv_field(token, expect)
     }
 }
@@ -98,7 +97,7 @@ pub fn open_with<'a, U: Unwrapper + Sync>(
     vault: &'a U,
     sealed: &[u8],
     req: &OpenRequest<'_>,
-) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send + 'a {
+) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send + 'a {
     let unsealed = unseal_token(key, sealed, req);
     async move {
         let (token, expectation) = unsealed?;
@@ -132,7 +131,7 @@ pub fn open_forge_with<'a, U: Unwrapper + Sync>(
     vault: &'a U,
     sealed: &[u8],
     req: &ForgeOpenRequest<'_>,
-) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send + 'a {
+) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send + 'a {
     let unsealed = unseal_forge_token(key, sealed, req);
     async move {
         let (token, expectation) = unsealed?;
@@ -148,7 +147,7 @@ impl ForgeOpener for SealedOpener {
         &self,
         sealed: &[u8],
         req: &ForgeOpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send {
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send {
         open_forge_with(&self.key, &*self.api, sealed, req)
     }
 }
@@ -158,7 +157,7 @@ impl KeyOpener for SealedOpener {
         &self,
         sealed: &[u8],
         req: &OpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send {
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send {
         open_with(&self.key, &*self.api, sealed, req)
     }
 }
@@ -168,6 +167,7 @@ pub(crate) mod tests {
     use super::*;
     use maknae_deputy::reach::open::tasker_open_request;
     use std::sync::{Mutex, Once};
+    use zeroize::Zeroizing;
 
     const ALICE: &str = "maknae/users/alice/openai/personal";
     const BOB: &str = "maknae/users/bob/openai/personal";
@@ -257,7 +257,7 @@ ampbv97Rcx9j
             &self,
             token: MaknaeSecret,
             expect: &WrapExpectation,
-        ) -> Result<Zeroizing<String>, VaultError> {
+        ) -> Result<MaknaeSecret, VaultError> {
             assert!(token.expose().as_bytes() == TOKEN);
             self.calls.lock().unwrap().push(format!(
                 "{}|{}|{}",
@@ -268,7 +268,7 @@ ampbv97Rcx9j
             if expect.creation_path() != self.creation_path {
                 return Err(VaultError::WrapMismatch(WrapMismatch::CreationPath));
             }
-            Ok(Zeroizing::new("sk-ALICE-SENTINEL".into()))
+            Ok(MaknaeSecret::new(Zeroizing::new("sk-ALICE-SENTINEL".into())).unwrap())
         }
     }
 
@@ -384,7 +384,7 @@ ampbv97Rcx9j
         assert_eq!(bobs.calls(), [format!("{ALICE_CREATION_PATH}|api_key|60")]);
         let alices = MintedVault::minted_on(ALICE_CREATION_PATH);
         let got = run(open_with(&key, &alices, &blob, &alice())).unwrap();
-        assert!(got.as_str() == "sk-ALICE-SENTINEL");
+        assert!(got.expose() == "sk-ALICE-SENTINEL");
     }
 
     #[test]
@@ -599,7 +599,7 @@ ampbv97Rcx9j
         );
         let alices = MintedVault::minted_on(ALICE_FORGE_CREATION_PATH);
         let got = run(open_forge_with(&key, &alices, &blob, &req)).unwrap();
-        assert!(got.as_str() == "sk-ALICE-SENTINEL");
+        assert!(got.expose() == "sk-ALICE-SENTINEL");
     }
 
     #[test]

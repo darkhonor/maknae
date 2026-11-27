@@ -386,7 +386,7 @@ impl<'de> Visitor<'de> for Level<'_> {
     }
 }
 
-pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<String>, VaultError> {
+pub(crate) fn pick_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<String>, VaultError> {
     let mut de = serde_json::Deserializer::from_slice(body);
     let picked = Level { field, depth: 0 }
         .deserialize(&mut de)
@@ -396,6 +396,10 @@ pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<Stri
         field: field.to_string(),
         why: "absent",
     })
+}
+
+pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<MaknaeSecret, VaultError> {
+    MaknaeSecret::new(pick_kv_field(body, field)?).map_err(|e| secret_error("KV field", e))
 }
 
 pub(crate) trait UnwrapOps {
@@ -414,7 +418,7 @@ pub(crate) async fn unwrap_checked<O: UnwrapOps>(
     ops: &O,
     token: MaknaeSecret,
     expect: &WrapExpectation,
-) -> Result<Zeroizing<String>, VaultError> {
+) -> Result<MaknaeSecret, VaultError> {
     let lookup = ops.lookup(&token).await?;
     let checked = check_lookup(&lookup, expect)?;
     let body = ops.unwrap_body(token, &checked).await?;
@@ -1035,14 +1039,15 @@ mod tests {
 
     #[test]
     fn field_selection_returns_only_the_named_field() {
-        let v = select_kv_field(KV_BODY, "api_key").unwrap();
+        let v = pick_kv_field(KV_BODY, "api_key").unwrap();
         assert!(v.as_str() == "sk-ALICE-SENTINEL");
         assert_eq!(v.capacity(), 17);
         let escaped =
-            select_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k").unwrap();
+            pick_kv_field(br#"{"data":{"data":{"data":"d","k":"sk\u002dX"}}}"#, "k").unwrap();
         assert!(escaped.as_str() == "sk-X" && escaped.capacity() == 4);
         let named_data = select_kv_field(br#"{"data":{"data":{"data":"d"}}}"#, "data").unwrap();
-        assert!(named_data.as_str() == "d");
+        assert!(named_data.expose() == "d");
+        assert!(select_kv_field(KV_BODY, "api_key").unwrap().expose() == "sk-ALICE-SENTINEL");
     }
 
     #[test]
@@ -1078,6 +1083,23 @@ mod tests {
         };
         let e = e.to_string();
         assert!(!e.contains("98765432"), "{e}");
+    }
+
+    #[test]
+    fn an_empty_kv_value_is_refused_by_name() {
+        let Err(e) = select_kv_field(br#"{"data":{"data":{"api_key":""}}}"#, "api_key") else {
+            panic!("an empty KV value must be refused");
+        };
+        assert!(
+            matches!(
+                e,
+                VaultError::InvalidSecret {
+                    what: "KV field",
+                    why: "is empty"
+                }
+            ),
+            "{e}"
+        );
     }
 
     struct Scripted {
@@ -1144,7 +1166,7 @@ mod tests {
     fn a_matching_token_is_looked_up_then_unwrapped_and_yields_only_the_field() {
         let ops = Scripted::new(ALICE, 60, true);
         let key = run(unwrap_checked(&ops, wrapping("hvs.wrap"), &expect())).unwrap();
-        assert!(key.as_str() == "sk-ALICE-SENTINEL");
+        assert!(key.expose() == "sk-ALICE-SENTINEL");
         assert_eq!(ops.calls(), ["lookup", "unwrap"]);
     }
 

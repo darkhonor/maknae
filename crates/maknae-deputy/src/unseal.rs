@@ -1,6 +1,7 @@
 //! Opening a turn's sealed key into its provider key, behind the `KeyOpener` seam (#153).
 use crate::handle::Refusal;
 use maknae_config::EgressBounds;
+use maknae_io::MaknaeSecret;
 use maknae_proto::EgressFrameRequest;
 use maknae_seal::{ForgePurpose, ForgeSealContext, SealAad, SealPrivateKey};
 use maknae_vault::FORGE_TOKEN_FIELD;
@@ -71,7 +72,7 @@ pub trait KeyOpener {
         &self,
         sealed: &[u8],
         req: &OpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send;
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send;
 }
 
 /// Where a tasker's sealed forge token was read from, checked against the tasker
@@ -144,7 +145,7 @@ pub trait ForgeOpener {
         &self,
         sealed: &[u8],
         req: &ForgeOpenRequest<'_>,
-    ) -> impl Future<Output = Result<Zeroizing<String>, OpenFailure>> + Send;
+    ) -> impl Future<Output = Result<MaknaeSecret, OpenFailure>> + Send;
 }
 
 /// The seal alone: what it holds is the wrapping token the tasker's client read.
