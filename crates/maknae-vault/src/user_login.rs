@@ -1,7 +1,8 @@
-use crate::api_shape::{de_secret, json_refusal, token_is_acceptable, VaultOp};
+use crate::api_shape::{json_refusal, VaultOp};
+use crate::error::secret_error;
 use crate::{UserAuth, VaultError};
+use maknae_io::MaknaeSecret;
 use serde::Deserialize;
-use std::fmt;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -9,67 +10,19 @@ use zeroize::Zeroizing;
 pub const MAX_USERNAME_BYTES: usize = 32;
 pub const MAX_PASSWORD_BYTES: usize = 1024;
 
-pub struct Password(Zeroizing<String>);
-
-fn password_len_ok(len: usize) -> bool {
-    (1..=MAX_PASSWORD_BYTES).contains(&len)
-}
-
-impl Password {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        if !password_len_ok(secret.len()) {
-            return Err(VaultError::InvalidSecret {
-                what: "password",
-                why: "must be 1..=1024 bytes",
-            });
-        }
-        Ok(Self(secret))
+pub fn password(secret: Zeroizing<String>) -> Result<MaknaeSecret, VaultError> {
+    if !(1..=MAX_PASSWORD_BYTES).contains(&secret.len()) {
+        return Err(VaultError::InvalidSecret {
+            what: "password",
+            why: "must be 1..=1024 bytes",
+        });
     }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Password {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Password(<redacted>)")
-    }
-}
-
-pub struct UserToken(Zeroizing<String>);
-
-impl UserToken {
-    pub fn new(secret: Zeroizing<String>) -> Result<Self, VaultError> {
-        token_is_acceptable(&secret).map_err(|why| VaultError::InvalidSecret {
-            what: "user token",
-            why,
-        })?;
-        Ok(Self(secret))
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for UserToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("UserToken(<redacted>)")
-    }
+    MaknaeSecret::new(secret).map_err(|e| secret_error("password", e))
 }
 
 #[derive(Debug)]
 pub struct UserLogin {
-    pub token: UserToken,
+    pub token: MaknaeSecret,
     pub lease: Duration,
     pub renewable: bool,
 }
@@ -111,7 +64,7 @@ struct LoginDto {
 
 #[derive(Deserialize)]
 pub(crate) struct LoginAuthDto {
-    #[serde(deserialize_with = "de_secret")]
+    #[serde(deserialize_with = "maknae_io::secret::de_zeroizing_string")]
     pub(crate) client_token: Zeroizing<String>,
     pub(crate) lease_duration: u64,
     renewable: bool,
@@ -144,7 +97,8 @@ pub(crate) fn parse_login(body: &[u8], username: &str) -> Result<UserLogin, Vaul
         ));
     }
     Ok(UserLogin {
-        token: UserToken::new(auth.client_token)?,
+        token: MaknaeSecret::vault_token(auth.client_token)
+            .map_err(|e| secret_error("user token", e))?,
         lease: Duration::from_secs(auth.lease_duration),
         renewable: auth.renewable,
     })
@@ -153,12 +107,6 @@ pub(crate) fn parse_login(body: &[u8], username: &str) -> Result<UserLogin, Vaul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_password_reports_only_its_length() {
-        let p = Password::new(Zeroizing::new("s3cret".into())).unwrap();
-        assert_eq!((p.len(), p.is_empty()), (6, false));
-    }
 
     fn secret(s: &str) -> Zeroizing<String> {
         Zeroizing::new(s.to_string())
@@ -212,26 +160,49 @@ mod tests {
     #[test]
     fn the_password_length_bound_is_one_to_1024_bytes_inclusive() {
         for (len, ok) in [(0, false), (1, true), (1024, true), (1025, false)] {
-            assert_eq!(password_len_ok(len), ok, "{len}");
+            assert_eq!(password(secret(&"p".repeat(len))).is_ok(), ok, "{len}");
         }
     }
 
     #[test]
     fn a_password_is_non_empty_bounded_and_redacted() {
-        assert!(Password::new(secret("")).is_err());
-        assert!(Password::new(secret(&"p".repeat(MAX_PASSWORD_BYTES + 1))).is_err());
-        let p = Password::new(secret(&"p".repeat(MAX_PASSWORD_BYTES))).unwrap();
+        assert!(password(secret("")).is_err());
+        assert!(matches!(
+            password(secret(&"p".repeat(MAX_PASSWORD_BYTES + 1))),
+            Err(VaultError::InvalidSecret {
+                what: "password",
+                why: "must be 1..=1024 bytes"
+            })
+        ));
+        let p = password(secret(&"p".repeat(MAX_PASSWORD_BYTES))).unwrap();
         assert!(p.expose().len() == MAX_PASSWORD_BYTES);
-        let p = Password::new(secret("hunter2-SENTINEL")).unwrap();
-        assert!(format!("{p:?}") == "Password(<redacted>)");
+        let p = password(secret("hunter2-SENTINEL")).unwrap();
+        assert!(format!("{p:?}") == "MaknaeSecret(<redacted>)");
     }
 
     #[test]
-    fn a_user_token_is_shape_checked_and_redacted() {
-        assert!(UserToken::new(secret("hvs.a b")).is_err());
-        let t = UserToken::new(secret("hvs.SENTINEL")).unwrap();
-        assert!(t.expose() == "hvs.SENTINEL");
-        assert!(format!("{t:?}") == "UserToken(<redacted>)");
+    fn a_password_debug_does_not_show_its_length() {
+        let p = password(secret("s3cret")).unwrap();
+        let shown = format!("{p:?}");
+        assert!(shown == "MaknaeSecret(<redacted>)" && !shown.contains('6'));
+    }
+
+    #[test]
+    fn a_login_token_is_shape_checked_and_redacted() {
+        let bad = parse_login(
+            &OK.replace("hvs.USERTOKEN", "hvs.a b").into_bytes(),
+            "alice",
+        );
+        assert!(matches!(
+            bad,
+            Err(VaultError::InvalidSecret {
+                what: "user token",
+                ..
+            })
+        ));
+        let t = parse_login(OK.as_bytes(), "alice").unwrap().token;
+        assert!(t.expose() == "hvs.USERTOKEN");
+        assert!(format!("{t:?}") == "MaknaeSecret(<redacted>)");
     }
 
     #[test]

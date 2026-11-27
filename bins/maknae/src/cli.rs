@@ -849,7 +849,7 @@ pub(crate) fn cli_config() -> Result<(PathBuf, Document, TransportConfig), Strin
 pub(crate) async fn minted_plane(
     document: &Document,
     dir: &Path,
-    token: &maknae_vault::UserToken,
+    token: &maknae_io::MaknaeSecret,
 ) -> Result<(PlaneClient, std::sync::Arc<maknae_vault::TrustBundle>), String> {
     let client = PlaneClient::for_user(document, dir, crate::agent::token_copy(token)?)
         .map_err(|e| e.to_string())?;

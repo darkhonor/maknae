@@ -5,7 +5,7 @@ use crate::api_request::{
 };
 use crate::api_shape::{admit_response, append_bounded, oversize, VaultOp, MAX_VAULT_BODY_BYTES};
 use crate::transit::{parse_service_login, parse_sign_reply, ServiceLogin};
-use crate::user_login::{parse_login, Password, UserLogin, UserToken};
+use crate::user_login::{parse_login, UserLogin};
 use crate::wrap::{
     kv_data_path, kv_metadata_path, parse_lookup, parse_wrapped_read, parse_wrapped_write,
     unwrap_checked, CheckedLookup, KvSecret, UnwrapOps, WrapExpectation, WrapLookup, WrappedSecret,
@@ -48,7 +48,7 @@ impl VaultApi {
         &self,
         auth: &UserAuth,
         username: &str,
-        password: &Password,
+        password: &MaknaeSecret,
     ) -> Result<UserLogin, VaultError> {
         match auth.method() {
             UserAuthMethod::Userpass => {
@@ -62,7 +62,7 @@ impl VaultApi {
 
     pub async fn read_wrapped(
         &self,
-        token: &UserToken,
+        token: &MaknaeSecret,
         kv_mount: &str,
         secret_path: &str,
         wrap_ttl: Duration,
@@ -75,7 +75,7 @@ impl VaultApi {
 
     pub async fn write_wrapped(
         &self,
-        token: &UserToken,
+        token: &MaknaeSecret,
         kv_mount: &str,
         secret_path: &str,
         field: &str,
@@ -91,7 +91,7 @@ impl VaultApi {
 
     pub async fn delete_metadata(
         &self,
-        token: &UserToken,
+        token: &MaknaeSecret,
         kv_mount: &str,
         secret_path: &str,
     ) -> Result<(), VaultError> {
@@ -115,7 +115,7 @@ impl VaultApi {
         unwrap_checked(self, token, expect).await
     }
 
-    pub async fn revoke_self(&self, token: &UserToken) -> Result<(), VaultError> {
+    pub async fn revoke_self(&self, token: &MaknaeSecret) -> Result<(), VaultError> {
         let req = revoke_self_request(&self.http, &self.base, token)?;
         self.execute(VaultOp::RevokeSelf, req).await.map(drop)
     }
@@ -221,9 +221,9 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let pw = Password::new(Zeroizing::new("pw".into())).unwrap();
+        let pw = crate::password(Zeroizing::new("pw".into())).unwrap();
         let wrapping = || WrappingToken::new(Zeroizing::new("hvs.w".into())).unwrap();
-        let user = UserToken::new(Zeroizing::new("hvs.u".into())).unwrap();
+        let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.u".into())).unwrap();
         let expect = WrapExpectation::new(
             "maknae-kv",
             "maknae/users/alice/openai",
@@ -328,7 +328,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let user = UserToken::new(Zeroizing::new("hvs.u".into())).unwrap();
+        let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.u".into())).unwrap();
         assert!(matches!(
             rt.block_on(api.read_wrapped(&user, "maknae-kv", "../bob/x", Duration::from_secs(60))),
             Err(VaultError::InvalidKeyVaultPath(_))

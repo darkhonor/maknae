@@ -1,4 +1,5 @@
-use crate::{Password, VaultError, MAX_PASSWORD_BYTES};
+use crate::{password, VaultError, MAX_PASSWORD_BYTES};
+use maknae_io::MaknaeSecret;
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +128,7 @@ impl PasswordLine {
         }
     }
 
-    pub fn finish(mut self) -> Result<Password, VaultError> {
+    pub fn finish(mut self) -> Result<MaknaeSecret, VaultError> {
         if self.ended != Some(PasswordFeed::Done) {
             return Err(VaultError::InvalidSecret {
                 what: "password",
@@ -135,7 +136,7 @@ impl PasswordLine {
             });
         }
         match String::from_utf8(std::mem::take(&mut *self.buf)) {
-            Ok(s) => Password::new(Zeroizing::new(s)),
+            Ok(s) => password(Zeroizing::new(s)),
             Err(e) => {
                 let _wiped = Zeroizing::new(e.into_bytes());
                 Err(VaultError::InvalidSecret {
@@ -248,7 +249,7 @@ mod tests {
             full.feed(b'a');
         }
         assert_eq!(full.feed(b'\r'), PasswordFeed::Done);
-        assert_eq!(full.finish().unwrap().len(), MAX_PASSWORD_BYTES);
+        assert_eq!(full.finish().unwrap().expose().len(), MAX_PASSWORD_BYTES);
     }
 
     #[test]

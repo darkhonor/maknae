@@ -1,8 +1,9 @@
 use crate::stderr::errln;
 use crate::tty::{HiddenLine, PromptError};
 use maknae_agent::hints::Forge;
+use maknae_io::MaknaeSecret;
 use maknae_loop::tasker::{TaskerClient, TaskerError};
-use maknae_vault::{KvSecret, PasswordFeed, UserToken, VaultApi, VaultError, MAX_TOKEN_BYTES};
+use maknae_vault::{KvSecret, PasswordFeed, VaultApi, VaultError, MAX_TOKEN_BYTES};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -209,7 +210,7 @@ fn read_token(server: &str) -> Result<KvSecret, String> {
 
 struct Vault<'a> {
     api: &'a VaultApi,
-    token: &'a UserToken,
+    token: &'a MaknaeSecret,
 }
 
 impl LoginStore for Vault<'_> {
@@ -269,7 +270,7 @@ async fn catalog(
     document: &maknae_config::Document,
     dir: &std::path::Path,
     transport: maknae_config::TransportConfig,
-    token: &UserToken,
+    token: &MaknaeSecret,
 ) -> Result<Vec<Forge>, String> {
     let (client, trust) = crate::cli::minted_plane(document, dir, token).await?;
     let client = Arc::new(client);

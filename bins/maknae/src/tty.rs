@@ -1,4 +1,5 @@
-use maknae_vault::{Password, PasswordFeed, PasswordLine, VaultError};
+use maknae_io::MaknaeSecret;
+use maknae_vault::{PasswordFeed, PasswordLine, VaultError};
 use nix::errno::Errno;
 use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use nix::sys::termios::{
@@ -141,7 +142,7 @@ impl HiddenLine for PasswordLine {
     }
 }
 
-pub(crate) fn read_password(prompt: &str) -> Result<Password, PromptError> {
+pub(crate) fn read_password(prompt: &str) -> Result<MaknaeSecret, PromptError> {
     let mut line = PasswordLine::new();
     read_hidden(prompt, &mut line)?;
     line.finish().map_err(PromptError::Password)
@@ -161,7 +162,7 @@ pub(crate) fn read_password_on(
     fd: BorrowedFd<'_>,
     out: &mut impl Write,
     prompt: &str,
-) -> Result<Password, PromptError> {
+) -> Result<MaknaeSecret, PromptError> {
     let mut line = PasswordLine::new();
     read_hidden_on(fd, out, prompt, &mut line)?;
     line.finish().map_err(PromptError::Password)
@@ -291,7 +292,7 @@ mod tests {
 
     const MARKER: &[u8] = b"END-OF-ECHO";
 
-    type Typed = (Result<Password, PromptError>, Mode, Mode, Vec<u8>);
+    type Typed = (Result<MaknaeSecret, PromptError>, Mode, Mode, Vec<u8>);
 
     fn type_at_prompt(keys: &[u8]) -> Typed {
         let (master, slave) = pty();
@@ -339,7 +340,7 @@ mod tests {
     #[test]
     fn a_typed_password_is_read_hidden_and_the_terminal_restored() {
         let (got, before, after, echoed) = type_at_prompt(b"s3cret\r");
-        assert_eq!(got.unwrap().len(), 6);
+        assert_eq!(got.unwrap().expose().len(), 6);
         assert_eq!(after, before);
         assert!(
             !echoed.windows(6).any(|w| w == b"s3cret"),
@@ -384,7 +385,7 @@ mod tests {
         std::thread::spawn(move || {
             let before = signal::SigSet::thread_get_mask().unwrap();
             let got = read_password_on(slave.as_fd(), &mut MaskAtPrompt(prompted_tx), "Password: ")
-                .map(|p| p.len());
+                .map(|p| p.expose().len());
             let after = signal::SigSet::thread_get_mask().unwrap();
             let _ = done_tx.send((got, before, after, slave));
         });

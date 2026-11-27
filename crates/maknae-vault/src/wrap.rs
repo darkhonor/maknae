@@ -2,7 +2,6 @@ use crate::api_shape::{
     de_secret, json_refusal, token_is_acceptable, url_path_is_safe, SecretStr, VaultOp,
     WrapMismatch,
 };
-use crate::user_login::UserToken;
 use crate::VaultError;
 use maknae_io::MaknaeSecret;
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -164,7 +163,7 @@ fn missing_client_token() -> VaultError {
 
 pub(crate) fn client_token<'a>(
     op: VaultOp,
-    user: Option<&'a UserToken>,
+    user: Option<&'a MaknaeSecret>,
     wrapping: Option<&'a WrappingToken>,
     service: Option<&'a MaknaeSecret>,
 ) -> Result<Option<&'a str>, VaultError> {
@@ -692,7 +691,7 @@ mod tests {
 
     #[test]
     fn each_call_carries_only_its_own_token_and_lookup_carries_none() {
-        let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let wrap = wrapping("hvs.wrap");
         let (u, w) = (Some(&user), Some(&wrap));
         let pick = |op| client_token(op, u, w, None).unwrap();
@@ -740,7 +739,7 @@ mod tests {
 
     #[test]
     fn client_token_requires_the_service_token_for_transit_sign() {
-        let user = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let user = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let wrap = wrapping("hvs.wrap");
         let service = MaknaeSecret::vault_token(Zeroizing::new("hvs.service".into())).unwrap();
         let (u, w, s) = (Some(&user), Some(&wrap), Some(&service));

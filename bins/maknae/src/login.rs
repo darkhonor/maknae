@@ -1,10 +1,10 @@
 use crate::stderr::errln;
 use crate::tty::{read_password, stdin_is_terminal, PromptError};
+use maknae_io::MaknaeSecret;
 use maknae_vault::{
     check_vault_addr, custody_for_store, custody_label, erase_user_token, observe_systemd_creds,
     read_user_token, store_user_token, userpass_username_is_acceptable, vault_config_from_document,
-    StoredToken, SystemdCreds, UserAuth, UserToken, VaultApi, VaultConfig, VaultError,
-    MAX_USERNAME_BYTES,
+    StoredToken, SystemdCreds, UserAuth, VaultApi, VaultConfig, VaultError, MAX_USERNAME_BYTES,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -60,7 +60,7 @@ fn vault_api(dir: &Path, vault: &VaultConfig) -> Result<VaultApi, String> {
 
 pub(crate) struct UserSession {
     pub(crate) api: VaultApi,
-    pub(crate) token: UserToken,
+    pub(crate) token: MaknaeSecret,
     pub(crate) expires_at: u64,
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn usable_token(
     read: Result<StoredToken, VaultError>,
     vault_addr: &str,
     now: u64,
-) -> Result<(UserToken, u64), String> {
+) -> Result<(MaknaeSecret, u64), String> {
     let stored = read.map_err(|e| match e {
         VaultError::TokenStore(_) => format!("{e}: run `maknae login`"),
         other => other.to_string(),
@@ -568,8 +568,7 @@ mod tests {
 
     fn stored(expires_at: u64) -> StoredToken {
         let login = maknae_vault::UserLogin {
-            token: maknae_vault::UserToken::new(zeroize::Zeroizing::new("hvs.plan".into()))
-                .unwrap(),
+            token: MaknaeSecret::vault_token(zeroize::Zeroizing::new("hvs.plan".into())).unwrap(),
             lease: std::time::Duration::from_secs(expires_at),
             renewable: true,
         };

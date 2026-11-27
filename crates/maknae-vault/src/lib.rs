@@ -129,8 +129,7 @@ pub use token_store::{
 pub use transit::{parse_transit_signature, ServiceLogin, TRANSIT_SIGN_INPUT_MAX_BYTES};
 pub use trust_bundle::TrustBundle;
 pub use user_login::{
-    userpass_username_is_acceptable, Password, UserLogin, UserToken, MAX_PASSWORD_BYTES,
-    MAX_USERNAME_BYTES,
+    password, userpass_username_is_acceptable, UserLogin, MAX_PASSWORD_BYTES, MAX_USERNAME_BYTES,
 };
 pub use vault_api::{VaultApi, VAULT_API_TIMEOUT};
 pub use verify::{leaf_not_after, verify_uri_san, VerifyError};

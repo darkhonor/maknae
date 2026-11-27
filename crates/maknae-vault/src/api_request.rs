@@ -2,7 +2,7 @@ use crate::api_shape::{addr_refusal, VaultOp};
 use crate::transit::{
     approle_credential, approle_login_path, transit_sign_path, TRANSIT_SIGN_INPUT_MAX_BYTES,
 };
-use crate::user_login::{login_path, Password, UserToken};
+use crate::user_login::login_path;
 use crate::wrap::{
     client_token, field_echo, kv_field_is_acceptable, wrap_ttl_value, KvDataPath, KvMetadataPath,
     KvSecret, WrappingToken,
@@ -105,7 +105,7 @@ fn json_body<T: Serialize>(capacity: usize, value: &T) -> Result<Zeroizing<Vec<u
     Ok(body)
 }
 
-pub(crate) fn login_body(password: &Password) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+pub(crate) fn login_body(password: &MaknaeSecret) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let password = password.expose();
     json_body(
         LOGIN_BODY_OVERHEAD + 6 * password.len(),
@@ -215,7 +215,7 @@ pub(crate) fn login_request(
 pub(crate) fn wrapped_read_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
     path: &KvDataPath,
     wrap_ttl: Duration,
 ) -> Result<Request, VaultError> {
@@ -228,7 +228,7 @@ pub(crate) fn wrapped_read_request(
 pub(crate) fn wrapped_write_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
     path: &KvDataPath,
     wrap_ttl: Duration,
     body: Zeroizing<Vec<u8>>,
@@ -242,7 +242,7 @@ pub(crate) fn wrapped_write_request(
 pub(crate) fn delete_metadata_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
     path: &KvMetadataPath,
 ) -> Result<Request, VaultError> {
     let token = client_token(VaultOp::DeleteMetadata, Some(token), None, None)?;
@@ -280,7 +280,7 @@ pub(crate) fn unwrap_request(
 pub(crate) fn revoke_self_request(
     http: &Client,
     base: &ApiBase,
-    token: &UserToken,
+    token: &MaknaeSecret,
 ) -> Result<Request, VaultError> {
     let token = client_token(VaultOp::RevokeSelf, Some(token), None, None)?;
     finish(authed(
@@ -339,8 +339,8 @@ mod tests {
         ApiBase::new("https://vault.example:8200/").unwrap()
     }
 
-    fn pw(s: &str) -> Password {
-        Password::new(Zeroizing::new(s.to_string())).unwrap()
+    fn pw(s: &str) -> MaknaeSecret {
+        crate::password(Zeroizing::new(s.to_string())).unwrap()
     }
 
     fn wrapping() -> WrappingToken {
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn the_wrapped_read_carries_the_user_token_and_the_wrap_ttl() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "maknae/users/alice/openai").unwrap();
         let req =
             wrapped_read_request(&http(), &base(), &token, &path, Duration::from_secs(60)).unwrap();
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn the_wrapped_write_request_carries_the_wrap_ttl_and_a_zeroizing_body() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
         let secret = KvSecret::new(Zeroizing::new("github_pat_SENTINEL".into())).unwrap();
         let body = kv_write_body(FORGE_TOKEN_FIELD, &secret).unwrap();
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn the_delete_targets_the_metadata_path() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_metadata_path("maknae-kv", "maknae/users/alice/forges/github.com").unwrap();
         let req = delete_metadata_request(&http(), &base(), &token, &path).unwrap();
         assert_eq!(*req.method(), Method::DELETE);
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn a_wrap_ttl_out_of_bounds_is_refused_before_any_request() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let path = kv_data_path("maknae-kv", "a").unwrap();
         assert!(matches!(
             wrapped_read_request(&http(), &base(), &token, &path, Duration::ZERO),
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn revoke_self_authenticates_with_the_user_token_and_sends_no_body() {
-        let token = UserToken::new(Zeroizing::new("hvs.user".into())).unwrap();
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.user".into())).unwrap();
         let req = revoke_self_request(&http(), &base(), &token).unwrap();
         assert_eq!(*req.method(), Method::POST);
         assert_eq!(header(&req, X_VAULT_REQUEST), "true");

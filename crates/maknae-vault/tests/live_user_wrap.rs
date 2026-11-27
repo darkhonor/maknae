@@ -2,8 +2,7 @@
 #![cfg(unix)]
 
 use maknae_vault::{
-    Password, UserAuth, UserAuthMethod, VaultApi, VaultError, WrapExpectation, WrapMismatch,
-    WrappingToken,
+    UserAuth, UserAuthMethod, VaultApi, VaultError, WrapExpectation, WrapMismatch, WrappingToken,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -46,7 +45,7 @@ async fn scenario(
         .login(
             auth,
             user,
-            &Password::new(password.clone()).map_err(|e| e.to_string())?,
+            &maknae_vault::password(password.clone()).map_err(|e| e.to_string())?,
         )
         .await
         .map_err(|e| format!("login: {e}"))?;

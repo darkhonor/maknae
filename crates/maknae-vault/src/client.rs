@@ -6,20 +6,22 @@
 //! rotation all proceed concurrently (ADR-0018 Decision 3).
 use crate::agent_enroll::AgentId;
 use crate::auth::AppRoleAuth;
+use crate::error::secret_error;
 use crate::plane::PlaneTokenSource;
 use crate::secret_io::read_daemon_secret;
 use crate::secret_source::{resolve_daemon_secret_source, AgentSecret, CredentialSourceKind};
 use crate::{
     generate_plane_csr, load_ca_pin, peer_auth::SanRule, sign_refusal_detail,
     validate_deployment_id, validate_vault_addr, vault_config_from_document, vault_error_text,
-    verify::verify_uri_san, Plane, PlaneSubject, UserToken, VaultApi, VaultConfig, VaultError,
-    WrappedSecret, VAULT_SECTION,
+    verify::verify_uri_san, Plane, PlaneSubject, VaultApi, VaultConfig, VaultError, WrappedSecret,
+    VAULT_SECTION,
 };
 use arc_swap::ArcSwapOption;
 use maknae_config::{load_config, Document, SectionSpec};
 use maknae_crypto::assert_fips_provider;
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_crypto::rustls::sign::CertifiedKey;
+use maknae_io::MaknaeSecret;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -122,7 +124,7 @@ pub const PLANE_SHUTDOWN_BOUND: std::time::Duration = PLANE_HTTP_TIMEOUT.saturat
 enum PlaneAuth {
     AppRole(AppRoleAuth),
     AgentAppRole(AppRoleAuth),
-    UserToken(UserToken),
+    UserToken(MaknaeSecret),
 }
 
 impl PlaneAuth {
@@ -476,7 +478,7 @@ impl PlaneClient {
         })
     }
 
-    pub fn for_user(doc: &Document, dir: &Path, token: UserToken) -> Result<Self, VaultError> {
+    pub fn for_user(doc: &Document, dir: &Path, token: MaknaeSecret) -> Result<Self, VaultError> {
         Self::build(doc, dir, Plane::Cli, |_| Ok(PlaneAuth::UserToken(token)))
     }
 
@@ -763,7 +765,7 @@ impl PlaneClient {
             let held = client.settings.token.as_str();
             let mut copy = Zeroizing::new(String::with_capacity(held.len()));
             copy.push_str(held);
-            UserToken::new(copy)?
+            MaknaeSecret::vault_token(copy).map_err(|e| secret_error("user token", e))?
         };
         VaultApi::new(&self.vault_addr, &self.vault_ca)?
             .read_wrapped(&token, kv_mount, secret_path, wrap_ttl)
@@ -1560,8 +1562,8 @@ mod tests {
 
     const DEAD_VAULT: &str = "https://127.0.0.1:1";
 
-    fn user_token() -> UserToken {
-        UserToken::new(Zeroizing::new("hvs.user-token-sentinel".into())).unwrap()
+    fn user_token() -> MaknaeSecret {
+        MaknaeSecret::vault_token(Zeroizing::new("hvs.user-token-sentinel".into())).unwrap()
     }
 
     fn current_thread(paused: bool) -> tokio::runtime::Runtime {
