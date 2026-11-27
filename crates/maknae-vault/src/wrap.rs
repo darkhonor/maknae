@@ -392,10 +392,17 @@ pub(crate) fn pick_kv_field(body: &[u8], field: &str) -> Result<Zeroizing<String
         .deserialize(&mut de)
         .map_err(|e| json_refusal(VaultOp::Unwrap, &e))?;
     de.end().map_err(|e| json_refusal(VaultOp::Unwrap, &e))?;
-    picked.ok_or_else(|| VaultError::KvField {
+    let picked = picked.ok_or_else(|| VaultError::KvField {
         field: field.to_string(),
         why: "absent",
-    })
+    })?;
+    if picked.is_empty() {
+        return Err(VaultError::KvField {
+            field: field.to_string(),
+            why: "empty",
+        });
+    }
+    Ok(picked)
 }
 
 pub(crate) fn select_kv_field(body: &[u8], field: &str) -> Result<MaknaeSecret, VaultError> {
@@ -1090,16 +1097,7 @@ mod tests {
         let Err(e) = select_kv_field(br#"{"data":{"data":{"api_key":""}}}"#, "api_key") else {
             panic!("an empty KV value must be refused");
         };
-        assert!(
-            matches!(
-                e,
-                VaultError::InvalidSecret {
-                    what: "KV field",
-                    why: "is empty"
-                }
-            ),
-            "{e}"
-        );
+        assert!(matches!(e, VaultError::KvField { why: "empty", .. }), "{e}");
     }
 
     struct Scripted {

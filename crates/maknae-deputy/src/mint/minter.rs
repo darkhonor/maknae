@@ -268,9 +268,18 @@ pub async fn revoke<S: Signer>(
     };
     let label = frame_label("revoke", &r.task, agent, &r.class, &r.app);
     let reply = match open_credential(d.own_key, &ctx, r.for_revocation.as_bytes()) {
+        Err(maknae_seal::SealError::CoreDumps(kind)) => {
+            (d.journal)(&format!(
+                "{label} set={}: the revocation token could not be held: core dumps could not be denied: {kind}",
+                r.set
+            ));
+            RevokeReply::Refused(MintRefusal::Request)
+        }
         Err(_) => RevokeReply::Refused(MintRefusal::Request),
-        Ok(token) if !is_installation_token(&token) => RevokeReply::Refused(MintRefusal::Request),
-        Ok(token) => match d.github.revoke(&app.api, &token).await {
+        Ok(token) if !is_installation_token(token.expose()) => {
+            RevokeReply::Refused(MintRefusal::Request)
+        }
+        Ok(token) => match d.github.revoke(&app.api, token.expose()).await {
             Ok(reply) => reply,
             Err(e) => {
                 (d.journal)(&format!(
@@ -600,6 +609,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_jwt_too_long_to_hold_is_a_signer_refusal_journaled_with_no_github_call() {
+        let mut rig = Rig::new();
+        rig.signer = FakeSigner::signing(&vec![0u8; 50_000]);
+        let (reply, live, seen, journal) = rig.mint(&request(vec![set(&["a"])]), vec![]).await;
+        assert_eq!(reply, MintReply::Refused(MintRefusal::Signer));
+        assert!(live.tokens.is_empty());
+        assert_eq!((seen.requests.len(), seen.extra), (0, 0));
+        assert!(
+            journal
+                .iter()
+                .any(|l| l.contains("the App JWT could not be held") && l.contains("TooLong")),
+            "{journal:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_missing_or_unsafe_recipient_key_refuses_before_any_io() {
         let absent = Rig::new();
         std::fs::remove_file(absent.egress.key_file("coder")).unwrap();
@@ -735,7 +760,7 @@ mod tests {
             let opened =
                 open_credential(&rig.agent_key, &ctx(CredentialDirection::ToAgent, i), blob)
                     .unwrap();
-            assert_eq!(opened.as_str(), want);
+            assert_eq!(opened.expose(), want);
             for wrong in [
                 ctx(CredentialDirection::ToRevoke, i),
                 ctx(CredentialDirection::ToAgent, 1 - i),
@@ -781,7 +806,7 @@ mod tests {
         let blob = creds[0].for_revocation.as_bytes();
         let opened =
             open_credential(&rig.own, &ctx(CredentialDirection::ToRevoke, 0), blob).unwrap();
-        assert_eq!(opened.as_str(), "ghs_one");
+        assert_eq!(opened.expose(), "ghs_one");
         assert!(open_credential(&rig.own, &ctx(CredentialDirection::ToAgent, 0), blob).is_err());
         assert!(
             open_credential(&rig.agent_key, &ctx(CredentialDirection::ToRevoke, 0), blob).is_err()

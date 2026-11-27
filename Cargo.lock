@@ -1349,6 +1349,7 @@ name = "maknae-seal"
 version = "0.0.0"
 dependencies = [
  "maknae-crypto",
+ "maknae-io",
  "maknae-proto",
  "zeroize",
 ]

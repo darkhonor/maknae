@@ -2138,7 +2138,7 @@ mod tests {
                 assert_eq!(
                     open_credential(&agent, &ctx, c.for_agent.as_bytes())
                         .unwrap()
-                        .as_str(),
+                        .expose(),
                     want
                 );
             }

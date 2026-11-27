@@ -2,6 +2,7 @@ use crate::{
     open, seal, CredentialSealContext, SealAad, SealError, SealPrivateKey, SealPublicKey,
     SealedBlob,
 };
+use maknae_io::{MaknaeSecret, SecretError};
 use zeroize::Zeroizing;
 
 pub fn seal_credential(
@@ -16,10 +17,13 @@ pub fn open_credential(
     key: &SealPrivateKey,
     ctx: &CredentialSealContext<'_>,
     sealed: &[u8],
-) -> Result<Zeroizing<String>, SealError> {
+) -> Result<MaknaeSecret, SealError> {
     let mut bytes = open(key, &SealAad::credential(ctx)?, sealed)?;
     match String::from_utf8(std::mem::take(&mut *bytes)) {
-        Ok(token) => Ok(Zeroizing::new(token)),
+        Ok(token) => MaknaeSecret::new(Zeroizing::new(token)).map_err(|e| match e {
+            SecretError::CoreDumps(io) => SealError::CoreDumps(io.kind()),
+            _ => SealError::Open,
+        }),
         Err(e) => {
             drop(Zeroizing::new(e.into_bytes()));
             Err(SealError::Open)
@@ -51,7 +55,7 @@ mod tests {
         let key = SealPrivateKey::generate().unwrap();
         let blob = seal_credential(key.public_key(), &cctx(), TOKEN).unwrap();
         let opened = open_credential(&key, &cctx(), blob.as_bytes()).unwrap();
-        assert_eq!(opened.as_str(), TOKEN);
+        assert_eq!(opened.expose(), TOKEN);
 
         let changed = [
             CredentialSealContext {

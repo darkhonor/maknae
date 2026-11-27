@@ -52,6 +52,7 @@ pub fn vault_failure(e: VaultError) -> OpenFailure {
         VaultError::WrapMismatch(WrapMismatch::CreationTtl { .. }) => OpenFailure::Ttl,
         VaultError::WrapMismatch(WrapMismatch::Invalid) => OpenFailure::Invalid,
         VaultError::KvField { .. } => OpenFailure::Field,
+        VaultError::CoreDumps(_) => OpenFailure::CoreDumps,
         _ => OpenFailure::Vault,
     }
 }
@@ -411,6 +412,17 @@ ampbv97Rcx9j
                     why: "absent",
                 },
                 OpenFailure::Field,
+            ),
+            (
+                VaultError::KvField {
+                    field: "api_key".into(),
+                    why: "empty",
+                },
+                OpenFailure::Field,
+            ),
+            (
+                VaultError::CoreDumps(std::io::Error::other("rlimit")),
+                OpenFailure::CoreDumps,
             ),
             (
                 VaultError::WrapMismatch(WrapMismatch::NotWrapped),

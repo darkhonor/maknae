@@ -12,6 +12,7 @@ pub enum SealError {
     PrivateKey,
     Open,
     Crypto,
+    CoreDumps(std::io::ErrorKind),
 }
 
 impl fmt::Display for SealError {
@@ -31,6 +32,9 @@ impl fmt::Display for SealError {
             SealError::PrivateKey => "the sealing private key is not a P-384 PKCS#8 key",
             SealError::Open => "the seal does not match this request",
             SealError::Crypto => "a cryptographic primitive failed",
+            SealError::CoreDumps(kind) => {
+                return write!(f, "core dumps could not be denied: {kind}")
+            }
         })
     }
 }

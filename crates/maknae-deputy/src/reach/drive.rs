@@ -837,6 +837,19 @@ mod tests {
         assert_eq!((seen.requests.len(), seen.extra), (0, 0));
 
         let mut rig = Rig::new();
+        rig.signer = FakeSigner::signing(&vec![0u8; 50_000]);
+        let (reply, seen) = rig.run(&agent(), vec![]).await;
+        assert_eq!(refused(&reply), Some(ReachRefusal::Signer));
+        assert_eq!((seen.requests.len(), seen.extra), (0, 0));
+        assert!(
+            rig.journal
+                .iter()
+                .any(|l| l.contains("the App JWT could not be held") && l.contains("TooLong")),
+            "{:?}",
+            rig.journal
+        );
+
+        let mut rig = Rig::new();
         rig.clock = None;
         let (reply, _) = rig.run(&agent(), vec![]).await;
         assert_eq!(refused(&reply), Some(ReachRefusal::Signer));

@@ -23,7 +23,6 @@ pub fn signing_input(app_id: u64, now: u64) -> String {
     )
 }
 
-/// The JWT is a bearer credential, so its buffer is sized once and never grows (ADR-0026).
 pub fn assemble_jwt(signing_input: &str, signature: &[u8]) -> Result<MaknaeSecret, SecretError> {
     MaknaeSecret::new(jwt_text(signing_input, signature))
 }
