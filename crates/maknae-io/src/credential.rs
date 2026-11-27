@@ -3,6 +3,7 @@ use std::io;
 
 use zeroize::Zeroizing;
 
+use crate::filter::{FilterError, Source, ValueFilter};
 use crate::{MaknaeSecret, MaknaeSecretBytes, SecretError, MAX_SECRET_BYTES};
 
 /// A credential a front end holds to deliver to a tool. It never prints, copies or compares,
@@ -355,6 +356,22 @@ impl LaunchCredentials {
         self.entries.iter().map(|(slot, _)| slot)
     }
 
+    pub fn value_filter(&self) -> Result<ValueFilter, FilterError> {
+        let mut builder = ValueFilter::builder();
+        for (slot, credential) in &self.entries {
+            builder = match slot {
+                CredentialSlot::EnvVar(_) => {
+                    builder.source(Source::Slot(slot.clone()), credential.expose())
+                }
+                CredentialSlot::GitCredentialHelper
+                | CredentialSlot::CargoCredentialProvider
+                | CredentialSlot::Netrc
+                | CredentialSlot::File(_) => builder.skip(),
+            };
+        }
+        builder.build()
+    }
+
     pub(crate) fn encode(&self) -> Zeroizing<Vec<u8>> {
         let len = FRAME_TAG.len()
             + self.invocation.len()
@@ -446,6 +463,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::{LeakHook, Screened};
     use rustix::process::{getrlimit, Resource};
     use zeroize::Zeroizing;
 
@@ -507,6 +525,159 @@ mod tests {
             .deliver_to(&mut lc, CredentialSlot::file("token.txt").unwrap())
             .unwrap();
         lc
+    }
+
+    const GH: &[u8] = b"ghp_AAAAaaaa1111BBBBbbbb2222CCCC";
+    const NPM: &[u8] = b"npm_ZZZZzzzz9999YYYYyyyy8888XXXX";
+
+    #[derive(Default)]
+    struct Recorder {
+        calls: usize,
+        seen: Vec<Source>,
+    }
+
+    impl LeakHook for Recorder {
+        fn leaked(&mut self, sources: &[Source]) {
+            self.calls += 1;
+            self.seen.clear();
+            self.seen.extend_from_slice(sources);
+        }
+    }
+
+    fn deliver(lc: &mut LaunchCredentials, slot: CredentialSlot, value: &[u8]) {
+        MaknaeSecretBytes::new(Zeroizing::new(value.to_vec()))
+            .unwrap()
+            .into_delivered()
+            .deliver_to(lc, slot)
+            .unwrap();
+    }
+
+    fn two_env() -> LaunchCredentials {
+        let mut lc = LaunchCredentials::new([0; 16]);
+        deliver(&mut lc, slot_env("GH_TOKEN"), GH);
+        deliver(&mut lc, slot_env("NPM_TOKEN"), NPM);
+        lc
+    }
+
+    fn output(parts: &[&[u8]]) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(parts.concat())
+    }
+
+    fn screened(lc: &LaunchCredentials, out: Zeroizing<Vec<u8>>) -> (Screened, Recorder) {
+        let mut rec = Recorder::default();
+        let s = lc.value_filter().unwrap().screen(out, &mut rec);
+        (s, rec)
+    }
+
+    #[test]
+    fn output_echoing_one_credential_is_withheld_and_its_slot_reported() {
+        let lc = two_env();
+        for (value, name) in [(GH, "GH_TOKEN"), (NPM, "NPM_TOKEN")] {
+            let out = output(&[b"token is ", value, b"\n"]);
+            let len = out.len();
+            let (s, rec) = screened(&lc, out);
+            assert_eq!(s, Screened::Withheld { len });
+            assert_eq!(rec.calls, 1);
+            assert_eq!(rec.seen, [Source::Slot(slot_env(name))]);
+            let shown = format!("{:?}", rec.seen);
+            assert!(!shown.contains(std::str::from_utf8(&value[..16]).unwrap()));
+        }
+    }
+
+    #[test]
+    fn two_credentials_in_one_output_are_reported_once_in_one_call() {
+        let (s, rec) = screened(&two_env(), output(&[NPM, b" ", GH, b" ", NPM, GH]));
+        assert_eq!(
+            s,
+            Screened::Withheld {
+                len: 2 * (GH.len() + NPM.len()) + 2
+            }
+        );
+        assert_eq!(rec.calls, 1);
+        assert_eq!(
+            rec.seen,
+            [
+                Source::Slot(slot_env("NPM_TOKEN")),
+                Source::Slot(slot_env("GH_TOKEN"))
+            ]
+        );
+    }
+
+    #[test]
+    fn clean_output_is_returned_unchanged_and_not_reported() {
+        let out = output(&[b"ok ", &GH[..15], b" ", &NPM[1..16], b" done"]);
+        let expected = out.to_vec();
+        let at = out.as_ptr();
+        let (s, rec) = screened(&two_env(), out);
+        let Screened::Clean(back) = s else {
+            panic!("withheld clean output");
+        };
+        assert_eq!(*back, expected);
+        assert_eq!(back.as_ptr(), at);
+        assert_eq!(rec.calls, 0);
+        assert!(rec.seen.is_empty());
+    }
+
+    #[test]
+    fn output_ending_in_a_value_s_prefix_is_clean() {
+        let lc = two_env();
+        for n in [1, 15] {
+            let (s, rec) = screened(&lc, output(&[b"partial ", &GH[..n]]));
+            assert!(matches!(s, Screened::Clean(_)), "{n}");
+            assert_eq!(rec.calls, 0, "{n}");
+        }
+    }
+
+    #[test]
+    fn slots_other_than_env_vars_are_skipped_and_counted() {
+        let others = [
+            (
+                CredentialSlot::GitCredentialHelper,
+                &b"protocol=https host=example password=gitHELPERsecret0001"[..],
+            ),
+            (
+                CredentialSlot::CargoCredentialProvider,
+                &b"cargoPROVIDERsecret0002cargoPROVIDER"[..],
+            ),
+            (
+                CredentialSlot::Netrc,
+                &b"machine example login u password netrcSECRET0003"[..],
+            ),
+            (
+                CredentialSlot::file("token.txt").unwrap(),
+                &b"fileSLOTsecret0004fileSLOTsecret0004"[..],
+            ),
+        ];
+        for (slot, value) in &others {
+            let mut lc = LaunchCredentials::new([0; 16]);
+            deliver(&mut lc, slot_env("GH_TOKEN"), GH);
+            deliver(&mut lc, slot.clone(), value);
+            let f = lc.value_filter().unwrap();
+            assert_eq!(f.skipped(), 1, "{slot:?}");
+            let mut rec = Recorder::default();
+            let s = f.screen(output(&[b"echo ", value]), &mut rec);
+            assert!(matches!(s, Screened::Clean(_)), "{slot:?}");
+            assert_eq!(rec.calls, 0, "{slot:?}");
+        }
+
+        assert_eq!(two_env().value_filter().unwrap().skipped(), 0);
+
+        let mut lc = two_env();
+        for (slot, value) in &others {
+            deliver(&mut lc, slot.clone(), value);
+        }
+        deliver(&mut lc, slot_env("SHORT"), b"tiny");
+        let f = lc.value_filter().unwrap();
+        assert_eq!(f.skipped(), 5);
+        assert_eq!(format!("{f:?}"), "ValueFilter(2 values)");
+    }
+
+    #[test]
+    fn an_empty_set_screens_everything_clean() {
+        let lc = LaunchCredentials::new([0; 16]);
+        let (s, rec) = screened(&lc, output(&[GH]));
+        assert_eq!(s, Screened::Clean(output(&[GH])));
+        assert_eq!(rec.calls, 0);
     }
 
     #[test]

@@ -195,6 +195,17 @@ impl std::error::Error for FilterError {}
 
 pub struct ValueFilterBuilder<'a> {
     entries: Vec<(Source, &'a [u8])>,
+    skipped: usize,
+}
+
+pub trait LeakHook {
+    fn leaked(&mut self, sources: &[Source]);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Screened {
+    Clean(Zeroizing<Vec<u8>>),
+    Withheld { len: usize },
 }
 
 pub struct ValueFilter {
@@ -299,7 +310,26 @@ impl ValueFilter {
     pub fn builder<'a>() -> ValueFilterBuilder<'a> {
         ValueFilterBuilder {
             entries: Vec::new(),
+            skipped: 0,
         }
+    }
+
+    pub fn screen(&self, output: Zeroizing<Vec<u8>>, hook: &mut dyn LeakHook) -> Screened {
+        let mut found = Found::new(self.sources.len());
+        let _ = self.scan(&output, &mut 0, |_, _, source| {
+            found.add(source);
+            ControlFlow::Continue(())
+        });
+        if found.order.is_empty() {
+            return Screened::Clean(output);
+        }
+        let sources: Vec<Source> = found
+            .order
+            .iter()
+            .map(|&s| self.sources[s as usize].clone())
+            .collect();
+        hook.leaked(&sources);
+        Screened::Withheld { len: output.len() }
     }
 
     pub fn mask_in_place(&self, buf: &mut [u8]) -> Vec<Source> {
@@ -441,6 +471,11 @@ impl<'a> ValueFilterBuilder<'a> {
         self
     }
 
+    pub(crate) fn skip(mut self) -> Self {
+        self.skipped += 1;
+        self
+    }
+
     pub fn build(self) -> Result<ValueFilter, FilterError> {
         if self.entries.len() > MAX_VALUES {
             return Err(FilterError::TooManyValues);
@@ -469,7 +504,7 @@ impl<'a> ValueFilterBuilder<'a> {
             whole,
             max_raw,
             values: kept,
-            skipped: values.len() - kept,
+            skipped: values.len() - kept + self.skipped,
         })
     }
 }
