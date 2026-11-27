@@ -494,7 +494,17 @@ impl Held {
     }
 
     fn queue_stop(&mut self, task: TaskId, agent: &AgentId, tasker: &Tasker) {
-        let why = match draw_id() {
+        self.queue_drawn(draw_id(), task, agent, tasker);
+    }
+
+    fn queue_drawn(
+        &mut self,
+        drawn: Result<[u8; 16], TaskRefusal>,
+        task: TaskId,
+        agent: &AgentId,
+        tasker: &Tasker,
+    ) {
+        let why = match drawn {
             Ok(id) => {
                 let stop = maknae_proto::Notice {
                     id: NoticeId(id),
@@ -506,7 +516,7 @@ impl Held {
                     Err(refused) => refused.as_str().to_owned(),
                 }
             }
-            Err(e) => e.to_string(),
+            Err(_) => "no notice id could be drawn".to_owned(),
         };
         self.note(Notice::StopUnqueued {
             task,
@@ -12861,6 +12871,23 @@ mod tests {
                 id("hobi"),
                 "the tasker has 2 notices outstanding for the agent".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn a_stop_whose_id_cannot_be_drawn_is_recorded_and_not_queued() {
+        let (_blobs, store) = mem();
+        let task = TaskId([9; 16]);
+        store.held().queue_drawn(
+            Err(TaskRefusal::Random),
+            task,
+            &id("hobi"),
+            &Tasker::Uid(1000),
+        );
+        assert!(store.notices_for(&id("hobi")).is_empty());
+        assert_eq!(
+            unqueued(&store.take_notices()),
+            [(task, id("hobi"), "no notice id could be drawn".to_string())]
         );
     }
 
