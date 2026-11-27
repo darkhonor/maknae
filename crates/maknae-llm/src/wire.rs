@@ -449,28 +449,6 @@ pub fn take_capped(buf: &mut zeroize::Zeroizing<Vec<u8>>, chunk: &[u8], cap: usi
     n < chunk.len()
 }
 
-/// Overwrite every echo of `secret` in `body` with `*`, in place, including a
-/// partial echo the 4 KiB cut left at the very end.
-pub fn redact(body: &mut zeroize::Zeroizing<Vec<u8>>, secret: &[u8]) {
-    if secret.is_empty() {
-        return;
-    }
-    if let Some(last) = body.len().checked_sub(secret.len()) {
-        for i in 0..=last {
-            if &body[i..i + secret.len()] == secret {
-                body[i..i + secret.len()].fill(b'*');
-            }
-        }
-    }
-    if let Some(k) = (1..secret.len())
-        .rev()
-        .find(|&k| body.ends_with(&secret[..k]))
-    {
-        let n = body.len();
-        body[n - k..].fill(b'*');
-    }
-}
-
 // ---- #264: the trusted preamble and the baseline tool definitions ----
 //
 // Both artifacts are COMPILED IN from reviewable text files under
@@ -1617,35 +1595,6 @@ mod tests {
         assert_eq!((buf.len(), buf.capacity()), (4096, 4096));
         assert!(take_capped(&mut buf, b"more", 4096));
         assert_eq!(buf.len(), 4096);
-    }
-
-    #[test]
-    fn a_key_echoed_in_an_error_body_is_redacted() {
-        let mut body =
-            zeroize::Zeroizing::new(b"bad key sk-SECRET-123 and again sk-SECRET-123.".to_vec());
-        redact(&mut body, b"sk-SECRET-123");
-        assert_eq!(&body[..], b"bad key ************* and again *************.");
-        let mut untouched = zeroize::Zeroizing::new(b"abc".to_vec());
-        redact(&mut untouched, b"");
-        assert_eq!(&untouched[..], b"abc");
-        let mut exact = zeroize::Zeroizing::new(b"sk-SECRET-123".to_vec());
-        redact(&mut exact, b"sk-SECRET-123");
-        assert_eq!(&exact[..], b"*************");
-        let mut short = zeroize::Zeroizing::new(b"sk".to_vec());
-        redact(&mut short, b"sk-SECRET-123");
-        assert_eq!(&short[..], b"**");
-    }
-
-    /// The 4 KiB cut can fall inside an echoed key; what survives of it is a
-    /// prefix of the key at the very end of the body.
-    #[test]
-    fn a_key_cut_by_the_cap_is_still_redacted() {
-        let mut body = zeroize::Zeroizing::new(b"echo: sk-SECR".to_vec());
-        redact(&mut body, b"sk-SECRET-123");
-        assert_eq!(&body[..], b"echo: *******");
-        let mut clean = zeroize::Zeroizing::new(b"echo: done".to_vec());
-        redact(&mut clean, b"sk-SECRET-123");
-        assert_eq!(&clean[..], b"echo: done");
     }
 
     #[test]

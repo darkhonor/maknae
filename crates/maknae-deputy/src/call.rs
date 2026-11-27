@@ -300,7 +300,15 @@ pub async fn fulfil<O: KeyOpener>(
             mut body,
             truncated,
         } => {
-            maknae_llm::redact(&mut body, key.expose().as_bytes());
+            match maknae_io::ValueFilter::builder()
+                .secret("provider key", &key)
+                .build()
+            {
+                Ok(filter) => {
+                    filter.mask_in_place(&mut body);
+                }
+                Err(_) => body.fill(b'*'),
+            }
             FulfilError::Unusable {
                 defect: maknae_proto::ReplyDefect::from_status(code),
                 usage: None,
