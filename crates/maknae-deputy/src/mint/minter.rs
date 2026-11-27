@@ -203,6 +203,7 @@ fn forge_refusal(e: ForgeError) -> MintRefusal {
         | ForgeError::Oversize
         | ForgeError::Shape
         | ForgeError::Malformed { .. }
+        | ForgeError::CoreDumps { .. }
         | ForgeError::Undocumented { .. } => MintRefusal::Forge(ForgeStatus::Other),
     }
 }
@@ -216,6 +217,7 @@ pub(crate) fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Mismatch { revoked: false }
         | ForgeError::Malformed { revoked: false }
         | ForgeError::Undocumented { revoked: false }
+        | ForgeError::CoreDumps { revoked: false }
         | ForgeError::Status(ForgeStatus::Other) => true,
         ForgeError::Status(
             ForgeStatus::Unauthorized
@@ -226,6 +228,7 @@ pub(crate) fn live_token_may_remain(e: ForgeError) -> bool {
         | ForgeError::Transport
         | ForgeError::Mismatch { revoked: true }
         | ForgeError::Malformed { revoked: true }
+        | ForgeError::CoreDumps { revoked: true }
         | ForgeError::Undocumented { revoked: true } => false,
     }
 }

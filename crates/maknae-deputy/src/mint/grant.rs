@@ -1,10 +1,11 @@
 //! The check that a GitHub installation-token grant is exactly the permission
 //! set that was asked for.
 
-use maknae_io::MaknaeSecret;
+use maknae_io::secret::de_zeroizing_string;
 use maknae_proto::{AccessLevel, GithubPermission, PermissionSet};
 use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeMap, BTreeSet};
+use zeroize::Zeroizing;
 
 pub(super) fn level(l: AccessLevel) -> &'static str {
     match l {
@@ -77,12 +78,14 @@ pub(super) fn grant_is_metadata_read(grant: &Grant) -> bool {
 /// to parse can still be revoked with it.
 #[derive(Deserialize)]
 pub(super) struct Bearer {
-    pub(super) token: MaknaeSecret,
+    #[serde(deserialize_with = "de_zeroizing_string")]
+    pub(super) token: Zeroizing<String>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct Grant {
-    pub(super) token: MaknaeSecret,
+    #[serde(deserialize_with = "de_zeroizing_string")]
+    pub(super) token: Zeroizing<String>,
     pub(super) expires_at: String,
     #[serde(deserialize_with = "unique_keys")]
     permissions: Vec<(String, String)>,
