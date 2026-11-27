@@ -95,11 +95,44 @@ impl Serialize for OneField<'_> {
     }
 }
 
+fn escaped_room(s: &str) -> usize {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        s.len()
+    } else {
+        6 * s.len()
+    }
+}
+
+struct Presized<'a>(&'a mut Vec<u8>);
+
+impl std::io::Write for Presized<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buf.len() > self.0.capacity() {
+            return Err(std::io::Error::other("body outgrew its presized buffer"));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn json_body<T: Serialize>(capacity: usize, value: &T) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let mut body = Zeroizing::new(Vec::with_capacity(capacity));
-    serde_json::to_writer(&mut *body, value).map_err(|e| VaultError::VaultBody {
-        op: "request body",
-        why: format!("{:?}", e.classify()),
+    serde_json::to_writer(Presized(&mut body), value).map_err(|e| {
+        if e.is_io() {
+            VaultError::InvalidSecret {
+                what: "request body",
+                why: "a value needs JSON escaping",
+            }
+        } else {
+            VaultError::VaultBody {
+                op: "request body",
+                why: format!("{:?}", e.classify()),
+            }
+        }
     })?;
     Ok(body)
 }
@@ -141,7 +174,7 @@ pub(crate) fn kv_write_body(
     }
     let value = secret.expose();
     json_body(
-        KV_WRITE_BODY_OVERHEAD + 6 * field.len() + value.len(),
+        KV_WRITE_BODY_OVERHEAD + escaped_room(field) + value.len(),
         &KvWriteBody {
             data: OneField { field, value },
         },
@@ -479,7 +512,7 @@ mod tests {
         let body = kv_write_body(FORGE_TOKEN_FIELD, &secret).unwrap();
         assert_eq!(
             body.capacity(),
-            KV_WRITE_BODY_OVERHEAD + 6 * FORGE_TOKEN_FIELD.len() + secret.expose().len()
+            KV_WRITE_BODY_OVERHEAD + FORGE_TOKEN_FIELD.len() + secret.expose().len()
         );
         let passed = (body.as_ptr(), body.len());
         let req = wrapped_write_request(
@@ -763,6 +796,34 @@ mod tests {
         let passed = (body.as_ptr(), body.len());
         let req = lookup_request(&http(), &base(), body).unwrap();
         assert_eq!(sent(&req), passed);
+    }
+
+    #[test]
+    fn a_value_that_needs_escaping_is_refused_not_grown_into() {
+        let dirty = || MaknaeSecret::new(Zeroizing::new("a\"b\\c\u{1}".into())).unwrap();
+        let secret = dirty();
+        assert!(matches!(
+            kv_write_body(FORGE_TOKEN_FIELD, &secret),
+            Err(VaultError::InvalidSecret {
+                what: "request body",
+                ..
+            })
+        ));
+        assert!(matches!(
+            lookup_body(&dirty()),
+            Err(VaultError::InvalidSecret {
+                what: "request body",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_valid_token_body_is_byte_exact() {
+        let token = MaknaeSecret::vault_token(Zeroizing::new("hvs.a-b_C".into())).unwrap();
+        assert_eq!(&**lookup_body(&token).unwrap(), br#"{"token":"hvs.a-b_C"}"#);
+        let body = kv_write_body("token", &token).unwrap();
+        assert_eq!(&**body, br#"{"data":{"token":"hvs.a-b_C"}}"#);
     }
 
     #[test]
