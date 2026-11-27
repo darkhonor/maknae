@@ -1380,4 +1380,29 @@ mod tests {
         assert_eq!(lps(b"abcd", b"xyzw"), 0);
         assert_eq!(lps(b"abcd", b""), 0);
     }
+
+    #[test]
+    fn the_tail_counts_each_compare_and_each_fallback_step() {
+        let count_pi = |p: &[u8]| {
+            let mut pi = vec![0u32; p.len()];
+            let mut work = 0;
+            prefix_function(p, &mut pi, &mut work);
+            work
+        };
+        assert_eq!(count_pi(b"aabaaab"), 8);
+        assert_eq!(count_pi(b"abacabab"), 9);
+        assert_eq!(count_pi(b"aaaa"), 3);
+        let count_lps = |p: &[u8], t: &[u8]| {
+            let mut work = 0;
+            let k = longest_prefix_suffix(p, &pi_of(p), t, &mut work);
+            (k, work)
+        };
+        assert_eq!(count_lps(b"aaabXXXX", b"aaaa"), (3, 5));
+        assert_eq!(count_lps(b"aaabXXXX", b"zaaab"), (4, 5));
+        assert_eq!(count_lps(b"abacabab", b"xabacab"), (6, 7));
+        let q = b"aabaaab";
+        let mut work = 0;
+        assert_eq!(fall_back(q, &pi_of(q), 6, b'a', &mut work), 1);
+        assert_eq!(work, 2);
+    }
 }
