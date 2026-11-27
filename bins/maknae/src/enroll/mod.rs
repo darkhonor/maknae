@@ -1353,6 +1353,27 @@ fn intake_token(args: &EnrollArgs, locale: Locale) -> Result<MaknaeSecret, Enrol
     intake_token_from(args.token_file.as_deref(), locale)
 }
 
+fn read_token_bytes(r: &mut impl std::io::Read) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let mut buf = Zeroizing::new(vec![0u8; maknae_io::MAX_SECRET_BYTES + 1]);
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if n > maknae_io::MAX_SECRET_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("longer than {} bytes", maknae_io::MAX_SECRET_BYTES),
+        ));
+    }
+    buf.truncate(n);
+    Ok(buf)
+}
+
 fn intake_token_from(
     token_file: Option<&Path>,
     locale: Locale,
@@ -1362,8 +1383,8 @@ fn intake_token_from(
             path: path.to_path_buf(),
             source,
         };
-        let raw = maknae_io::read_operator_input(path, maknae_io::MAX_SECRET_BYTES)
-            .map_err(|e| io_err(e.to_string()))?;
+        let raw = std::fs::File::open(path).and_then(|mut f| read_token_bytes(&mut f));
+        let raw = raw.map_err(|e| io_err(e.to_string()))?;
         let text = std::str::from_utf8(&raw)
             .map_err(|_| io_err("stream did not contain valid UTF-8".to_owned()))?;
         let trimmed = text.trim();
@@ -3111,6 +3132,30 @@ mod tests {
         assert_eq!(got.expose(), "hvs.piped");
         writer.join().unwrap();
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_token_read_fills_one_buffer_that_never_grows() {
+        struct Trickle<'a>(&'a [u8]);
+        impl std::io::Read for Trickle<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let k = self.0.len().min(buf.len()).min(3);
+                buf[..k].copy_from_slice(&self.0[..k]);
+                self.0 = &self.0[k..];
+                Ok(k)
+            }
+        }
+        let want: Vec<u8> = (0..5000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let got = read_token_bytes(&mut Trickle(&want)).unwrap();
+        assert_eq!(got.as_slice(), want.as_slice());
+        assert_eq!(got.capacity(), maknae_io::MAX_SECRET_BYTES + 1);
+        let full = vec![b'a'; maknae_io::MAX_SECRET_BYTES];
+        assert_eq!(
+            read_token_bytes(&mut Trickle(&full)).unwrap().len(),
+            full.len()
+        );
+        let over = vec![b'a'; maknae_io::MAX_SECRET_BYTES + 1];
+        assert!(read_token_bytes(&mut Trickle(&over)).is_err());
     }
 
     #[test]

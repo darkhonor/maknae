@@ -524,27 +524,10 @@ fn read_attribute(
     target: &TargetRequired,
     max_bytes: usize,
     st: nix::Result<nix::sys::stat::FileStat>,
-    read: impl FnMut(&mut [u8]) -> nix::Result<usize>,
+    mut read: impl FnMut(&mut [u8]) -> nix::Result<usize>,
 ) -> Result<Zeroizing<Vec<u8>>, IoError> {
     let st = st.map_err(|errno| crate::checks::map_errno_no_disambiguation(errno, full))?;
     crate::checks::check_target(&st, full, target)?;
-    read_capped(full, max_bytes, read)
-}
-
-/// Reads an operator-named file or pipe to EOF, following symlinks as `open(2)` does,
-/// into a buffer sized once at `max_bytes + 1` and wiped on drop. Content past
-/// `max_bytes` is refused.
-pub fn read_operator_input(path: &Path, max_bytes: usize) -> Result<Zeroizing<Vec<u8>>, IoError> {
-    let fd = syscall::open_read_following(path)
-        .map_err(|e| crate::checks::map_errno_no_disambiguation(e, path))?;
-    read_capped(path, max_bytes, |buf| nix::unistd::read(&fd, buf))
-}
-
-fn read_capped(
-    full: &Path,
-    max_bytes: usize,
-    mut read: impl FnMut(&mut [u8]) -> nix::Result<usize>,
-) -> Result<Zeroizing<Vec<u8>>, IoError> {
     let mut buf = Zeroizing::new(vec![0u8; max_bytes + 1]);
     let mut n = 0;
     loop {
@@ -4087,47 +4070,6 @@ mod tests {
         let e =
             read_attribute(&f, &t_req(), 8, Err(nix::errno::Errno::EIO), |_| Ok(0)).unwrap_err();
         assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
-    }
-
-    #[test]
-    fn operator_input_reads_a_file_through_a_symlink_into_a_buffer_that_never_grows() {
-        let d = dir(0o750);
-        let f = attribute(d.path(), b"hvs.tok\n", 0o600);
-        let link = d.path().join("link");
-        symlink(&f, &link).unwrap();
-        for p in [&f, &link] {
-            let got = read_operator_input(p, 8).unwrap();
-            assert_eq!(got.as_slice(), b"hvs.tok\n");
-            assert_eq!(got.capacity(), 9);
-        }
-        let e = read_operator_input(&f, 7).unwrap_err();
-        assert!(
-            matches!(&e, IoError::TargetTooLarge { limit: 7, actual: 8, path } if path == &f),
-            "got {e:?}"
-        );
-        let e = read_operator_input(&d.path().join("absent"), 8).unwrap_err();
-        assert!(matches!(e, IoError::Io { .. }), "got {e:?}");
-    }
-
-    #[test]
-    fn operator_input_reads_a_pipe_to_eof() {
-        let d = dir(0o750);
-        let fifo = d.path().join("fifo");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-        let writer = {
-            let fifo = fifo.clone();
-            std::thread::spawn(move || {
-                use std::io::Write;
-                let mut w = std::fs::OpenOptions::new().write(true).open(fifo).unwrap();
-                w.write_all(b"hvs.").unwrap();
-                w.flush().unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                w.write_all(b"tok").unwrap();
-            })
-        };
-        let got = read_operator_input(&fifo, 64).unwrap();
-        assert_eq!(got.as_slice(), b"hvs.tok");
-        writer.join().unwrap();
     }
 
     /// The fixtures `read_absolute` refuses: sysfs reports more than it holds,
