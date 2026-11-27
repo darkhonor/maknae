@@ -12,6 +12,10 @@ use zeroize::Zeroizing;
 
 use crate::credential::{LaunchCredentials, ReceiveError, MAX_FRAME};
 
+// POLLOUT promises the send low-water mark (2048 by default) is free, and Darwin's send ignores
+// MSG_DONTWAIT, so a larger write could block past the deadline.
+const SEND_CHUNK: usize = 2048;
+
 static CORE_DUMPS_DENIED_FAILED: OnceLock<i32> = OnceLock::new();
 
 /// Lowers the soft core limit to 0 and, on Linux, makes the process non-dumpable. It reapplies
@@ -133,7 +137,11 @@ fn read_by(stream: &UnixStream, mut buf: &mut [u8], at: Instant) -> io::Result<(
 fn write_by(stream: &UnixStream, mut buf: &[u8], at: Instant) -> io::Result<()> {
     while !buf.is_empty() {
         wait(stream, PollFlags::POLLOUT, at)?;
-        match send(stream, buf, SendFlags::DONTWAIT) {
+        match send(
+            stream,
+            &buf[..buf.len().min(SEND_CHUNK)],
+            SendFlags::DONTWAIT,
+        ) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
             Ok(n) => buf = &buf[n..],
             Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
