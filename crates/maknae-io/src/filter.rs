@@ -175,6 +175,24 @@ pub enum Source {
     Label(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FilterError {
+    TooManyValues,
+    ValueTooLong,
+}
+
+impl fmt::Display for FilterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FilterError::TooManyValues => write!(f, "more than {MAX_VALUES} values"),
+            FilterError::ValueTooLong => write!(f, "a value longer than {MAX_SECRET_BYTES} bytes"),
+        }
+    }
+}
+
+impl std::error::Error for FilterError {}
+
 pub struct ValueFilterBuilder<'a> {
     entries: Vec<(Source, &'a [u8])>,
 }
@@ -418,20 +436,14 @@ impl<'a> ValueFilterBuilder<'a> {
         self
     }
 
-    pub fn build(mut self) -> ValueFilter {
-        let beyond = self.entries.len().saturating_sub(MAX_VALUES);
-        self.entries.truncate(MAX_VALUES);
-        let values: Vec<&[u8]> = self
-            .entries
-            .iter()
-            .map(|&(_, b)| {
-                if b.len() > MAX_SECRET_BYTES {
-                    &[][..]
-                } else {
-                    b
-                }
-            })
-            .collect();
+    pub fn build(self) -> Result<ValueFilter, FilterError> {
+        if self.entries.len() > MAX_VALUES {
+            return Err(FilterError::TooManyValues);
+        }
+        if self.entries.iter().any(|(_, b)| b.len() > MAX_SECRET_BYTES) {
+            return Err(FilterError::ValueTooLong);
+        }
+        let values: Vec<&[u8]> = self.entries.iter().map(|&(_, b)| b).collect();
         let kept = values.iter().filter(|v| v.len() >= MIN_VALUE).count();
         let index = build_index(&values);
         let raw: Vec<usize> = (0..index.forms.len())
@@ -445,15 +457,15 @@ impl<'a> ValueFilterBuilder<'a> {
             .map(|&i| index.forms[i].bytes.len())
             .max()
             .unwrap_or(0);
-        ValueFilter {
+        Ok(ValueFilter {
             index,
             sources: self.entries.into_iter().map(|(s, _)| s).collect(),
             raw,
             whole,
             max_raw,
             values: kept,
-            skipped: beyond + values.len() - kept,
-        }
+            skipped: values.len() - kept,
+        })
     }
 }
 
@@ -835,7 +847,7 @@ mod tests {
         for (i, v) in values.iter().enumerate() {
             b = b.source(Source::Label(LABELS[i]), v);
         }
-        b.build()
+        b.build().unwrap()
     }
 
     fn masked(f: &ValueFilter, buf: &[u8]) -> (Vec<u8>, Vec<Source>) {
@@ -1142,28 +1154,57 @@ mod tests {
     }
 
     #[test]
-    fn values_beyond_the_bounds_are_skipped_and_counted() {
-        let big = vec![b'z'; MAX_SECRET_BYTES + 1];
-        let f = filter_of(&[&big]);
-        assert_eq!(f.skipped(), 1);
-        assert!(f.is_empty());
-        assert!(!f.matches(&big));
-
+    fn exactly_max_values_builds_and_one_more_is_refused() {
         let values: Vec<Vec<u8>> = (0..=MAX_VALUES)
             .map(|i| format!("val{i:05}").into_bytes())
             .collect();
-        let mut b = ValueFilter::builder();
-        for v in &values {
-            b = b.source(Source::Label("bulk"), v);
-        }
-        let f = b.build();
-        assert_eq!(f.skipped(), 1);
+        let build = |n: usize| {
+            let mut b = ValueFilter::builder();
+            for v in &values[..n] {
+                b = b.source(Source::Label("bulk"), v);
+            }
+            b.build()
+        };
+        let f = build(MAX_VALUES).unwrap();
+        assert_eq!(f.skipped(), 0);
         assert_eq!(
             format!("{f:?}"),
             format!("ValueFilter({MAX_VALUES} values)")
         );
+        assert!(f.matches(&embed(&values[0])));
         assert!(f.matches(&embed(&values[MAX_VALUES - 1])));
-        assert!(!f.matches(&embed(&values[MAX_VALUES])));
+        assert_eq!(
+            build(MAX_VALUES + 1).unwrap_err(),
+            FilterError::TooManyValues
+        );
+    }
+
+    #[test]
+    fn a_value_of_max_secret_bytes_builds_and_one_byte_more_is_refused() {
+        let v: Vec<u8> = (0..=MAX_SECRET_BYTES).map(|i| (i % 251) as u8).collect();
+        let f = ValueFilter::builder()
+            .source(Source::Label("big"), &v[..MAX_SECRET_BYTES])
+            .build()
+            .unwrap();
+        assert_eq!(f.skipped(), 0);
+        assert!(f.matches(&v[MAX_SECRET_BYTES - 16..MAX_SECRET_BYTES]));
+        let refused = ValueFilter::builder()
+            .source(Source::Label("small"), TOKEN)
+            .source(Source::Label("big"), &v)
+            .build();
+        assert_eq!(refused.unwrap_err(), FilterError::ValueTooLong);
+    }
+
+    #[test]
+    fn a_filter_error_names_the_bound_and_never_a_value() {
+        assert_eq!(
+            FilterError::TooManyValues.to_string(),
+            "more than 1024 values"
+        );
+        assert_eq!(
+            FilterError::ValueTooLong.to_string(),
+            "a value longer than 65536 bytes"
+        );
     }
 
     #[test]
@@ -1175,7 +1216,8 @@ mod tests {
             .secret("pw", &s)
             .secret("tok", &b)
             .secret("tiny", &t)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(f.skipped(), 1);
         let (out, found) = masked(&f, &embed(b"hunter2-but-longer"));
         assert_eq!(out, embed(&stars(18)));

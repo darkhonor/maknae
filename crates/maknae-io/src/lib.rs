@@ -64,7 +64,7 @@ pub mod normalize;
 mod page;
 pub mod program;
 pub mod secret;
-pub use filter::{Source, ValueFilter, ValueFilterBuilder};
+pub use filter::{FilterError, Source, ValueFilter, ValueFilterBuilder};
 pub use secret::{
     check_vault_token, MaknaeSecret, MaknaeSecretBytes, SecretBuf, SecretError, MAX_SECRET_BYTES,
     MAX_VAULT_TOKEN_BYTES,
