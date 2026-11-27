@@ -409,13 +409,14 @@ impl ValueFilter {
         if buf.is_empty() || self.raw.is_empty() {
             return;
         }
-        let mut pi = Zeroizing::new(vec![0u32; self.max_raw]);
+        let mut pi = Zeroizing::new(vec![0u32; self.max_raw.min(buf.len())]);
         for &r in &self.raw {
             let form = self.index.forms[r].bytes.as_slice();
-            let pi = &mut pi[..form.len()];
-            prefix_function(form, pi, work);
-            let text = &buf[buf.len().saturating_sub(form.len())..];
-            let k = longest_prefix_suffix(form, pi, text, work);
+            let m = form.len().min(buf.len());
+            let pattern = &form[..m];
+            let pi = &mut pi[..m];
+            prefix_function(pattern, pi, work);
+            let k = longest_prefix_suffix(pattern, pi, &buf[buf.len() - m..], work);
             if k > 0 {
                 hit(k, self.index.sources[r]);
             }
@@ -1404,5 +1405,18 @@ mod tests {
         let mut work = 0;
         assert_eq!(fall_back(q, &pi_of(q), 6, b'a', &mut work), 1);
         assert_eq!(work, 2);
+    }
+
+    #[test]
+    fn the_tail_costs_the_input_not_the_value() {
+        let v: Vec<u8> = (0..MAX_SECRET_BYTES).map(|i| (i % 251) as u8).collect();
+        let f = filter_of(&[&v]);
+        for n in [1usize, 2, 15] {
+            let mut buf = v[..n].to_vec();
+            let (found, work) = f.mask_in_place_with_work(&mut buf);
+            assert_eq!(buf, stars(n));
+            assert_eq!(found, v0());
+            assert!(work <= 2 * n as u64, "n={n} work={work}");
+        }
     }
 }
