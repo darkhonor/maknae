@@ -5335,6 +5335,7 @@ mod tests {
         calls: Mutex<usize>,
         installer: Mutex<Option<std::thread::JoinHandle<()>>>,
         landed: Arc<std::sync::atomic::AtomicBool>,
+        landed_in_check: std::sync::atomic::AtomicBool,
     }
 
     impl EnrollmentView for InstallDuringTheRecheck {
@@ -5378,6 +5379,10 @@ mod tests {
                     let _ = done.send(());
                 }));
                 let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
+                self.landed_in_check.store(
+                    self.landed.load(std::sync::atomic::Ordering::SeqCst),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
             }
             answer
         }
@@ -5403,9 +5408,12 @@ mod tests {
             calls: Mutex::new(0),
             installer: Mutex::new(None),
             landed: Arc::default(),
+            landed_in_check: Default::default(),
         };
         let got = store.clear(BOB, &pairs([&post]), &view);
-        let landed = view.landed.load(std::sync::atomic::Ordering::SeqCst);
+        let landed = view
+            .landed_in_check
+            .load(std::sync::atomic::Ordering::SeqCst);
         view.installer
             .lock()
             .unwrap()
