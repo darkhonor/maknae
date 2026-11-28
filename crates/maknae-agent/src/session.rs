@@ -226,9 +226,9 @@ impl Session {
         P: Plane + Send,
         H: StepHook<P> + Send,
     {
-        match first(self.run_with(plane, hook, emit), interrupt).await {
-            Either::Left(outcome) => Ended::Ran(outcome),
-            Either::Right(signal) => Ended::Interrupted(signal),
+        match first(interrupt, self.run_with(plane, hook, emit)).await {
+            Either::Left(signal) => Ended::Interrupted(signal),
+            Either::Right(outcome) => Ended::Ran(outcome),
         }
     }
 
@@ -244,9 +244,9 @@ impl Session {
         P: Plane + Send,
         H: StepHook<P> + Send,
     {
-        match first(self.resume(plane, follow_ups, hook, emit), interrupt).await {
-            Either::Left(outcome) => Ended::Ran(outcome),
-            Either::Right(signal) => Ended::Interrupted(signal),
+        match first(interrupt, self.resume(plane, follow_ups, hook, emit)).await {
+            Either::Left(signal) => Ended::Interrupted(signal),
+            Either::Right(outcome) => Ended::Ran(outcome),
         }
     }
 
@@ -1092,6 +1092,11 @@ mod tests {
         assert!(p.prompts.is_empty());
     }
 
+    async fn after_a_yield<S>(signal: S) -> S {
+        tokio::task::yield_now().await;
+        signal
+    }
+
     #[tokio::test]
     async fn an_interrupted_run_leaves_the_session_closable() {
         let mut p = fake(vec![]);
@@ -1099,7 +1104,9 @@ mod tests {
         let mut s = opened(&mut p).await.unwrap();
         let mut events = vec![];
         let ended = s
-            .run_until(&mut p, &mut NoHook, async { 7 }, &mut |e| events.push(e))
+            .run_until(&mut p, &mut NoHook, after_a_yield(7), &mut |e| {
+                events.push(e)
+            })
             .await;
         assert_eq!(ended, Ended::Interrupted(7));
         assert!(events.is_empty());
@@ -1129,7 +1136,7 @@ mod tests {
                 &mut p,
                 &[secret("more")],
                 &mut NoHook,
-                async { 3 },
+                after_a_yield(3),
                 &mut |_| {},
             )
             .await;
@@ -1156,5 +1163,49 @@ mod tests {
         };
         assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("two"));
         assert_eq!(p.prompts.len(), 2);
+    }
+
+    async fn halted_on_the_wake_that_ends_the_write(resume: bool) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (halt_tx, halt_rx) = tokio::sync::oneshot::channel::<u8>();
+        let mut replies = vec![tool("w1", "write_file", &write_args("/a")), answer("done")];
+        if resume {
+            replies.insert(0, answer("first"));
+        }
+        let mut p = fake(replies);
+        let mut s = opened(&mut p).await.unwrap();
+        if resume {
+            run_answer(&mut s, &mut p).await;
+        }
+        p.started = Some(started_tx);
+        p.release = Some(release_rx);
+        let before = p.log.iter().filter(|l| l.starts_with("prompt")).count();
+        let halt = async { halt_rx.await.unwrap() };
+        let fire = async {
+            started_rx.await.unwrap();
+            release_tx.send(()).unwrap();
+            halt_tx.send(9).unwrap();
+        };
+        let (mut hook, mut emit, more) = (NoHook, |_| {}, [secret("more")]);
+        let ended = if resume {
+            let resumed = s.resume_until(&mut p, &more, &mut hook, halt, &mut emit);
+            tokio::join!(resumed, fire).0
+        } else {
+            tokio::join!(s.run_until(&mut p, &mut hook, halt, &mut emit), fire).0
+        };
+        assert_eq!(ended, Ended::Interrupted(9), "resume: {resume}");
+        let prompts = p.log.iter().filter(|l| l.starts_with("prompt")).count();
+        assert_eq!(prompts, before + 1, "resume: {resume}: a later step began");
+    }
+
+    #[tokio::test]
+    async fn a_halt_ready_on_the_same_wake_as_the_run_interrupts_it() {
+        halted_on_the_wake_that_ends_the_write(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_halt_ready_on_the_same_wake_as_the_resume_interrupts_it() {
+        halted_on_the_wake_that_ends_the_write(true).await;
     }
 }
