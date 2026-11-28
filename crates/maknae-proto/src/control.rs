@@ -117,9 +117,7 @@ pub const fn control_reply_cap<B: NoticeBody>() -> usize {
 }
 
 pub fn encode_control_request(r: &ControlRequest) -> Result<Vec<u8>, ProtoCodecError> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(r, &mut buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
-    Ok(buf)
+    crate::wire::enc(r)
 }
 
 pub fn decode_control_request(b: &[u8]) -> Result<ControlRequest, ProtoCodecError> {
@@ -137,8 +135,7 @@ pub fn encode_control_response<B: NoticeBody>(
     if matches!(&r.result, Ok(n) if n.len() > NOTICES_MAX) {
         return Err(ProtoCodecError::Encode("too many notices".into()));
     }
-    let mut buf = Vec::new();
-    ciborium::into_writer(r, &mut buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
+    let buf = crate::wire::enc(r)?;
     if buf.len() > control_reply_cap::<B>() {
         return Err(ProtoCodecError::Encode("control reply over its cap".into()));
     }
@@ -292,6 +289,23 @@ mod tests {
             decode_control_request(&b),
             Err(ProtoCodecError::UnsupportedVersion(2))
         ));
+    }
+
+    #[test]
+    fn an_undecodable_control_response_is_a_decode_error() {
+        for b in [
+            &[][..],
+            &[0xff, 0x00][..],
+            &encode_control_request(&poll()).unwrap()[..],
+        ] {
+            assert!(
+                matches!(
+                    decode_control_response::<AgentNotice>(b),
+                    Err(ProtoCodecError::Decode(_))
+                ),
+                "{b:?}"
+            );
+        }
     }
 
     #[test]

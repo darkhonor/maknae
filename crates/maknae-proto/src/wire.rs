@@ -1600,7 +1600,7 @@ impl Response {
     }
 }
 
-fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>, ProtoCodecError> {
+pub(crate) fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>, ProtoCodecError> {
     let mut buf = Vec::new();
     ciborium::into_writer(v, &mut buf).map_err(|e| ProtoCodecError::Encode(e.to_string()))?;
     Ok(buf)
