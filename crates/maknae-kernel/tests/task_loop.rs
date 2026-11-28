@@ -9895,7 +9895,7 @@ mod control_plane {
         (FrameClass::Control, poll_body())
     }
 
-    fn reply_of(raw: &[u8]) -> Option<ControlResponse<AgentNotice>> {
+    async fn reply_of(raw: &[u8]) -> Option<ControlResponse<AgentNotice>> {
         if raw.is_empty() {
             return None;
         }
@@ -9905,24 +9905,14 @@ mod control_plane {
             prompt: 0,
         };
         let mut cursor = raw;
-        let (class, body) =
-            futures_lite_block(maknae_proto::read_frame_zeroizing(&mut cursor, &caps))
-                .expect("one control frame");
+        let (class, body) = maknae_proto::read_frame_zeroizing(&mut cursor, &caps)
+            .await
+            .expect("one control frame");
         assert_eq!(class, FrameClass::Control);
         assert!(cursor.is_empty(), "one frame only");
         Some(maknae_proto::decode_control_response(&body).expect("a control reply"))
     }
 
-    fn futures_lite_block<F: std::future::Future>(f: F) -> F::Output {
-        let mut f = std::pin::pin!(f);
-        let waker = std::task::Waker::noop();
-        match f.as_mut().poll(&mut std::task::Context::from_waker(waker)) {
-            std::task::Poll::Ready(v) => v,
-            std::task::Poll::Pending => panic!("an in-memory read is never pending"),
-        }
-    }
-
-    /// The control records: action, result, reason.
     fn said(records: &Records) -> Vec<(String, String, String)> {
         records
             .snapshot()
@@ -9969,7 +9959,6 @@ mod control_plane {
         Admin,
     }
 
-    /// The real composition, except on `agent.control`.
     struct OnControl {
         inner: Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
         twist: Twist,
@@ -10052,7 +10041,6 @@ mod control_plane {
         }
     }
 
-    /// A verdict the real per-read check set: a read whose bytes name no expected sender.
     async fn mismatched_sender() -> maknae_vault::SenderVerdict {
         let (writer, reader) = tokio::net::UnixStream::pair().unwrap();
         let mut collector = maknae_plane::FdCollector::new(
@@ -10083,7 +10071,6 @@ mod control_plane {
             (session, gate)
         }
 
-        /// One connection carrying `frame` (none when `None`), its reply bytes read to EOF.
         #[allow(clippy::too_many_arguments)]
         async fn frame_as<P, E>(
             &self,
@@ -10159,7 +10146,9 @@ mod control_plane {
         }
 
         async fn poll_with(&self, agent: &str, records: &Arc<Records>) -> Option<Polled> {
-            reply_of(&self.control_raw(agent, poll_frame(), records).await).map(|r| r.result)
+            reply_of(&self.control_raw(agent, poll_frame(), records).await)
+                .await
+                .map(|r| r.result)
         }
 
         async fn poll(&self, agent: &str) -> Polled {
@@ -10297,15 +10286,18 @@ mod control_plane {
             )
             .await;
         assert_eq!(
-            reply_of(&raw).map(|r| r.result),
+            reply_of(&raw).await.map(|r| r.result),
             Some(Err(unauthorized_reply())),
             "{:?}",
             said(&records)
         );
-        let (action, result, _) = &said(&records)[0];
         assert_eq!(
-            (action.as_str(), result.as_str()),
-            ("agent.control", "deny")
+            said(&records),
+            one(
+                "agent.control",
+                "deny",
+                &format!("agent channel: uid {HOBI_UID} is not enrolled agent hobi")
+            )
         );
 
         let records = Records::new(0);

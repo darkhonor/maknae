@@ -12592,9 +12592,10 @@ mod record_widths {
     const PARENT: TaskId = TaskId([0xfe; 16]);
     const AUTHZ_PATH: &str = "/etc/maknae/authz.yaml";
     const AGENT_UID: u32 = 2001;
-    const MEASURED_CONTROL_POLL: [(usize, bool, Option<usize>); 3] = [
-        (1042, false, Some(244)),
-        (1838, false, Some(244)),
+    const MEASURED_CONTROL_POLL: [(usize, bool, Option<usize>); 4] = [
+        (1040, false, Some(244)),
+        (1836, false, Some(244)),
+        (1864, false, Some(244)),
         (1082, false, Some(242)),
     ];
 
@@ -13444,7 +13445,7 @@ mod record_widths {
             .label
     }
 
-    fn control_poll(notices: usize, (result, reason): (&str, &str)) -> AuditRecord {
+    fn control_poll(notices: usize, (result, reason, posture): (&str, &str, &str)) -> AuditRecord {
         let socket =
             maknae_config::control_socket_path(std::path::Path::new(MACOS_AGENT_SOCKET_PATH));
         let notice = maknae_proto::Notice {
@@ -13459,7 +13460,7 @@ mod record_widths {
             Some(&widest_user()),
             Some("adversary"),
             (u64::MAX, u64::MAX),
-            (result, reason, "unauthorized"),
+            (result, reason, posture),
             &vec![notice; notices],
             &serde_json::Value::Null,
         );
@@ -13474,14 +13475,24 @@ mod record_widths {
 
     #[test]
     fn a_control_poll_record_mirrors_as_measured() {
+        let permit = ("permit", "authorized", "authorized");
         let measured = [
-            (0, ("permit", "authorized")),
-            (maknae_proto::NOTICES_MAX, ("permit", "authorized")),
+            (0, permit),
+            (maknae_proto::NOTICES_MAX, permit),
+            (
+                maknae_proto::NOTICES_MAX,
+                (
+                    "permit",
+                    "delivery failed: response not written",
+                    "undelivered",
+                ),
+            ),
             (
                 0,
                 (
                     "deny",
                     "the live baseline changed between admission and decision",
+                    "unauthorized",
                 ),
             ),
         ]
@@ -30309,7 +30320,6 @@ mod agent_listener_tests {
         }
     }
 
-    /// One connection, handed over as hobi's leaf once its handshake runs.
     struct Serves {
         auth: PeerAuth,
         accepted: std::sync::atomic::AtomicBool,
@@ -30388,7 +30398,6 @@ mod agent_listener_tests {
         )
     }
 
-    /// Writes one poll and reads to EOF.
     async fn poll_over(mut client: tokio::io::DuplexStream) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         let body = maknae_proto::encode_control_request(&maknae_proto::ControlRequest {
@@ -30430,7 +30439,6 @@ mod agent_listener_tests {
 
     type Listening = tokio::task::JoinHandle<ServeOutcome>;
 
-    /// The three listeners until `stop`, the agent loop taking `agent` and the control loop `control`.
     fn listening<A, K>(
         fx: &Fx,
         emit: &Arc<Recorder>,
@@ -30609,6 +30617,42 @@ mod agent_listener_tests {
             (refused[0].0.as_str(), refused[0].2.as_str()),
             ("connection", "deny"),
             "{refused:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_poll_is_decided_under_the_control_breaker() {
+        let fx = enrolled_hobi("control-decide-breaker").await;
+        let emit = Arc::new(Recorder::default());
+        let (control, client) = Serves::hobi(control_socket().peer_auth);
+        let agents = AgentAdmission {
+            control: crate::control::ControlBreakers {
+                decide: Arc::new(tokio::sync::Mutex::new(BlockingBreaker::new(0))),
+                lookup: Arc::default(),
+            },
+            ..admission(&fx)
+        };
+        let run = listening(
+            &fx,
+            &emit,
+            4,
+            (idle(agent_socket().peer_auth), agent_gate(Arc::default())),
+            (control, agent_gate(Arc::default()), agents),
+        );
+        assert!(poll_over(client).await.is_empty());
+        stop_listening(run).await;
+        let requests: Vec<_> = of_socket(&emit, CONTROL_SOCKET)
+            .into_iter()
+            .filter(|r| r.0 == "request")
+            .collect();
+        assert_eq!(
+            requests,
+            [(
+                "request".to_string(),
+                "agent.control".to_string(),
+                "deny".to_string(),
+                "authorization decision circuit breaker open".to_string()
+            )]
         );
     }
 

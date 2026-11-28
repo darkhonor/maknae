@@ -62,7 +62,6 @@ pub fn control_class(agent_socket: std::path::PathBuf, trust_domain: &str) -> Ch
     }
 }
 
-/// Whether a refusal that ends a session is answered: never on the control plane.
 pub(crate) fn answers_a_session_ending(plane: ChannelPlane) -> bool {
     match plane {
         ChannelPlane::Data => true,
@@ -862,7 +861,10 @@ pub(crate) enum ControlOutcome {
         verdict: maknae_security::Verdict,
         role: Option<&'static str>,
     },
-    Unavailable(&'static str),
+    Unavailable {
+        reason: &'static str,
+        role: Option<&'static str>,
+    },
 }
 
 /// What the control socket writes back to a poll.
@@ -878,7 +880,7 @@ pub(crate) enum ControlReply {
 pub(crate) fn control_reply(outcome: &ControlOutcome, enrolled_now: bool) -> ControlReply {
     use maknae_security::Verdict;
     let (verdict, role) = match outcome {
-        ControlOutcome::Unavailable(_) => return ControlReply::None,
+        ControlOutcome::Unavailable { .. } => return ControlReply::None,
         ControlOutcome::Decided { verdict, role } => (verdict, *role),
     };
     match verdict {
@@ -1114,9 +1116,12 @@ mod tests {
             "authorization decision timed out",
             "the live baseline changed between admission and decision",
         ] {
-            for enrolled in [true, false] {
+            for (enrolled, role) in [true, false]
+                .into_iter()
+                .flat_map(|e| [(e, None), (e, Some("user")), (e, Some("adversary"))])
+            {
                 assert_eq!(
-                    control_reply(&ControlOutcome::Unavailable(reason), enrolled),
+                    control_reply(&ControlOutcome::Unavailable { reason, role }, enrolled),
                     ControlReply::None,
                     "{reason}"
                 );

@@ -50,13 +50,19 @@ pub(crate) async fn decide_control<P: Authorizer + Send + Sync + 'static>(
 ) -> ControlOutcome {
     match decide_on(breaker, authorizer, live, req, admitted_generation, timeout).await {
         Ok((verdict, role, _)) => ControlOutcome::Decided { verdict, role },
-        Err((reason, _)) => ControlOutcome::Unavailable(reason),
+        Err((reason, role)) => ControlOutcome::Unavailable { reason, role },
+    }
+}
+
+fn outcome_role(outcome: &ControlOutcome) -> Option<&'static str> {
+    match outcome {
+        ControlOutcome::Decided { role, .. } | ControlOutcome::Unavailable { role, .. } => *role,
     }
 }
 
 fn outcome_reason(outcome: &ControlOutcome) -> String {
     match outcome {
-        ControlOutcome::Unavailable(reason) => (*reason).to_string(),
+        ControlOutcome::Unavailable { reason, .. } => (*reason).to_string(),
         ControlOutcome::Decided { verdict, .. } => match finalize(verdict.clone()) {
             Decision::Deny { reason } => reason,
             Decision::Permit { obligations } => match discharge_plan(&obligations) {
@@ -237,10 +243,7 @@ pub(crate) async fn serve_control<S, E, P>(
     .await;
     let enrolled_now = agents.view.agent_uid(agent) == Some(uid);
     let reply = control_reply(&outcome, enrolled_now);
-    let role = match &outcome {
-        ControlOutcome::Decided { role, .. } => *role,
-        ControlOutcome::Unavailable(_) => None,
-    };
+    let role = outcome_role(&outcome);
     let reason = outcome_reason(&outcome);
     let said = |(result, reason, posture): (&str, &str, &str), notices: &[Notice<AgentNotice>]| {
         poll_record(
@@ -418,7 +421,10 @@ mod tests {
     async fn an_open_breaker_is_unavailable() {
         assert_eq!(
             decided(&breaker(0), Fixed(deny("r"), None), false).await,
-            ControlOutcome::Unavailable("authorization decision circuit breaker open")
+            ControlOutcome::Unavailable {
+                reason: "authorization decision circuit breaker open",
+                role: None
+            }
         );
     }
 
@@ -430,7 +436,10 @@ mod tests {
         }
         assert_eq!(
             decided(&b, Fixed(deny("r"), None), false).await,
-            ControlOutcome::Unavailable("authorization decision blocking worker budget exhausted")
+            ControlOutcome::Unavailable {
+                reason: "authorization decision blocking worker budget exhausted",
+                role: None
+            }
         );
     }
 
@@ -447,7 +456,10 @@ mod tests {
         let _ = release.send(());
         assert_eq!(
             got,
-            ControlOutcome::Unavailable("authorization decision timed out")
+            ControlOutcome::Unavailable {
+                reason: "authorization decision timed out",
+                role: None
+            }
         );
     }
 
@@ -455,7 +467,10 @@ mod tests {
     async fn a_baseline_change_during_the_decision_is_unavailable() {
         assert_eq!(
             decided(&breaker(3), Fixed(deny("r"), Some("user")), true).await,
-            ControlOutcome::Unavailable("the live baseline changed between admission and decision")
+            ControlOutcome::Unavailable {
+                reason: "the live baseline changed between admission and decision",
+                role: Some("user")
+            }
         );
     }
 
@@ -497,6 +512,23 @@ mod tests {
     }
 
     #[test]
+    fn each_outcome_names_the_role_it_was_decided_on() {
+        for role in [None, Some("user"), Some("adversary")] {
+            assert_eq!(
+                outcome_role(&ControlOutcome::Unavailable { reason: "r", role }),
+                role
+            );
+            assert_eq!(
+                outcome_role(&ControlOutcome::Decided {
+                    verdict: deny("r"),
+                    role
+                }),
+                role
+            );
+        }
+    }
+
+    #[test]
     fn each_outcome_names_its_reason() {
         let ob = |id: &str| maknae_security::Obligation {
             id: id.into(),
@@ -509,7 +541,10 @@ mod tests {
             })
         };
         assert_eq!(
-            outcome_reason(&ControlOutcome::Unavailable("sentinel-746")),
+            outcome_reason(&ControlOutcome::Unavailable {
+                reason: "sentinel-746",
+                role: None
+            }),
             "sentinel-746"
         );
         assert_eq!(of(deny("sentinel-746-deny")), "sentinel-746-deny");
