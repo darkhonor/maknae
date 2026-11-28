@@ -3,7 +3,7 @@
 title = "An agent's task: bindings and reach, the pull hand-off, the agentic loop, the outcome and the revoke"
 subtitle = [
   "maknaed never dials an agent: maknae-agentd polls until a task is queued for it, then works it in the agentic loop. Each tool call is the one a person makes (generated-tool-invocation.svg).",
-  "When the agent's forge credential is a stored token, the kernel first asks the agent for it through forge_auth on its notice poll (#746), then sends one Reach frame that works both sides.",
+  "When the agent's forge credential is a stored token, the kernel first asks the agent for it through forge_auth on its notice poll (#168), then sends one Reach frame that works both sides.",
   "Inside the loop, the tasker may add to the task, the agent may ask (#736), a tool call may wait for the tasker's approval (#174), and the tasker may stop it; halting its containers is #481. Each step shows its build state.",
 ]
 svg_title = "Maknae agent task lifecycle"
@@ -125,10 +125,11 @@ id = "notice-poll"
 from = "agentd"
 to = "kernel"
 kind = "call"
-label = "notice poll, every 5 s, on its own connection"
-status = "#746"
-evidence = "#746 · ADR-0033"
-note = "Control frames only. It never renews the claim lease; the heartbeat still does, so a wedged loop lapses."
+label = "notice poll on control.sock, every 5 s"
+status = "live"
+evidence = "ADR-0033 · crates/maknae-kernel/src/control.rs"
+test = "crates/maknae-kernel/tests/task_loop.rs::a_working_task_whose_loop_is_stalled_lapses_agent_lost_while_notice_polls_continue"
+note = "Control requests only, on the control socket. It never renews the claim lease; the heartbeat still does, so a wedged loop lapses."
 
 [[step]]
 id = "forge-auth"
@@ -136,8 +137,8 @@ from = "kernel"
 to = "agentd"
 kind = "reply"
 label = "forge_auth: the nonce and the forge servers"
-status = "#746"
-evidence = "#746 · ADR-0033"
+status = "#168"
+evidence = "#168 · ADR-0033"
 
 [[step]]
 id = "agent-wrapped-read"
@@ -467,18 +468,18 @@ label = "TaskStop: close the working task as Stopped"
 status = "live"
 evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs"
 test = "crates/maknae-kernel/tests/task_loop.rs::a_heartbeat_after_stop_tells_the_agent_it_was_stopped"
-note = "Cooperative today: the agent sees the stop at its next heartbeat, after its in-flight step."
+note = "The agent learns it on its next notice poll."
 
 [[step]]
 id = "stopped"
 from = "kernel"
 to = "agentd"
 kind = "reply"
-label = "on the heartbeat reply: the task was stopped"
+label = "on the next notice poll: Stop for the task; the step in flight is cut"
 status = "live"
-evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs"
-test = "crates/maknae-kernel/tests/task_loop.rs::a_heartbeat_after_stop_tells_the_agent_it_was_stopped"
-note = "Ruled 2026-11-27, not built (#746): the stop arrives on the notice poll within 5 s, not at the next heartbeat."
+evidence = "ADR-0033 · crates/maknae-kernel/src/task.rs · crates/maknae-agent/src/task_driver.rs"
+test = "crates/maknae-kernel/tests/agent_daemon.rs::a_tasker_stop_cuts_the_agents_step_within_one_poll_interval"
+note = "The heartbeat reply still reports the stop, so an agent that missed every poll learns it there."
 
 [[step]]
 id = "halt"

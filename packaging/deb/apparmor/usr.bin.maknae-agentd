@@ -29,6 +29,7 @@ profile maknae-agentd /usr/bin/maknae-agentd {
 
   /run/maknae-agent/                           r,
   /run/maknae-agent/maknaed.sock               rw,
+  /run/maknae-agent/control.sock               rw,
   network unix stream,
   unix (create, connect, send, receive, getattr, getopt, setopt, shutdown) type=stream,
   deny unix addr=@**,
