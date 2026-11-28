@@ -12195,18 +12195,14 @@ where
         Arc::clone(&sweep_stop),
     ));
     let max_connections = transport.max_connections;
-    let control_agents = AgentAdmission {
-        control: crate::control::ControlBreakers {
+    let (control_gate, control_agents) = control_side(
+        &gate,
+        &agents,
+        crate::control::ControlBreakers {
             decide: control_decide_breaker(),
             lookup: control_lookup_breaker(),
         },
-        ..agents.clone()
-    };
-    let control_gate = Arc::new(FactsGate {
-        facts: Arc::clone(&gate.facts),
-        breaker: Arc::clone(&control_agents.control.lookup),
-        bound: gate.bound,
-    });
+    );
     let serve = |listener: PlaneListener,
                  class: ChannelClass,
                  gate: Arc<FactsGate>,
@@ -12281,6 +12277,24 @@ where
     );
     let drained = *drain.borrow();
     Ok(crate::handler::after_drain(outcome, drained))
+}
+
+/// The control listener's facts gate and admission: the data plane's, under `breakers`.
+fn control_side(
+    gate: &FactsGate,
+    agents: &AgentAdmission,
+    breakers: crate::control::ControlBreakers,
+) -> (Arc<FactsGate>, AgentAdmission) {
+    let agents = AgentAdmission {
+        control: breakers,
+        ..agents.clone()
+    };
+    let gate = Arc::new(FactsGate {
+        facts: Arc::clone(&gate.facts),
+        breaker: Arc::clone(&agents.control.lookup),
+        bound: gate.bound,
+    });
+    (gate, agents)
 }
 
 /// What one listener's accept loop is stopped by, and the connections it may hold.
@@ -12596,8 +12610,10 @@ mod record_widths {
         (1040, false, Some(244)),
         (1836, false, Some(244)),
         (1864, false, Some(244)),
-        (1082, false, Some(242)),
+        (1081, false, Some(242)),
     ];
+    const MEASURED_POLL_CADENCE_LINES: (usize, usize, usize, usize, usize) =
+        (646, 714, 841, 664, 611);
 
     fn host() -> String {
         "h".repeat(HOST_BYTES)
@@ -13492,7 +13508,7 @@ mod record_widths {
                 (
                     "deny",
                     "the live baseline changed between admission and decision",
-                    "unauthorized",
+                    "unavailable",
                 ),
             ),
         ]
@@ -13504,6 +13520,75 @@ mod record_widths {
             (m.full_len, m.mirrored_in_full, m.degraded_len)
         });
         assert_eq!(measured, MEASURED_CONTROL_POLL);
+    }
+
+    #[test]
+    fn an_agents_poll_cadence_writes_as_measured() {
+        let line = |rec: &AuditRecord| {
+            maknae_audit_append::canonical_json(rec)
+                .expect("the record encodes")
+                .len()
+                + 1
+        };
+        let cases = Who::new(false).task_verb_cases();
+        let claim = |label: &str| {
+            let case = cases
+                .iter()
+                .find(|c| c.label == label)
+                .expect("the claim case");
+            line(&case.rec)
+        };
+        let socket =
+            maknae_config::control_socket_path(std::path::Path::new(MACOS_AGENT_SOCKET_PATH))
+                .display()
+                .to_string();
+        let mut session = SessionRecord::for_test(u32::MAX, Some(widest_user()));
+        session.channel = crate::session::SessionChannel::Agent {
+            agent: AgentId::parse(&widest_agent_id()).expect("the widest id parses"),
+            leaf_expires: std::time::Instant::now(),
+        };
+        let [connect, terminate] = [
+            (
+                "connection",
+                "connect",
+                "admitted (account: not-checked:directory)",
+                "authorized",
+            ),
+            ("session", "terminate", "disconnect", "stopped"),
+        ]
+        .map(|(event, action, reason, posture)| {
+            let mut rec = make_record(
+                event,
+                &host(),
+                &socket,
+                u32::MAX,
+                None,
+                None,
+                None,
+                u64::MAX,
+                u64::MAX,
+                action,
+                None,
+                "permit",
+                reason,
+                posture,
+                &serde_json::Value::Null,
+            );
+            rec.subject.user = Some(widest_user());
+            session.stamp(&mut rec);
+            line(&rec)
+        });
+        let poll = line(&control_poll(0, ("permit", "authorized", "authorized")));
+        assert_eq!(
+            (
+                connect,
+                claim("claim: permit idle"),
+                claim("claim: permit heartbeat: the addendum and 32 follow-ups after 4294967295"),
+                poll,
+                terminate
+            ),
+            MEASURED_POLL_CADENCE_LINES
+        );
     }
 
     #[test]
@@ -30570,17 +30655,16 @@ mod agent_listener_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_open_data_plane_breaker_does_not_refuse_a_poll() {
+    async fn an_open_data_plane_lookup_breaker_does_not_refuse_a_poll() {
         let fx = enrolled_hobi("control-own-breakers").await;
         let emit = Arc::new(Recorder::default());
-        let open = Arc::new(tokio::sync::Mutex::new(BlockingBreaker::new(0)));
+        let open = agent_gate(Arc::new(tokio::sync::Mutex::new(BlockingBreaker::new(0))));
         let (agent, agent_client) = Serves::hobi(agent_socket().peer_auth);
         let (control, control_client) = Serves::hobi(control_socket().peer_auth);
         let breakers = crate::control::ControlBreakers::default();
-        let agents = AgentAdmission {
-            control: breakers.clone(),
-            ..admission(&fx)
-        };
+        let (control_gate, agents) = control_side(&open, &admission(&fx), breakers.clone());
+        assert!(Arc::ptr_eq(&control_gate.breaker, &breakers.lookup));
+        assert!(Arc::ptr_eq(&agents.control.decide, &breakers.decide));
         let task = fx
             .reloader
             .tasks
@@ -30595,8 +30679,8 @@ mod agent_listener_tests {
             &fx,
             &emit,
             4,
-            (agent, agent_gate(Arc::clone(&open))),
-            (control, agent_gate(Arc::clone(&breakers.lookup)), agents),
+            (agent, open),
+            (control, control_gate, agents),
         );
         let raw = poll_over(control_client).await;
         let notices = polled(&raw).await.result.expect("the poll is permitted");
@@ -30654,6 +30738,13 @@ mod agent_listener_tests {
                 "authorization decision circuit breaker open".to_string()
             )]
         );
+        let postures: Vec<_> = emit
+            .records()
+            .into_iter()
+            .filter(|r| r.where_.socket == CONTROL_SOCKET && r.event == "request")
+            .map(|r| r.outcome.posture)
+            .collect();
+        assert_eq!(postures, ["unavailable"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

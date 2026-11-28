@@ -3017,7 +3017,14 @@ mod tests {
                 "{p}"
             );
         }
-        for p in ["nope.*", "fs.exec", "admin.whoami", "admin.policy.reload"] {
+        for p in [
+            "nope.*",
+            "fs.exec",
+            "admin.whoami",
+            "admin.policy.reload",
+            "agent.control",
+            "agent.*",
+        ] {
             assert_eq!(
                 expanded(p),
                 Err(crate::AuthzBasicError::UnknownAction(p.into())),

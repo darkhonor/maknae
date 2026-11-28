@@ -60,6 +60,13 @@ fn outcome_role(outcome: &ControlOutcome) -> Option<&'static str> {
     }
 }
 
+fn refusal_posture(outcome: &ControlOutcome) -> &'static str {
+    match outcome {
+        ControlOutcome::Unavailable { .. } => "unavailable",
+        ControlOutcome::Decided { .. } => "unauthorized",
+    }
+}
+
 fn outcome_reason(outcome: &ControlOutcome) -> String {
     match outcome {
         ControlOutcome::Unavailable { reason, .. } => (*reason).to_string(),
@@ -290,7 +297,7 @@ pub(crate) async fn serve_control<S, E, P>(
             }
         }
         ControlReply::None => {
-            let rec = record("deny", "unauthorized", &[]);
+            let rec = record("deny", refusal_posture(&outcome), &[]);
             emit_or_report(emit, &rec, action, uid, session_id).await;
         }
     }
@@ -526,6 +533,24 @@ mod tests {
                 role
             );
         }
+    }
+
+    #[test]
+    fn an_undecided_poll_is_unavailable_and_a_decided_refusal_unauthorized() {
+        assert_eq!(
+            refusal_posture(&ControlOutcome::Unavailable {
+                reason: "r",
+                role: None
+            }),
+            "unavailable"
+        );
+        assert_eq!(
+            refusal_posture(&ControlOutcome::Decided {
+                verdict: deny("r"),
+                role: Some("user")
+            }),
+            "unauthorized"
+        );
     }
 
     #[test]
