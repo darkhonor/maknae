@@ -215,6 +215,42 @@ impl Session {
         self.run_with(plane, hook, emit).await
     }
 
+    /// An interrupted run is dropped where it stands, which leaves the session closed.
+    pub async fn run_until<P, H, S>(
+        &mut self,
+        plane: &mut P,
+        hook: &mut H,
+        interrupt: impl Future<Output = S> + Send,
+        emit: &mut (impl FnMut(LoopEvent) + Send),
+    ) -> Ended<S>
+    where
+        P: Plane + Send,
+        H: StepHook<P> + Send,
+    {
+        match first(self.run_with(plane, hook, emit), interrupt).await {
+            Either::Left(outcome) => Ended::Ran(outcome),
+            Either::Right(signal) => Ended::Interrupted(signal),
+        }
+    }
+
+    pub async fn resume_until<P, H, S>(
+        &mut self,
+        plane: &mut P,
+        follow_ups: &[SecretText],
+        hook: &mut H,
+        interrupt: impl Future<Output = S> + Send,
+        emit: &mut (impl FnMut(LoopEvent) + Send),
+    ) -> Ended<S>
+    where
+        P: Plane + Send,
+        H: StepHook<P> + Send,
+    {
+        match first(self.resume(plane, follow_ups, hook, emit), interrupt).await {
+            Either::Left(outcome) => Ended::Ran(outcome),
+            Either::Right(signal) => Ended::Interrupted(signal),
+        }
+    }
+
     /// `None` when the kernel never opened this conversation.
     pub async fn close<P: Plane + Send>(
         &self,
@@ -1055,5 +1091,71 @@ mod tests {
         let out = s.run(&mut p, &mut |_| {}).await;
         assert_eq!(out.stopped, Some(StopReason::Stopped));
         assert!(p.prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_run_leaves_the_session_closable() {
+        let mut p = fake(vec![]);
+        p.prompt_hangs = true;
+        let mut s = opened(&mut p).await.unwrap();
+        let mut events = vec![];
+        let ended = s
+            .run_until(&mut p, &mut NoHook, async { 7 }, &mut |e| events.push(e))
+            .await;
+        assert_eq!(ended, Ended::Interrupted(7));
+        assert!(events.is_empty());
+        assert_eq!(
+            p.log.last().map(String::as_str),
+            Some(format!("prompt {KERNEL_ID}").as_str())
+        );
+        assert_eq!(s.prompt("more"), Err(SessionClosed));
+        assert_eq!(
+            s.close(&mut p).await,
+            Some(Ok(view(&ConversationId::parse(KERNEL_ID).unwrap())))
+        );
+        assert_eq!(
+            p.log.last().map(String::as_str),
+            Some(format!("close {KERNEL_ID}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_resume_leaves_the_session_closable() {
+        let mut p = fake(vec![answer("first")]);
+        let mut s = opened(&mut p).await.unwrap();
+        run_answer(&mut s, &mut p).await;
+        p.prompt_hangs = true;
+        let ended = s
+            .resume_until(
+                &mut p,
+                &[secret("more")],
+                &mut NoHook,
+                async { 3 },
+                &mut |_| {},
+            )
+            .await;
+        assert_eq!(ended, Ended::Interrupted(3));
+        assert_eq!(p.prompts.len(), 1);
+        assert_eq!(s.prompt("again"), Err(SessionClosed));
+        assert!(matches!(s.close(&mut p).await, Some(Ok(_))));
+    }
+
+    #[tokio::test]
+    async fn a_run_or_resume_the_interrupt_never_reaches_ends_as_it_ran() {
+        let mut p = fake(vec![answer("one"), answer("two")]);
+        let mut s = opened(&mut p).await.unwrap();
+        let never = std::future::pending::<()>;
+        let Ended::Ran(out) = s.run_until(&mut p, &mut NoHook, never(), &mut |_| {}).await else {
+            panic!("the run was not interrupted")
+        };
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("one"));
+        let Ended::Ran(out) = s
+            .resume_until(&mut p, &[secret("more")], &mut NoHook, never(), &mut |_| {})
+            .await
+        else {
+            panic!("the resume was not interrupted")
+        };
+        assert_eq!(out.answer.as_ref().map(|a| a.expose()), Some("two"));
+        assert_eq!(p.prompts.len(), 2);
     }
 }

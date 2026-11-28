@@ -4,9 +4,10 @@
 //! Pure: every effect goes through [`TaskPlane`] and [`Clock`].
 use crate::budget::ContextBudget;
 use crate::drive::{Budget, LoopEvent, StepControl, StepHook, StopReason};
+use crate::halt::{halts, Halt, HaltSender, Halts};
 use crate::hints::Forge;
 use crate::plane::{Plane, PlaneError, WriteOutcome};
-use crate::session::Session;
+use crate::session::{Ended, Session};
 use crate::task::{BeatAnswer, ClaimAnswer, ReportOutcome, TaskerFail};
 use crate::transcript::Transcript;
 use maknae_proto::{
@@ -571,6 +572,8 @@ pub struct TaskDriver<P, C> {
     clock: C,
     config: DriverConfig,
     shutdown: Arc<AtomicBool>,
+    halt: HaltSender,
+    halts: Halts,
     held: Option<Held>,
     /// The task found `Working` by the startup heartbeat, until a claim settles it.
     leftover: Option<TaskId>,
@@ -580,11 +583,14 @@ pub struct TaskDriver<P, C> {
 
 impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
     pub fn new(plane: P, clock: C, config: DriverConfig) -> Self {
+        let (halt, halts) = halts();
         TaskDriver {
             plane,
             clock,
             config,
             shutdown: Arc::new(AtomicBool::new(false)),
+            halt,
+            halts,
             held: None,
             leftover: None,
             backoff: Backoff(BACKOFF_FIRST),
@@ -594,6 +600,10 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
 
     pub fn shutdown_handle(&self) -> ShutdownHandle {
         ShutdownHandle(Arc::clone(&self.shutdown))
+    }
+
+    pub fn halt_handle(&self) -> HaltSender {
+        self.halt.clone()
     }
 
     fn stopping(&self) -> bool {
@@ -966,15 +976,18 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
                 cwd: &held.cwd,
                 bindings: &mut held.bindings,
             };
-            let outcome = match then {
+            let halt = self.halts.until(held.id);
+            let ended = match then {
                 Then::Run => {
                     held.session
-                        .run_with(&mut tool, &mut hook, &mut |e| events.push(e))
+                        .run_until(&mut tool, &mut hook, halt, &mut |e| events.push(e))
                         .await
                 }
                 Then::Resume(news) => {
                     held.session
-                        .resume(&mut tool, &news.items, &mut hook, &mut |e| events.push(e))
+                        .resume_until(&mut tool, &news.items, &mut hook, halt, &mut |e| {
+                            events.push(e)
+                        })
                         .await
                 }
             };
@@ -982,6 +995,16 @@ impl<P: TaskPlane + Send, C: Clock + Send + Sync> TaskDriver<P, C> {
             for e in events {
                 self.plane.note(DriverEvent::Loop(e));
             }
+            let outcome = match ended {
+                Ended::Ran(outcome) => outcome,
+                Ended::Interrupted(halt) => {
+                    let ending = match halt {
+                        Halt::Stop => Ending::Gone,
+                        Halt::Refused => Ending::Held,
+                    };
+                    return self.conclude(held.id, Some(&held.session), ending).await;
+                }
+            };
             if let Some(answer) = outcome.answer {
                 held.answer = Some(answer.into_inner());
             }
@@ -1151,6 +1174,9 @@ mod tests {
         quiet_at: Option<Duration>,
         stop_on_quiet: bool,
         submitted: Vec<Vec<BindingRequest>>,
+        halt: Option<HaltSender>,
+        cited: Option<TaskId>,
+        halted: Option<(bool, usize)>,
     }
     type Shared = Arc<Mutex<World>>;
 
@@ -1198,9 +1224,41 @@ mod tests {
         accept_subs: bool,
         diagnostics: Vec<String>,
         forges: Option<Vec<Forge>>,
+        halt_at: Option<(HaltAt, Halt)>,
+        stop_for: Option<TaskId>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum HaltAt {
+        Prompt(usize),
+        ToolCall,
+        Beat,
     }
 
     impl Fake {
+        /// Sends the halt at its call; `true` when a wait took it, and the call then never returns.
+        fn halts_at(&mut self, at: HaltAt) -> bool {
+            let Some((when, halt)) = self.halt_at else {
+                return false;
+            };
+            let mut w = self.w.lock().unwrap();
+            let due = match when {
+                HaltAt::Prompt(_) | HaltAt::ToolCall => at == when,
+                HaltAt::Beat => at == when && !w.sent.is_empty(),
+            };
+            if !due {
+                return false;
+            }
+            self.halt_at = None;
+            let sender = w.halt.clone().unwrap();
+            let taken = match halt {
+                Halt::Stop => sender.stop(self.stop_for.or(w.cited).unwrap(), sender.mark()),
+                Halt::Refused => sender.refused(sender.mark()),
+            };
+            w.halted = Some((taken, w.log.len()));
+            taken
+        }
+
         fn log(&mut self, line: String) {
             self.calls += 1;
             assert!(self.calls < 400, "the driver did not settle");
@@ -1265,10 +1323,16 @@ mod tests {
                 let w = self.w.lock().unwrap();
                 w.shutdown.as_ref().unwrap().shut_down();
             }
+            if self.halts_at(HaltAt::Prompt(n)) {
+                std::future::pending::<()>().await;
+            }
             self.replies.pop_front().expect("prompt script exhausted")
         }
         async fn read(&mut self, _: &str, p: &str, _: maknae_proto::PageRequest) -> ReadOutcome {
             self.log(format!("read {p}"));
+            if self.halts_at(HaltAt::ToolCall) {
+                std::future::pending::<()>().await;
+            }
             ReadOutcome::Unavailable
         }
         async fn write(&mut self, _: &str, p: &str, _: &[u8], _: ReadBasis) -> WriteOutcome {
@@ -1316,6 +1380,9 @@ mod tests {
         }
         async fn heartbeat(&mut self, seen: u32) -> Result<BeatAnswer, String> {
             self.log(format!("beat {seen}"));
+            if self.halts_at(HaltAt::Beat) {
+                std::future::pending::<()>().await;
+            }
             if self.beats.is_empty() && self.lose_beats {
                 return self.lost();
             }
@@ -1348,6 +1415,7 @@ mod tests {
             }
         }
         fn cite(&mut self, task: Option<TaskId>) {
+            self.w.lock().unwrap().cited = task;
             self.log(match task {
                 Some(id) => format!("cite {}", tag(&id)),
                 None => "uncite".into(),
@@ -1540,6 +1608,7 @@ mod tests {
         let w = Arc::clone(&f.w);
         let d = TaskDriver::new(f, FakeClock(Arc::clone(&w)), config(persona));
         w.lock().unwrap().shutdown = Some(d.shutdown_handle());
+        w.lock().unwrap().halt = Some(d.halt_handle());
         (d, w)
     }
 
@@ -3595,5 +3664,141 @@ mod tests {
                 .any(|l| l.starts_with("beat") || l.starts_with("report")));
             assert_eq!(events, vec![ended(1, Ending::Shutdown)]);
         }
+    }
+
+    async fn halted(f: Fake) -> (Vec<String>, Vec<DriverEvent>, Vec<String>, bool) {
+        let (mut d, w) = driver(f, PersonaMode::Own);
+        tokio::time::timeout(Duration::from_secs(10), d.run())
+            .await
+            .expect("the halt did not cut the step");
+        let g = w.lock().unwrap();
+        let (taken, at) = g.halted.expect("the halt was never sent");
+        (g.log.clone(), g.events.clone(), g.log[at..].to_vec(), taken)
+    }
+
+    fn stopped_then_idle() -> Vec<String> {
+        let mut v = strs(&["uncite", &format!("close {CONV}")]);
+        v.extend(tail());
+        v
+    }
+
+    fn halting(at: HaltAt, halt: Halt) -> Fake {
+        let mut f = fake();
+        f.claims = VecDeque::from([delivered(1, PART)]);
+        f.halt_at = Some((at, halt));
+        f
+    }
+
+    #[tokio::test]
+    async fn a_stop_cuts_the_model_turn_in_flight() {
+        let f = halting(HaltAt::Prompt(1), Halt::Stop);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(taken);
+        assert_eq!(events, vec![ended(1, Ending::Gone)]);
+        assert_eq!(after, stopped_then_idle(), "{log:?}");
+        assert!(reports(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_cuts_the_tool_call_in_flight() {
+        let mut f = halting(HaltAt::ToolCall, Halt::Stop);
+        f.replies = VecDeque::from([read("c1", "/w/a")]);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(taken);
+        assert_eq!(log[log.len() - after.len() - 1], "read /w/a");
+        assert_eq!(events, vec![ended(1, Ending::Gone)]);
+        assert_eq!(after, stopped_then_idle(), "{log:?}");
+        assert!(reports(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_cuts_the_hooks_heartbeat_in_flight() {
+        let mut f = halting(HaltAt::Beat, Halt::Stop);
+        f.step_cost = HEARTBEAT_EVERY;
+        f.replies = VecDeque::from([read("c1", "/w/a")]);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(taken);
+        assert_eq!(log[log.len() - after.len() - 1], "beat 0");
+        assert_eq!(log[log.len() - after.len() - 2], "read /w/a");
+        assert_eq!(events, vec![ended(1, Ending::Gone)]);
+        assert_eq!(after, stopped_then_idle(), "{log:?}");
+        assert!(reports(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_poll_holds_the_worked_task() {
+        let f = halting(HaltAt::Prompt(1), Halt::Refused);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(taken);
+        assert_eq!(events, vec![ended(1, Ending::Held)]);
+        let mut expected = strs(&["uncite"]);
+        expected.extend(tail());
+        assert_eq!(after, expected, "{log:?}");
+        assert!(!log.iter().any(|l| l.starts_with("close")));
+        assert!(reports(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_cuts_a_resumed_run_and_notes_the_loop_events_before_it() {
+        let mut f = halting(HaltAt::Prompt(3), Halt::Stop);
+        f.replies = VecDeque::from([
+            call("list_directory", "l1", r#"{"path":"/w/a"}"#),
+            answer("a1"),
+        ]);
+        f.beats.push_back(follow_ups(0, &["more"]));
+        let (log, events, after, taken) = halted(f).await;
+        assert!(taken);
+        assert_eq!(
+            events,
+            vec![
+                DriverEvent::Loop(LoopEvent::Diagnostic("listed /w/a".into())),
+                ended(1, Ending::Gone)
+            ]
+        );
+        assert_eq!(after, stopped_then_idle(), "{log:?}");
+        assert!(reports(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_the_driver_is_outside_a_step_halts_nothing() {
+        let mut f = halting(HaltAt::Beat, Halt::Stop);
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(!taken);
+        assert_eq!(after[0], "report a1", "{log:?}");
+        assert_eq!(events, vec![ended(1, Ending::Answered)]);
+    }
+
+    #[tokio::test]
+    async fn the_next_task_after_a_stop_is_claimed_and_worked() {
+        let mut f = halting(HaltAt::Prompt(1), Halt::Stop);
+        f.claims = VecDeque::from([delivered(1, PART), delivered(2, PART)]);
+        f.replies = VecDeque::from([answer("a2")]);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(taken);
+        assert_eq!(
+            events,
+            vec![ended(1, Ending::Gone), ended(2, Ending::Answered)]
+        );
+        assert_eq!(
+            after[..3],
+            strs(&["uncite", &format!("close {CONV}"), "claim"])
+        );
+        let cites: Vec<_> = after.iter().filter(|l| l.starts_with("cite")).collect();
+        assert_eq!(cites, vec!["cite t2"], "{log:?}");
+        assert_eq!(reports(&log), strs(&["report a2"]));
+        let at = after.iter().position(|l| l == "cite t2").unwrap();
+        assert!(after[at..].iter().any(|l| l == "prompt 1"));
+    }
+
+    #[tokio::test]
+    async fn a_stop_for_another_task_leaves_the_worked_one_running() {
+        let mut f = halting(HaltAt::Prompt(1), Halt::Stop);
+        f.stop_for = Some(id(2));
+        f.replies = VecDeque::from([answer("a1")]);
+        let (log, events, after, taken) = halted(f).await;
+        assert!(!taken);
+        assert_eq!(after[0], "beat 0", "{log:?}");
+        assert_eq!(events, vec![ended(1, Ending::Answered)]);
     }
 }
