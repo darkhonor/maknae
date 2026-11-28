@@ -136,13 +136,18 @@ mod tests {
         Pin::new(w).poll(&mut cx).is_pending()
     }
 
-    #[tokio::test]
-    async fn a_stop_for_the_worked_task_fires_its_wait() {
+    fn ready(mut w: Until<'_>) -> Poll<Halt> {
+        let mut cx = Context::from_waker(Waker::noop());
+        Pin::new(&mut w).poll(&mut cx)
+    }
+
+    #[test]
+    fn a_stop_for_the_worked_task_fires_its_wait() {
         let (sender, halts) = halts();
         let mut w = halts.until(id(1));
         assert!(pending(&mut w));
         assert!(sender.stop(id(1), sender.mark()));
-        assert_eq!(w.await, Halt::Stop);
+        assert_eq!(ready(w), Poll::Ready(Halt::Stop));
     }
 
     #[test]
@@ -155,14 +160,14 @@ mod tests {
         assert!(!pending(&mut w));
     }
 
-    #[tokio::test]
-    async fn a_refused_poll_fires_whatever_is_worked() {
+    #[test]
+    fn a_refused_poll_fires_whatever_is_worked() {
         for n in [1, 7] {
             let (sender, halts) = halts();
             let mut w = halts.until(id(n));
             assert!(pending(&mut w));
             assert!(sender.refused(sender.mark()));
-            assert_eq!(w.await, Halt::Refused);
+            assert_eq!(ready(w), Poll::Ready(Halt::Refused));
         }
     }
 
@@ -208,12 +213,12 @@ mod tests {
         assert!(pending(&mut w));
     }
 
-    #[tokio::test]
-    async fn a_stop_after_until_but_before_the_first_poll_is_taken() {
+    #[test]
+    fn a_stop_after_until_but_before_the_first_poll_is_taken() {
         let (sender, halts) = halts();
         let w = halts.until(id(1));
         assert!(sender.stop(id(1), sender.mark()));
-        assert_eq!(w.await, Halt::Stop);
+        assert_eq!(ready(w), Poll::Ready(Halt::Stop));
     }
 
     #[test]
