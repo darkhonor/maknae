@@ -374,6 +374,31 @@ fn hobi_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
     }))
 }
 
+/// The widest enrollable agent account: a 32-byte name at uid `WIDEST_AGENT_UID`.
+pub(crate) const WIDEST_AGENT_HOSTS: maknae_authz_basic::HostLookups =
+    maknae_authz_basic::HostLookups {
+        account: widest_agent_account,
+        daemons: no_daemons,
+        group: no_group,
+    };
+
+pub(crate) const WIDEST_AGENT_UID: u32 = u32::MAX - 1;
+
+pub(crate) fn widest_agent_account_name() -> String {
+    "u".repeat(maknae_vault::MAX_USERNAME_BYTES)
+}
+
+fn widest_agent_account(uid: u32) -> Result<Option<maknae_io::HostAccount>, String> {
+    Ok((uid == WIDEST_AGENT_UID).then(|| maknae_io::HostAccount {
+        uid,
+        name: widest_agent_account_name(),
+        primary_gid: uid,
+        shell: "/usr/sbin/nologin".into(),
+        dir: "/var/empty".into(),
+        named_groups: Vec::new(),
+    }))
+}
+
 pub(crate) const BTS_HOSTS: maknae_authz_basic::HostLookups = maknae_authz_basic::HostLookups {
     account: bts_account,
     daemons: no_daemons,

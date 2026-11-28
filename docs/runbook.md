@@ -455,8 +455,9 @@ unified log delivers one line and drops anything past 1015 bytes. With identity
 on the record every `session.prompt` send outcome and refusal exceeds that at the
 widest bounds (a contained subject's deny is the exception), so **on macOS those
 records mirror as a degraded marker as a matter of course, not as an exception**.
-Every `session.task` record degrades at the widest bounds too; the widest, a
-submission's `task gone before the answer` with 8 maximal bindings and their reach,
+Every `session.task` record of the verbs the width tests build (submit, add,
+status, list, stop, drop and collect, and an agent's claim and report; not
+`agents`) degrades at the widest bounds too; the widest, a submission's `task gone before the answer` with 8 maximal bindings and their reach,
 is 3,534 bytes from a person and 4,376 from an agent (for a 64-byte host and a
 255-byte trust domain). The marker carries `MAKNAE_SESSION`,
 `MAKNAE_SEQ` and `MAKNAE_PRIMARY`; use the session and seq to find the complete
@@ -1970,18 +1971,29 @@ sudo jq -c 'select(.action=="session.task") | {ts, event, op: .subject.task_op, 
 
 An agent's `maknae-agentd` talks to `maknaed` on two sockets, one connection per request. On the agent socket it claims with `TaskClaim` every 5 seconds while it has nothing to do, and sends a heartbeat every 5 minutes (a third of the lease) while it works (#629). On the control socket, `control.sock`, it polls for notices every 5 seconds in every state (#746): a `Stop` there cuts the step it is working within about 5 seconds, and a refused poll, which means the agent is contained, ends its working task.
 
-Each connection writes three records: `connect`, the request, and `terminate`. Every one of them carries the agent's certificate name, `spiffe://<trust_domain>/plane/agent/<id>`, twice (`source.plane_uri_san` and `subject.plane_uri_san`). Measured as JSONL lines for a 255-byte trust domain (the longest allowed), a 32-byte agent id (the longest), the longest user name and a 64-byte host, with the newline (`an_agents_poll_cadence_writes_as_measured` in `crates/maknae-kernel/src/run.rs`): a `connect` is 1,259 bytes (with the longest account label, `not-checked:configured`), an `idle` claim 1,255, a poll with no notice 1,276, a `terminate` 1,223 and the widest heartbeat 1,453. The figures are with `audit.au3_1` at its default, `{}`; a value the deployer sets there adds its JSON width beyond those 2 bytes to every record. A day is 86,400 / 5 = 17,280 intervals of 5 seconds.
+Each connection writes three records: `connect`, the request, and `terminate`. Every one carries the agent's certificate name, `spiffe://<trust_domain>/plane/agent/<id>`, twice (`source.plane_uri_san` and `subject.plane_uri_san`), and the host name once. Measured from the records `maknaed` writes for real connections, for a 255-byte trust domain (the longest allowed), a 32-byte agent id and account name (the longest), the longest account label (`not-checked:configured`), a 20-digit session id, a 64-byte host and `audit.au3_1` at its default `{}` (`an_agents_poll_cadence_writes_as_measured` in `crates/maknae-kernel/src/run.rs`):
 
-| Agent | Per 5 seconds | Records a day | Bytes a day |
+| Record | JSONL line, with its newline | macOS degraded marker |
+|---|---|---|
+| `connect` | 1,240 bytes | 200 bytes |
+| `idle` claim | 1,236 | 205 |
+| poll, no notice | 1,252 | 206 |
+| poll naming 8 notices | 2,048 | 206 |
+| heartbeat (the widest: `heartbeat: the addendum and 32 follow-ups after 0`, from an agent tasker with the longest id) | 1,425 | 205 |
+| `terminate` | 1,204 | 202 |
+
+A heartbeat's claim cites no task, so its connection's `terminate` names none. A day is 86,400 / 5 = 17,280 intervals of 5 seconds, and a working agent heartbeats 288 times a day.
+
+| Agent | Per 5 seconds | Records a day | JSONL bytes a day |
 |---|---|---|---|
-| idle | an `idle` claim (1,259 + 1,255 + 1,223 = 3,737 bytes) and a poll (1,259 + 1,276 + 1,223 = 3,758 bytes): 6 records, 7,495 bytes | 17,280 × 6 = 103,680 | 17,280 × 7,495 = 129,513,600, about 130 MB |
-| working | a poll: 3 records, 3,758 bytes; and every 5 minutes a heartbeat, 3 records of at most 1,259 + 1,453 + 1,223 = 3,935 bytes | 17,280 × 3 + 288 × 3 = 52,704 | 17,280 × 3,758 + 288 × 3,935 = 66,071,520, about 66 MB |
+| idle | an `idle` claim connection (1,240 + 1,236 + 1,204 = 3,680 bytes) and a poll connection (1,240 + 1,252 + 1,204 = 3,696 bytes): 6 records, 7,376 bytes | 17,280 × 6 = 103,680 | 17,280 × 7,376 = 127,457,280, about 127 MB |
+| working | a poll connection, 3 records, 3,696 bytes; and every 5 minutes a heartbeat connection, 3 records of at most 1,240 + 1,425 + 1,204 = 3,869 bytes | 17,280 × 3 + 288 × 3 = 52,704 | 17,280 × 3,696 + 288 × 3,869 = 64,981,152, about 65 MB |
 
-The host name has no length limit: each byte it has beyond 64 adds 1 byte to every record, 6 per idle interval and 3 per working one. Each byte by which the trust domain is shorter than 255 saves 2 bytes on every record: 12 bytes per idle interval (17,280 × 12 = 207,360 bytes a day) and 6 per working one (17,280 × 6 + 288 × 6 = 105,408). With a 14-byte trust domain such as `maknae.example`, an idle agent writes 7,495 − 241 × 12 = 4,603 bytes per interval (79,539,840 a day, about 80 MB). Shorter agent ids, hosts and user names save more.
+A working agent also writes the records of the requests it makes. A poll naming 8 notices adds 796 bytes to its record. A task costs two records to submit, two to hand out, two to report and one or two to collect, each with its connection's `connect` and `terminate`. A value the deployer sets in `audit.au3_1` adds its JSON width beyond `{}`'s 2 bytes to every record.
 
-A working agent also writes the records of the requests it makes, and a poll whose reply names 8 notices is 796 bytes longer than one naming none (2,450 against 1,654 on the macOS mirror line). A task costs two records to submit, two to hand out, two to report and one or two to collect, each with its connection's `connect` and `terminate`. Size the trail's rotation ([Rotate, restore or recreate the trail](#rotate-restore-or-recreate-the-trail)) for the number of agents you enroll.
+The host name has no length limit: each byte beyond 64 adds 1 byte to every record, so 6 bytes per idle interval (103,680 a day) and 3 per working interval plus 3 per heartbeat (52,704 a day); a shorter host saves the same. Each byte by which the trust domain is shorter than 255 saves 2 bytes on every record: 12 per idle interval (207,360 a day) and 6 per working interval plus 6 per heartbeat (105,408 a day). With a 14-byte trust domain such as `maknae.example`, an idle agent writes 7,376 − 241 × 12 = 4,484 bytes per interval, 77,483,520 a day (about 77 MB). Size the trail's rotation ([Rotate, restore or recreate the trail](#rotate-restore-or-recreate-the-trail)) for the number of agents you enroll.
 
-On macOS the unified-log mirror carries each record in full only up to 1,015 bytes; a longer one is mirrored as a degraded marker line, and the JSONL trail holds the whole record. For the names above a poll's record is a 1,654-byte line, so each agent mirrors one 244-byte degraded marker every 5 seconds, 17,280 a day; an idle agent's `idle` claim record degrades the same way, to a 243-byte marker. Shorter names and trust domains can fit in full.
+On macOS the unified-log mirror carries a record in full only up to 1,015 bytes; at these widths every one of these records is longer, so each is mirrored as its degraded marker and the JSONL trail holds the whole record. That is one marker per record: an idle agent mirrors 6 every 5 seconds, 103,680 a day (17,280 × (200 + 205 + 202 + 200 + 206 + 202) = 20,995,200 bytes); a working agent 3 every 5 seconds plus 3 per heartbeat, 52,704 a day (17,280 × 608 + 288 × 607 = 10,681,056 bytes). A shorter host, trust domain or name can bring a record under the line, and then it mirrors in full.
 
 ### When the store refuses a hand-out
 
@@ -2058,7 +2070,7 @@ A contained subject's posts are held at once: from the moment the containment is
 sudo jq -c 'select(.action=="board.post" or .action=="board.read" or .subject.board_op != null) | {ts, event, action, op: .subject.board_op, board: .object, agent: .subject.agent, post: .board.post_id, seq: .board.seq, result: .outcome.result, reason: .outcome.reason}' /var/log/maknae/audit.jsonl | tail -n 20
 ```
 
-On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record. A person's `board.manage` records, for the widest identity, are 1092 to 2263 bytes when the request is permitted, including a refusal after the permit, and mirror as the marker; a request the composition refuses (contained, no rule for `board.manage`, no role) is 953 to 994 bytes and mirrors in full. For an ordinary identity a clear naming 4 posts fits the line, 5 does not, and a clear naming 32 is 1977 bytes. A person's listing records, for the widest identity, are 1088 to 1200 bytes when the listing answers or is refused after its permit, and the agent-channel refusal is 1,754 (for a 255-byte trust domain); these mirror as the marker. A listing the composition refuses (contained, no rule for `board.read`, no role) is 945 to 980 bytes and mirrors in full. A `seen` record is 1107 to 1159 bytes when the request is permitted, and an agent's refused `seen` is 1,820 (for a 255-byte trust domain); these mirror as the marker. A `seen` the composition refuses is 951 to 986 bytes and mirrors in full.
+On macOS the widest board request records exceed the syslog line cap and the mirror carries the degraded marker; the JSONL has the whole record. A person's `board.manage` records, for the widest identity, are 1092 to 2263 bytes when the request is permitted, including a refusal after the permit, and mirror as the marker; a request the composition refuses (contained, no rule for `board.manage`, no role) is 953 to 994 bytes and mirrors in full. For an ordinary identity a clear naming 4 posts fits the line, 5 does not, and a clear naming 32 is 1977 bytes. A person's listing records, for the widest identity, are 1088 to 1200 bytes when the listing answers or is refused after its permit, and the agent-channel refusal is 1754 (for a 255-byte trust domain); these mirror as the marker. A listing the composition refuses (contained, no rule for `board.read`, no role) is 945 to 980 bytes and mirrors in full. A `seen` record is 1107 to 1159 bytes when the request is permitted, and an agent's refused `seen` is 1820 (for a 255-byte trust domain); these mirror as the marker. A `seen` the composition refuses is 951 to 986 bytes and mirrors in full.
 
 **Memory.** The kernel keeps the board in memory: at most 128 posts for each distinct author that has ever posted on a board (4 MiB at the maximum post size), held posts included. The 1024 cap applies when a post is admitted; releasing held posts, or a containment lifted before its holds are written, can leave a board above 1024 live posts. A held post is kept until released, including the posts of agents since de-enrolled.
 
