@@ -1968,16 +1968,18 @@ sudo jq -c 'select(.action=="session.task") | {ts, event, op: .subject.task_op, 
 
 An agent's `maknae-agentd` talks to `maknaed` on two sockets, one connection per request. On the agent socket it claims with `TaskClaim` every 5 seconds while it has nothing to do, and sends a heartbeat every 5 minutes (a third of the lease) while it works (#629). On the control socket, `control.sock`, it polls for notices every 5 seconds in every state (#746): a `Stop` there cuts the step it is working within about 5 seconds, and a refused poll, which means the agent is contained, ends its working task.
 
-Each connection writes three records: `connect`, the request, and `terminate`. Measured as JSONL lines for the widest agent id, host and user (`an_agents_poll_cadence_writes_as_measured` in `crates/maknae-kernel/src/run.rs`), a `connect` is 646 bytes, an `idle` claim 714, a poll with no notice 664 and a `terminate` 611; a heartbeat at most 841. Shorter names give shorter lines. A day is 86,400 / 5 = 17,280 intervals of 5 seconds.
+Each connection writes three records: `connect`, the request, and `terminate`. Every one of them carries the agent's certificate name, `spiffe://<trust_domain>/plane/agent/<id>`, twice (`source.plane_uri_san` and `subject.plane_uri_san`). Measured as JSONL lines at the bounds, a 255-byte trust domain, a 32-byte agent id, a 64-byte host and the longest user name, with the newline (`an_agents_poll_cadence_writes_as_measured` in `crates/maknae-kernel/src/run.rs`): a `connect` is 1,259 bytes (with the longest account label, `not-checked:configured`), an `idle` claim 1,255, a poll with no notice 1,276, a `terminate` 1,223 and the widest heartbeat 1,453. The figures are with `audit.au3_1` at its default, `{}`; a value the deployer sets there adds its JSON width beyond those 2 bytes to every record. A day is 86,400 / 5 = 17,280 intervals of 5 seconds.
 
 | Agent | Per 5 seconds | Records a day | Bytes a day |
 |---|---|---|---|
-| idle | an `idle` claim (646 + 714 + 611 = 1,971 bytes) and a poll (646 + 664 + 611 = 1,921 bytes): 6 records, 3,892 bytes | 17,280 × 6 = 103,680 | 17,280 × 3,892 = 67,253,760, about 67 MB |
-| working | a poll: 3 records, 1,921 bytes; and every 5 minutes a heartbeat, 3 records of at most 646 + 841 + 611 = 2,098 bytes | 17,280 × 3 + 288 × 3 = 52,704 | 17,280 × 1,921 + 288 × 2,098 = 33,799,104, about 34 MB |
+| idle | an `idle` claim (1,259 + 1,255 + 1,223 = 3,737 bytes) and a poll (1,259 + 1,276 + 1,223 = 3,758 bytes): 6 records, 7,495 bytes | 17,280 × 6 = 103,680 | 17,280 × 7,495 = 129,513,600, about 130 MB |
+| working | a poll: 3 records, 3,758 bytes; and every 5 minutes a heartbeat, 3 records of at most 1,259 + 1,453 + 1,223 = 3,935 bytes | 17,280 × 3 + 288 × 3 = 52,704 | 17,280 × 3,758 + 288 × 3,935 = 66,071,520, about 66 MB |
+
+These are upper bounds. Each byte by which the trust domain is shorter than 255 saves 2 bytes on every record: 12 bytes per idle interval (17,280 × 12 = 207,360 bytes a day) and 6 per working one (17,280 × 6 + 288 × 6 = 105,408). With a 14-byte trust domain such as `maknae.example`, an idle agent writes 7,495 − 241 × 12 = 4,603 bytes per interval (79,539,840 a day, about 80 MB). Shorter agent ids, hosts and user names save more.
 
 A working agent also writes the records of the requests it makes, and a notice adds about 100 bytes to its poll's record. A task costs two records to submit, two to hand out, two to report and one or two to collect, each with its connection's `connect` and `terminate`. Size the trail's rotation ([Rotate, restore or recreate the trail](#rotate-restore-or-recreate-the-trail)) for the number of agents you enroll.
 
-On macOS the unified-log mirror carries each record in full only up to 1,015 bytes; a longer one is mirrored as a degraded marker line, and the JSONL trail holds the whole record. At the widest names a poll's record is a 1,040-byte line, so each agent mirrors one degraded marker of about 244 bytes every 5 seconds, 17,280 a day; an idle agent's `idle` claim record degrades the same way. Shorter names fit in full.
+On macOS the unified-log mirror carries each record in full only up to 1,015 bytes; a longer one is mirrored as a degraded marker line, and the JSONL trail holds the whole record. At the widest names a poll's record is a 1,654-byte line, so each agent mirrors one degraded marker of about 244 bytes every 5 seconds, 17,280 a day; an idle agent's `idle` claim record degrades the same way. Shorter names and trust domains can fit in full.
 
 ### When the store refuses a hand-out
 

@@ -12607,13 +12607,13 @@ mod record_widths {
     const AUTHZ_PATH: &str = "/etc/maknae/authz.yaml";
     const AGENT_UID: u32 = 2001;
     const MEASURED_CONTROL_POLL: [(usize, bool, Option<usize>); 4] = [
-        (1040, false, Some(244)),
-        (1836, false, Some(244)),
-        (1864, false, Some(244)),
-        (1081, false, Some(242)),
+        (1654, false, Some(244)),
+        (2450, false, Some(244)),
+        (2478, false, Some(244)),
+        (1695, false, Some(242)),
     ];
     const MEASURED_POLL_CADENCE_LINES: (usize, usize, usize, usize, usize) =
-        (646, 714, 841, 664, 611);
+        (1259, 1255, 1453, 1276, 1223);
 
     fn host() -> String {
         "h".repeat(HOST_BYTES)
@@ -12629,6 +12629,21 @@ mod record_widths {
 
     fn widest_user() -> String {
         "u".repeat(MAX_SUBJECT_USER_BYTES)
+    }
+
+    fn widest_trust_domain() -> String {
+        let td = "d".repeat(255);
+        maknae_vault::validate_deployment_id(&td).expect("the widest trust domain is valid");
+        assert!(maknae_vault::validate_deployment_id(&"d".repeat(256)).is_err());
+        td
+    }
+
+    fn widest_agent_san() -> String {
+        format!(
+            "spiffe://{}/plane/agent/{}",
+            widest_trust_domain(),
+            widest_agent_id()
+        )
     }
 
     fn maximal_bindings() -> Vec<maknae_proto::Binding> {
@@ -13040,6 +13055,10 @@ mod record_widths {
             task
         }
 
+        fn peer(&self) -> Option<String> {
+            (!self.person).then(widest_agent_san)
+        }
+
         fn socket(&self) -> &'static str {
             if self.person {
                 MACOS_DAEMON_SOCKET_PATH
@@ -13146,13 +13165,20 @@ mod record_widths {
             (d.verdict, d.role, rule)
         }
 
-        fn session(&self) -> SessionRecord {
+        fn uncited_session(&self) -> SessionRecord {
             let mut s = SessionRecord::for_test(u32::MAX, Some(widest_user()));
             if !self.person {
                 s.channel = crate::session::SessionChannel::Agent {
                     agent: AgentId::parse(&widest_agent_id()).expect("the widest id parses"),
                     leaf_expires: std::time::Instant::now(),
                 };
+            }
+            s
+        }
+
+        fn session(&self) -> SessionRecord {
+            let s = self.uncited_session();
+            if !self.person {
                 s.cite(&TaskStamp {
                     id: TASK,
                     tasker: held_tasker(),
@@ -13164,6 +13190,10 @@ mod record_widths {
         }
 
         fn task_case(&self, op: &'static str, say: &Say) -> Case {
+            self.task_case_in(op, say, true)
+        }
+
+        fn task_case_in(&self, op: &'static str, say: &Say, cited: bool) -> Case {
             let verb = verb_of(op);
             let asked = tv::task_verb(&verb).expect("a task verb");
             let channel_agent = match self.tasker() {
@@ -13176,7 +13206,7 @@ mod record_widths {
                     &host(),
                     self.socket(),
                     u32::MAX,
-                    None,
+                    self.peer().as_deref(),
                     Some(&widest_user()),
                     None,
                     None,
@@ -13229,8 +13259,12 @@ mod record_widths {
                     }
                 }
             };
-            self.session().stamp(&mut rec);
-            if !self.person && task.is_none() && tasker.is_none() {
+            let session = match cited {
+                true => self.session(),
+                false => self.uncited_session(),
+            };
+            session.stamp(&mut rec);
+            if !self.person && cited && task.is_none() && tasker.is_none() {
                 (tasker, task) = (Some(held_tasker()), Some(TASK.to_string()));
             }
             Case {
@@ -13472,7 +13506,7 @@ mod record_widths {
         let mut rec = crate::control::poll_record(
             (&host(), &socket.display().to_string()),
             u32::MAX,
-            None,
+            Some(&widest_agent_san()),
             Some(&widest_user()),
             Some("adversary"),
             (u64::MAX, u64::MAX),
@@ -13525,35 +13559,61 @@ mod record_widths {
     #[test]
     fn an_agents_poll_cadence_writes_as_measured() {
         let line = |rec: &AuditRecord| {
-            maknae_audit_append::canonical_json(rec)
-                .expect("the record encodes")
-                .len()
-                + 1
+            let mut rec = rec.clone();
+            rec.au3_1 = serde_json::json!({});
+            let json = maknae_audit_append::canonical_json(&rec).expect("the record encodes");
+            assert_eq!(json.matches(&widest_agent_san()).count(), 2, "{json}");
+            json.len() + 1
         };
-        let cases = Who::new(false).task_verb_cases();
-        let claim = |label: &str| {
-            let case = cases
-                .iter()
-                .find(|c| c.label == label)
+        let who = Who::new(false);
+        let own = maknae_proto::tasker_text(&who.tasker());
+        let claim = |reason: &str, cited: bool| {
+            let say = says("claim", false, &own)
+                .into_iter()
+                .find(|say| say.reason == reason)
                 .expect("the claim case");
-            line(&case.rec)
+            let case = who.task_case_in("claim", &say, cited);
+            assert_eq!(
+                case.rec.source.plane_uri_san.as_deref(),
+                Some(widest_agent_san().as_str())
+            );
+            case.rec
         };
+        let idle = claim("idle", false);
+        assert_eq!(
+            (&idle.subject.task_id, &idle.subject.tasker),
+            (&None, &None)
+        );
+        let heartbeat = claim(
+            "heartbeat: the addendum and 32 follow-ups after 4294967295",
+            false,
+        );
+        assert!(heartbeat.subject.task_id.is_some());
         let socket =
             maknae_config::control_socket_path(std::path::Path::new(MACOS_AGENT_SOCKET_PATH))
                 .display()
                 .to_string();
-        let mut session = SessionRecord::for_test(u32::MAX, Some(widest_user()));
-        session.channel = crate::session::SessionChannel::Agent {
-            agent: AgentId::parse(&widest_agent_id()).expect("the widest id parses"),
-            leaf_expires: std::time::Instant::now(),
-        };
+        let session = who.uncited_session();
+        use crate::session_facts::{AccountFact, AccountState, NotCheckedWhy};
+        let facts = [
+            AccountFact::Checked(AccountState::Active),
+            AccountFact::Checked(AccountState::Locked),
+            AccountFact::Checked(AccountState::Expired),
+            AccountFact::Checked(AccountState::Disabled),
+            AccountFact::Checked(AccountState::Unknown("u".repeat(4096))),
+            AccountFact::NotChecked(NotCheckedWhy::DirectoryAccount),
+            AccountFact::NotChecked(NotCheckedWhy::Platform),
+            AccountFact::NotChecked(NotCheckedWhy::Configured),
+        ];
+        let admitted = facts
+            .iter()
+            .map(crate::authz::admission_reason)
+            .max_by_key(String::len)
+            .expect("an account fact");
+        assert_eq!(admitted, "admitted (account: not-checked:configured)");
+        let san = widest_agent_san();
         let [connect, terminate] = [
-            (
-                "connection",
-                "connect",
-                "admitted (account: not-checked:directory)",
-                "authorized",
-            ),
+            ("connection", "connect", admitted.as_str(), "authorized"),
             ("session", "terminate", "disconnect", "stopped"),
         ]
         .map(|(event, action, reason, posture)| {
@@ -13564,7 +13624,7 @@ mod record_widths {
                 u32::MAX,
                 None,
                 None,
-                None,
+                Some(&san),
                 u64::MAX,
                 u64::MAX,
                 action,
@@ -13580,13 +13640,7 @@ mod record_widths {
         });
         let poll = line(&control_poll(0, ("permit", "authorized", "authorized")));
         assert_eq!(
-            (
-                connect,
-                claim("claim: permit idle"),
-                claim("claim: permit heartbeat: the addendum and 32 follow-ups after 4294967295"),
-                poll,
-                terminate
-            ),
+            (connect, line(&idle), line(&heartbeat), poll, terminate),
             MEASURED_POLL_CADENCE_LINES
         );
     }
@@ -13654,7 +13708,7 @@ mod record_widths {
                         &host(),
                         self.socket(),
                         u32::MAX,
-                        None,
+                        self.peer().as_deref(),
                         Some(&widest_user()),
                         None,
                         None,
@@ -13803,7 +13857,7 @@ mod record_widths {
                         &host(),
                         self.socket(),
                         u32::MAX,
-                        None,
+                        self.peer().as_deref(),
                         Some(&widest_user()),
                         None,
                         None,
@@ -13969,7 +14023,7 @@ mod record_widths {
                         &host(),
                         self.socket(),
                         u32::MAX,
-                        None,
+                        self.peer().as_deref(),
                         Some(&widest_user()),
                         None,
                         None,
@@ -14063,7 +14117,10 @@ mod record_widths {
         ];
         assert_each_case_mirrors_as_measured(&cases, &refused);
         let widest = "board.read list: permit done; older posts remain";
-        assert_eq!(widest_label(&cases), widest);
+        assert_eq!(
+            widest_label(&cases),
+            "board.read list: deny board: not served on the agent channel"
+        );
         let case = |label: &str| cases.iter().find(|c| c.label == label).expect("a case");
         let full = |label: &str| macos_mirror(&case(label).rec).full_len;
         assert_eq!(full(widest), 1200);
@@ -14102,7 +14159,7 @@ mod record_widths {
             [(1088, true), (1097, true), (1088, true), (1091, true)]
         );
         let agent = "board.read list: deny board: not served on the agent channel";
-        assert_eq!(full(agent), 1140);
+        assert_eq!(full(agent), 1754);
         let c = case(agent);
         assert_eq!(
             (c.rec.object.as_deref(), c.rec.rule.is_none()),
@@ -14203,7 +14260,7 @@ mod record_widths {
             widest_agent_id()
         );
         assert_eq!(widest_label(&cases), agent);
-        assert_eq!(shape(&agent), (1206, Some("user"), false));
+        assert_eq!(shape(&agent), (1820, Some("user"), false));
         let c = cases.iter().find(|c| c.label == agent).expect("the agent");
         assert_eq!(c.rec.object, None);
     }
