@@ -2110,7 +2110,10 @@ async fn a_contained_agent_ceases_work_on_its_refused_poll() {
     })
     .await;
     assert_eq!(d.endings(), [(Some(id), Ending::Held)]);
-    assert!(p.failures.lock().unwrap().is_empty());
+    assert_eq!(
+        *p.failures.lock().unwrap(),
+        ["notice poll refused: ceasing work"]
+    );
     let polled: Vec<_> = after(&w, contained)
         .into_iter()
         .filter(|r| r.action == "agent.control")

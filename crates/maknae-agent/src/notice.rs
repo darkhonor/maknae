@@ -57,34 +57,37 @@ pub fn read_reply(reply: ControlResponse<AgentNotice>) -> PollAnswer {
     }
 }
 
-/// How often a failure of an unchanged class is logged again while it persists.
+/// How often a failure or refusal of an unchanged class is logged again while it persists.
 pub const FAILURE_LOG_EVERY: Duration = Duration::from_secs(60);
 
-/// The poller's log: a failure class when it starts or changes, again at most once per
-/// [`FAILURE_LOG_EVERY`] while it persists, and the recovery once.
+/// The poller's log: a failure class or a refusal when it starts or changes, again at most
+/// once per [`FAILURE_LOG_EVERY`] while it persists, and a notices answer after either once.
 #[derive(Debug, Default)]
-pub struct FailureLog {
+pub struct PollLog {
     failing: Option<(&'static str, Duration)>,
 }
 
-impl FailureLog {
-    pub fn observe(&mut self, now: Duration, failed: Option<&PollFailure>) -> Option<String> {
-        match (failed, self.failing) {
-            (None, None) => None,
-            (None, Some(_)) => {
-                self.failing = None;
-                Some("notice poll recovered".into())
+impl PollLog {
+    pub fn observe(&mut self, now: Duration, answer: &PollAnswer) -> Option<String> {
+        let class = match answer {
+            PollAnswer::Notices(_) => {
+                return self.failing.take().map(|_| "notice poll recovered".into());
             }
-            (Some(f), Some((class, at)))
-                if class == f.class() && now.saturating_sub(at) < FAILURE_LOG_EVERY =>
-            {
-                None
-            }
-            (Some(f), _) => {
-                self.failing = Some((f.class(), now));
-                Some(format!("notice poll failed: {}", f.class()))
+            PollAnswer::Refused => "refused",
+            PollAnswer::Failed(f) => f.class(),
+        };
+        if let Some((was, at)) = self.failing {
+            if was == class && now.saturating_sub(at) < FAILURE_LOG_EVERY {
+                return None;
             }
         }
+        self.failing = Some((class, now));
+        Some(match answer {
+            PollAnswer::Refused => "notice poll refused: ceasing work".into(),
+            PollAnswer::Notices(_) | PollAnswer::Failed(_) => {
+                format!("notice poll failed: {class}")
+            }
+        })
     }
 }
 
@@ -98,15 +101,11 @@ pub async fn poll_notices<CP: ControlPlane, C: Clock>(
     halts: &HaltSender,
     log: &mut (impl FnMut(String) + Send),
 ) {
-    let mut failures = FailureLog::default();
+    let mut said = PollLog::default();
     loop {
         let mark = halts.mark();
         let answer = plane.notice_poll().await;
-        let failed = match &answer {
-            PollAnswer::Failed(f) => Some(f),
-            PollAnswer::Notices(_) | PollAnswer::Refused => None,
-        };
-        if let Some(line) = failures.observe(clock.now(), failed) {
+        if let Some(line) = said.observe(clock.now(), &answer) {
             log(line);
         }
         match answer {
@@ -299,7 +298,15 @@ mod tests {
             let (sender, halts) = halts();
             let w = halts.until(id(n));
             let log = run(vec![PollAnswer::Refused], &sender);
-            assert_eq!(log, ["poll", "sleep 5000ms", "poll"]);
+            assert_eq!(
+                log,
+                [
+                    "poll",
+                    "notice poll refused: ceasing work",
+                    "sleep 5000ms",
+                    "poll"
+                ]
+            );
             assert_eq!(taken(w), Poll::Ready(Halt::Refused));
         }
     }
@@ -425,37 +432,57 @@ mod tests {
     #[test]
     fn a_failure_is_logged_on_a_class_change_then_once_a_minute_and_its_recovery_once() {
         let at = Duration::from_secs;
-        let dial = PollFailure::Dial;
-        let timeout = PollFailure::Timeout;
-        let mut log = FailureLog::default();
-        let mut seen = |now: Duration, f: Option<&PollFailure>| log.observe(now, f);
-        assert_eq!(seen(at(0), None), None);
+        let failed = |f: PollFailure| PollAnswer::Failed(f);
+        let ok = || PollAnswer::Notices(vec![]);
+        let mut log = PollLog::default();
+        let mut seen = |now: Duration, a: PollAnswer| log.observe(now, &a);
+        assert_eq!(seen(at(0), ok()), None);
         assert_eq!(
-            seen(at(5), Some(&dial)).as_deref(),
+            seen(at(5), failed(PollFailure::Dial)).as_deref(),
             Some("notice poll failed: dial")
         );
-        assert_eq!(seen(at(10), Some(&dial)), None);
-        assert_eq!(seen(at(64), Some(&dial)), None);
+        assert_eq!(seen(at(10), failed(PollFailure::Dial)), None);
+        assert_eq!(seen(at(64), failed(PollFailure::Dial)), None);
         assert_eq!(
-            seen(at(65), Some(&dial)).as_deref(),
+            seen(at(65), failed(PollFailure::Dial)).as_deref(),
             Some("notice poll failed: dial")
         );
-        assert_eq!(seen(at(70), Some(&dial)), None);
+        assert_eq!(seen(at(70), failed(PollFailure::Dial)), None);
         assert_eq!(
-            seen(at(75), Some(&timeout)).as_deref(),
+            seen(at(75), failed(PollFailure::Timeout)).as_deref(),
             Some("notice poll failed: timeout")
         );
-        assert_eq!(seen(at(80), Some(&timeout)), None);
-        assert_eq!(seen(at(85), None).as_deref(), Some("notice poll recovered"));
-        assert_eq!(seen(at(90), None), None);
+        assert_eq!(seen(at(80), failed(PollFailure::Timeout)), None);
+        assert_eq!(seen(at(85), ok()).as_deref(), Some("notice poll recovered"));
+        assert_eq!(seen(at(90), ok()), None);
         assert_eq!(
-            seen(at(95), Some(&timeout)).as_deref(),
+            seen(at(95), failed(PollFailure::Timeout)).as_deref(),
             Some("notice poll failed: timeout")
         );
     }
 
     #[test]
-    fn the_poller_logs_a_persisting_failure_once_and_its_recovery() {
+    fn a_refusal_is_its_own_line_logged_like_a_failure_class() {
+        let at = Duration::from_secs;
+        let mut log = PollLog::default();
+        let mut seen = |now: Duration, a: PollAnswer| log.observe(now, &a);
+        let refused = "notice poll refused: ceasing work";
+        assert_eq!(seen(at(0), PollAnswer::Refused).as_deref(), Some(refused));
+        assert_eq!(seen(at(5), PollAnswer::Refused), None);
+        assert_eq!(seen(at(60), PollAnswer::Refused).as_deref(), Some(refused));
+        assert_eq!(
+            seen(at(65), PollAnswer::Failed(PollFailure::Dial)).as_deref(),
+            Some("notice poll failed: dial")
+        );
+        assert_eq!(seen(at(70), PollAnswer::Refused).as_deref(), Some(refused));
+        assert_eq!(
+            seen(at(75), PollAnswer::Notices(vec![])).as_deref(),
+            Some("notice poll recovered")
+        );
+    }
+
+    #[test]
+    fn the_poller_logs_a_persisting_failure_once_then_the_refusal_then_the_recovery() {
         let (sender, _halts) = halts();
         let mut answers = vec![PollAnswer::Failed(PollFailure::Dial); 3];
         answers.push(PollAnswer::Refused);
@@ -465,7 +492,14 @@ mod tests {
             .iter()
             .filter(|l| l.starts_with("notice poll"))
             .collect();
-        assert_eq!(said, ["notice poll failed: dial", "notice poll recovered"]);
+        assert_eq!(
+            said,
+            [
+                "notice poll failed: dial",
+                "notice poll refused: ceasing work",
+                "notice poll recovered"
+            ]
+        );
     }
 
     #[test]
