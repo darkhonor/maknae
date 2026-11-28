@@ -100,9 +100,7 @@ pub async fn poll_notices<CP: ControlPlane, C: Clock>(
     loop {
         let mark = halts.mark();
         let answer = plane.notice_poll().await;
-        if let Some(line) = said.observe(clock.now(), &answer) {
-            log(line);
-        }
+        let line = said.observe(clock.now(), &answer);
         match answer {
             PollAnswer::Notices(notices) => {
                 for n in notices {
@@ -119,6 +117,9 @@ pub async fn poll_notices<CP: ControlPlane, C: Clock>(
                 halts.refused(mark);
             }
             PollAnswer::Failed(_) => {}
+        }
+        if let Some(line) = line {
+            log(line);
         }
         clock.sleep(NOTICE_POLL_EVERY).await;
     }
@@ -495,6 +496,47 @@ mod tests {
                 "notice poll recovered"
             ]
         );
+    }
+
+    #[test]
+    fn the_halt_is_delivered_before_its_line_is_logged() {
+        let cases = [
+            (
+                vec![PollAnswer::Refused],
+                vec![("notice poll refused: ceasing work", true)],
+            ),
+            (
+                vec![
+                    PollAnswer::Failed(PollFailure::Dial),
+                    PollAnswer::Notices(vec![stop(Some(id(1)))]),
+                ],
+                vec![
+                    ("notice poll failed: dial", false),
+                    ("notice poll recovered", true),
+                ],
+            ),
+        ];
+        for (answers, want) in cases {
+            let (sender, halts) = halts();
+            let wait = Mutex::new(halts.until(id(1)));
+            let mut seen: Vec<(String, bool)> = vec![];
+            let mut plane = Script {
+                answers: answers.into(),
+                log: Log::default(),
+            };
+            let mut clock = FakeClock {
+                now: Duration::ZERO,
+                log: Log::default(),
+            };
+            let mut said = |line: String| seen.push((line, !pending(&mut wait.lock().unwrap())));
+            {
+                let mut cx = Context::from_waker(Waker::noop());
+                let polling = pin!(poll_notices(&mut plane, &mut clock, &sender, &mut said));
+                assert!(polling.poll(&mut cx).is_pending());
+            }
+            let want: Vec<(String, bool)> = want.into_iter().map(|(l, h)| (l.into(), h)).collect();
+            assert_eq!(seen, want);
+        }
     }
 
     #[test]
