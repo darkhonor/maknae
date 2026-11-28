@@ -15,12 +15,19 @@ pub enum Admission {
     EnrolledAgent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelPlane {
+    Data,
+    Control,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelClass {
     pub peer_auth: PeerAuth,
     pub admission: Admission,
     pub lane: maknae_security::Lane,
     pub socket: std::path::PathBuf,
+    pub plane: ChannelPlane,
 }
 
 pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass {
@@ -29,6 +36,7 @@ pub fn client_class(transport: &maknae_config::TransportConfig) -> ChannelClass 
         admission: Admission::MaknaeGroupMember,
         lane: maknae_security::Lane::Local,
         socket: transport.socket_path.clone(),
+        plane: ChannelPlane::Data,
     }
 }
 
@@ -42,6 +50,22 @@ pub fn agent_class(socket: std::path::PathBuf, trust_domain: &str) -> ChannelCla
         admission: Admission::EnrolledAgent,
         lane: maknae_security::Lane::Local,
         socket,
+        plane: ChannelPlane::Data,
+    }
+}
+
+pub fn control_class(agent_socket: std::path::PathBuf, trust_domain: &str) -> ChannelClass {
+    ChannelClass {
+        socket: maknae_config::control_socket_path(&agent_socket),
+        plane: ChannelPlane::Control,
+        ..agent_class(agent_socket, trust_domain)
+    }
+}
+
+pub(crate) fn answers_a_session_ending(plane: ChannelPlane) -> bool {
+    match plane {
+        ChannelPlane::Data => true,
+        ChannelPlane::Control => false,
     }
 }
 
@@ -694,6 +718,37 @@ pub fn build_authz_request(
     }
 }
 
+pub(crate) fn control_op(verb: &maknae_proto::ControlVerb) -> &'static str {
+    match verb {
+        maknae_proto::ControlVerb::NoticePoll {} => maknae_security::CONTROL_OP_NOTICE_POLL,
+    }
+}
+
+pub fn build_control_request(
+    peer_uid: u32,
+    agent: &maknae_config::AgentId,
+    verb: &maknae_proto::ControlVerb,
+    lane: maknae_security::Lane,
+) -> maknae_security::Request {
+    use maknae_security::{Action, AttrValue, Attributes, Context, Resource, Subject};
+    let Subject(mut subject) = stamp_subject(peer_uid, None, &Stamp::Agent { agent, task: None });
+    subject.insert(
+        maknae_security::SUBJECT_PLANE,
+        AttrValue::Str(maknae_security::PLANE_CONTROL.into()),
+    );
+    let mut context = lane_context(lane);
+    context.insert(
+        maknae_security::CONTEXT_CONTROL_OP,
+        AttrValue::Str(control_op(verb).into()),
+    );
+    maknae_security::Request {
+        subject: Subject(subject),
+        resource: Resource(Attributes::new()),
+        action: Action(maknae_security::ACTION_AGENT_CONTROL.into()),
+        context: Context(context),
+    }
+}
+
 pub(crate) fn stamp_subject(
     peer_uid: u32,
     home: Option<&std::path::Path>,
@@ -796,6 +851,50 @@ pub(crate) fn build_kernel_request(
         resource: Resource(Attributes::new()),
         action: Action(action.to_string()),
         context: Context(context),
+    }
+}
+
+/// A notice poll's decision, or why none was made.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ControlOutcome {
+    Decided {
+        verdict: maknae_security::Verdict,
+        role: Option<&'static str>,
+    },
+    Unavailable {
+        reason: &'static str,
+        role: Option<&'static str>,
+    },
+}
+
+/// What the control socket writes back to a poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlReply {
+    Notices,
+    Unauthorized,
+    None,
+}
+
+/// `Unauthorized` only for a refusal the agent must act on: it is contained, or it is no
+/// longer enrolled as the uid its leaf was admitted under.
+pub(crate) fn control_reply(outcome: &ControlOutcome, enrolled_now: bool) -> ControlReply {
+    use maknae_security::Verdict;
+    let (verdict, role) = match outcome {
+        ControlOutcome::Unavailable { .. } => return ControlReply::None,
+        ControlOutcome::Decided { verdict, role } => (verdict, *role),
+    };
+    match verdict {
+        Verdict::Permit { obligations } => match discharge_plan(obligations) {
+            Ok(()) => ControlReply::Notices,
+            Err(_) => ControlReply::None,
+        },
+        Verdict::Deny { .. } | Verdict::NotApplicable { .. } | Verdict::Indeterminate => {
+            if role == Some("adversary") || !enrolled_now {
+                ControlReply::Unauthorized
+            } else {
+                ControlReply::None
+            }
+        }
     }
 }
 
@@ -954,6 +1053,7 @@ mod tests {
                 admission: Admission::MaknaeGroupMember,
                 lane: maknae_security::Lane::Local,
                 socket: "/run/maknae/test-client.sock".into(),
+                plane: ChannelPlane::Data,
             }
         );
     }
@@ -971,8 +1071,110 @@ mod tests {
                 admission: Admission::EnrolledAgent,
                 lane: maknae_security::Lane::Local,
                 socket: "/run/maknae/agent.sock".into(),
+                plane: ChannelPlane::Data,
             }
         );
+    }
+
+    #[test]
+    fn the_control_class_is_the_agent_class_on_the_control_plane() {
+        let agent = agent_class("/run/maknae-agent/maknaed.sock".into(), "d");
+        let control = control_class("/run/maknae-agent/maknaed.sock".into(), "d");
+        assert_eq!(control.peer_auth, agent.peer_auth);
+        assert_eq!(control.admission, agent.admission);
+        assert_eq!(control.lane, agent.lane);
+        assert_eq!(
+            control.socket,
+            std::path::PathBuf::from("/run/maknae-agent/control.sock")
+        );
+        assert_eq!(control.plane, ChannelPlane::Control);
+    }
+
+    #[test]
+    fn control_reply_maps_every_outcome() {
+        use maknae_security::{Obligation, Verdict};
+        let ob = |id: &str| Obligation {
+            id: id.into(),
+            params: Default::default(),
+        };
+        let decided = |verdict: Verdict, role: Option<&'static str>| ControlOutcome::Decided {
+            verdict,
+            role,
+        };
+        let deny = || Verdict::Deny { reason: "r".into() };
+        let refusals = || {
+            [
+                deny(),
+                Verdict::NotApplicable { note: None },
+                Verdict::Indeterminate,
+            ]
+        };
+        for reason in [
+            "authorization decision circuit breaker open",
+            "authorization decision blocking worker budget exhausted",
+            "authorization decision failed (join)",
+            "authorization decision timed out",
+            "the live baseline changed between admission and decision",
+        ] {
+            for (enrolled, role) in [true, false]
+                .into_iter()
+                .flat_map(|e| [(e, None), (e, Some("user")), (e, Some("adversary"))])
+            {
+                assert_eq!(
+                    control_reply(&ControlOutcome::Unavailable { reason, role }, enrolled),
+                    ControlReply::None,
+                    "{reason}"
+                );
+            }
+        }
+        for enrolled in [true, false] {
+            let audit = Verdict::Permit {
+                obligations: vec![ob("audit")],
+            };
+            assert_eq!(
+                control_reply(&decided(audit, Some("user")), enrolled),
+                ControlReply::Notices
+            );
+            let notify = Verdict::Permit {
+                obligations: vec![ob("notify")],
+            };
+            assert_eq!(
+                control_reply(&decided(notify, Some("user")), enrolled),
+                ControlReply::None
+            );
+            assert_eq!(
+                control_reply(&decided(deny(), Some("adversary")), enrolled),
+                ControlReply::Unauthorized
+            );
+        }
+        for v in refusals() {
+            assert_eq!(
+                control_reply(&decided(v.clone(), Some("user")), false),
+                ControlReply::Unauthorized,
+                "{v:?}"
+            );
+            assert_eq!(
+                control_reply(&decided(v.clone(), None), false),
+                ControlReply::Unauthorized,
+                "{v:?}"
+            );
+            assert_eq!(
+                control_reply(&decided(v.clone(), Some("user")), true),
+                ControlReply::None,
+                "{v:?}"
+            );
+            assert_eq!(control_reply(&decided(v, None), true), ControlReply::None);
+        }
+        assert_eq!(
+            control_reply(&decided(deny(), Some("admin")), true),
+            ControlReply::None
+        );
+    }
+
+    #[test]
+    fn only_the_data_plane_answers_a_session_ending() {
+        assert!(answers_a_session_ending(ChannelPlane::Data));
+        assert!(!answers_a_session_ending(ChannelPlane::Control));
     }
 
     #[test]
@@ -1044,6 +1246,38 @@ mod tests {
         assert_eq!(get(&tasked, SUBJECT_TASK), s(&task.id.to_string()));
         assert_eq!(get(&tasked, SUBJECT_TASKER), s("uid:1002"));
         assert_eq!(get(&tasked, SUBJECT_ROOT_TASKER), s("users/1000"));
+    }
+
+    #[test]
+    fn a_control_request_is_stamped_agent_channel_and_control_plane() {
+        use maknae_security::{
+            AttrValue, CHANNEL_AGENT, CONTEXT_CONTROL_OP, CONTEXT_DAC_LANE, SUBJECT_AGENT,
+            SUBJECT_CHANNEL, SUBJECT_PLANE,
+        };
+        let hobi = maknae_config::AgentId::parse("hobi").unwrap();
+        let s = |v: &str| AttrValue::Str(v.into());
+        let r = build_control_request(
+            2001,
+            &hobi,
+            &maknae_proto::ControlVerb::NoticePoll {},
+            maknae_security::Lane::Local,
+        );
+        let mut subject = maknae_security::Attributes::new();
+        subject.insert("uid", AttrValue::Int(2001));
+        subject.insert(SUBJECT_CHANNEL, s(CHANNEL_AGENT));
+        subject.insert(SUBJECT_AGENT, s("hobi"));
+        subject.insert(SUBJECT_PLANE, s("control"));
+        assert_eq!(r.subject.0, subject);
+        assert_eq!(r.resource.0, maknae_security::Attributes::new());
+        assert_eq!(r.action.0, "agent.control");
+        let mut context = maknae_security::Attributes::new();
+        context.insert(CONTEXT_DAC_LANE, s("local"));
+        context.insert(CONTEXT_CONTROL_OP, s("notice_poll"));
+        assert_eq!(r.context.0, context);
+        assert_eq!(
+            control_op(&maknae_proto::ControlVerb::NoticePoll {}),
+            "notice_poll"
+        );
     }
 
     #[test]

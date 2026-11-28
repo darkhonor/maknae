@@ -2882,6 +2882,9 @@ PRELUDE='    let undecided = |verdict| Decided {
     let Some(uid) = uid else {
         return undecided(Verdict::Indeterminate);
     };
+    if let Some(reason) = plane_refusal(req) {
+        return undecided(Verdict::Deny { reason });
+    }
     if class_of(&req.action.0) == Some(Class::Kernel) {
         return undecided(kernel_decided(req));
     }
@@ -3038,19 +3041,19 @@ nested='        Role::Guest => match x {
 ordering_probe a-nested-adversary-arm "is not an arm of \`match role {\`" "${CLEAN_DECIDE/"$ADV_ARM"/"$nested"}"
 ordering_probe the-adversary-arm-reads-the-request "the Role::Adversary arm must decide without reading the request" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => if req.action.0 == \"liveness.ping\" { (Verdict::Deny { reason: \"\".into() }, None) } else { (Verdict::Deny { reason: \"\".into() }, None) },}"
 ordering_probe the-adversary-arm-permits "the Role::Adversary arm must be a Verdict::Deny and never a permit" "${CLEAN_DECIDE/"$ADV_ARM"/        Role::Adversary => (Verdict::Permit { obligations: vec![] }, None),}"
-ordering_probe a-class-return-between-roles-and-the-match "(line 43: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
+ordering_probe a-class-return-between-roles-and-the-match "(line 46: \`if class == Some(Class::Liveness) {\`)" "$(between '    if class == Some(Class::Liveness) {
         return undecided(permit());
     }
 ')"
-ordering_probe a-role-key-match-between-roles-and-the-match "(line 43: \`match role.key() {\`)" "$(between '    match role.key() {
+ordering_probe a-role-key-match-between-roles-and-the-match "(line 46: \`match role.key() {\`)" "$(between '    match role.key() {
         "adversary" => return undecided(permit()),
         _ => {}
     }
 ')"
-ordering_probe the-resolved-role-is-rewritten "(line 35: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
+ordering_probe the-resolved-role-is-rewritten "(line 38: \`Resolution::Role(_) => Role::Admin,\`)" "${CLEAN_DECIDE/Resolution::Role(r) => r,/Resolution::Role(_) => Role::Admin,}"
 ordering_probe the-role-is-rebound "the role is rebound outside its role_for(" "$(between '    let role = Role::Admin;
 ')"
-ordering_probe the-role-is-rebound-by-a-tuple "(line 43: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
+ordering_probe the-role-is-rebound-by-a-tuple "(line 46: \`let (role, _) = (lp.default(), 0);\`)" "$(between '    let (role, _) = (lp.default(), 0);
 ')"
 ordering_probe the-role-is-shadowed-by-an-at-pattern "role is bound by a closure, a pattern or an arm" "$(before_adversary '        role @ Role::Admin => permit(),')"
 ordering_probe the-role-is-a-closure-parameter "role is bound by a closure, a pattern or an arm" "$(with_prelude '    let f = |role: Role| role;
@@ -3146,7 +3149,7 @@ for prefix in 'r' 'br' 'cr' 'br#'; do
 ${HIDDEN_ARM}
         Role::User if t == \"\" => ok(),")"
 done
-ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 45: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
+ordering_probe an-escaped-quote-char-cannot-hide-an-arm "(line 48: \`_\`)" "$(before_adversary "        Role::Admin if [c] == ['\\'','\"'] => ok(),
 ${HIDDEN_ARM}
         Role::User if t == \"\" => ok(),")"
 f="$(ordering_fixture "$CLEAN_DECIDE" "$CLEAN_BINDING")"

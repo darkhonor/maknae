@@ -712,6 +712,22 @@ PROBE
         && ok "socket born+owned srw-rw---- _maknae:maknae as _maknae — D1 PROVEN" \
         || fail "probe socket = $sgot (want 'srw-rw---- _maknae maknae') — D1 UNPROVEN"
     rm -f /usr/local/var/run/maknae/d1probe.sock
+
+    # Not proof that maknaed binds control.sock.
+    local agid; agid="$(dscl . -read /Groups/maknae-agents PrimaryGroupID | awk '{print $2}')"
+    (cd / && sudo -u _maknae /usr/bin/python3 - "$agid") <<'PROBE'
+import os, socket, sys
+os.chdir("/usr/local/var/run/maknae-agent")
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind("ctlprobe.sock"); s.listen(1)
+os.chown("ctlprobe.sock", -1, int(sys.argv[1]))
+os.chmod("ctlprobe.sock", 0o660)
+PROBE
+    sgot="$(stat -f '%Sp %Su %Sg' /usr/local/var/run/maknae-agent/ctlprobe.sock 2>/dev/null || echo ABSENT)"
+    [ "$sgot" = "srw-rw---- _maknae maknae-agents" ] \
+        && ok "agent runtime dir admits a srw-rw---- _maknae:maknae-agents socket born as _maknae (control.sock's mode)" \
+        || fail "agent probe socket = $sgot (want 'srw-rw---- _maknae maknae-agents')"
+    rm -f /usr/local/var/run/maknae-agent/ctlprobe.sock
     launchctl disable "system/$LABEL" 2>/dev/null || :
 
     # --- uninstall, asserted --------------------------------------------------

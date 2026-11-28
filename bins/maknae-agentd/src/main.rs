@@ -5,6 +5,7 @@
 mod plane_impl;
 mod shutdown;
 
+use maknae_agent::notice::poll_notices;
 use maknae_agent::task_driver::TaskDriver;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -50,6 +51,7 @@ async fn run(id: maknae_config::AgentId) -> Result<(), String> {
     let (stop_tx, stop_rx) = shutdown::stop_signal();
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    let serve_stop = stop_tx.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = term.recv() => {}
@@ -100,35 +102,52 @@ async fn run(id: maknae_config::AgentId) -> Result<(), String> {
         home,
         owner: enrollment.uid,
     };
-    plane_impl::run_minted(client, serve(assembly, driver_config, stop_rx)).await
+    plane_impl::run_minted(client, serve(assembly, driver_config, serve_stop)).await
 }
 
 async fn serve(
     assembly: plane_impl::Assembly<'_>,
     driver_config: maknae_agent::task_driver::DriverConfig,
-    stop: tokio::sync::watch::Receiver<bool>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<(), String> {
+    let stop = stop_tx.subscribe();
     let connected = plane_impl::connect(assembly)?;
+    let mut control = connected.control;
     let mut driver = TaskDriver::new(
         connected.plane,
         shutdown::TokioClock::new(stop.clone()),
         driver_config,
     );
     let handle = driver.shutdown_handle();
-    let ended = shutdown::run_until_drained(
+    let halt = driver.halt_handle();
+    let stop_p = stop.clone();
+    let poller = shutdown::spawn_poller(
+        async move {
+            poll_notices(
+                &mut control,
+                &mut shutdown::TokioClock::new(stop_p),
+                &halt,
+                &mut |line: String| eprintln!("maknae-agentd: {line}"),
+            )
+            .await
+        },
+        stop,
+    );
+    let served = shutdown::supervise(
         driver.run(),
-        shutdown::stopped(stop),
+        &stop_tx,
+        poller,
         || handle.shut_down(),
         shutdown::AGENTD_EXCHANGE_DRAIN,
     )
     .await;
-    if ended == shutdown::Ended::Abandoned {
+    if served.ended == shutdown::Ended::Abandoned {
         eprintln!(
             "maknae-agentd: the exchange in flight did not end within {}s; its task is reported at the next start",
             shutdown::AGENTD_EXCHANGE_DRAIN.as_secs()
         );
     }
-    Ok(())
+    served.poller_lost.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

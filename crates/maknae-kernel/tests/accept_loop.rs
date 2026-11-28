@@ -218,6 +218,7 @@ fn class_on(socket: &str) -> ChannelClass {
         admission: Admission::MaknaeGroupMember,
         lane: maknae_security::Lane::Local,
         socket: socket.into(),
+        plane: maknae_kernel::ChannelPlane::Data,
     }
 }
 
@@ -1650,6 +1651,7 @@ fn agents(pairs: &[(&str, u32)]) -> maknae_kernel::AgentAdmission {
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
         count_breaker: Default::default(),
+        control: Default::default(),
     }
 }
 

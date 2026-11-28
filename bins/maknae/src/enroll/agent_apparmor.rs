@@ -398,6 +398,7 @@ mod tests {
             ("/etc/ssl/maknae/seal.pub", "r"),
             ("/run/credentials/maknae-agent@*.service/**", "r"),
             ("/run/maknae-agent/maknaed.sock", "rw"),
+            ("/run/maknae-agent/control.sock", "rw"),
             ("owner @{MAKNAE_AGENT_HOMES}/**", "rwk"),
             ("owner @{PROC}/@{pid}/cgroup", "r"),
         ] {

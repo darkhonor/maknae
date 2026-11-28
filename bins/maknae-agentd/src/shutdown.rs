@@ -48,6 +48,19 @@ impl Clock for TokioClock {
     }
 }
 
+/// The notice poller, on its own task so a stalled driver cannot stall it; it ends at `stop`.
+pub fn spawn_poller<F: Future<Output = ()> + Send + 'static>(
+    poll: F,
+    stop: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            () = stopped(stop) => {}
+            () = poll => {}
+        }
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ended {
     Finished,
@@ -80,9 +93,52 @@ where
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Served {
+    pub ended: Ended,
+    pub poller_lost: Option<String>,
+}
+
+/// Runs `work` beside the notice poller. A poller that ends before `stop` sends `stop`, so the
+/// driver is drained as at SIGTERM, and its end is returned for the daemon to exit on.
+pub async fn supervise<W: Future<Output = ()>>(
+    work: W,
+    stop: &watch::Sender<bool>,
+    mut poller: tokio::task::JoinHandle<()>,
+    on_signal: impl FnOnce(),
+    drain: Duration,
+) -> Served {
+    let mut poller_lost = None;
+    let signal = async {
+        let at_stop = stopped(stop.subscribe());
+        tokio::select! {
+            biased;
+            () = at_stop => {}
+            ended = &mut poller => {
+                poller_lost = Some(match ended {
+                    Ok(()) => "the notice poller ended; the control channel is gone".to_string(),
+                    Err(e) => format!("the notice poller ended abnormally: {e}"),
+                });
+                stop.send_replace(true);
+            }
+        }
+    };
+    let ended = run_until_drained(work, signal, on_signal, drain).await;
+    if poller_lost.is_none() {
+        poller.abort();
+        if let Err(e) = poller.await {
+            if !e.is_cancelled() {
+                eprintln!("maknae-agentd: the notice poller ended abnormally: {e}");
+            }
+        }
+    }
+    Served { ended, poller_lost }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_agent::notice::{poll_notices, ControlPlane, PollAnswer, NOTICE_POLL_EVERY};
     use maknae_agent::task_driver::UNDECODABLE_WAIT;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -222,6 +278,65 @@ mod tests {
         );
     }
 
+    struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ControlPlane for Counting {
+        fn notice_poll(&mut self) -> impl Future<Output = PollAnswer> + Send {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(PollAnswer::Notices(vec![]))
+        }
+    }
+
+    struct Silent;
+
+    impl ControlPlane for Silent {
+        fn notice_poll(&mut self) -> impl Future<Output = PollAnswer> + Send {
+            std::future::pending()
+        }
+    }
+
+    fn poller<CP: ControlPlane + Send + 'static>(
+        mut plane: CP,
+        stop: watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (halt, _halts) = maknae_agent::halt::halts();
+        let clock_stop = stop.clone();
+        spawn_poller(
+            async move {
+                poll_notices(
+                    &mut plane,
+                    &mut TokioClock::new(clock_stop),
+                    &halt,
+                    &mut |_| {},
+                )
+                .await
+            },
+            stop,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_poller_ends_at_the_stop_signal() {
+        let (tx, rx) = stop_signal();
+        let start = tokio::time::Instant::now();
+        let polling = poller(Silent, rx);
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        assert!(!polling.is_finished());
+        tx.send(true).unwrap();
+        polling.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_spawned_poller_polls_on_its_own_task() {
+        let (_tx, rx) = stop_signal();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let polling = poller(Counting(Arc::clone(&polls)), rx);
+        tokio::time::sleep(NOTICE_POLL_EVERY * 3 + Duration::from_millis(1)).await;
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
+        polling.abort();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn work_woken_by_the_stop_resumes_after_on_signal_has_run() {
         let (tx, rx) = stop_signal();
@@ -245,6 +360,126 @@ mod tests {
         assert!(
             seen.load(Ordering::SeqCst),
             "the driver saw no shutdown when it woke"
+        );
+    }
+
+    const LOST_AT: Duration = Duration::from_secs(10);
+
+    async fn supervised(
+        poller: impl Future<Output = ()> + Send + 'static,
+        work: impl Future<Output = ()>,
+        tx: &watch::Sender<bool>,
+        on_signal: impl FnOnce(),
+    ) -> Served {
+        let poller = spawn_poller(poller, tx.subscribe());
+        tokio::time::timeout(
+            Duration::from_secs(3600),
+            supervise(work, tx, poller, on_signal, AGENTD_EXCHANGE_DRAIN),
+        )
+        .await
+        .expect("the driver outlived its control channel")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_poller_that_panics_shuts_the_sleeping_driver_down_and_is_reported() {
+        let (tx, rx) = stop_signal();
+        let handle = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicBool::new(false));
+        let (h, s) = (Arc::clone(&handle), Arc::clone(&seen));
+        let mut clock = TokioClock::new(rx.clone());
+        let work = async move {
+            clock.sleep(UNDECODABLE_WAIT).await;
+            s.store(h.load(Ordering::SeqCst), Ordering::SeqCst);
+        };
+        let start = tokio::time::Instant::now();
+        let served = supervised(
+            async {
+                tokio::time::sleep(LOST_AT).await;
+                panic!("sentinel-746-poller-panic");
+            },
+            work,
+            &tx,
+            || handle.store(true, Ordering::SeqCst),
+        )
+        .await;
+        assert_eq!(served.ended, Ended::Drained);
+        assert_eq!(start.elapsed(), LOST_AT);
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "the driver woke before on_signal"
+        );
+        assert!(*rx.borrow(), "the stop signal was not sent");
+        let lost = served
+            .poller_lost
+            .expect("the poller's end was not reported");
+        assert!(lost.contains("sentinel-746-poller-panic"), "{lost}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_poller_that_returns_abandons_a_stuck_exchange_at_the_drain_and_is_reported() {
+        let (tx, _rx) = stop_signal();
+        let signalled = AtomicBool::new(false);
+        let start = tokio::time::Instant::now();
+        let served = supervised(
+            tokio::time::sleep(LOST_AT),
+            std::future::pending(),
+            &tx,
+            || signalled.store(true, Ordering::SeqCst),
+        )
+        .await;
+        assert_eq!(served.ended, Ended::Abandoned);
+        assert_eq!(start.elapsed(), LOST_AT + AGENTD_EXCHANGE_DRAIN);
+        assert!(signalled.load(Ordering::SeqCst));
+        assert_eq!(
+            served.poller_lost.as_deref(),
+            Some("the notice poller ended; the control channel is gone")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_stop_signal_ends_the_poller_without_reporting_it_lost() {
+        let (tx, _rx) = stop_signal();
+        let flag = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&flag);
+        let work = async move {
+            while !seen.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        };
+        let send = async {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            tx.send(true).unwrap();
+        };
+        let (served, ()) = tokio::join!(
+            supervised(std::future::pending(), work, &tx, || flag
+                .store(true, Ordering::SeqCst)),
+            send
+        );
+        assert_eq!(
+            served,
+            Served {
+                ended: Ended::Drained,
+                poller_lost: None
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn work_that_ends_on_its_own_stops_the_poller_and_reports_nothing_lost() {
+        let (tx, _rx) = stop_signal();
+        let served = supervised(
+            std::future::pending(),
+            tokio::time::sleep(Duration::from_secs(3)),
+            &tx,
+            || panic!("signalled"),
+        )
+        .await;
+        assert_eq!(
+            served,
+            Served {
+                ended: Ended::Finished,
+                poller_lost: None
+            }
         );
     }
 }

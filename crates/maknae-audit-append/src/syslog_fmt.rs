@@ -185,6 +185,7 @@ pub(crate) fn format_line_unchecked(
                 .task_op
                 .as_deref()
                 .or(rec.subject.board_op.as_deref())
+                .or(rec.subject.control_op.as_deref())
                 .map(scrub),
         ),
     ];
@@ -660,6 +661,7 @@ mod tests {
                 parent_task_id: None,
                 task_op: None,
                 board_op: None,
+                control_op: None,
                 tasker: None,
                 bindings: Vec::new(),
                 reach: Vec::new(),
@@ -670,6 +672,7 @@ mod tests {
             mutation: None,
             egress: None,
             board: None,
+            notices: Vec::new(),
             conversation: None,
             graph: None,
             rule: None,
@@ -758,6 +761,17 @@ mod tests {
             .into_full()
             .unwrap();
         assert!(s.contains(" op=collect session=7"), "{s}");
+    }
+
+    #[test]
+    fn the_summary_line_carries_a_control_op() {
+        let mut r = rec("no");
+        r.subject.control_op = Some("notice_poll".into());
+        let s = format_record(&r, PrimaryOutcome::Ok)
+            .unwrap()
+            .into_full()
+            .unwrap();
+        assert!(s.contains(" op=notice_poll session=7"), "{s}");
     }
 
     #[test]

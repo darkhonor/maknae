@@ -625,6 +625,8 @@ pub(crate) mod fake {
         HangUp,
         /// A complete frame whose body is not a response.
         Garbage,
+        /// Reads the request and never answers it.
+        Hold,
     }
 
     /// Answers the first frame on each connection with the next scripted answer.
@@ -654,6 +656,10 @@ pub(crate) mod fake {
                 answers: Mutex::new(answers.into()),
                 ..Default::default()
             }
+        }
+
+        pub fn seen(&self) -> Arc<Mutex<Seen>> {
+            Arc::clone(&self.seen)
         }
 
         pub async fn finish(&self) -> Seen {
@@ -686,6 +692,7 @@ pub(crate) mod fake {
                     seen.lock().unwrap().requests.push(request);
                     let reply = match answer.take() {
                         None | Some(Scripted::HangUp) => break,
+                        Some(Scripted::Hold) => continue,
                         Some(Scripted::Garbage) => vec![0xff, 0xff],
                         Some(Scripted::Answer(answer)) => {
                             let (result, catalog_digest) = *answer;
@@ -1066,6 +1073,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dropped_exchange_leaves_the_plane_usable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("notes.md");
+        std::fs::write(&file, "sentinel-746-notes").unwrap();
+        let mut plane = LoopPlane::with_dial(
+            fake::FakeKernel::scripted(vec![
+                fake::Scripted::Hold,
+                fake::Scripted::Answer(Box::new((fake::refused(), None))),
+            ]),
+            TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let seen = plane.link.dial.seen();
+        {
+            let turns = user_turn();
+            let mut prompt = std::pin::pin!(plane.prompt("c", &turns));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while seen.lock().unwrap().requests.is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the prompt was never written"
+                );
+                tokio::select! {
+                    got = &mut prompt => panic!("the held prompt was answered: {got:?}"),
+                    () = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
+                }
+            }
+        }
+        let read = plane
+            .read("c", file.to_str().unwrap(), maknae_proto::WHOLE_FILE)
+            .await;
+        assert!(matches!(read, ReadOutcome::Unavailable), "{read:?}");
+        let seen = plane.link.dial.finish().await;
+        let sent: Vec<_> = seen.requests.iter().map(|r| verb_name(&r.verb)).collect();
+        assert_eq!(sent, ["prompt", "read"]);
+        assert_eq!(seen.frames_per_connection, [1, 1]);
+    }
+
+    #[tokio::test]
     async fn the_models_mkdir_and_delete_carry_its_conversation() {
         let dir = tempfile::TempDir::new().unwrap();
         let d = dir.path().to_str().unwrap();
@@ -1237,5 +1285,106 @@ mod tests {
             SPARE_MAX_AGE_SECS * 2,
             maknae_vault::USER_KEY_WRAP_TTL.as_secs()
         );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_cut_mid_exchange_leaves_the_plane_for_the_next_exchange() {
+        use maknae_agent::session::{Ended, Session};
+        let conversation = ConversationId::parse(&"a".repeat(32)).unwrap();
+        let view = ConversationView {
+            conversation: conversation.clone(),
+            cwd: "/w".into(),
+            opened_at: 0,
+            last_active: 0,
+            turns: 0,
+            bytes: 0,
+            chain_head: String::new(),
+        };
+        let ok = |p| fake::Scripted::Answer(Box::new((maknae_proto::RespResult::Ok(p), None)));
+        let reply = maknae_proto::PromptReply {
+            reasoning: None,
+            blocks: vec![maknae_proto::ContentBlock::Text {
+                text: maknae_proto::SecretText::from(zeroize::Zeroizing::new(
+                    "sentinel-746-after-the-cut".into(),
+                )),
+            }],
+            tool_calls: vec![],
+            usage: None,
+        };
+        let kernel = fake::FakeKernel::scripted(vec![
+            ok(maknae_proto::Payload::ConversationOpened(view.clone())),
+            fake::Scripted::Hold,
+            ok(maknae_proto::Payload::PromptReply(reply)),
+            ok(maknae_proto::Payload::ConversationClosed(view.clone())),
+        ]);
+        let seen = kernel.seen();
+        let mut plane = LoopPlane::with_dial(kernel, TransportConfig::default(), None, 4096, Keys);
+        let budget = maknae_agent::drive::Budget {
+            max_steps: 4,
+            max_tool_calls_per_step: 1,
+        };
+        let context =
+            maknae_agent::budget::ContextBudget::new(maknae_proto::MAX_CONTEXT_TOKENS, None)
+                .unwrap();
+        let mut session = Session::open(
+            &mut plane,
+            std::path::Path::new("/w"),
+            &[],
+            "go",
+            budget,
+            context,
+            None,
+        )
+        .await
+        .unwrap();
+        let reached = async {
+            while seen.lock().unwrap().requests.len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            "cut"
+        };
+        let hook = &mut maknae_agent::drive::NoHook;
+        let ended = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            session.run_until(&mut plane, hook, reached, &mut |_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::Interrupted("cut"));
+        let Ended::Ran(out) = session
+            .resume_until(
+                &mut plane,
+                &[],
+                hook,
+                std::future::pending::<()>(),
+                &mut |_| {},
+            )
+            .await
+        else {
+            panic!("the next exchange was interrupted")
+        };
+        assert_eq!(
+            out.answer.as_ref().map(|a| a.expose()),
+            Some("sentinel-746-after-the-cut")
+        );
+        assert_eq!(session.close(&mut plane).await, Some(Ok(view)));
+        let seen = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            plane.link_for_test().finish(),
+        )
+        .await
+        .expect("the cut connection was never released");
+        let verbs: Vec<_> = seen
+            .requests
+            .iter()
+            .map(|r| match &r.verb {
+                Verb::SessionNew { .. } => "open",
+                Verb::SessionPrompt { .. } => "prompt",
+                Verb::SessionClose { .. } => "close",
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(verbs, ["open", "prompt", "prompt", "close"]);
+        assert_eq!(seen.frames_per_connection.len(), 4);
     }
 }

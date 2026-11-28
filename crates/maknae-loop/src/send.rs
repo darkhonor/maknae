@@ -148,7 +148,7 @@ fn request_caps(
     }
 }
 
-fn class_wait(
+pub(crate) fn class_wait(
     class: maknae_proto::FrameClass,
     transport: &maknae_config::TransportConfig,
 ) -> std::time::Duration {

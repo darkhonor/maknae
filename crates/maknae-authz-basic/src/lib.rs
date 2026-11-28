@@ -3130,6 +3130,108 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_production_path_never_permits_a_contained_agents_control_request() {
+        use agents::{hobi, load, try_source, HOBI};
+        let grants: String = decide::GRANTABLE_ACTIONS
+            .iter()
+            .map(|t| format!("      - \"{t}\"\n"))
+            .collect();
+        let authz = format!("{EMPTY}roles:\n  admin:\n    allow:\n{grants}");
+        let source = |bindings: &str| {
+            try_source(
+                &authz,
+                Some(bindings),
+                &[("root", 0), ("hobi-svc", HOBI)],
+                load(vec![hobi()], &[]),
+            )
+            .unwrap()
+        };
+        let request = |plane: Option<AttrValue>, channel: Option<&str>, op: Option<&str>| {
+            let mut s = Attributes::new();
+            s.insert(SUBJECT_UID_KEY, AttrValue::Int(i64::from(HOBI)));
+            if let Some(c) = channel {
+                s.insert(maknae_security::SUBJECT_CHANNEL, AttrValue::Str(c.into()));
+                s.insert(
+                    maknae_security::SUBJECT_AGENT,
+                    AttrValue::Str("hobi".into()),
+                );
+            }
+            if let Some(p) = plane {
+                s.insert(maknae_security::SUBJECT_PLANE, p);
+            }
+            let mut c = Attributes::new();
+            if let Some(op) = op {
+                c.insert(
+                    maknae_security::CONTEXT_CONTROL_OP,
+                    AttrValue::Str(op.into()),
+                );
+            }
+            maknae_security::Request {
+                subject: Subject(s),
+                resource: Resource(Attributes::new()),
+                action: Action(maknae_security::ACTION_AGENT_CONTROL.into()),
+                context: Context(c),
+            }
+        };
+        let control = || Some(AttrValue::Str(maknae_security::PLANE_CONTROL.into()));
+        let poll = || {
+            request(
+                control(),
+                Some(maknae_security::CHANNEL_AGENT),
+                Some(maknae_security::CONTROL_OP_NOTICE_POLL),
+            )
+        };
+        let auth_over = |src: &PolicySource| {
+            BasicAuthorizer::from_snapshot(principal(), paths(), test_digest, compiled(src))
+        };
+        let free = source("schema_version: 1\nbindings:\n  admin: [\"root\"]\n");
+        assert!(matches!(
+            auth_over(&free).decide_cited(&poll()).verdict,
+            maknae_security::Verdict::Permit { .. }
+        ));
+        let src = source(
+            "schema_version: 1\nbindings:\n  admin: [\"root\"]\n  adversary: [\"hobi-svc\"]\n",
+        );
+        let snap = compiled(&src);
+        let auth = auth_over(&src);
+        let candidate = Candidate::new(&snap, principal());
+        for path in [
+            &auth as &dyn maknae_security::Authorizer,
+            &candidate as &dyn maknae_security::Authorizer,
+        ] {
+            let d = path.decide_cited(&poll());
+            assert_eq!(
+                (d.verdict, d.role),
+                (
+                    maknae_security::Verdict::Deny {
+                        reason: CONTAINED.into()
+                    },
+                    Some("adversary")
+                )
+            );
+            for plane in [None, control(), Some(AttrValue::Str("data".into()))] {
+                for channel in [
+                    None,
+                    Some(maknae_security::CHANNEL_CLIENT),
+                    Some(maknae_security::CHANNEL_AGENT),
+                ] {
+                    for op in [
+                        None,
+                        Some(maknae_security::CONTROL_OP_NOTICE_POLL),
+                        Some("reboot"),
+                    ] {
+                        let d = path.decide_cited(&request(plane.clone(), channel, op));
+                        assert!(
+                            !matches!(d.verdict, maknae_security::Verdict::Permit { .. }),
+                            "{plane:?} {channel:?} {op:?}: {d:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn liveness_req(uid: Option<i64>) -> maknae_security::Request {
         let mut s = Attributes::new();
         if let Some(u) = uid {

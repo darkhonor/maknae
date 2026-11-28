@@ -34,6 +34,18 @@ pub const MACOS_DAEMON_SOCKET_PATH: &str = "/usr/local/var/run/maknae/maknaed.so
 /// The macOS daemon's agent socket path.
 pub const MACOS_AGENT_SOCKET_PATH: &str = "/usr/local/var/run/maknae-agent/maknaed.sock";
 
+/// The control socket's file name, in the directory of `transport.agent_socket_path`.
+pub const CONTROL_SOCKET_NAME: &str = "control.sock";
+
+pub fn control_socket_path(agent_socket: &std::path::Path) -> PathBuf {
+    agent_socket.with_file_name(CONTROL_SOCKET_NAME)
+}
+
+/// An agent socket so named would be its own control socket.
+pub(crate) fn names_the_control_socket(agent_socket: &std::path::Path) -> bool {
+    agent_socket.file_name() == Some(std::ffi::OsStr::new(CONTROL_SOCKET_NAME))
+}
+
 const MAX_CONNECTIONS_RANGE: std::ops::RangeInclusive<i64> = 1..=4096;
 /// The smallest `prompt_max_bytes` an operator can set. Exported because the
 /// tool-call argument bound is derived from it (`maknae-kernel` pins the fit).
@@ -247,6 +259,15 @@ pub fn transport_from_section(v: Option<&Value>) -> Result<TransportConfig, Conf
     let socket_path = socket_path_of(section, "socket_path", DEFAULT_SOCKET_PATH)?;
     let agent_socket_path =
         socket_path_of(section, "agent_socket_path", DEFAULT_AGENT_SOCKET_PATH)?;
+    if names_the_control_socket(&agent_socket_path) {
+        return Err(err(
+            "agent_socket_path",
+            format!(
+                "{} is named {CONTROL_SOCKET_NAME}",
+                agent_socket_path.display()
+            ),
+        ));
+    }
     if agent_socket_path.parent() == socket_path.parent() {
         return Err(err(
             "agent_socket_path",
@@ -652,6 +673,41 @@ mod tests {
                 transport_from_section(Some(&v)),
                 Err(ConfigError::InvalidTransport(_))
             ));
+        }
+    }
+
+    #[test]
+    fn the_control_socket_is_control_sock_beside_the_agent_socket() {
+        for (agent, control) in [
+            (
+                "/run/maknae-agent/maknaed.sock",
+                "/run/maknae-agent/control.sock",
+            ),
+            (
+                MACOS_AGENT_SOCKET_PATH,
+                "/usr/local/var/run/maknae-agent/control.sock",
+            ),
+            ("/srv/a/x.sock", "/srv/a/control.sock"),
+        ] {
+            assert_eq!(
+                control_socket_path(std::path::Path::new(agent)),
+                PathBuf::from(control)
+            );
+        }
+        assert_eq!(CONTROL_SOCKET_NAME, "control.sock");
+    }
+
+    #[test]
+    fn an_agent_socket_named_control_sock_is_refused() {
+        let v = Value::Map(vec![(
+            "agent_socket_path".into(),
+            Value::Str("/run/maknae-agent/control.sock".into()),
+        )]);
+        match transport_from_section(Some(&v)) {
+            Err(ConfigError::InvalidTransport(why)) => {
+                assert!(why.contains("transport.agent_socket_path"), "{why}");
+            }
+            other => panic!("expected InvalidTransport, got {other:?}"),
         }
     }
 

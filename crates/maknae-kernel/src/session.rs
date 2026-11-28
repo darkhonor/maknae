@@ -12,7 +12,7 @@ use crate::authz::Ending;
 use crate::blocking_guard::{BlockingBreaker, BreakerAdmission, BreakerTransition};
 use crate::deployment::Platform;
 use crate::groupres::{AuthzError, Membership};
-use crate::handler::Admission;
+use crate::handler::{Admission, ChannelPlane};
 use crate::session_facts::{AccountFact, AccountState};
 
 pub trait SessionFacts: Send + Sync {
@@ -198,6 +198,7 @@ pub struct SessionRecord {
     pub lane: maknae_security::Lane,
     pub admission: Admission,
     pub channel: SessionChannel,
+    pub plane: ChannelPlane,
     pub sender: SenderVerdict,
     pub account: AccountFact,
     pub seq: Seq,
@@ -278,6 +279,7 @@ impl SessionRecord {
             lane: maknae_security::Lane::Local,
             admission: Admission::MaknaeGroupMember,
             channel: SessionChannel::Client,
+            plane: ChannelPlane::Data,
             sender: SenderVerdict::default(),
             account: AccountFact::NotChecked(crate::session_facts::NotCheckedWhy::Platform),
             seq: Seq::new(),

@@ -1275,6 +1275,7 @@ mod tests {
                 parent_task_id: None,
                 task_op: None,
                 board_op: None,
+                control_op: None,
                 tasker: None,
                 bindings: Vec::new(),
                 reach: Vec::new(),
@@ -1284,6 +1285,7 @@ mod tests {
             object_requested: None,
             mutation: None,
             board: None,
+            notices: Vec::new(),
             outcome: Outcome {
                 result: "permit".into(),
                 reason: "intent recorded".into(),

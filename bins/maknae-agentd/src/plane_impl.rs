@@ -6,8 +6,9 @@ use maknae_agent::task_driver::{self, DriverConfig, DriverEvent};
 use maknae_config::{AgentClientConfig, AgentId, TransportConfig};
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_loop::agent::{AgentPlane, PersonaFiles, TaskTrust};
+use maknae_loop::control::ControlLink;
 use maknae_loop::keys::AgentKeys;
-use maknae_loop::plane::LoopPlane;
+use maknae_loop::plane::{LoopPlane, PlaneDial};
 use maknae_vault::{AgentLogin, PlaneClient, TrustBundle, VaultError};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -90,6 +91,7 @@ pub fn task_trust(cfg: &AgentClientConfig, trust: Arc<TrustBundle>) -> TaskTrust
 
 pub struct Connected {
     pub plane: Plane,
+    pub control: ControlLink<PlaneDial>,
 }
 
 pub struct Assembly<'a> {
@@ -104,6 +106,12 @@ pub struct Assembly<'a> {
 
 /// The host's transport section is not read: its defaults, with what enrollment copied.
 pub fn agent_transport(cfg: &AgentClientConfig) -> Result<TransportConfig, String> {
+    if maknae_config::control_socket_path(&cfg.agent_socket_path) == cfg.agent_socket_path {
+        return Err(format!(
+            "agent.yaml: agent_socket_path must not be named {}",
+            maknae_config::CONTROL_SOCKET_NAME
+        ));
+    }
     let mut transport = maknae_config::transport_from_section(None).map_err(|e| e.to_string())?;
     transport.agent_socket_path = cfg.agent_socket_path.clone();
     transport.prompt_max_bytes = cfg.prompt_max_bytes;
@@ -123,6 +131,14 @@ pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
         a.seal_key,
     );
     let output_tokens = cfg.provider.output_tokens;
+    let control = ControlLink::new(
+        PlaneDial::new(
+            maknae_config::control_socket_path(&transport.agent_socket_path),
+            Arc::clone(&a.client),
+            Arc::clone(&a.trust),
+        ),
+        transport.clone(),
+    );
     let plane = LoopPlane::for_agent(
         transport,
         Arc::clone(&a.trust),
@@ -144,6 +160,7 @@ pub fn connect(a: Assembly<'_>) -> Result<Connected, String> {
     });
     Ok(Connected {
         plane: AgentPlane::new(plane, trust, personas, note),
+        control,
     })
 }
 
@@ -336,6 +353,19 @@ mod tests {
             PathBuf::from("/run/maknae-agent/maknaed.sock")
         );
         assert_eq!(t.prompt_max_bytes, 262_144);
+    }
+
+    #[test]
+    fn the_control_socket_is_beside_the_agent_socket_and_never_is_it() {
+        let t = agent_transport(&cfg()).unwrap();
+        assert_eq!(
+            maknae_config::control_socket_path(&t.agent_socket_path),
+            PathBuf::from("/run/maknae-agent/control.sock")
+        );
+        let mut named = cfg();
+        named.agent_socket_path = PathBuf::from("/run/maknae-agent/control.sock");
+        let err = agent_transport(&named).unwrap_err();
+        assert!(err.contains("agent_socket_path"), "{err}");
     }
 
     #[test]

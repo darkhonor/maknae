@@ -51,6 +51,9 @@ pub struct Subject {
     /// `board.manage` record, `release` on an `admin.release` record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_op: Option<String>,
+    /// The control-channel operation: `notice_poll`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_op: Option<String>,
     /// `uid:<n>`, `agent:<id>` or `remote:<id>` (`maknae_proto::tasker_text`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasker: Option<String>,
@@ -217,6 +220,15 @@ pub struct EgressAudit {
     pub completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_tool_calls: Vec<RefusedToolCall>,
+}
+
+/// One notice a control poll returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeAudit {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// The board block of a `board.post`, `board.read`, `board.manage` or `admin.release`
@@ -474,6 +486,9 @@ pub struct AuditRecord {
     pub egress: Option<EgressAudit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<BoardAudit>,
+    /// The notices a control poll returned: id, kind and task only, never a body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<NoticeAudit>,
     /// The loop's conversation identifier on `fs.write` records (#265) —
     /// client-supplied, informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -580,6 +595,7 @@ mod tests {
                 parent_task_id: None,
                 task_op: None,
                 board_op: None,
+                control_op: None,
                 tasker: None,
                 bindings: Vec::new(),
                 reach: Vec::new(),
@@ -590,6 +606,7 @@ mod tests {
             mutation: None,
             egress: None,
             board: None,
+            notices: Vec::new(),
             conversation: None,
             graph: None,
             rule: None,
@@ -617,6 +634,49 @@ mod tests {
             canonical_json(&rec).unwrap(),
             r#"{"action":"connect","au3_1":{},"event":"connection.accept","integrity":{"prev_hash":null,"sig":null},"outcome":{"posture":"authorized","reason":"group membership: maknae-ops","result":"permit"},"seq":1,"session_id":42,"source":{"gid":1000,"pid":4242,"plane_uri_san":"spiffe://d/plane/cli","uid":1000},"subject":{"plane_uri_san":"spiffe://d/plane/cli","user":"alice"},"ts":"2026-08-11T00:00:00.000Z","where":{"component":"kernel","host":"maknaed-01","socket":"/run/maknae/plane.sock"}}"#
         );
+    }
+
+    #[test]
+    fn a_record_without_control_fields_serializes_as_before() {
+        let rec = sample();
+        assert!(rec.notices.is_empty() && rec.subject.control_op.is_none());
+        let json = canonical_json(&rec).unwrap();
+        assert!(
+            !json.contains("control_op") && !json.contains("notices"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_poll_record_carries_its_op_and_each_notice() {
+        let mut rec = sample();
+        rec.subject.control_op = Some("notice_poll".into());
+        rec.notices = vec![NoticeAudit {
+            id: "ab".repeat(16),
+            kind: "stop".into(),
+            task: Some("cd".repeat(16)),
+        }];
+        let json = canonical_json(&rec).unwrap();
+        assert!(json.contains(r#""control_op":"notice_poll""#), "{json}");
+        let want = format!(
+            r#""notices":[{{"id":"{}","kind":"stop","task":"{}"}}]"#,
+            "ab".repeat(16),
+            "cd".repeat(16)
+        );
+        assert!(json.contains(&want), "{json}");
+        let back: AuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notices, rec.notices);
+        assert_eq!(back.subject.control_op.as_deref(), Some("notice_poll"));
+    }
+
+    #[test]
+    fn a_notice_without_a_task_omits_the_key() {
+        let n = NoticeAudit {
+            id: "ab".repeat(16),
+            kind: "stop".into(),
+            task: None,
+        };
+        assert!(!serde_json::to_string(&n).unwrap().contains("task"));
     }
 
     #[test]
@@ -1202,6 +1262,7 @@ mod tests {
                     parent_task_id: None,
                     task_op: None,
                     board_op: None,
+                    control_op: None,
                     tasker: None,
                     bindings: Vec::new(),
                     reach: Vec::new(),
@@ -1212,6 +1273,7 @@ mod tests {
                 mutation: None,
                 egress: None,
                 board: None,
+                notices: Vec::new(),
                 conversation: None,
                 graph: None,
                 rule: None,

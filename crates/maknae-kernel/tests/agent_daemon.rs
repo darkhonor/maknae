@@ -6,13 +6,15 @@ mod common;
 use common::Records;
 use maknae_agent::budget::ContextBudget;
 use maknae_agent::drive::Budget;
+use maknae_agent::halt::HaltSender;
+use maknae_agent::notice::{poll_notices, NOTICE_POLL_EVERY};
 use maknae_agent::task_driver::{
     Clock, DriverConfig, DriverEvent, Ending, PersonaMode, ShutdownHandle, TaskDriver,
 };
 use maknae_crypto::plane_key::PlaneKey;
 use maknae_io::Zeroizing;
 use maknae_kernel::{
-    AgentAdmission, ManualClock, MemTaskBlobs, TaskRefusal, TaskStore, CLAIM_LEASE,
+    AgentAdmission, ChannelPlane, ManualClock, MemTaskBlobs, TaskRefusal, TaskStore, CLAIM_LEASE,
 };
 use maknae_loop::agent::{AgentPlane, PersonaFiles, PersonaRead, TaskTrust};
 use maknae_loop::keys::{AgentKeys, WrappedRead};
@@ -124,6 +126,7 @@ struct Model {
     replies: Mutex<VecDeque<Result<PromptReply, maknae_kernel::EgressFailure>>>,
     seen: Mutex<Vec<Vec<Turn>>>,
     on_prompt: Mutex<Option<Hook<usize>>>,
+    deadline: Option<Duration>,
 }
 
 impl Model {
@@ -153,7 +156,7 @@ impl maknae_kernel::Egress for Model {
         Ok(())
     }
     fn deadline(&self) -> Duration {
-        Duration::from_secs(5)
+        self.deadline.unwrap_or(Duration::from_secs(5))
     }
     fn send(
         &self,
@@ -295,6 +298,7 @@ struct World {
     kernel: Arc<Mutex<Kernel>>,
     conversations: Arc<dyn maknae_kernel::ConversationStore>,
     records: Arc<Records>,
+    tap: Arc<Tap>,
 }
 
 fn world(tag: &str, hobi_policy: &str) -> World {
@@ -422,6 +426,7 @@ fn world_over(tag: &str, authz: &str, enrolled: &[(&str, u32, &str)]) -> World {
         })),
         conversations: common::conversations(),
         records: Records::new(0),
+        tap: Arc::default(),
         ca,
     }
 }
@@ -446,6 +451,7 @@ fn admission(
         board: Arc::new(maknae_kernel::BoardStore::new()),
         switches: Arc::new(maknae_kernel::FixedSwitches::default()),
         count_breaker: Default::default(),
+        control: Default::default(),
     }
 }
 
@@ -583,10 +589,57 @@ struct Wiring {
     egress: Arc<dyn maknae_kernel::Egress>,
 }
 
-/// One connection to the kernel's agent channel per dial, as the agent socket gives.
+#[derive(Default)]
+struct Tap(Mutex<Vec<(ChannelPlane, Written)>>);
+
+type Written = Arc<Mutex<Vec<u8>>>;
+
+impl Tap {
+    fn open(&self, plane: ChannelPlane) -> Written {
+        let written = Arc::default();
+        self.0.lock().unwrap().push((plane, Arc::clone(&written)));
+        written
+    }
+
+    /// Each connection's plane and the task its first request cites.
+    async fn sent(&self) -> Vec<(ChannelPlane, Option<TaskId>)> {
+        let conns: Vec<_> = self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(plane, written)| (*plane, written.lock().unwrap().clone()))
+            .collect();
+        let caps = maknae_proto::FrameCaps {
+            control: 1 << 26,
+            attempt: 1 << 26,
+            prompt: 1 << 26,
+        };
+        let mut sent = Vec::new();
+        for (plane, written) in conns {
+            let mut bytes = written.as_slice();
+            let task = match maknae_proto::read_frame_zeroizing(&mut bytes, &caps).await {
+                Err(_) => None,
+                Ok((_, body)) => match plane {
+                    ChannelPlane::Data => maknae_proto::decode_request(&body).unwrap().task,
+                    ChannelPlane::Control => {
+                        maknae_proto::decode_control_request(&body).unwrap();
+                        None
+                    }
+                },
+            };
+            sent.push((plane, task));
+        }
+        sent
+    }
+}
+
+/// One connection to the kernel's agent channel per dial, as the agent socket gives;
+/// on the control plane, as the control socket gives.
 struct KernelDial {
     agent: &'static str,
     uid: u32,
+    plane: ChannelPlane,
     kernel: Arc<Mutex<Kernel>>,
     pdp: Arc<maknae_kernel::Composition<maknae_authz_basic::HermeticAuthorizer>>,
     cfg: maknae_config::TransportConfig,
@@ -594,12 +647,14 @@ struct KernelDial {
     wiring: Wiring,
     conversations: Arc<dyn maknae_kernel::ConversationStore>,
     records: Arc<Records>,
+    tap: Arc<Tap>,
 }
 
 /// The client end; a delegated descriptor joins the connection's queue, as SCM_RIGHTS does.
 struct Conn {
     stream: tokio::io::DuplexStream,
     delegated: maknae_io::DelegatedFds,
+    tap: Written,
 }
 
 impl tokio::io::AsyncRead for Conn {
@@ -618,7 +673,11 @@ impl tokio::io::AsyncWrite for Conn {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.stream).poll_write(cx, buf)
+        let wrote = Pin::new(&mut self.stream).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &wrote {
+            self.tap.lock().unwrap().extend_from_slice(&buf[..*n]);
+        }
+        wrote
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.stream).poll_flush(cx)
@@ -640,23 +699,27 @@ impl Dial for KernelDial {
     fn dial(&self) -> impl Future<Output = Result<Conn, maknae_vault::VaultError>> + Send {
         let (agents, garble) = {
             let mut k = self.kernel.lock().unwrap();
-            if !k.connects() {
+            if self.plane == ChannelPlane::Control {
+                (k.agents.clone(), None)
+            } else if !k.connects() {
                 return std::future::ready(Err(maknae_vault::VaultError::Io {
                     path: "maknaed-agent.sock".into(),
                     source: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
                 }));
+            } else {
+                let garble = k
+                    .garble
+                    .load(Ordering::SeqCst)
+                    .then(|| Arc::clone(&k.garble));
+                let relay = garble.is_some() || std::mem::take(&mut k.cut);
+                (k.agents.clone(), relay.then_some(garble))
             }
-            let garble = k
-                .garble
-                .load(Ordering::SeqCst)
-                .then(|| Arc::clone(&k.garble));
-            let relay = garble.is_some() || std::mem::take(&mut k.cut);
-            (k.agents.clone(), relay.then_some(garble))
         };
         let account = format!("{}-svc", self.agent);
         let mut session = maknae_kernel::SessionRecord::for_test(self.uid, Some(account.clone()))
             .with_session_id(629);
         session.admission = maknae_kernel::Admission::EnrolledAgent;
+        session.plane = self.plane;
         session.channel = maknae_kernel::SessionChannel::Agent {
             agent: maknae_config::AgentId::parse(self.agent).unwrap(),
             leaf_expires: std::time::Instant::now() + Duration::from_secs(3600),
@@ -706,6 +769,7 @@ impl Dial for KernelDial {
         std::future::ready(Ok(Conn {
             stream: client,
             delegated,
+            tap: self.tap.open(self.plane),
         }))
     }
 }
@@ -820,6 +884,7 @@ type Plane = AgentPlane<AgentKeys<Vault>, Personas, KernelDial>;
 
 struct Daemon {
     shutdown: ShutdownHandle,
+    halt: HaltSender,
     events: Arc<Mutex<Vec<DriverEvent>>>,
     ticks: Ticks,
     running: tokio::task::JoinHandle<()>,
@@ -882,6 +947,22 @@ fn home_of(w: &World, agent: &str) -> PathBuf {
     }
 }
 
+fn dial_for(w: &World, agent: &'static str, model: &Arc<Model>, plane: ChannelPlane) -> KernelDial {
+    KernelDial {
+        agent,
+        uid: if agent == "hobi" { HOBI_UID } else { JIN_UID },
+        plane,
+        kernel: Arc::clone(&w.kernel),
+        pdp: Arc::clone(&w.pdp),
+        cfg: w.cfg.clone(),
+        home: home_of(w, agent),
+        wiring: w.wiring(model),
+        conversations: Arc::clone(&w.conversations),
+        records: Arc::clone(&w.records),
+        tap: Arc::clone(&w.tap),
+    }
+}
+
 fn plane_for(
     w: &World,
     agent: &'static str,
@@ -889,17 +970,7 @@ fn plane_for(
     events: &Arc<Mutex<Vec<DriverEvent>>>,
 ) -> Plane {
     let home = home_of(w, agent);
-    let dial = KernelDial {
-        agent,
-        uid: if agent == "hobi" { HOBI_UID } else { JIN_UID },
-        kernel: Arc::clone(&w.kernel),
-        pdp: Arc::clone(&w.pdp),
-        cfg: w.cfg.clone(),
-        home: home.clone(),
-        wiring: w.wiring(model),
-        conversations: Arc::clone(&w.conversations),
-        records: Arc::clone(&w.records),
-    };
+    let dial = dial_for(w, agent, model, ChannelPlane::Data);
     let hobi = maknae_config::AgentId::parse(agent).unwrap();
     let recipient = maknae_seal::SealPrivateKey::generate().unwrap();
     let keys = AgentKeys::new(
@@ -968,9 +1039,11 @@ fn start_agent(
         },
     );
     let shutdown = driver.shutdown_handle();
+    let halt = driver.halt_handle();
     let running = tokio::spawn(async move { driver.run().await });
     Daemon {
         shutdown,
+        halt,
         events,
         ticks,
         running,
@@ -1760,4 +1833,322 @@ async fn a_shutdown_mid_wait_drops_the_sub_task_and_the_restart_reports_restarte
         w.collected().await,
         vec![(t1, None, maknae_agent::task_driver::RESTARTED.to_string())]
     );
+}
+
+/// The poller's clock: each sleep records the time of the poll it follows and waits
+/// for the test to step it.
+#[derive(Clone)]
+struct Stepped {
+    now: Arc<Mutex<Duration>>,
+    polls: Arc<Mutex<Vec<Duration>>>,
+    steps: Arc<tokio::sync::Semaphore>,
+}
+
+impl Clock for Stepped {
+    fn now(&self) -> Duration {
+        *self.now.lock().unwrap()
+    }
+    fn sleep(&mut self, d: Duration) -> impl Future<Output = ()> + Send {
+        self.polls.lock().unwrap().push(self.now());
+        let (now, steps) = (Arc::clone(&self.now), Arc::clone(&self.steps));
+        async move {
+            steps.acquire().await.unwrap().forget();
+            *now.lock().unwrap() += d;
+        }
+    }
+}
+
+struct Poller {
+    clock: Stepped,
+    failures: Arc<Mutex<Vec<String>>>,
+    running: tokio::task::JoinHandle<()>,
+}
+
+impl Poller {
+    fn polls(&self) -> Vec<Duration> {
+        self.clock.polls.lock().unwrap().clone()
+    }
+
+    fn step(&self) {
+        self.clock.steps.add_permits(1);
+    }
+
+    async fn until_polls(&self, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while self.polls().len() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "poll {n} never came; polls {:?}, failures {:?}",
+                self.polls(),
+                self.failures.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn poll_once(&self) {
+        let n = self.polls().len();
+        self.step();
+        self.until_polls(n + 1).await;
+    }
+}
+
+fn start_poller(w: &World, model: &Arc<Model>, d: &Daemon) -> Poller {
+    let mut link = maknae_loop::control::ControlLink::new(
+        dial_for(w, "hobi", model, ChannelPlane::Control),
+        w.cfg.clone(),
+    );
+    let clock = Stepped {
+        now: Arc::default(),
+        polls: Arc::default(),
+        steps: Arc::new(tokio::sync::Semaphore::new(0)),
+    };
+    let failures: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (mut c, f, halt) = (clock.clone(), Arc::clone(&failures), d.halt.clone());
+    let running = tokio::spawn(async move {
+        let mut failed = move |e| f.lock().unwrap().push(e);
+        poll_notices(&mut link, &mut c, &halt, &mut failed).await
+    });
+    Poller {
+        clock,
+        failures,
+        running,
+    }
+}
+
+/// Longer than any wait here, so a held prompt ends only when it is released.
+const HOLD: Duration = Duration::from_secs(60);
+
+/// A model whose first prompt is held until the returned sender is dropped.
+fn holding(replies: Vec<PromptReply>) -> (Arc<Model>, std::sync::mpsc::Sender<()>) {
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let model = Model {
+        agent: "hobi",
+        replies: Mutex::new(replies.into_iter().map(Ok).collect()),
+        deadline: Some(HOLD),
+        ..Default::default()
+    };
+    *model.on_prompt.lock().unwrap() = Some(Box::new(move |n| {
+        if n == 1 {
+            let _ = held.recv_timeout(HOLD);
+        }
+    }));
+    (Arc::new(model), release)
+}
+
+/// The agent's working task, held at its first prompt, with poll 1 made.
+async fn working_and_polled(w: &World, model: &Arc<Model>) -> (Daemon, Poller) {
+    let d = start(w, model);
+    let p = start_poller(w, model, &d);
+    d.until("prompt 1 is held", |_| model.prompts().len() == 1)
+        .await;
+    p.until_polls(1).await;
+    (d, p)
+}
+
+async fn end(d: Daemon, p: Poller) {
+    p.running.abort();
+    d.stop().await;
+}
+
+fn after(w: &World, from: usize) -> Vec<maknae_audit_append::AuditRecord> {
+    w.snapshot().into_iter().skip(from).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tasker_stop_cuts_the_agents_step_within_one_poll_interval() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world("notice-stop", HOBI_POLICY);
+    let id = w.submit("sentinel-746-stopped-prompt").await;
+    let (model, release) = holding(vec![
+        answer("sentinel-746-answer"),
+        answer("sentinel-746-answer"),
+    ]);
+    let (d, p) = working_and_polled(&w, &model).await;
+    assert_eq!(p.polls(), [Duration::ZERO]);
+    assert!(d.endings().is_empty());
+    let stopped = w
+        .ask(Verb::TaskStop {
+            task: maknae_proto::TaskRef::from_id(&id),
+        })
+        .await;
+    assert!(
+        matches!(stopped, RespResult::Ok(Payload::TaskAcknowledged(_))),
+        "{stopped:?}"
+    );
+    p.step();
+    d.until("the stop ends the task", |d| !d.endings().is_empty())
+        .await;
+    assert_eq!(d.endings(), [(Some(id), Ending::Gone)]);
+    p.until_polls(2).await;
+    assert_eq!(p.polls(), [Duration::ZERO, NOTICE_POLL_EVERY]);
+    drop(release);
+    let next = w.submit("sentinel-746-next-prompt").await;
+    d.until("the next task's report", |d| d.ended(&next)).await;
+    assert_eq!(
+        d.endings(),
+        [(Some(id), Ending::Gone), (Some(next), Ending::Answered)]
+    );
+    assert_eq!(
+        w.collected().await,
+        [
+            (id, Some(TaskClose::Stopped), String::new()),
+            (next, None, "sentinel-746-answer".to_string())
+        ]
+    );
+    let sent = w.tap.sent().await;
+    let poll_2 = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, (plane, _))| *plane == ChannelPlane::Control)
+        .nth(1)
+        .map(|(i, _)| i)
+        .expect("poll 2 was written");
+    assert!(
+        sent[..poll_2].contains(&(ChannelPlane::Data, Some(id))),
+        "{sent:?}"
+    );
+    assert!(
+        !sent[poll_2..].iter().any(|(_, task)| *task == Some(id)),
+        "{sent:?}"
+    );
+    assert!(p.failures.lock().unwrap().is_empty());
+    end(d, p).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_loop_lapses_agent_lost_while_notice_polls_continue() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world("notice-lapse", HOBI_POLICY);
+    let id = w.submit("sentinel-746-stalled-prompt").await;
+    let (model, release) = holding(vec![answer("sentinel-746-answer")]);
+    let (d, p) = working_and_polled(&w, &model).await;
+    let third = (CLAIM_LEASE + SWEEP_EVERY) / 3;
+    for polled in [true, true, false] {
+        assert_eq!(w.state(&id), TaskState::Working);
+        w.clock
+            .set(maknae_kernel::Clock::now_secs(&*w.clock) + third.as_secs() as i64);
+        w.store().sweep();
+        if polled {
+            p.poll_once().await;
+        }
+    }
+    let rec = w.store().record(&id).unwrap();
+    assert_eq!(
+        (rec.state, rec.close),
+        (TaskState::Closed, Some(TaskClose::AgentLost))
+    );
+    assert_eq!(p.polls().len(), 3);
+    assert!(p.failures.lock().unwrap().is_empty());
+    assert!(d.endings().is_empty(), "the loop is stalled");
+    p.step();
+    d.until("the lapse's Stop ends the task", |d| {
+        !d.endings().is_empty()
+    })
+    .await;
+    assert_eq!(d.endings(), [(Some(id), Ending::Gone)]);
+    drop(release);
+    end(d, p).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_for_a_held_task_leaves_its_task_records_untouched() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world("notice-held", HOBI_POLICY);
+    let id = w.submit("sentinel-746-held-prompt").await;
+    let (model, release) = holding(vec![answer("sentinel-746-answer")]);
+    let (d, p) = working_and_polled(&w, &model).await;
+    let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+    common::write_0640(
+        &bindings,
+        &format!(
+            "schema_version: 1\nbindings:\n  adversary: [\"{}\"]\n",
+            w.user
+        ),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let view = maknae_kernel::SnapshotEnrollment(Arc::clone(&w.pdp));
+    w.store().retain_enrolled(&view);
+    assert_eq!(w.state(&id), TaskState::Held);
+    let before = format!("{:?}", w.store().record(&id));
+    let from = w.snapshot().len();
+    p.step();
+    d.until("the hold's Stop ends the task", |d| !d.endings().is_empty())
+        .await;
+    assert_eq!(d.endings(), [(Some(id), Ending::Gone)]);
+    p.until_polls(2).await;
+    assert_eq!(format!("{:?}", w.store().record(&id)), before);
+    let named = id.to_string();
+    let naming: Vec<_> = after(&w, from)
+        .into_iter()
+        .filter(|r| r.subject.task_id.as_deref() == Some(named.as_str()))
+        .collect();
+    assert!(naming.is_empty(), "{naming:?}");
+    assert!(!reported(&w, &id));
+    drop(release);
+    end(d, p).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contained_agent_ceases_work_on_its_refused_poll() {
+    let _one = ONE_DAEMON.lock().await;
+    let w = world("notice-contained", HOBI_POLICY);
+    let id = w.submit("sentinel-746-contained-prompt").await;
+    let (model, release) = holding(vec![answer("sentinel-746-answer")]);
+    let (d, p) = working_and_polled(&w, &model).await;
+    let bindings = maknae_authz_basic::PolicyPaths::in_dir(&w.root).bindings;
+    let bound = std::fs::read_to_string(&bindings).unwrap();
+    common::write_0640(
+        &bindings,
+        &format!("{bound}  adversary: [{{uid: {HOBI_UID}}}]\n"),
+    );
+    w.pdp.baseline().reload_from_file().unwrap();
+    let contained = w.snapshot().len();
+    p.step();
+    d.until("the refused poll ends the task", |d| {
+        !d.endings().is_empty()
+    })
+    .await;
+    assert_eq!(d.endings(), [(Some(id), Ending::Held)]);
+    assert_eq!(
+        *p.failures.lock().unwrap(),
+        ["notice poll refused: ceasing work"]
+    );
+    let polled: Vec<_> = after(&w, contained)
+        .into_iter()
+        .filter(|r| r.action == "agent.control")
+        .map(|r| r.outcome.result)
+        .collect();
+    assert_eq!(polled, ["deny"]);
+    let refused_claim = |r: &maknae_audit_append::AuditRecord| {
+        r.action == "session.task" && r.outcome.result == "deny"
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !after(&w, contained).iter().any(refused_claim) {
+        assert!(std::time::Instant::now() < deadline, "no claim was refused");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        !after(&w, contained)
+            .iter()
+            .any(|r| r.action == "session.task" && r.outcome.result == "permit"),
+        "a claim was permitted while contained"
+    );
+    common::write_0640(&bindings, &bound);
+    w.pdp.baseline().reload_from_file().unwrap();
+    let released = w.snapshot().len();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !after(&w, released)
+        .iter()
+        .any(|r| r.action == "session.task" && r.outcome.result == "permit")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no claim was permitted after the release"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!reported(&w, &id));
+    drop(release);
+    end(d, p).await;
 }

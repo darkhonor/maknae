@@ -2940,4 +2940,59 @@ mod tests {
             Verdict::Deny { ref reason } if reason == "refuses"
         ));
     }
+
+    fn notice_poll(uid: u32) -> Request {
+        crate::handler::build_control_request(
+            uid,
+            &maknae_config::AgentId::parse("hobi").unwrap(),
+            &maknae_proto::ControlVerb::NoticePoll {},
+            maknae_security::Lane::Local,
+        )
+    }
+
+    #[test]
+    fn the_composition_permits_an_enrolled_agents_notice_poll_and_every_mandatory_operand_abstains()
+    {
+        let (_g, c) = hobi_composition("notice-poll");
+        let r = notice_poll(2001);
+        assert!(matches!(c.decide(&r), Verdict::Permit { .. }));
+        let snap = c.baseline().snapshot();
+        let base = maknae_authz_basic::Candidate::new(&snap, c.baseline().principal());
+        let sensitive = SensitiveAuthorizer::new(snap.sensitive());
+        let ops = c.operands_with(&base, &sensitive);
+        let mandatory: Vec<_> = ops[1..].iter().map(|o| o.backend_name()).collect();
+        assert_eq!(
+            mandatory,
+            ["maknae-ceiling", "maknae-sensitive", "maknae-partition"]
+        );
+        for operand in &ops[1..] {
+            assert_eq!(
+                operand.decide(&r),
+                Verdict::NotApplicable { note: None },
+                "{}",
+                operand.backend_name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_composition_denies_a_contained_agents_notice_poll() {
+        let (g, basic) = fixture(
+            "notice-poll-contained",
+            READ_POLICY,
+            Some("schema_version: 1\nbindings:\n  adversary:\n    - uid: 2001\n"),
+        );
+        basic.set_hosts(crate::test_fixtures::BTS_HOSTS);
+        crate::test_fixtures::write_agent(&g.0, "hobi", "hobi-svc", 2001, "user");
+        basic.install(basic.compile_from_file().unwrap());
+        let c = Composition::new(basic, ceiling(Ceiling::baseline_for(US)));
+        let d = c.decide_cited(&notice_poll(2001));
+        assert_eq!(
+            d.verdict,
+            Verdict::Deny {
+                reason: "subject contained: role=adversary".into()
+            }
+        );
+        assert_eq!(d.role, Some("adversary"));
+    }
 }
