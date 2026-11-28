@@ -1091,7 +1091,12 @@ mod tests {
         {
             let turns = user_turn();
             let mut prompt = std::pin::pin!(plane.prompt("c", &turns));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             while seen.lock().unwrap().requests.is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the prompt was never written"
+                );
                 tokio::select! {
                     got = &mut prompt => panic!("the held prompt was answered: {got:?}"),
                     () = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}

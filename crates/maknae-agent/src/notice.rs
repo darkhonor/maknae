@@ -14,6 +14,7 @@ pub enum PollFailure {
     Dial,
     Handshake,
     Timeout,
+    Write,
     Undecodable,
     Code(ProtoErrCode),
 }
@@ -24,6 +25,7 @@ impl PollFailure {
             PollFailure::Dial => "dial",
             PollFailure::Handshake => "handshake",
             PollFailure::Timeout => "timeout",
+            PollFailure::Write => "write",
             PollFailure::Undecodable => "undecodable",
             PollFailure::Code(_) => "refused-other",
         }
@@ -151,7 +153,6 @@ mod tests {
         }
     }
 
-    /// Runs the poller over `answers` until the script is spent; it never returns.
     fn run(answers: Vec<PollAnswer>, sender: &HaltSender) -> Vec<String> {
         let log = Log::default();
         let mut plane = Script {
@@ -274,6 +275,7 @@ mod tests {
             PollFailure::Dial,
             PollFailure::Handshake,
             PollFailure::Timeout,
+            PollFailure::Write,
             PollFailure::Undecodable,
             PollFailure::Code(ProtoErrCode::Internal),
         ];
@@ -391,6 +393,7 @@ mod tests {
             PollFailure::Dial,
             PollFailure::Handshake,
             PollFailure::Timeout,
+            PollFailure::Write,
             PollFailure::Undecodable,
             PollFailure::Code(ProtoErrCode::Internal),
         ]
@@ -403,6 +406,7 @@ mod tests {
                 "dial",
                 "handshake",
                 "timeout",
+                "write",
                 "undecodable",
                 "refused-other"
             ]

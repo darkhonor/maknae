@@ -589,7 +589,6 @@ struct Wiring {
     egress: Arc<dyn maknae_kernel::Egress>,
 }
 
-/// The bytes the agent wrote on each connection, in dial order.
 #[derive(Default)]
 struct Tap(Mutex<Vec<(ChannelPlane, Written)>>);
 
@@ -1866,7 +1865,6 @@ struct Poller {
 }
 
 impl Poller {
-    /// The times of the polls made so far.
     fn polls(&self) -> Vec<Duration> {
         self.clock.polls.lock().unwrap().clone()
     }
@@ -1888,7 +1886,6 @@ impl Poller {
         }
     }
 
-    /// Steps once and waits for the poll that follows.
     async fn poll_once(&self) {
         let n = self.polls().len();
         self.step();
@@ -1896,7 +1893,6 @@ impl Poller {
     }
 }
 
-/// hobi's notice poller over the kernel's control channel, beside its driver.
 fn start_poller(w: &World, model: &Arc<Model>, d: &Daemon) -> Poller {
     let mut link = maknae_loop::control::ControlLink::new(
         dial_for(w, "hobi", model, ChannelPlane::Control),

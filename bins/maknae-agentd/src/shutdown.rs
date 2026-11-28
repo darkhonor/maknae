@@ -286,14 +286,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_poller_polls_while_the_driver_is_stalled() {
+    async fn the_spawned_poller_polls_on_its_own_task() {
         let (_tx, rx) = stop_signal();
         let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let polling = poller(Counting(Arc::clone(&polls)), rx);
-        tokio::select! {
-            () = std::future::pending::<()>() => unreachable!(),
-            () = tokio::time::sleep(NOTICE_POLL_EVERY * 3 + Duration::from_millis(1)) => {}
-        }
+        tokio::time::sleep(NOTICE_POLL_EVERY * 3 + Duration::from_millis(1)).await;
         assert_eq!(polls.load(Ordering::SeqCst), 4);
         polling.abort();
     }

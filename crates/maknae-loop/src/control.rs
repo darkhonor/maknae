@@ -34,14 +34,14 @@ impl<D: Dial> ControlLink<D> {
             protocol_version: PROTOCOL_VERSION,
             verb: ControlVerb::NoticePoll {},
         })
-        .map_err(|_| PollFailure::Undecodable)?;
+        .map_err(|_| PollFailure::Write)?;
         tokio::time::timeout(
             Duration::from_millis(t.read_timeout_ms),
             write_frame(&mut stream, FrameClass::Control, &body),
         )
         .await
         .map_err(|_| PollFailure::Timeout)?
-        .map_err(|_| PollFailure::Undecodable)?;
+        .map_err(|_| PollFailure::Write)?;
         let caps = FrameCaps {
             control: control_reply_cap::<AgentNotice>(),
             attempt: 0,
@@ -86,6 +86,8 @@ mod tests {
         Served(Reply),
         Refused,
         NeverConnects,
+        NeverReads,
+        Gone,
     }
 
     /// One connection per dial; reads the control request and answers as scripted.
@@ -122,6 +124,19 @@ mod tests {
                     }))) as Connecting
                 }
                 Some(Dialled::NeverConnects) => return Box::pin(std::future::pending()),
+                Some(Dialled::NeverReads) => {
+                    let (client, server) = tokio::io::duplex(1);
+                    self.servers.lock().unwrap().push(tokio::spawn(async move {
+                        let _held = server;
+                        std::future::pending::<()>().await
+                    }));
+                    return Box::pin(std::future::ready(Ok(client)));
+                }
+                Some(Dialled::Gone) => {
+                    let (client, server) = tokio::io::duplex(1);
+                    drop(server);
+                    return Box::pin(std::future::ready(Ok(client)));
+                }
             };
             let (client, mut server) = tokio::io::duplex(1 << 16);
             let seen = Arc::clone(&self.seen);
@@ -258,6 +273,29 @@ mod tests {
         assert_eq!(
             l.notice_poll().await,
             PollAnswer::Failed(PollFailure::Undecodable)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_write_times_out_at_the_read_timeout() {
+        let mut l = link(FakeControl::new(Dialled::NeverReads));
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            l.notice_poll().await,
+            PollAnswer::Failed(PollFailure::Timeout)
+        );
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_millis(TransportConfig::default().read_timeout_ms)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_is_a_write_failure() {
+        let mut l = link(FakeControl::new(Dialled::Gone));
+        assert_eq!(
+            l.notice_poll().await,
+            PollAnswer::Failed(PollFailure::Write)
         );
     }
 
