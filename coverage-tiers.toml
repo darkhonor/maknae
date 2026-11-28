@@ -433,6 +433,9 @@ files = [
   # #746: the driver's halt. A Stop that cuts another task, or a halt that
   # latches, ends work the kernel never asked to stop.
   "crates/maknae-agent/src/halt.rs",
+  # #746: the notice poller. A refusal read as a failure keeps a contained agent
+  # working; any other failure read as a refusal holds every task on a blip.
+  "crates/maknae-agent/src/notice.rs",
   # #609: task_agent. A wait read as a report, or a report acknowledged before it is
   # stored, tells the tasking model work was done that it cannot use.
   "crates/maknae-agent/src/task_agent.rs",
@@ -681,11 +684,11 @@ why = "thin main: env scrub + FIPS install + arg parse + bounds load + uid resol
 
 [[t3]]
 path = "bins/maknae-agentd/src/main.rs"
-why = "#629: thin main: arg parse + runtime + signal listener + config, enrollment and SecretID load + the euid check + mint + wiring into maknae-agent's TaskDriver; every refusal is exit 1, and needs a live Vault and kernel. The driver is T1 in maknae-agent::task_driver, the plane T2 in maknae-loop::agent, the drain T2 in shutdown.rs; the whole wiring short of Vault is exercised by maknae-kernel's tests/agent_daemon.rs"
+why = "#629: thin main: arg parse + runtime + signal listener + config, enrollment and SecretID load + the euid check + mint + wiring into maknae-agent's TaskDriver; every refusal is exit 1, and needs a live Vault and kernel. The driver is T1 in maknae-agent::task_driver, the plane T2 in maknae-loop::agent, the drain T2 in shutdown.rs; the whole wiring short of Vault is exercised by maknae-kernel's tests/agent_daemon.rs. Amended 2026-11-28 (#746): serve spawns the notice poller beside the driver and joins it before it returns; the poller is T1 in maknae-agent::notice, spawn_poller T2 in shutdown.rs"
 
 [[t3]]
 path = "bins/maknae-agentd/src/plane_impl.rs"
-why = "#629: the production assembly over a live Vault and kernel: the AgentLogin, the AgentPlane, the mint retry, the leaf supervisor loop and run_minted, the one teardown every post-mint exit takes. login, driver_config, persona_mode, describe, next_backoff, task_trust and agent_id are table-tested; mint_until_held, keep_leaf and run_minted are tested over a fake Credential with paused time (the supervisor reaped before revoke, revoke after a failure, the revoke bound, the stop ending the backoff). connect and the PlaneClient Credential impl need Vault"
+why = "#629: the production assembly over a live Vault and kernel: the AgentLogin, the AgentPlane, the mint retry, the leaf supervisor loop and run_minted, the one teardown every post-mint exit takes. login, driver_config, persona_mode, describe, next_backoff, task_trust and agent_id are table-tested; mint_until_held, keep_leaf and run_minted are tested over a fake Credential with paused time (the supervisor reaped before revoke, revoke after a failure, the revoke bound, the stop ending the backoff). connect and the PlaneClient Credential impl need Vault. Amended 2026-11-28 (#746): connect also builds the notice poller's ControlLink over control.sock beside the agent socket, and agent_transport refuses an agent socket named control.sock (the_control_socket_is_beside_the_agent_socket_and_never_is_it)"
 
 [[t3]]
 path = "bins/maknaed/src/main.rs"
@@ -761,7 +764,11 @@ why = "#630: the tasker's verbs over a Dial, one connection each: connect and fr
 
 [[t3]]
 path = "crates/maknae-loop/src/plane.rs"
-why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchanged in what it needs: a live daemon, Vault and certificates. Every decision it feeds is T1 in maknae-agent::wire; frame_fits, take_spare and the frame-before-key ordering are unit-tested here Amended 2026-11-08 (#170): open and close send session.new (the cwd delegated as a directory descriptor by mutation.rs's prepare_checked, T2) and session.close; their answers are mapped by maknae-agent::wire's open_outcome and close_outcome (T1). Amended 2026-11-13 (#629): the connection is a Dial (PlaneDial in production, the client or agent socket), and the cited task rides every file, session and mkdir request; both are pinned against an in-process fake kernel by a_cited_task_is_stamped_on_every_request_until_uncited, only_a_claim_or_heartbeat_goes_uncited and each_verb_opens_its_own_connection; for_agent dials the agent socket with its keys' own client and refuses a client that is not that agent's (constructed with a real agent PlaneClient). Amended 2026-11-26 (#715): open sends session.new through send_counted and keeps the board's unseen count its reply carried, only from a payload reply, for take_board_unseen to return; pinned by the_open_keeps_the_count_its_reply_carried and a_count_on_a_refused_open_is_never_kept."
+why = "#470: RealPlane moved from bins/maknae/src/agent.rs as LoopPlane, unchanged in what it needs: a live daemon, Vault and certificates. Every decision it feeds is T1 in maknae-agent::wire; frame_fits, take_spare and the frame-before-key ordering are unit-tested here Amended 2026-11-08 (#170): open and close send session.new (the cwd delegated as a directory descriptor by mutation.rs's prepare_checked, T2) and session.close; their answers are mapped by maknae-agent::wire's open_outcome and close_outcome (T1). Amended 2026-11-13 (#629): the connection is a Dial (PlaneDial in production, the client or agent socket), and the cited task rides every file, session and mkdir request; both are pinned against an in-process fake kernel by a_cited_task_is_stamped_on_every_request_until_uncited, only_a_claim_or_heartbeat_goes_uncited and each_verb_opens_its_own_connection; for_agent dials the agent socket with its keys' own client and refuses a client that is not that agent's (constructed with a real agent PlaneClient). Amended 2026-11-26 (#715): open sends session.new through send_counted and keeps the board's unseen count its reply carried, only from a payload reply, for take_board_unseen to return; pinned by the_open_keeps_the_count_its_reply_carried and a_count_on_a_refused_open_is_never_kept. Amended 2026-11-28 (#746): a step the driver cuts drops an exchange in flight; a_dropped_exchange_leaves_the_plane_usable pins that the next verb opens its own connection and is answered."
+
+[[t3]]
+path = "crates/maknae-loop/src/control.rs"
+why = "#746: the agent's control-channel client: one connection per notice poll over a Dial to control.sock, with no decision of its own. The reply is mapped by maknae_agent::notice::read_reply (T1); the one Control frame it writes, the reply cap, the class check, the handshake bound and the reply wait are pinned against an in-process fake by a_poll_sends_one_control_frame_with_no_task_and_reads_the_notices, an_oversized_reply_is_undecodable, a_reply_of_another_class_is_undecodable, a_closed_connection_with_no_reply_is_undecodable, a_dial_failure_is_a_dial_failure, a_handshake_that_never_completes_fails_at_the_handshake_timeout and a_stalled_reply_times_out_within_the_control_wait; against the real kernel by maknae-kernel's tests/agent_daemon.rs"
 
 [[t3]]
 path = "crates/maknae-loop/src/task.rs"

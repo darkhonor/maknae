@@ -15,6 +15,7 @@ pub mod conversations;
 pub mod drive;
 pub mod halt;
 pub mod hints;
+pub mod notice;
 pub mod plane;
 pub mod render;
 pub mod route;

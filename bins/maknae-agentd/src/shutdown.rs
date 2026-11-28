@@ -48,6 +48,19 @@ impl Clock for TokioClock {
     }
 }
 
+/// The notice poller, on its own task so a stalled driver cannot stall it; it ends at `stop`.
+pub fn spawn_poller<F: Future<Output = ()> + Send + 'static>(
+    poll: F,
+    stop: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            () = stopped(stop) => {}
+            () = poll => {}
+        }
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ended {
     Finished,
@@ -83,6 +96,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maknae_agent::notice::{poll_notices, ControlPlane, PollAnswer, NOTICE_POLL_EVERY};
     use maknae_agent::task_driver::UNDECODABLE_WAIT;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -220,6 +234,68 @@ mod tests {
             start.elapsed(),
             Duration::from_secs(10) + AGENTD_EXCHANGE_DRAIN
         );
+    }
+
+    struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ControlPlane for Counting {
+        fn notice_poll(&mut self) -> impl Future<Output = PollAnswer> + Send {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(PollAnswer::Notices(vec![]))
+        }
+    }
+
+    struct Silent;
+
+    impl ControlPlane for Silent {
+        fn notice_poll(&mut self) -> impl Future<Output = PollAnswer> + Send {
+            std::future::pending()
+        }
+    }
+
+    fn poller<CP: ControlPlane + Send + 'static>(
+        mut plane: CP,
+        stop: watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (halt, _halts) = maknae_agent::halt::halts();
+        let clock_stop = stop.clone();
+        spawn_poller(
+            async move {
+                poll_notices(
+                    &mut plane,
+                    &mut TokioClock::new(clock_stop),
+                    &halt,
+                    &mut |_| {},
+                )
+                .await
+            },
+            stop,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_poller_ends_at_the_stop_signal() {
+        let (tx, rx) = stop_signal();
+        let start = tokio::time::Instant::now();
+        let polling = poller(Silent, rx);
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        assert!(!polling.is_finished());
+        tx.send(true).unwrap();
+        polling.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_poller_polls_while_the_driver_is_stalled() {
+        let (_tx, rx) = stop_signal();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let polling = poller(Counting(Arc::clone(&polls)), rx);
+        tokio::select! {
+            () = std::future::pending::<()>() => unreachable!(),
+            () = tokio::time::sleep(NOTICE_POLL_EVERY * 3 + Duration::from_millis(1)) => {}
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
+        polling.abort();
     }
 
     #[tokio::test(start_paused = true)]

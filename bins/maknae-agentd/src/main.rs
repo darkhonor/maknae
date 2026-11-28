@@ -5,6 +5,7 @@
 mod plane_impl;
 mod shutdown;
 
+use maknae_agent::notice::{poll_notices, PollFailure};
 use maknae_agent::task_driver::TaskDriver;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -109,12 +110,27 @@ async fn serve(
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     let connected = plane_impl::connect(assembly)?;
+    let mut control = connected.control;
     let mut driver = TaskDriver::new(
         connected.plane,
         shutdown::TokioClock::new(stop.clone()),
         driver_config,
     );
     let handle = driver.shutdown_handle();
+    let halt = driver.halt_handle();
+    let stop_p = stop.clone();
+    let poller = shutdown::spawn_poller(
+        async move {
+            poll_notices(
+                &mut control,
+                &mut shutdown::TokioClock::new(stop_p),
+                &halt,
+                &mut |f: PollFailure| eprintln!("maknae-agentd: notice poll failed: {}", f.class()),
+            )
+            .await
+        },
+        stop.clone(),
+    );
     let ended = shutdown::run_until_drained(
         driver.run(),
         shutdown::stopped(stop),
@@ -122,6 +138,12 @@ async fn serve(
         shutdown::AGENTD_EXCHANGE_DRAIN,
     )
     .await;
+    poller.abort();
+    if let Err(e) = poller.await {
+        if !e.is_cancelled() {
+            eprintln!("maknae-agentd: the notice poller ended abnormally: {e}");
+        }
+    }
     if ended == shutdown::Ended::Abandoned {
         eprintln!(
             "maknae-agentd: the exchange in flight did not end within {}s; its task is reported at the next start",

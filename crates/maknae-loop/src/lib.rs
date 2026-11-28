@@ -3,6 +3,7 @@
 //! `maknae-agent`. `maknaed` never links this crate.
 pub mod agent;
 pub mod catalog;
+pub mod control;
 pub mod keys;
 pub mod mutation;
 pub mod outcome;

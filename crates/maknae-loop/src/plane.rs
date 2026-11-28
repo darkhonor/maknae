@@ -1073,6 +1073,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dropped_exchange_leaves_the_plane_usable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("notes.md");
+        std::fs::write(&file, "sentinel-746-notes").unwrap();
+        let mut plane = LoopPlane::with_dial(
+            fake::FakeKernel::scripted(vec![
+                fake::Scripted::Hold,
+                fake::Scripted::Answer(Box::new((fake::refused(), None))),
+            ]),
+            TransportConfig::default(),
+            None,
+            4096,
+            Keys,
+        );
+        let seen = plane.link.dial.seen();
+        {
+            let turns = user_turn();
+            let mut prompt = std::pin::pin!(plane.prompt("c", &turns));
+            while seen.lock().unwrap().requests.is_empty() {
+                tokio::select! {
+                    got = &mut prompt => panic!("the held prompt was answered: {got:?}"),
+                    () = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
+                }
+            }
+        }
+        let read = plane
+            .read("c", file.to_str().unwrap(), maknae_proto::WHOLE_FILE)
+            .await;
+        assert!(matches!(read, ReadOutcome::Unavailable), "{read:?}");
+        let seen = plane.link.dial.finish().await;
+        let sent: Vec<_> = seen.requests.iter().map(|r| verb_name(&r.verb)).collect();
+        assert_eq!(sent, ["prompt", "read"]);
+        assert_eq!(seen.frames_per_connection, [1, 1]);
+    }
+
+    #[tokio::test]
     async fn the_models_mkdir_and_delete_carry_its_conversation() {
         let dir = tempfile::TempDir::new().unwrap();
         let d = dir.path().to_str().unwrap();
