@@ -51,6 +51,7 @@ async fn run(id: maknae_config::AgentId) -> Result<(), String> {
     let (stop_tx, stop_rx) = shutdown::stop_signal();
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    let serve_stop = stop_tx.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = term.recv() => {}
@@ -101,14 +102,15 @@ async fn run(id: maknae_config::AgentId) -> Result<(), String> {
         home,
         owner: enrollment.uid,
     };
-    plane_impl::run_minted(client, serve(assembly, driver_config, stop_rx)).await
+    plane_impl::run_minted(client, serve(assembly, driver_config, serve_stop)).await
 }
 
 async fn serve(
     assembly: plane_impl::Assembly<'_>,
     driver_config: maknae_agent::task_driver::DriverConfig,
-    stop: tokio::sync::watch::Receiver<bool>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<(), String> {
+    let stop = stop_tx.subscribe();
     let connected = plane_impl::connect(assembly)?;
     let mut control = connected.control;
     let mut driver = TaskDriver::new(
@@ -129,28 +131,23 @@ async fn serve(
             )
             .await
         },
-        stop.clone(),
+        stop,
     );
-    let ended = shutdown::run_until_drained(
+    let served = shutdown::supervise(
         driver.run(),
-        shutdown::stopped(stop),
+        &stop_tx,
+        poller,
         || handle.shut_down(),
         shutdown::AGENTD_EXCHANGE_DRAIN,
     )
     .await;
-    poller.abort();
-    if let Err(e) = poller.await {
-        if !e.is_cancelled() {
-            eprintln!("maknae-agentd: the notice poller ended abnormally: {e}");
-        }
-    }
-    if ended == shutdown::Ended::Abandoned {
+    if served.ended == shutdown::Ended::Abandoned {
         eprintln!(
             "maknae-agentd: the exchange in flight did not end within {}s; its task is reported at the next start",
             shutdown::AGENTD_EXCHANGE_DRAIN.as_secs()
         );
     }
-    Ok(())
+    served.poller_lost.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
