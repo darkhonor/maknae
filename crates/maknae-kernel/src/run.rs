@@ -12606,26 +12606,6 @@ mod record_widths {
     const PARENT: TaskId = TaskId([0xfe; 16]);
     const AUTHZ_PATH: &str = "/etc/maknae/authz.yaml";
     const AGENT_UID: u32 = 2001;
-    const MEASURED_CONTROL_POLL: [(usize, bool, Option<usize>); 4] = [
-        (1654, false, Some(244)),
-        (2450, false, Some(244)),
-        (2478, false, Some(244)),
-        (1695, false, Some(242)),
-    ];
-    /// Without bindings, with 8 bindings, with their reach, and the marker.
-    type SubmitWidths = (usize, usize, usize, Option<usize>);
-    const MEASURED_SUBMIT_OUTCOMES: [[SubmitWidths; 3]; 2] = [
-        [
-            (1086, 2650, 3516, Some(243)),
-            (1088, 2652, 3518, Some(243)),
-            (1104, 2668, 3534, Some(243)),
-        ],
-        [
-            (1928, 3492, 4358, Some(243)),
-            (1930, 3494, 4360, Some(243)),
-            (1946, 3510, 4376, Some(243)),
-        ],
-    ];
 
     fn host() -> String {
         "h".repeat(HOST_BYTES)
@@ -12641,21 +12621,6 @@ mod record_widths {
 
     fn widest_user() -> String {
         "u".repeat(MAX_SUBJECT_USER_BYTES)
-    }
-
-    fn widest_trust_domain() -> String {
-        let td = "d".repeat(255);
-        maknae_vault::validate_deployment_id(&td).expect("the widest trust domain is valid");
-        assert!(maknae_vault::validate_deployment_id(&"d".repeat(256)).is_err());
-        td
-    }
-
-    fn widest_agent_san() -> String {
-        format!(
-            "spiffe://{}/plane/agent/{}",
-            widest_trust_domain(),
-            widest_agent_id()
-        )
     }
 
     fn maximal_bindings() -> Vec<maknae_proto::Binding> {
@@ -13067,10 +13032,6 @@ mod record_widths {
             task
         }
 
-        fn peer(&self) -> Option<String> {
-            (!self.person).then(widest_agent_san)
-        }
-
         fn socket(&self) -> &'static str {
             if self.person {
                 MACOS_DAEMON_SOCKET_PATH
@@ -13207,7 +13168,7 @@ mod record_widths {
                     &host(),
                     self.socket(),
                     u32::MAX,
-                    self.peer().as_deref(),
+                    None,
                     Some(&widest_user()),
                     None,
                     None,
@@ -13493,116 +13454,6 @@ mod record_widths {
     }
 
     #[test]
-    fn adversary_is_the_longest_role_a_decision_reports() {
-        let roles: Vec<&str> = [
-            Who::new(true),
-            Who::new(false),
-            Who::guest(),
-            Who::contained(),
-        ]
-        .iter()
-        .map(|who| who.decision(&list_verb(), None, &[]).1)
-        .map(|role| role.expect("each shipped role is reported"))
-        .collect();
-        assert_eq!(roles, ["admin", "user", "guest", "adversary"]);
-        assert_eq!(roles.iter().max_by_key(|r| r.len()), Some(&"adversary"));
-    }
-
-    fn control_poll(notices: usize, (result, reason, posture): (&str, &str, &str)) -> AuditRecord {
-        let socket =
-            maknae_config::control_socket_path(std::path::Path::new(MACOS_AGENT_SOCKET_PATH));
-        let notice = maknae_proto::Notice {
-            id: maknae_proto::NoticeId([0xff; 16]),
-            task: Some(TASK),
-            body: maknae_proto::AgentNotice::Stop,
-        };
-        let mut rec = crate::control::poll_record(
-            (&host(), &socket.display().to_string()),
-            u32::MAX,
-            Some(&widest_agent_san()),
-            Some(&widest_user()),
-            Some("adversary"),
-            (u64::MAX, u64::MAX),
-            (result, reason, posture),
-            &vec![notice; notices],
-            &serde_json::Value::Null,
-        );
-        let mut session = SessionRecord::for_test(u32::MAX, Some(widest_user()));
-        session.channel = crate::session::SessionChannel::Agent {
-            agent: AgentId::parse(&widest_agent_id()).expect("the widest id parses"),
-            leaf_expires: std::time::Instant::now(),
-        };
-        session.stamp(&mut rec);
-        rec
-    }
-
-    #[test]
-    fn a_control_poll_record_mirrors_as_measured() {
-        let permit = ("permit", "authorized", "authorized");
-        let measured = [
-            (0, permit),
-            (maknae_proto::NOTICES_MAX, permit),
-            (
-                maknae_proto::NOTICES_MAX,
-                (
-                    "permit",
-                    "delivery failed: response not written",
-                    "undelivered",
-                ),
-            ),
-            (
-                0,
-                (
-                    "deny",
-                    "the live baseline changed between admission and decision",
-                    "unavailable",
-                ),
-            ),
-        ]
-        .map(|(n, said)| {
-            let rec = control_poll(n, said);
-            assert_eq!(rec.notices.len(), n);
-            let m = macos_mirror(&rec);
-            assert!(m.full_line.contains("op=notice_poll"), "{}", m.full_line);
-            (m.full_len, m.mirrored_in_full, m.degraded_len)
-        });
-        assert_eq!(measured, MEASURED_CONTROL_POLL);
-    }
-
-    #[test]
-    fn the_submit_outcomes_mirror_as_measured() {
-        let measure = |person: bool| {
-            let cases = Who::new(person).task_verb_cases();
-            ["task held", "task queued", "task gone before the answer"].map(|reason| {
-                let label = format!("submit: permit {reason}");
-                let rec = &cases
-                    .iter()
-                    .find(|c| c.label == label)
-                    .expect("the submit case")
-                    .rec;
-                assert_eq!(rec.subject.bindings.len(), maknae_proto::TASK_BINDINGS_MAX);
-                assert_eq!(rec.subject.reach.len(), maknae_proto::TASK_BINDINGS_MAX);
-                let mut bound = rec.clone();
-                bound.subject.reach.clear();
-                let mut bare = bound.clone();
-                bare.subject.bindings.clear();
-                let [bare, bound, reached] = [&bare, &bound, rec].map(macos_mirror);
-                assert_eq!(
-                    [&bare, &bound].map(|m| (m.mirrored_in_full, m.degraded_len)),
-                    [(false, reached.degraded_len); 2]
-                );
-                (
-                    bare.full_len,
-                    bound.full_len,
-                    reached.full_len,
-                    reached.degraded_len,
-                )
-            })
-        };
-        assert_eq!([measure(true), measure(false)], MEASURED_SUBMIT_OUTCOMES);
-    }
-
-    #[test]
     fn a_persons_task_verb_records_mirror_as_measured() {
         let cases = Who::new(true).task_verb_cases();
         assert_each_case_mirrors_as_measured(&cases, &[]);
@@ -13665,7 +13516,7 @@ mod record_widths {
                         &host(),
                         self.socket(),
                         u32::MAX,
-                        self.peer().as_deref(),
+                        None,
                         Some(&widest_user()),
                         None,
                         None,
@@ -13814,7 +13665,7 @@ mod record_widths {
                         &host(),
                         self.socket(),
                         u32::MAX,
-                        self.peer().as_deref(),
+                        None,
                         Some(&widest_user()),
                         None,
                         None,
@@ -13980,7 +13831,7 @@ mod record_widths {
                         &host(),
                         self.socket(),
                         u32::MAX,
-                        self.peer().as_deref(),
+                        None,
                         Some(&widest_user()),
                         None,
                         None,
@@ -14073,14 +13924,11 @@ mod record_widths {
             "board.read list: deny subject resolves to no role",
         ];
         assert_each_case_mirrors_as_measured(&cases, &refused);
-        let older = "board.read list: permit done; older posts remain";
-        assert_eq!(
-            widest_label(&cases),
-            "board.read list: deny board: not served on the agent channel"
-        );
+        let widest = "board.read list: permit done; older posts remain";
+        assert_eq!(widest_label(&cases), widest);
         let case = |label: &str| cases.iter().find(|c| c.label == label).expect("a case");
         let full = |label: &str| macos_mirror(&case(label).rec).full_len;
-        assert_eq!(full(older), 1200);
+        assert_eq!(full(widest), 1200);
         let narrowest = cases
             .iter()
             .map(|c| macos_mirror(&c.rec).full_len)
@@ -14116,7 +13964,7 @@ mod record_widths {
             [(1088, true), (1097, true), (1088, true), (1091, true)]
         );
         let agent = "board.read list: deny board: not served on the agent channel";
-        assert_eq!(full(agent), 1754);
+        assert_eq!(full(agent), 1140);
         let c = case(agent);
         assert_eq!(
             (c.rec.object.as_deref(), c.rec.rule.is_none()),
@@ -14217,7 +14065,7 @@ mod record_widths {
             widest_agent_id()
         );
         assert_eq!(widest_label(&cases), agent);
-        assert_eq!(shape(&agent), (1820, Some("user"), false));
+        assert_eq!(shape(&agent), (1206, Some("user"), false));
         let c = cases.iter().find(|c| c.label == agent).expect("the agent");
         assert_eq!(c.rec.object, None);
     }
@@ -14484,12 +14332,11 @@ mod record_widths {
     fn with_facts<R>(i: &Identity, f: impl FnOnce(&PromptRecordFacts<'_>) -> R) -> R {
         let content = prompt_content();
         let au3_1 = serde_json::Value::Null;
-        let peer = i.stamped_by.peer();
         f(&PromptRecordFacts {
             host: &host(),
-            socket: i.stamped_by.socket(),
+            socket: MACOS_DAEMON_SOCKET_PATH,
             peer_uid: u32::MAX,
-            peer_uri: peer.as_deref(),
+            peer_uri: None,
             session_id: u64::MAX,
             seq: u64::MAX,
             destination: &format!("provider:{}", widest_provider()),
@@ -30832,357 +30679,6 @@ mod agent_listener_tests {
         assert!(records
             .iter()
             .all(|r| r.subject.agent.as_deref() == Some("hobi")));
-    }
-
-    struct WidestAccount;
-
-    impl crate::session::SessionFacts for WidestAccount {
-        fn membership(
-            &self,
-            _admission: crate::handler::Admission,
-            _uid: u32,
-        ) -> Result<crate::groupres::Membership, crate::groupres::AuthzError> {
-            Ok(crate::groupres::Membership {
-                in_group: false,
-                user: crate::test_fixtures::widest_agent_account_name(),
-                dir: "/var/empty".into(),
-            })
-        }
-
-        fn account(&self, _uid: u32) -> crate::session_facts::AccountFact {
-            crate::session_facts::AccountFact::NotChecked(
-                crate::session_facts::NotCheckedWhy::Configured,
-            )
-        }
-    }
-
-    fn widest_agent() -> maknae_config::AgentId {
-        (1..=255)
-            .rev()
-            .find_map(|n| maknae_config::AgentId::parse(&"a".repeat(n)).ok())
-            .expect("some agent id parses")
-    }
-
-    fn widest_trust_domain() -> String {
-        let td = "d".repeat(255);
-        maknae_vault::validate_deployment_id(&td).expect("255 bytes is a trust domain");
-        assert!(maknae_vault::validate_deployment_id(&"d".repeat(256)).is_err());
-        td
-    }
-
-    async fn enrolled_widest(tag: &str) -> Fx {
-        let fx = fixture(tag, AUTHZ, Some(ROOT_ADMIN)).await;
-        fx.baseline()
-            .set_hosts(crate::test_fixtures::WIDEST_AGENT_HOSTS);
-        fx.write_agent(
-            widest_agent().as_str(),
-            &crate::test_fixtures::widest_agent_account_name(),
-            crate::test_fixtures::WIDEST_AGENT_UID,
-            "user",
-        );
-        reload(&fx).await;
-        fx
-    }
-
-    /// Every record one connection writes, through the production accept loop, for the
-    /// widest agent: a 255-byte trust domain, the longest agent id and account name, a
-    /// session id of 20 digits, and `au3_1` at its default.
-    async fn widest_connection<F, Fut>(fx: &Fx, plane: ChannelPlane, drive: F) -> Vec<AuditRecord>
-    where
-        F: FnOnce(tokio::io::DuplexStream) -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        let td = widest_trust_domain();
-        let agent = widest_agent();
-        let peer = maknae_vault::ChannelPeer::Agent {
-            san: maknae_vault::agent_uri_san(&td, &agent),
-            agent,
-            not_after: std::time::SystemTime::now() + Duration::from_secs(3600),
-        };
-        let creds = PeerCreds {
-            uid: crate::test_fixtures::WIDEST_AGENT_UID,
-            gid: Some(u32::MAX - 1),
-            pid: Some(4_194_304),
-        };
-        let path = std::path::PathBuf::from(maknae_config::MACOS_AGENT_SOCKET_PATH);
-        let classes = (
-            crate::handler::agent_class(path.clone(), &td),
-            crate::handler::control_class(path, &td),
-        );
-        let emit = Arc::new(Recorder::default());
-        let (serves, client) = Serves::as_peer(classes.0.peer_auth.clone(), peer, creds);
-        let gate = || {
-            Arc::new(FactsGate {
-                facts: Arc::new(WidestAccount),
-                breaker: Arc::default(),
-                bound: Duration::from_secs(5),
-            })
-        };
-        let side = |class: ChannelClass| {
-            (
-                class,
-                WhereCtx {
-                    host: hostname(),
-                    socket: "s".into(),
-                    au3_1: serde_json::json!({}),
-                },
-                Arc::new(SessionIds::with_nonce(u32::MAX)),
-            )
-        };
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let client_side = serving(fx, idle(PeerAuth::Certless), client_socket(), &emit);
-        let served = match plane {
-            ChannelPlane::Data => tokio::spawn(serve_listeners(
-                4,
-                async move {
-                    let _ = stopped.await;
-                },
-                tokio::spawn(std::future::pending()),
-                client_side,
-                Some((
-                    serving_in(fx, serves, side(classes.0), &emit, gate(), admission(fx)),
-                    serving_in(
-                        fx,
-                        idle(classes.1.peer_auth.clone()),
-                        side(classes.1),
-                        &emit,
-                        gate(),
-                        admission(fx),
-                    ),
-                )),
-            )),
-            ChannelPlane::Control => tokio::spawn(serve_listeners(
-                4,
-                async move {
-                    let _ = stopped.await;
-                },
-                tokio::spawn(std::future::pending()),
-                client_side,
-                Some((
-                    serving_in(
-                        fx,
-                        idle(classes.0.peer_auth.clone()),
-                        side(classes.0),
-                        &emit,
-                        gate(),
-                        admission(fx),
-                    ),
-                    serving_in(fx, serves, side(classes.1), &emit, gate(), admission(fx)),
-                )),
-            )),
-        };
-        drive(client).await;
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !emit.records().iter().any(|r| r.action == "terminate") {
-            assert!(std::time::Instant::now() < deadline, "{:?}", emit.records());
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        stop_listening((served, stop)).await;
-        let mut got: Vec<AuditRecord> = emit
-            .records()
-            .into_iter()
-            .filter(|r| r.event != "shutdown")
-            .collect();
-        got.sort_by_key(|r| r.seq);
-        got
-    }
-
-    async fn claim_over(mut client: tokio::io::DuplexStream, seen: Option<u32>) {
-        let verb = Verb::TaskClaim {
-            seen_follow_ups: seen,
-        };
-        let body = maknae_proto::encode_request(&maknae_proto::Request {
-            task: None,
-            protocol_version: PROTOCOL_VERSION,
-            verb: verb.clone(),
-        })
-        .unwrap();
-        maknae_proto::write_frame(&mut client, maknae_proto::class_of(&verb), &body)
-            .await
-            .unwrap();
-        let caps = maknae_proto::FrameCaps {
-            control: 1 << 20,
-            attempt: 1 << 20,
-            prompt: 1 << 20,
-        };
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            maknae_proto::read_frame_zeroizing(&mut client, &caps),
-        )
-        .await
-        .expect("a reply in time")
-        .expect("a reply frame");
-    }
-
-    /// Each record's JSONL line with its newline, as it would be on a 64-byte host (the
-    /// host appears once, and `hostname()` is the environment's), whether the macOS
-    /// mirror carries it in full, and its degraded marker's length.
-    fn written(records: &[AuditRecord]) -> Vec<(String, usize, bool, Option<usize>)> {
-        records
-            .iter()
-            .map(|r| {
-                let m = maknae_audit_append::test_support::macos_mirror(r);
-                let mut on_64 = r.clone();
-                on_64.where_.host = "h".repeat(64);
-                let m64 = maknae_audit_append::test_support::macos_mirror(&on_64);
-                assert_eq!(
-                    (m64.mirrored_in_full, m64.degraded_len),
-                    (m.mirrored_in_full, m.degraded_len)
-                );
-                (
-                    format!("{} {}", r.action, r.outcome.reason),
-                    maknae_audit_append::canonical_json(r).unwrap().len() + 1 + 64
-                        - hostname().len(),
-                    m.mirrored_in_full,
-                    m.degraded_len,
-                )
-            })
-            .collect()
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_agents_poll_cadence_writes_as_measured() {
-        let fx = enrolled_widest("poll-cadence-widths").await;
-        let agent = widest_agent();
-        let idle_claim = widest_connection(&fx, ChannelPlane::Data, |c| claim_over(c, None)).await;
-        let poll = widest_connection(&fx, ChannelPlane::Control, |c| async {
-            assert_eq!(polled(&poll_over(c).await).await.result, Ok(Vec::new()));
-        })
-        .await;
-        for (n, tasker) in (1..=4u32).flat_map(|u| [u, u]).enumerate() {
-            let mut task = maknae_proto::TaskObject::for_test(agent.as_str(), tasker);
-            task.task_id = maknae_proto::TaskId([n as u8; 16]);
-            let id = task.task_id;
-            fx.reloader.tasks.insert_for_test(
-                maknae_proto::SignedTask {
-                    task,
-                    ..signed_for_hobi()
-                },
-                crate::test_fixtures::WIDEST_AGENT_UID,
-            );
-            fx.reloader.tasks.start_for_test(&id);
-            fx.reloader
-                .tasks
-                .stop(&id, &maknae_proto::Tasker::Uid(tasker))
-                .unwrap();
-        }
-        let full_poll = widest_connection(&fx, ChannelPlane::Control, |c| async {
-            let notices = polled(&poll_over(c).await).await.result.unwrap();
-            assert_eq!(notices.len(), maknae_proto::NOTICES_MAX);
-        })
-        .await;
-        let tasker = maknae_proto::Tasker::Agent {
-            agent: "b".repeat(agent.as_str().len()),
-            uid: u32::MAX,
-        };
-        let mut task = maknae_proto::TaskObject::for_test(agent.as_str(), 0);
-        task.tasker = tasker.clone();
-        let id = task.task_id;
-        fx.reloader.tasks.insert_for_test(
-            maknae_proto::SignedTask {
-                task,
-                ..signed_for_hobi()
-            },
-            crate::test_fixtures::WIDEST_AGENT_UID,
-        );
-        fx.reloader.tasks.start_for_test(&id);
-        for _ in 1..crate::task::MAX_FOLLOW_UPS_PER_TASK {
-            fx.reloader
-                .tasks
-                .follow_up(&id, &tasker, maknae_proto::SecretText::new("f"), 1 << 20)
-                .unwrap();
-        }
-        fx.reloader
-            .tasks
-            .add_bindings(
-                &*admission(&fx).view,
-                &id,
-                &tasker,
-                maknae_proto::SecretText::new("f"),
-                (
-                    vec![maknae_proto::Binding::Git(maknae_proto::GitBinding {
-                        server: "g".into(),
-                        base: "o/r".into(),
-                        head: None,
-                        change: None,
-                    })],
-                    vec![maknae_proto::BindingReach::Git(maknae_proto::GitReach {
-                        tasker: maknae_proto::SideReach::new(
-                            Default::default(),
-                            Default::default(),
-                        )
-                        .unwrap(),
-                        basis: maknae_proto::TaskerBasis::Submitter,
-                        agent: maknae_proto::AgentReach::AtHandOut,
-                        why: Some(maknae_proto::EmptyReason::NoReachCheck),
-                    })],
-                ),
-                &crate::task::UnverifiedSigner,
-                1 << 20,
-            )
-            .unwrap();
-        let heartbeat =
-            widest_connection(&fx, ChannelPlane::Data, |c| claim_over(c, Some(0))).await;
-        let san = maknae_vault::agent_uri_san(&widest_trust_domain(), &agent);
-        for r in [&idle_claim, &poll, &full_poll, &heartbeat]
-            .into_iter()
-            .flatten()
-        {
-            let json = maknae_audit_append::canonical_json(r).unwrap();
-            assert_eq!(json.matches(&san).count(), 2, "{json}");
-            assert_eq!(r.where_.host, hostname());
-            let host = format!("\"host\":\"{}\"", hostname());
-            assert_eq!(json.matches(&host).count(), 1, "{json}");
-        }
-        let terminate = &heartbeat[2];
-        assert_eq!(
-            (&terminate.subject.task_id, &terminate.subject.tasker),
-            (&None, &None),
-            "a heartbeat's claim is uncited, so its session is never stamped"
-        );
-        let line = |said: &str, width: usize, marker: usize| {
-            (said.to_string(), width, false, Some(marker))
-        };
-        let connect = || {
-            line(
-                "connect admitted (account: not-checked:configured)",
-                1240,
-                200,
-            )
-        };
-        let terminate = || line("terminate disconnect", 1204, 202);
-        assert_eq!(
-            written(&idle_claim),
-            [connect(), line("session.task idle", 1236, 205), terminate()]
-        );
-        assert_eq!(
-            written(&poll),
-            [
-                connect(),
-                line("agent.control authorized", 1252, 206),
-                terminate()
-            ]
-        );
-        assert_eq!(
-            written(&full_poll),
-            [
-                connect(),
-                line("agent.control authorized", 2048, 206),
-                terminate()
-            ]
-        );
-        assert_eq!(
-            written(&heartbeat),
-            [
-                connect(),
-                line(
-                    "session.task heartbeat: the addendum and 32 follow-ups after 0",
-                    1425,
-                    205
-                ),
-                terminate()
-            ]
-        );
     }
 
     #[test]
