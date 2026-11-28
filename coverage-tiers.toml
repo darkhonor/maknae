@@ -1098,7 +1098,31 @@ why = "#491: sudo maknae policy sync — bin code, T3 per the tiering constraint
 
 [[t3]]
 path = "bins/maknae/src/tools_admin/mod.rs"
-why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file orders those calls, and its unit tests cover the link and one 0640 drop-in per entry, --entry and --shapes, the refusals with nothing written (an existing drop-in, a name tools.yaml or another drop-in defines with the ln -s or disable advice, a local grammar file, a foreign link or a directory, a bad image, an unknown program or template, a held tools.d lock, a bad operand), the rollback of a write failure that keeps a link it did not create and leaves a grammar that is no longer the link, a write or removal that happened without a durable directory sync counted as done (rolled back, or disable going on to the link and the reload and then failing), disable keeping the link while tools.yaml or another drop-in uses it and removing the exact link, dangling included, with its last user, the reload, --no-reload and a failed reload, the available states and users, and terminal-safe output of file text"
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file holds the shared operand checks, the reload and its reporting, and the dispatch from the sudo entry point, and its unit tests cover a bad operand, the reload, --no-reload and a failed reload (including a stdout that fails), the root check and the exit code, the reload command per platform, the installed paths and owners, and the dispatch of each subcommand"
+
+[[t3]]
+path = "bins/maknae/src/tools_admin/dirs.rs"
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file opens the tools.d, grammars and vendor directories through maknae-io and maps its errors to what may be on disk, and its unit test covers that mapping"
+
+[[t3]]
+path = "bins/maknae/src/tools_admin/inventory.rs"
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file reads what is configured and enabled (tools.yaml, drop-ins, grammars and links) and builds the grammar set, and its unit tests cover the grammar set a loader would enable, including with an unusable vendor directory"
+
+[[t3]]
+path = "bins/maknae/src/tools_admin/available.rs"
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file lists the available grammars and templates and their states, and its unit tests cover the available states and users and terminal-safe output of file text"
+
+[[t3]]
+path = "bins/maknae/src/tools_admin/enable.rs"
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file orders those calls for enable, and its unit tests cover the link and one 0640 drop-in per entry, --entry and --shapes, the refusals with nothing written (an existing drop-in, a name tools.yaml or another drop-in defines with the ln -s or disable advice, a local grammar file, a foreign link or a directory, a bad image, an unknown program or template, a held tools.d lock), and the rollback of a write failure that keeps a link it did not create and leaves a grammar that is no longer the link, including a write that happened without a durable directory sync counted as done and rolled back"
+
+[[t3]]
+path = "bins/maknae/src/tools_admin/disable.rs"
+why = "#674: sudo maknae tools available|enable|disable over injected paths, owners and reload. What a drop-in is worth is decided by maknae-config's ToolsCatalog::parse_with (T1), which the rendered text goes through in template.rs; what a grammars/ member is, and every write, link and removal, is maknae-io (T1: enabled_member_state, link_member, publish_owned_new, remove_durable, try_lock_exclusive). This file orders those calls for disable, and its unit tests cover disable keeping the link while tools.yaml or another drop-in uses it and removing the exact link, dangling included, with its last user, a removal without a durable directory sync going on to the link and the reload, a drop-in replaced while it ran, and the refusals"
+
+[[t3]]
+path = "bins/maknae/src/tools_admin/test_support.rs"
+why = "test-only fixtures shared by the tools_admin module test suites; the file opens with `#![cfg(test)]`, so it has no production regions"
 
 [[t3]]
 path = "bins/maknae/src/tools_admin/template.rs"
