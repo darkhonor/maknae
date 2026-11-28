@@ -12612,6 +12612,20 @@ mod record_widths {
         (2478, false, Some(244)),
         (1695, false, Some(242)),
     ];
+    /// Without bindings, with 8 bindings, with their reach, and the marker.
+    type SubmitWidths = (usize, usize, usize, Option<usize>);
+    const MEASURED_SUBMIT_OUTCOMES: [[SubmitWidths; 3]; 2] = [
+        [
+            (1086, 2650, 3516, Some(243)),
+            (1088, 2652, 3518, Some(243)),
+            (1104, 2668, 3534, Some(243)),
+        ],
+        [
+            (1928, 3492, 4358, Some(243)),
+            (1930, 3494, 4360, Some(243)),
+            (1946, 3510, 4376, Some(243)),
+        ],
+    ];
     const MEASURED_POLL_CADENCE_LINES: (usize, usize, usize, usize, usize) =
         (1259, 1255, 1453, 1276, 1223);
 
@@ -13563,6 +13577,7 @@ mod record_widths {
             rec.au3_1 = serde_json::json!({});
             let json = maknae_audit_append::canonical_json(&rec).expect("the record encodes");
             assert_eq!(json.matches(&widest_agent_san()).count(), 2, "{json}");
+            assert_eq!(json.matches(&host()).count(), 1, "{json}");
             json.len() + 1
         };
         let who = Who::new(false);
@@ -13583,6 +13598,11 @@ mod record_widths {
         assert_eq!(
             (&idle.subject.task_id, &idle.subject.tasker),
             (&None, &None)
+        );
+        let mirrored = macos_mirror(&idle);
+        assert_eq!(
+            (mirrored.mirrored_in_full, mirrored.degraded_len),
+            (false, Some(243))
         );
         let heartbeat = claim(
             "heartbeat: the addendum and 32 follow-ups after 4294967295",
@@ -13643,6 +13663,36 @@ mod record_widths {
             (connect, line(&idle), line(&heartbeat), poll, terminate),
             MEASURED_POLL_CADENCE_LINES
         );
+    }
+
+    #[test]
+    fn the_submit_outcomes_mirror_as_measured() {
+        let measure = |person: bool| {
+            let cases = Who::new(person).task_verb_cases();
+            ["task held", "task queued", "task gone before the answer"].map(|reason| {
+                let label = format!("submit: permit {reason}");
+                let rec = &cases
+                    .iter()
+                    .find(|c| c.label == label)
+                    .expect("the submit case")
+                    .rec;
+                assert_eq!(rec.subject.bindings.len(), maknae_proto::TASK_BINDINGS_MAX);
+                assert_eq!(rec.subject.reach.len(), maknae_proto::TASK_BINDINGS_MAX);
+                let mut bound = rec.clone();
+                bound.subject.reach.clear();
+                let mut bare = bound.clone();
+                bare.subject.bindings.clear();
+                let [bare, bound, reached] = [&bare, &bound, rec].map(macos_mirror);
+                assert!(!bare.mirrored_in_full && !bound.mirrored_in_full);
+                (
+                    bare.full_len,
+                    bound.full_len,
+                    reached.full_len,
+                    reached.degraded_len,
+                )
+            })
+        };
+        assert_eq!([measure(true), measure(false)], MEASURED_SUBMIT_OUTCOMES);
     }
 
     #[test]
@@ -14116,14 +14166,14 @@ mod record_widths {
             "board.read list: deny subject resolves to no role",
         ];
         assert_each_case_mirrors_as_measured(&cases, &refused);
-        let widest = "board.read list: permit done; older posts remain";
+        let older = "board.read list: permit done; older posts remain";
         assert_eq!(
             widest_label(&cases),
             "board.read list: deny board: not served on the agent channel"
         );
         let case = |label: &str| cases.iter().find(|c| c.label == label).expect("a case");
         let full = |label: &str| macos_mirror(&case(label).rec).full_len;
-        assert_eq!(full(widest), 1200);
+        assert_eq!(full(older), 1200);
         let narrowest = cases
             .iter()
             .map(|c| macos_mirror(&c.rec).full_len)
@@ -14527,11 +14577,12 @@ mod record_widths {
     fn with_facts<R>(i: &Identity, f: impl FnOnce(&PromptRecordFacts<'_>) -> R) -> R {
         let content = prompt_content();
         let au3_1 = serde_json::Value::Null;
+        let peer = i.stamped_by.peer();
         f(&PromptRecordFacts {
             host: &host(),
-            socket: MACOS_DAEMON_SOCKET_PATH,
+            socket: i.stamped_by.socket(),
             peer_uid: u32::MAX,
-            peer_uri: None,
+            peer_uri: peer.as_deref(),
             session_id: u64::MAX,
             seq: u64::MAX,
             destination: &format!("provider:{}", widest_provider()),
