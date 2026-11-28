@@ -7,7 +7,7 @@ use common::Records;
 use maknae_agent::budget::ContextBudget;
 use maknae_agent::drive::Budget;
 use maknae_agent::halt::HaltSender;
-use maknae_agent::notice::{poll_notices, PollFailure, NOTICE_POLL_EVERY};
+use maknae_agent::notice::{poll_notices, NOTICE_POLL_EVERY};
 use maknae_agent::task_driver::{
     Clock, DriverConfig, DriverEvent, Ending, PersonaMode, ShutdownHandle, TaskDriver,
 };
@@ -1860,7 +1860,7 @@ impl Clock for Stepped {
 
 struct Poller {
     clock: Stepped,
-    failures: Arc<Mutex<Vec<PollFailure>>>,
+    failures: Arc<Mutex<Vec<String>>>,
     running: tokio::task::JoinHandle<()>,
 }
 
@@ -1903,7 +1903,7 @@ fn start_poller(w: &World, model: &Arc<Model>, d: &Daemon) -> Poller {
         polls: Arc::default(),
         steps: Arc::new(tokio::sync::Semaphore::new(0)),
     };
-    let failures: Arc<Mutex<Vec<PollFailure>>> = Arc::default();
+    let failures: Arc<Mutex<Vec<String>>> = Arc::default();
     let (mut c, f, halt) = (clock.clone(), Arc::clone(&failures), d.halt.clone());
     let running = tokio::spawn(async move {
         let mut failed = move |e| f.lock().unwrap().push(e);

@@ -5,7 +5,7 @@
 mod plane_impl;
 mod shutdown;
 
-use maknae_agent::notice::{poll_notices, PollFailure};
+use maknae_agent::notice::poll_notices;
 use maknae_agent::task_driver::TaskDriver;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -125,7 +125,7 @@ async fn serve(
                 &mut control,
                 &mut shutdown::TokioClock::new(stop_p),
                 &halt,
-                &mut |f: PollFailure| eprintln!("maknae-agentd: notice poll failed: {}", f.class()),
+                &mut |line: String| eprintln!("maknae-agentd: {line}"),
             )
             .await
         },
