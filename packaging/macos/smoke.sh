@@ -713,9 +713,7 @@ PROBE
         || fail "probe socket = $sgot (want 'srw-rw---- _maknae maknae') — D1 UNPROVEN"
     rm -f /usr/local/var/run/maknae/d1probe.sock
 
-    # The same limit applies to control.sock: this proves the agent runtime
-    # directory admits a socket with the agent socket's owner, group and mode, not
-    # that maknaed binds control.sock.
+    # Not proof that maknaed binds control.sock.
     local agid; agid="$(dscl . -read /Groups/maknae-agents PrimaryGroupID | awk '{print $2}')"
     (cd / && sudo -u _maknae /usr/bin/python3 - "$agid") <<'PROBE'
 import os, socket, sys
