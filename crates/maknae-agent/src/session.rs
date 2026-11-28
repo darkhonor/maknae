@@ -215,7 +215,6 @@ impl Session {
         self.run_with(plane, hook, emit).await
     }
 
-    /// An interrupted run is dropped where it stands, which leaves the session closed.
     pub async fn run_until<P, H, S>(
         &mut self,
         plane: &mut P,

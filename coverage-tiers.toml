@@ -430,7 +430,8 @@ files = [
   # #629: the task driver. Reporting a task it did not finish, or working on after
   # the kernel answered Held, is false assurance to the tasker.
   "crates/maknae-agent/src/task_driver.rs",
-  # #746: the driver's halt. A Stop that cuts another task, or a halt that latches, ends work the kernel never asked to stop.
+  # #746: the driver's halt. A Stop that cuts another task, or a halt that
+  # latches, ends work the kernel never asked to stop.
   "crates/maknae-agent/src/halt.rs",
   # #609: task_agent. A wait read as a report, or a report acknowledged before it is
   # stored, tells the tasking model work was done that it cannot use.
