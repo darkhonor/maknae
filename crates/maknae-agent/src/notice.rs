@@ -69,12 +69,12 @@ pub struct PollLog {
 
 impl PollLog {
     pub fn observe(&mut self, now: Duration, answer: &PollAnswer) -> Option<String> {
-        let class = match answer {
+        let (class, line) = match answer {
             PollAnswer::Notices(_) => {
                 return self.failing.take().map(|_| "notice poll recovered".into());
             }
-            PollAnswer::Refused => "refused",
-            PollAnswer::Failed(f) => f.class(),
+            PollAnswer::Refused => ("refused", "notice poll refused: ceasing work".into()),
+            PollAnswer::Failed(f) => (f.class(), format!("notice poll failed: {}", f.class())),
         };
         if let Some((was, at)) = self.failing {
             if was == class && now.saturating_sub(at) < FAILURE_LOG_EVERY {
@@ -82,12 +82,7 @@ impl PollLog {
             }
         }
         self.failing = Some((class, now));
-        Some(match answer {
-            PollAnswer::Refused => "notice poll refused: ceasing work".into(),
-            PollAnswer::Notices(_) | PollAnswer::Failed(_) => {
-                format!("notice poll failed: {class}")
-            }
-        })
+        Some(line)
     }
 }
 
